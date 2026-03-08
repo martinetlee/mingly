@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import type { Message } from '../api/types'
 
 interface Props {
@@ -50,9 +51,18 @@ export default function MessageBubble({ message, showSender }: Props) {
     <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1`}>
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
         {showSender && !isOut && message.sender_name && (
-          <span className="mb-0.5 ml-1 text-xs font-medium text-purple-400">
-            {message.sender_name}
-          </span>
+          message.sender_id ? (
+            <Link
+              to={`/profile/${message.sender_id}`}
+              className="mb-0.5 ml-1 text-xs font-medium text-purple-400 hover:text-purple-300 transition-colors"
+            >
+              {message.sender_name}
+            </Link>
+          ) : (
+            <span className="mb-0.5 ml-1 text-xs font-medium text-purple-400">
+              {message.sender_name}
+            </span>
+          )
         )}
         <div
           className={`rounded-2xl text-sm leading-relaxed overflow-hidden ${

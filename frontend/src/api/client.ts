@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, Folder, Message } from './types'
+import type { AuthStatus, Chat, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -75,8 +75,8 @@ export const logout = () =>
 
 // --- Chats ---
 
-export const getChats = () =>
-  request<Chat[]>('/api/chats')
+export const getChats = (limit = 50, offset = 0) =>
+  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}`)
 
 export const bulkSync = () =>
   request<{ synced: number }>('/api/chats/bulk-sync', { method: 'POST' })
@@ -122,6 +122,46 @@ export const setBriefing = (telegram_id: number, briefing: boolean) =>
     method: 'POST',
     body: JSON.stringify({ briefing }),
   })
+
+// --- Tags ---
+
+export const getTags = () =>
+  request<Tag[]>('/api/tags')
+
+export const createTag = (name: string, color: string = 'slate', category?: string) =>
+  request<Tag>('/api/tags', {
+    method: 'POST',
+    body: JSON.stringify({ name, color, category: category || null }),
+  })
+
+export const updateTag = (tag_id: number, data: { name?: string; color?: string; category?: string | null }) =>
+  request<Tag>(`/api/tags/${tag_id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  })
+
+export const deleteTag = (tag_id: number) =>
+  request<{ success: boolean }>(`/api/tags/${tag_id}`, { method: 'DELETE' })
+
+export const getChatTags = (telegram_id: number) =>
+  request<Tag[]>(`/api/chats/${telegram_id}/tags`)
+
+export const addTagToChat = (telegram_id: number, tag_id: number) =>
+  request<{ success: boolean }>(`/api/chats/${telegram_id}/tags`, {
+    method: 'POST',
+    body: JSON.stringify({ tag_id }),
+  })
+
+export const removeTagFromChat = (telegram_id: number, tag_id: number) =>
+  request<{ success: boolean }>(`/api/chats/${telegram_id}/tags/${tag_id}`, { method: 'DELETE' })
+
+export const suggestTags = (telegram_id: number) =>
+  request<TagSuggestion[]>(`/api/chats/${telegram_id}/tags/suggest`, { method: 'POST' })
+
+// --- Profiles ---
+
+export const getProfile = (userId: number) =>
+  request<TelegramProfile>(`/api/profiles/${userId}`)
 
 // --- Settings / Prefs ---
 

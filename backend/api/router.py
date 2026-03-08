@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, chats, compose, todos, contacts, organizations, scan, settings, llm
+from backend.api import auth, chats, compose, todos, contacts, organizations, scan, settings, llm, tags, intelligence, profiles
 
 
 def create_app() -> FastAPI:
@@ -23,6 +23,9 @@ def create_app() -> FastAPI:
     app.include_router(scan.router, prefix="/api/scan", tags=["scan"])
     app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
     app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
+    app.include_router(tags.router, prefix="/api", tags=["tags"])
+    app.include_router(intelligence.router, prefix="/api", tags=["intelligence"])
+    app.include_router(profiles.router, prefix="/api/profiles", tags=["profiles"])
 
     @app.get("/api/media/{file_path:path}")
     async def serve_media(file_path: str):

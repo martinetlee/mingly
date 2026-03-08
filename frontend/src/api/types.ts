@@ -29,6 +29,20 @@ export interface Chat {
   last_synced_at: string | null
 }
 
+export interface Tag {
+  id: number
+  name: string
+  color: string
+  category: string | null
+  is_default: boolean
+}
+
+export interface TagSuggestion {
+  name: string
+  color: string
+  reason: string
+}
+
 export interface Reaction {
   emoji: string
   count: number
@@ -49,6 +63,26 @@ export interface Message {
   media_url: string | null
   importance_score: number | null
   user_flagged: boolean
+}
+
+export interface TelegramProfile {
+  id: number
+  type: 'user' | 'group' | 'channel' | 'unknown'
+  first_name?: string
+  last_name?: string
+  title?: string
+  username?: string | null
+  phone?: string | null
+  is_bot?: boolean
+  is_self?: boolean
+  is_verified?: boolean
+  is_premium?: boolean
+  status?: string
+  bio?: string | null
+  about?: string | null
+  members_count?: number | null
+  photo_url?: string | null
+  common_chats?: { id: number; title: string }[]
 }
 
 export type WSEvent =
