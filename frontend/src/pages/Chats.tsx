@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon } from 'lucide-react'
-import type { Chat, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags } from '../api/client'
+import { Link } from 'react-router-dom'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot } from 'lucide-react'
+import type { Chat, ChatMember, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
@@ -123,12 +124,26 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
   const [showNewTag, setShowNewTag] = useState(false)
   const [newTagName, setNewTagName] = useState('')
   const [newTagColor, setNewTagColor] = useState<string>('slate')
+  const [members, setMembers] = useState<ChatMember[]>([])
+  const [loadingMembers, setLoadingMembers] = useState(false)
+  const [membersError, setMembersError] = useState<string | null>(null)
 
   useEffect(() => {
     getTags().then(setAllTags).catch(() => {})
     getChatTags(chat.telegram_id).then(setChatTags).catch(() => {})
     setSuggestions([])
-  }, [chat.telegram_id])
+    // Load members for groups/channels
+    if (chat.type !== 'private') {
+      setLoadingMembers(true)
+      setMembersError(null)
+      getChatMembers(chat.telegram_id)
+        .then(setMembers)
+        .catch((e) => { setMembersError(e.message); setMembers([]) })
+        .finally(() => setLoadingMembers(false))
+    } else {
+      setMembers([])
+    }
+  }, [chat.telegram_id, chat.type])
 
   const assignedIds = new Set(chatTags.map((t) => t.id))
   const unassignedTags = allTags.filter((t) => !assignedIds.has(t.id))
@@ -391,6 +406,50 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
           </div>
         )}
       </div>
+
+      {/* Members section (groups/channels only) */}
+      {chat.type !== 'private' && (
+        <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400 uppercase tracking-wider">
+            <Users size={11} />
+            Members{members.length > 0 && ` (${members.length})`}
+          </div>
+          {loadingMembers ? (
+            <p className="text-xs text-slate-500">Loading members...</p>
+          ) : membersError ? (
+            <p className="text-xs text-slate-500">{membersError}</p>
+          ) : members.length === 0 ? (
+            <p className="text-xs text-slate-500">No members found</p>
+          ) : (
+            <div className="flex flex-col gap-0.5 max-h-64 overflow-y-auto">
+              {members.map((m) => (
+                <Link
+                  key={m.id}
+                  to={`/profile/${m.id}`}
+                  className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-700/50 transition-colors group"
+                >
+                  <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
+                    {m.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs text-gray-200 group-hover:text-indigo-300 transition-colors">
+                      {m.name}
+                    </p>
+                    {m.username && (
+                      <p className="truncate text-[10px] text-slate-500">@{m.username}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {m.is_bot && <Bot size={10} className="text-violet-400" title="Bot" />}
+                    {m.role === 'creator' && <Crown size={10} className="text-amber-400" title="Creator" />}
+                    {m.role === 'admin' && <Shield size={10} className="text-sky-400" title="Admin" />}
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

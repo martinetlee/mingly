@@ -1,5 +1,5 @@
 - [x] the height of the horizontal scroll bar for the chat folders is too big. make it smaller, and also a bit more transparent when the mouse is not there. When mouse is closer then it become less transparent.  
 - [x] Create a page to see an id's telegram profile. 
-- [ ] Add group member information in the information tab of the chat. Clicking on the name should lead us to the page. 
+- [x] Add group member information in the information tab of the chat. Clicking on the name should lead us to the page. 
 - [ ] Create a page to display and manage Organization information, it should include: name, members and their respective titles (members should be telegram profile), current context (that is initially empty but can be triggered by user to generate context), latest message in different groups. 
 - [ ] Get existing contact from Telegram and show them in the contacts page. Contacts would have extra field, including: organization, title, twitter handle, linkedin page, phone number. Note that one person can hold different positions at multiple organizations at the same time. 

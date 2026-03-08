@@ -11,7 +11,7 @@ from telethon.tl.types import DialogFilter
 from backend.config import DATA_DIR
 from backend.db.database import get_db
 from backend.db import crud
-from backend.telegram.client import get_client
+from backend.telegram.client import get_client, ensure_connected
 from backend.telegram.sync import sync_messages, bulk_sync
 
 router = APIRouter()
@@ -86,8 +86,8 @@ async def bulk_sync_chats():
 
 
 @router.get("")
-async def list_chats(db: AsyncSession = Depends(get_db)):
-    return [_chat_dict(c) for c in await crud.get_chats(db)]
+async def list_chats(limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db)):
+    return [_chat_dict(c) for c in await crud.get_chats(db, limit=limit, offset=offset)]
 
 
 @router.get("/hidden")
@@ -198,3 +198,52 @@ async def sync_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Chat not found")
     await sync_messages(telegram_id, limit=100)
     return {"status": "ok"}
+
+
+@router.get("/{telegram_id}/members")
+async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession = Depends(get_db)):
+    """Fetch members of a group or channel via Telethon."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if chat.type == "private":
+        return []
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    from telethon.tl.types import User
+
+    members = []
+    try:
+        async for user in client.iter_participants(telegram_id, limit=limit):
+            if not isinstance(user, User):
+                continue
+            name = f"{user.first_name or ''} {user.last_name or ''}".strip() or str(user.id)
+            # Determine role from participant type
+            role = "member"
+            participant = getattr(user, "participant", None)
+            if participant:
+                cls_name = type(participant).__name__
+                if "Creator" in cls_name:
+                    role = "creator"
+                elif "Admin" in cls_name:
+                    role = "admin"
+
+            members.append({
+                "id": user.id,
+                "name": name,
+                "username": user.username,
+                "is_bot": user.bot,
+                "role": role,
+            })
+    except Exception as e:
+        # Some chats don't allow participant listing
+        raise HTTPException(status_code=403, detail=f"Cannot fetch members: {e}")
+
+    # Sort: creator first, then admins, then members
+    role_order = {"creator": 0, "admin": 1, "member": 2}
+    members.sort(key=lambda m: (role_order.get(m["role"], 2), m["name"].lower()))
+    return members

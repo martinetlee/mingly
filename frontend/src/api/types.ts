@@ -65,6 +65,14 @@ export interface Message {
   user_flagged: boolean
 }
 
+export interface ChatMember {
+  id: number
+  name: string
+  username: string | null
+  is_bot: boolean
+  role: 'creator' | 'admin' | 'member'
+}
+
 export interface TelegramProfile {
   id: number
   type: 'user' | 'group' | 'channel' | 'unknown'

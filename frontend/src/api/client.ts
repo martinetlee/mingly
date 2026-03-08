@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, Chat, ChatMember, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -95,6 +95,9 @@ export const getMessages = (telegram_id: number, limit = 50, offset = 0) =>
 
 export const syncChat = (telegram_id: number) =>
   request<{ status: string }>(`/api/chats/${telegram_id}/sync`, { method: 'POST' })
+
+export const getChatMembers = (telegram_id: number, limit = 100) =>
+  request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
 
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')
