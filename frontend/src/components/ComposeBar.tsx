@@ -1,4 +1,4 @@
-import { useState, useRef, KeyboardEvent } from 'react'
+import { useState, useRef, useEffect, KeyboardEvent } from 'react'
 import { Send } from 'lucide-react'
 
 interface Props {
@@ -10,6 +10,12 @@ export default function ComposeBar({ onSend, disabled }: Props) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (!sending) {
+      textareaRef.current?.focus()
+    }
+  }, [sending])
 
   const handleSend = async () => {
     const trimmed = text.trim()
@@ -27,7 +33,7 @@ export default function ComposeBar({ onSend, disabled }: Props) {
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
@@ -41,8 +47,8 @@ export default function ComposeBar({ onSend, disabled }: Props) {
   }
 
   return (
-    <div className="border-t border-gray-200 bg-white px-4 py-3">
-      <div className="flex items-end gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
+    <div className="border-t border-slate-700/50 bg-slate-900 px-4 py-3">
+      <div className="flex items-end gap-2 rounded-xl border border-slate-600 bg-slate-800 px-3 py-2">
         <textarea
           ref={textareaRef}
           rows={1}
@@ -50,15 +56,15 @@ export default function ComposeBar({ onSend, disabled }: Props) {
           onChange={(e) => setText(e.target.value)}
           onInput={handleInput}
           onKeyDown={handleKeyDown}
-          placeholder="Message… (⌘↵ to send)"
-          disabled={disabled || sending}
-          className="flex-1 resize-none bg-transparent text-sm text-gray-900 outline-none placeholder:text-gray-400 disabled:opacity-50"
+          placeholder="Message… (Enter to send)"
+          disabled={disabled}
+          className="flex-1 resize-none bg-transparent text-sm text-gray-100 outline-none placeholder:text-slate-500 disabled:opacity-50"
           style={{ maxHeight: 120 }}
         />
         <button
           onClick={handleSend}
           disabled={!text.trim() || sending || disabled}
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-blue-500 text-white transition-colors hover:bg-blue-600 disabled:opacity-40"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-indigo-500 text-white transition-colors hover:bg-indigo-400 disabled:opacity-40"
         >
           <Send size={15} />
         </button>

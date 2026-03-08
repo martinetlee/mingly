@@ -9,15 +9,20 @@ interface Props {
 
 export default function MessageList({ messages, chatType }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const prevCountRef = useRef(0)
   const isGroup = chatType === 'group' || chatType === 'channel'
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const prevCount = prevCountRef.current
+    prevCountRef.current = messages.length
+    // Instant jump on initial load; smooth scroll only when new messages arrive
+    const behavior = prevCount === 0 ? 'instant' : 'smooth'
+    bottomRef.current?.scrollIntoView({ behavior })
   }, [messages])
 
   if (messages.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center text-gray-400 text-sm">
+      <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
         No messages yet
       </div>
     )

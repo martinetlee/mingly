@@ -9,6 +9,8 @@ import Todos from './pages/Todos'
 import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
 import Settings from './pages/Settings'
+import Tracked from './pages/Tracked'
+import Briefing from './pages/Briefing'
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
@@ -41,6 +43,8 @@ export default function App() {
           <Route path="todos" element={<Todos />} />
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
+          <Route path="tracked" element={<Tracked />} />
+          <Route path="briefing" element={<Briefing />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

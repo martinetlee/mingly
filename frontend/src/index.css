@@ -26,3 +26,48 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }
+
+/* Formatted message text */
+.formatted-text code {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.85em;
+}
+.formatted-text pre {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 4px 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+.formatted-text a {
+  text-decoration: underline;
+}
+.formatted-out a {
+  color: #a5b4fc; /* indigo-300 */
+}
+.formatted-out a:hover {
+  color: #fff;
+}
+.formatted-in a {
+  color: #818cf8; /* indigo-400 */
+}
+.formatted-in a:hover {
+  color: #a5b4fc;
+}
+.formatted-text .spoiler {
+  background: #475569;
+  color: transparent;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.formatted-text .spoiler:hover,
+.formatted-text .spoiler:active {
+  color: inherit;
+}

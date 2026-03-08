@@ -5,6 +5,17 @@ export interface AuthStatus {
   phone?: string
 }
 
+export interface Folder {
+  id: number
+  title: string
+  chat_ids: number[]
+  include_contacts: boolean
+  include_non_contacts: boolean
+  include_groups: boolean
+  include_channels: boolean
+  include_bots: boolean
+}
+
 export interface Chat {
   id: number
   telegram_id: number
@@ -12,7 +23,15 @@ export interface Chat {
   type: 'private' | 'group' | 'channel'
   username: string | null
   is_monitored: boolean
+  is_hidden: boolean
+  is_briefing: boolean
+  is_tracked: boolean
   last_synced_at: string | null
+}
+
+export interface Reaction {
+  emoji: string
+  count: number
 }
 
 export interface Message {
@@ -22,9 +41,12 @@ export interface Message {
   sender_id: number | null
   sender_name: string | null
   text: string | null
+  text_html: string | null
+  reactions: Reaction[] | null
   date: string
   is_outgoing: boolean
   media_type: string | null
+  media_url: string | null
   importance_score: number | null
   user_flagged: boolean
 }

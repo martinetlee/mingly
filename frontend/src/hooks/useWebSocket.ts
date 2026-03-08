@@ -10,7 +10,7 @@ export function useWebSocket(onEvent: Handler) {
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`)
+    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws`)
 
     ws.onmessage = (e) => {
       try {

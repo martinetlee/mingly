@@ -1,17 +1,18 @@
+from typing import Optional, Tuple
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from backend.config import TG_API_ID, TG_API_HASH
 from backend.secrets import get_secret, save_secret
 
-_client: TelegramClient | None = None
+_client: Optional[TelegramClient] = None
 
 
-def get_client() -> TelegramClient | None:
+def get_client() -> Optional[TelegramClient]:
     return _client
 
 
-def _get_api_credentials() -> tuple[int, str]:
+def _get_api_credentials() -> Tuple[int, str]:
     """
     Return (api_id, api_hash). Keychain takes priority over env/.env values.
     """
@@ -45,13 +46,25 @@ async def init_client() -> bool:
     return await _client.is_user_authorized()
 
 
+async def ensure_connected() -> None:
+    """Reconnect the client if it has become disconnected."""
+    global _client
+    if _client is None:
+        await init_client()
+        return
+    if not _client.is_connected():
+        await _client.connect()
+
+
 async def send_code(phone: str) -> str:
     """Request a login code. Returns phone_code_hash."""
+    await ensure_connected()
     result = await _client.send_code_request(phone)
     return result.phone_code_hash
 
 
 async def sign_in(phone: str, code: str, phone_code_hash: str):
+    await ensure_connected()
     return await _client.sign_in(
         phone=phone,
         code=code,
@@ -60,6 +73,7 @@ async def sign_in(phone: str, code: str, phone_code_hash: str):
 
 
 async def sign_in_2fa(password: str):
+    await ensure_connected()
     return await _client.sign_in(password=password)
 
 

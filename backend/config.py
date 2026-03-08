@@ -13,5 +13,5 @@ DATABASE_URL = f"sqlite+aiosqlite:///{DATA_DIR}/mingly.db"
 API_HOST = "127.0.0.1"
 API_PORT = 8765
 
-TG_API_ID = int(os.getenv("TG_API_ID", "0"))
-TG_API_HASH = os.getenv("TG_API_HASH", "")
+TG_API_ID = int(os.getenv("TG_API_ID") or "0")
+TG_API_HASH = os.getenv("TG_API_HASH") or ""
