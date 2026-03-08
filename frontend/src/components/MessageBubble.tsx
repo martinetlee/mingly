@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { Reply } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { Message } from '../api/types'
 
@@ -5,6 +7,7 @@ interface Props {
   message: Message
   showSender: boolean
   highlighted?: boolean
+  onReply?: (msg: Message) => void
 }
 
 function formatTime(dateStr: string) {
@@ -44,12 +47,28 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
+  const [hovered, setHovered] = useState(false)
 
   return (
-    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}>
+    <div
+      className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 group/bubble ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {/* Reply button for outgoing messages — appears on the left */}
+      {isOut && onReply && (
+        <button
+          onClick={() => onReply(message)}
+          className={`mr-1 self-center rounded-full p-1 text-slate-500 transition-all hover:bg-slate-700 hover:text-slate-300 ${hovered ? 'opacity-100' : 'opacity-0'}`}
+          title="Reply"
+        >
+          <Reply size={14} />
+        </button>
+      )}
+
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
         {showSender && !isOut && message.sender_name && (
           message.sender_id ? (
@@ -111,6 +130,17 @@ export default function MessageBubble({ message, showSender, highlighted }: Prop
           {formatTime(message.date)}
         </span>
       </div>
+
+      {/* Reply button for incoming messages — appears on the right */}
+      {!isOut && onReply && (
+        <button
+          onClick={() => onReply(message)}
+          className={`ml-1 self-center rounded-full p-1 text-slate-500 transition-all hover:bg-slate-700 hover:text-slate-300 ${hovered ? 'opacity-100' : 'opacity-0'}`}
+          title="Reply"
+        >
+          <Reply size={14} />
+        </button>
+      )}
     </div>
   )
 }

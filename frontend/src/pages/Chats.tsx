@@ -766,6 +766,8 @@ export default function Chats() {
   // Highlight a specific message (set from URL params when navigating from Mentions)
   const [highlightMsgId, setHighlightMsgId] = useState<number | null>(null)
   const pendingNavRef = useRef<{ chatId: number; msgId: number } | null>(null)
+  // Reply-to state
+  const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -912,6 +914,7 @@ export default function Chats() {
     setMessageOffset(0)
     setShowInfo(false)
     setHighlightMsgId(null)
+    setReplyToMessage(null)
     // Mark as read: clear badge locally and persist to backend
     if ((chat.unread_count ?? 0) > 0) {
       setChats((prev) =>
@@ -977,7 +980,8 @@ export default function Chats() {
 
   const handleSend = async (text: string) => {
     if (!selectedChat) return
-    await sendMessage(selectedChat.telegram_id, text)
+    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.telegram_id)
+    setReplyToMessage(null)
     await loadMessages(selectedChat)
   }
 
@@ -1161,12 +1165,12 @@ export default function Chats() {
                       </button>
                     </div>
                   )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} />
+                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} />
                 </div>
               )}
 
               {/* Compose */}
-              <ComposeBar onSend={handleSend} />
+              <ComposeBar onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">

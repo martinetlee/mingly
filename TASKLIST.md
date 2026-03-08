@@ -15,6 +15,6 @@
     - [x] if the group is tracked group, highlight them.
     - [x] allow filtering by group name, chat tag, and time (within 7 days [default], 14 days, 1 month)
     - [x] if the user has messages after the mention (detected in chat history), then we should mark it as [replied]
-- [] in the chat, we should be able to reply to a specific message as the official telegram
+- [x] in the chat, we should be able to reply to a specific message as the official telegram
 - [x] in the chat list, when scrolling down to the end, it should trigger to load more chats
 - [] in the intelligence page, make another tab that does summary for briefing and tracking daily or weekly (this is settable at settings page, general tab). by default the  update would be triggered at 9am. If the app was opened after 9am, the app should also trigger the update. For tracked chats, the update should summarize the conversation in one line, and place more importance at messages with the user when summarizing. For chats categorized as brief, the update should ignore the chit chat messages, focus on messages with information, links, technical, and summarize the conversation but in more detail, highlight the topics that are being discussed, or theme that has emerged. Allow the user to trigger the update manually in this page as well. 
