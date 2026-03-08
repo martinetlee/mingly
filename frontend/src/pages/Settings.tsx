@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // API helpers (self-contained so we can handle SSE streaming)
@@ -132,10 +133,289 @@ interface SetupState {
 type NotifPref = 'all' | 'tracked' | 'off'
 
 // ---------------------------------------------------------------------------
-// Component
+// Tag colors
+// ---------------------------------------------------------------------------
+
+const TAG_COLORS: Record<string, { chip: string; dot: string }> = {
+  indigo:  { chip: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',  dot: 'bg-indigo-400' },
+  emerald: { chip: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30', dot: 'bg-emerald-400' },
+  rose:    { chip: 'bg-rose-500/20 text-rose-300 border-rose-500/30',    dot: 'bg-rose-400' },
+  amber:   { chip: 'bg-amber-500/20 text-amber-300 border-amber-500/30',   dot: 'bg-amber-400' },
+  violet:  { chip: 'bg-violet-500/20 text-violet-300 border-violet-500/30',  dot: 'bg-violet-400' },
+  sky:     { chip: 'bg-sky-500/20 text-sky-300 border-sky-500/30',      dot: 'bg-sky-400' },
+  slate:   { chip: 'bg-slate-500/20 text-slate-300 border-slate-500/30',   dot: 'bg-slate-400' },
+}
+const COLOR_OPTIONS = Object.keys(TAG_COLORS)
+
+// ---------------------------------------------------------------------------
+// TagsManager component
+// ---------------------------------------------------------------------------
+
+function TagsManager() {
+  const [tags, setTags] = useState<Tag[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Create form
+  const [newName, setNewName] = useState('')
+  const [newColor, setNewColor] = useState('slate')
+  const [newCategory, setNewCategory] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
+
+  // Inline edit
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editColor, setEditColor] = useState('slate')
+  const [editCategory, setEditCategory] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Delete confirm
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+
+  useEffect(() => {
+    getTags()
+      .then(setTags)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  // Group tags by category
+  const grouped = tags.reduce<Record<string, Tag[]>>((acc, tag) => {
+    const cat = tag.category?.trim() || 'Uncategorized'
+    ;(acc[cat] = acc[cat] || []).push(tag)
+    return acc
+  }, {})
+  // Sort so Uncategorized goes last
+  const categories = Object.keys(grouped).sort((a, b) => {
+    if (a === 'Uncategorized') return 1
+    if (b === 'Uncategorized') return -1
+    return a.localeCompare(b)
+  })
+
+  const startEdit = (tag: Tag) => {
+    setEditingId(tag.id)
+    setEditName(tag.name)
+    setEditColor(tag.color)
+    setEditCategory(tag.category || '')
+  }
+
+  const cancelEdit = () => setEditingId(null)
+
+  const saveEdit = async (tagId: number) => {
+    if (!editName.trim()) return
+    setSaving(true)
+    try {
+      const updated = await updateTag(tagId, {
+        name: editName.trim(),
+        color: editColor,
+        category: editCategory.trim() || null,
+      })
+      setTags((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
+      setEditingId(null)
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const confirmDelete = async (tagId: number) => {
+    await deleteTag(tagId)
+    setTags((prev) => prev.filter((t) => t.id !== tagId))
+    setDeletingId(null)
+  }
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return
+    setCreateError('')
+    setCreating(true)
+    try {
+      const tag = await createTag(newName.trim(), newColor, newCategory.trim() || undefined)
+      setTags((prev) => [...prev, tag])
+      setNewName('')
+      setNewColor('slate')
+      setNewCategory('')
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : 'Failed to create tag')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  if (loading) {
+    return <p className="mt-6 text-sm text-slate-400">Loading tags…</p>
+  }
+
+  return (
+    <div className="max-w-2xl space-y-6">
+
+      {/* ── Create new tag ── */}
+      <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
+        <h3 className="mb-3 text-sm font-medium text-slate-300">New Tag</h3>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <label className="mb-1 block text-xs text-slate-400">Name</label>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+              placeholder="Tag name…"
+              className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="mb-1 block text-xs text-slate-400">Category (optional)</label>
+            <input
+              value={newCategory}
+              onChange={(e) => setNewCategory(e.target.value)}
+              placeholder="e.g. Work, Personal…"
+              className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-slate-400">Color</label>
+            <div className="flex gap-1.5">
+              {COLOR_OPTIONS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setNewColor(c)}
+                  className={`h-6 w-6 rounded-full ${TAG_COLORS[c].dot} ring-offset-slate-800 ring-offset-2 transition ${newColor === c ? 'ring-2 ring-blue-400' : ''}`}
+                  title={c}
+                />
+              ))}
+            </div>
+          </div>
+          <button
+            onClick={handleCreate}
+            disabled={creating || !newName.trim()}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          >
+            {creating ? 'Creating…' : 'Create'}
+          </button>
+        </div>
+        {createError && <p className="mt-2 text-xs text-red-400">{createError}</p>}
+      </div>
+
+      {/* ── Tag list grouped by category ── */}
+      {tags.length === 0 ? (
+        <p className="text-sm text-slate-400">No tags yet.</p>
+      ) : (
+        categories.map((cat) => (
+          <div key={cat} className="rounded-xl border border-slate-700 bg-slate-800">
+            <div className="border-b border-slate-700 px-4 py-2.5">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{cat}</span>
+            </div>
+            <ul className="divide-y divide-slate-700/50">
+              {grouped[cat].map((tag) => (
+                <li key={tag.id} className="px-4 py-3">
+                  {editingId === tag.id ? (
+                    /* ── Inline edit row ── */
+                    <div className="flex flex-col gap-2">
+                      <div className="flex gap-2">
+                        <input
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                        <input
+                          value={editCategory}
+                          onChange={(e) => setEditCategory(e.target.value)}
+                          placeholder="Category"
+                          className="flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="flex gap-1.5">
+                          {COLOR_OPTIONS.map((c) => (
+                            <button
+                              key={c}
+                              onClick={() => setEditColor(c)}
+                              className={`h-5 w-5 rounded-full ${TAG_COLORS[c].dot} ring-offset-slate-800 ring-offset-2 transition ${editColor === c ? 'ring-2 ring-blue-400' : ''}`}
+                              title={c}
+                            />
+                          ))}
+                        </div>
+                        <div className="ml-auto flex gap-2">
+                          <button
+                            onClick={cancelEdit}
+                            className="rounded-lg px-3 py-1 text-xs text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => saveEdit(tag.id)}
+                            disabled={saving || !editName.trim()}
+                            className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                          >
+                            {saving ? 'Saving…' : 'Save'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : deletingId === tag.id ? (
+                    /* ── Delete confirm ── */
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-slate-300">
+                        Delete <span className="font-medium text-slate-100">"{tag.name}"</span>? It will be removed from all chats.
+                      </p>
+                      <div className="flex gap-2 ml-4 shrink-0">
+                        <button
+                          onClick={() => setDeletingId(null)}
+                          className="rounded-lg px-3 py-1 text-xs text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => confirmDelete(tag.id)}
+                          className="rounded-lg bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* ── Normal row ── */
+                    <div className="flex items-center gap-3">
+                      <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${TAG_COLORS[tag.color]?.chip ?? TAG_COLORS.slate.chip}`}>
+                        {tag.name}
+                      </span>
+                      {tag.is_default && (
+                        <span className="text-xs text-slate-500">default</span>
+                      )}
+                      <div className="ml-auto flex gap-1.5">
+                        <button
+                          onClick={() => startEdit(tag)}
+                          className="rounded-lg px-2.5 py-1 text-xs text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => setDeletingId(tag.id)}
+                          className="rounded-lg px-2.5 py-1 text-xs text-red-400 hover:bg-red-900/30 hover:text-red-300"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main Settings component
 // ---------------------------------------------------------------------------
 
 export default function Settings() {
+  // Tab state
+  const [settingsTab, setSettingsTab] = useState<'general' | 'tags'>('general')
+
   // Orchestrator state
   const [orchestratorId, setOrchestratorId] = useState<string | null>(null)
   const [pendingModelId, setPendingModelId] = useState<string | null>(null)
@@ -145,8 +425,21 @@ export default function Settings() {
   const [setup, setSetup] = useState<SetupState | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
+  // Ollama server status
+  const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null)
+  const [ollamaAction, setOllamaAction] = useState<'stopping' | 'restarting' | null>(null)
+
   // Notification preference
   const [notifPref, setNotifPref] = useState<NotifPref>('tracked')
+
+  const refreshOllamaStatus = useCallback(async () => {
+    try {
+      const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status')
+      setOllamaRunning(running)
+    } catch {
+      setOllamaRunning(false)
+    }
+  }, [])
 
   useEffect(() => {
     apiFetch<{ orchestrator_name: string }>('GET', '/api/llm/orchestrator')
@@ -160,7 +453,10 @@ export default function Settings() {
     getPrefs()
       .then(({ notif_pref }) => setNotifPref(notif_pref as NotifPref))
       .catch(() => {})
-  }, [])
+
+    // Check Ollama status on mount
+    refreshOllamaStatus()
+  }, [refreshOllamaStatus])
 
   // ── Orchestrator selection ──────────────────────────────────────────────
 
@@ -175,6 +471,37 @@ export default function Settings() {
 
   const handleCancelPending = () => {
     setPendingModelId(null)
+  }
+
+  const handleStopOllama = async () => {
+    setOllamaAction('stopping')
+    try {
+      await apiFetch('POST', '/api/llm/ollama/stop')
+      await new Promise((r) => setTimeout(r, 800))
+      await refreshOllamaStatus()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to stop Ollama')
+    } finally {
+      setOllamaAction(null)
+    }
+  }
+
+  const handleRestartOllama = async () => {
+    setOllamaAction('restarting')
+    try {
+      await apiFetch('POST', '/api/llm/ollama/restart')
+      // Poll until it's back up (up to 15s)
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 500))
+        const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status').catch(() => ({ running: false }))
+        if (running) { setOllamaRunning(true); break }
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to restart Ollama')
+    } finally {
+      setOllamaAction(null)
+      refreshOllamaStatus()
+    }
   }
 
   const handleConfirmSelection = () => {
@@ -324,96 +651,168 @@ export default function Settings() {
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-y-auto p-8">
-      <h1 className="mb-6 text-lg font-semibold text-slate-100">Settings</h1>
+    <div className="flex flex-1 flex-col overflow-y-auto">
+      {/* Header */}
+      <div className="border-b border-slate-700/50 px-8 pt-8 pb-0">
+        <h1 className="mb-4 text-lg font-semibold text-slate-100">Settings</h1>
+        {/* Tab bar */}
+        <div className="flex gap-1">
+          {(['general', 'tags'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setSettingsTab(tab)}
+              className={`rounded-t-lg px-4 py-2 text-sm font-medium capitalize transition ${
+                settingsTab === tab
+                  ? 'bg-white text-gray-900'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+      </div>
 
-      {/* ── AI Models ── */}
-      <section className="mb-8 max-w-xl">
-        <h2 className="mb-1 text-sm font-medium text-slate-300">AI Models</h2>
-        <p className="mb-4 text-xs text-slate-400">
-          Select the orchestrator model that powers AI features in Mingly.
-        </p>
+      {/* Tab content */}
+      <div className="flex-1 overflow-y-auto p-8">
+        {settingsTab === 'general' && (
+          <>
+            {/* ── AI Models ── */}
+            <section className="mb-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">AI Models</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Select the orchestrator model that powers AI features in Mingly.
+              </p>
 
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white p-4">
-          <label className="mb-1.5 block text-xs font-medium text-gray-600">
-            Orchestrator LLM
-          </label>
-          <select
-            value={selectValue}
-            onChange={handleModelSelectChange}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 cursor-pointer"
-          >
-            <option value="" disabled>Select a model…</option>
-            {MODELS.map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.available}>
-                {m.name}
-                {m.type === 'local' && m.available ? ' (Local)' : ''}
-                {!m.available ? ' — Coming soon' : ''}
-              </option>
-            ))}
-          </select>
-
-          {/* Inline confirm when pending change */}
-          {pendingModelId && pendingModelId !== orchestratorId && (
-            <div className="mt-3 flex items-center justify-between rounded-lg bg-blue-50 px-3 py-2.5">
-              <span className="text-sm text-blue-800">
-                {pendingModel?.type === 'local'
-                  ? `Set up ${pendingModel?.name} locally?`
-                  : `Switch to ${pendingModel?.name}?`}
-              </span>
-              <div className="flex gap-2">
-                <button
-                  onClick={handleCancelPending}
-                  className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-white"
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                  Orchestrator LLM
+                </label>
+                <select
+                  value={selectValue}
+                  onChange={handleModelSelectChange}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleConfirmSelection}
-                  disabled={!pendingModel?.available}
-                  className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50"
-                >
-                  {pendingModel?.type === 'local' ? 'Download & Set up' : 'Apply'}
-                </button>
+                  <option value="" disabled>Select a model…</option>
+                  {MODELS.map((m) => (
+                    <option key={m.id} value={m.id} disabled={!m.available}>
+                      {m.name}
+                      {m.type === 'local' && m.available ? ' (Local)' : ''}
+                      {!m.available ? ' — Coming soon' : ''}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Inline confirm when pending change */}
+                {pendingModelId && pendingModelId !== orchestratorId && (
+                  <div className="mt-3 flex items-center justify-between rounded-lg bg-blue-900/40 border border-blue-700/50 px-3 py-2.5">
+                    <span className="text-sm text-blue-300">
+                      {pendingModel?.type === 'local'
+                        ? `Set up ${pendingModel?.name} locally?`
+                        : `Switch to ${pendingModel?.name}?`}
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleCancelPending}
+                        className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleConfirmSelection}
+                        disabled={!pendingModel?.available}
+                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                      >
+                        {pendingModel?.type === 'local' ? 'Download & Set up' : 'Apply'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Current status */}
+                {orchestratorId && !pendingModelId && (
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${ollamaRunning ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+                      <p className={`text-xs ${ollamaRunning ? 'text-emerald-400' : 'text-slate-500'}`}>
+                        {ollamaRunning
+                          ? `${MODELS.find((m) => m.id === orchestratorId)?.name} is running`
+                          : 'Ollama server stopped'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={handleRestartOllama}
+                        disabled={ollamaAction !== null}
+                        title="Restart Ollama server"
+                        className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-700 hover:text-slate-200 disabled:opacity-40 transition-colors"
+                      >
+                        {ollamaAction === 'restarting' ? 'Restarting…' : 'Restart'}
+                      </button>
+                      {ollamaRunning && (
+                        <button
+                          onClick={handleStopOllama}
+                          disabled={ollamaAction !== null}
+                          title="Stop Ollama server"
+                          className="rounded px-2 py-1 text-xs text-rose-400 hover:bg-rose-900/30 hover:text-rose-300 disabled:opacity-40 transition-colors"
+                        >
+                          {ollamaAction === 'stopping' ? 'Stopping…' : 'Stop'}
+                        </button>
+                      )}
+                      {!ollamaRunning && ollamaRunning !== null && (
+                        <button
+                          onClick={handleRestartOllama}
+                          disabled={ollamaAction !== null}
+                          title="Start Ollama server"
+                          className="rounded px-2 py-1 text-xs text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40 transition-colors"
+                        >
+                          {ollamaAction === 'restarting' ? 'Starting…' : 'Start'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            </section>
 
-          {/* Current status */}
-          {orchestratorId && !pendingModelId && (
-            <p className="mt-2 text-xs text-green-600">
-              ✓ {MODELS.find((m) => m.id === orchestratorId)?.name} is active
+            {/* ── Notifications ── */}
+            <section className="max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Notifications</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Get notified when new messages arrive.
+              </p>
+
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                  Notify me about
+                </label>
+                <select
+                  value={notifPref}
+                  onChange={handleNotifPrefChange}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value="all">All new messages</option>
+                  <option value="tracked">Tracked chats only</option>
+                  <option value="off">Off</option>
+                </select>
+
+                {notifPref !== 'off' && (
+                  <p className="mt-2 text-xs text-emerald-400">✓ Native notifications enabled</p>
+                )}
+              </div>
+            </section>
+          </>
+        )}
+
+        {settingsTab === 'tags' && (
+          <>
+            <p className="mb-6 text-xs text-slate-400">
+              Manage tags for organizing chats. Tags can be assigned to chats from the chat info panel.
             </p>
-          )}
-        </div>
-      </section>
-
-      {/* ── Notifications ── */}
-      <section className="max-w-xl">
-        <h2 className="mb-1 text-sm font-medium text-slate-300">Notifications</h2>
-        <p className="mb-4 text-xs text-slate-400">
-          Get notified when new messages arrive.
-        </p>
-
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white p-4">
-          <label className="mb-1.5 block text-xs font-medium text-gray-600">
-            Notify me about
-          </label>
-          <select
-            value={notifPref}
-            onChange={handleNotifPrefChange}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 cursor-pointer"
-          >
-            <option value="all">All new messages</option>
-            <option value="tracked">Tracked chats only</option>
-            <option value="off">Off</option>
-          </select>
-
-          {notifPref !== 'off' && (
-            <p className="mt-2 text-xs text-green-600">✓ Native notifications enabled</p>
-          )}
-        </div>
-      </section>
+            <TagsManager />
+          </>
+        )}
+      </div>
 
       {/* ── Download modal ── */}
       {setup && (

@@ -341,6 +341,57 @@ async def ollama_status():
     return {"running": running}
 
 
+@router.post("/ollama/stop")
+async def stop_ollama():
+    """Kill the Ollama server process."""
+    running = await _get_ollama().health_check()
+    if not running:
+        return {"status": "not_running"}
+
+    try:
+        result = subprocess.run(
+            ["pkill", "-f", "ollama serve"],
+            capture_output=True,
+            timeout=5,
+        )
+        # pkill returns 0 if it killed something, 1 if no process found
+        if result.returncode in (0, 1):
+            return {"status": "stopped"}
+        raise HTTPException(status_code=500, detail=result.stderr.decode() or "pkill failed")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timed out trying to stop Ollama")
+
+
+@router.post("/ollama/restart")
+async def restart_ollama():
+    """Stop the Ollama server and start it again."""
+    # Stop (best-effort)
+    try:
+        subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True, timeout=5)
+        await asyncio.sleep(1.5)
+    except Exception:
+        pass
+
+    # Start fresh
+    binary = _find_ollama_binary()
+    if not binary:
+        raise HTTPException(
+            status_code=404,
+            detail="Ollama binary not found. Install it first.",
+        )
+
+    _OLLAMA_HOME.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "OLLAMA_HOME": str(_OLLAMA_HOME)}
+    subprocess.Popen(
+        [binary, "serve"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=env,
+    )
+    return {"status": "restarting"}
+
+
 @router.get("/ollama/models")
 async def list_ollama_models():
     """List locally installed Ollama models."""

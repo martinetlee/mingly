@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, Folder, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -99,6 +99,9 @@ export const syncChat = (telegram_id: number) =>
 export const getChatMembers = (telegram_id: number, limit = 100) =>
   request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
 
+export const markChatRead = (telegram_id: number) =>
+  request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
+
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')
 
@@ -181,10 +184,19 @@ export const deleteOrganization = (orgId: number) =>
 export const autoDiscoverOrgs = () =>
   request<{ created: number; total: number }>('/api/organizations/auto-discover', { method: 'POST' })
 
+export const generateOrgContext = (orgId: number) =>
+  request<OrgDetail>(`/api/organizations/${orgId}/generate-context`, { method: 'POST' })
+
 // --- Contacts ---
 
 export const syncContacts = () =>
   request<{ imported: number; total: number }>('/api/contacts/sync', { method: 'POST' })
+
+export const getContactByTelegram = (telegramId: number) =>
+  request<Contact>(`/api/contacts/by-telegram/${telegramId}`)
+
+export const createContact = (data: { telegram_id: number; first_name?: string; last_name?: string; username?: string }) =>
+  request<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(data) })
 
 export const getContacts = (search = '', limit = 100, offset = 0) =>
   request<Contact[]>(`/api/contacts?search=${encodeURIComponent(search)}&limit=${limit}&offset=${offset}`)
@@ -199,6 +211,16 @@ export const addPosition = (contactId: number, organization: string, title?: str
   request<ContactPosition>(`/api/contacts/${contactId}/positions`, {
     method: 'POST',
     body: JSON.stringify({ organization, title: title || null }),
+  })
+
+export const updatePosition = (
+  contactId: number,
+  positionId: number,
+  data: { title?: string; is_active?: boolean; ended_at?: string | null },
+) =>
+  request<ContactPosition>(`/api/contacts/${contactId}/positions/${positionId}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
   })
 
 export const removePosition = (contactId: number, positionId: number) =>
@@ -227,3 +249,37 @@ export const sendMessage = (chat_id: number, text: string, reply_to_id?: number)
     method: 'POST',
     body: JSON.stringify({ chat_id, text, reply_to_id }),
   })
+
+// --- Conversations ---
+
+export const listConversations = () =>
+  request<ConversationSummary[]>('/api/conversations/')
+
+export const createConversation = () =>
+  request<ConversationDetail>('/api/conversations/', { method: 'POST' })
+
+export const getConversation = (id: number) =>
+  request<ConversationDetail>(`/api/conversations/${id}`)
+
+export const updateConversationTitle = (id: number, title: string) =>
+  request<ConversationDetail>(`/api/conversations/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title }),
+  })
+
+export const deleteConversation = (id: number) =>
+  fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+
+export const appendConversationMessage = (id: number, role: string, content: string) =>
+  request<ConversationMessageItem>(`/api/conversations/${id}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ role, content }),
+  })
+
+export const suggestConversationTitle = (id: number) =>
+  request<{ title: string | null }>(`/api/conversations/${id}/suggest-title`, { method: 'POST' })
+
+// --- Mentions ---
+
+export const getMentions = () =>
+  request<MentionGroup[]>('/api/intelligence/mentions')

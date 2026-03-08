@@ -1,5 +1,6 @@
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func, desc
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
 from backend.db.models import Organization, Contact, ContactPosition, Message, Chat
+from backend.llm.config import load_registry_config
 
 router = APIRouter()
 
@@ -24,7 +26,7 @@ class OrgUpdate(BaseModel):
 
 async def _org_detail(db: AsyncSession, org: Organization) -> dict:
     """Build full org dict with members and recent group messages."""
-    # Members: contacts who have a position at this org
+    # Members: contacts who have a position at this org (split into current and former)
     pos_result = await db.execute(
         select(ContactPosition, Contact)
         .join(Contact, ContactPosition.contact_id == Contact.id)
@@ -32,15 +34,21 @@ async def _org_detail(db: AsyncSession, org: Organization) -> dict:
         .order_by(Contact.first_name)
     )
     members = []
+    former_members = []
     for pos, contact in pos_result.all():
         name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or str(contact.telegram_id)
-        members.append({
+        entry = {
             "contact_id": contact.id,
             "telegram_id": contact.telegram_id,
             "name": name,
             "username": contact.username,
             "title": pos.title,
-        })
+            "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
+        }
+        if pos.is_active:
+            members.append(entry)
+        else:
+            former_members.append(entry)
 
     # Find group chats whose name contains the org name (heuristic)
     chat_result = await db.execute(
@@ -76,6 +84,7 @@ async def _org_detail(db: AsyncSession, org: Organization) -> dict:
         "name": org.name,
         "context": org.context,
         "members": members,
+        "former_members": former_members,
         "related_chats": latest_messages,
         "created_at": org.created_at.isoformat() if org.created_at else None,
     }
@@ -205,3 +214,82 @@ async def auto_discover_organizations(db: AsyncSession = Depends(get_db)):
             created += 1
     await db.commit()
     return {"created": created, "total": len(org_names)}
+
+
+@router.post("/{org_id}/generate-context")
+async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
+    """Use the configured LLM to auto-generate a context summary for this organization."""
+    org = (await db.execute(
+        select(Organization).where(Organization.id == org_id)
+    )).scalar_one_or_none()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # Check LLM config
+    cfg = load_registry_config()
+    if not cfg.orchestrator_name:
+        raise HTTPException(status_code=503, detail="No LLM configured. Set up an AI model in Settings.")
+    inst = next((i for i in cfg.instances if i.name == cfg.orchestrator_name), None)
+    if not inst:
+        raise HTTPException(status_code=503, detail="Configured LLM instance not found.")
+
+    base_url = inst.base_url.rstrip("/")
+    model = inst.model
+
+    # Gather org data
+    detail = await _org_detail(db, org)
+    members_text = "\n".join(
+        f"- {m['name']}{' (@' + m['username'] + ')' if m['username'] else ''}"
+        f"{': ' + m['title'] if m['title'] else ''}"
+        for m in detail["members"]
+    ) or "No members yet."
+
+    related_text = ""
+    for rc in detail["related_chats"]:
+        related_text += f"\n- {rc['chat_name']} ({rc['chat_type']})"
+        if rc.get("last_message") and rc["last_message"].get("text"):
+            lm = rc["last_message"]
+            sender = lm.get("sender_name") or "Unknown"
+            related_text += f": last message from {sender}: {lm['text'][:150]}"
+    related_text = related_text.strip() or "No related groups found."
+
+    prompt = (
+        f"Organization: {org.name}\n\n"
+        f"Members:\n{members_text}\n\n"
+        f"Related Telegram groups and latest messages:\n{related_text}\n\n"
+        "Write a concise 2-4 sentence context summary for this organization. "
+        "Describe what the organization does, who the key people are, and any "
+        "relevant recent activity. Be factual and professional."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant that writes concise organization context summaries based on available data."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": 300,
+                    "temperature": 0.4,
+                    "stream": False,
+                },
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"LLM error: {resp.text[:200]}")
+
+        data = resp.json()
+        generated = data["choices"][0]["message"].get("content", "").strip()
+        if not generated:
+            raise HTTPException(status_code=502, detail="LLM returned empty response.")
+
+        # Save to org
+        org.context = generated
+        await db.commit()
+        await db.refresh(org)
+        return await _org_detail(db, org)
+
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Could not reach LLM: {e}")

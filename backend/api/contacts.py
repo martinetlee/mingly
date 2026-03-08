@@ -1,4 +1,5 @@
-from typing import Optional
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -24,11 +25,25 @@ class ContactUpdate(BaseModel):
 class PositionCreate(BaseModel):
     organization: str
     title: Optional[str] = None
+    is_active: bool = True
+
+
+class PositionUpdate(BaseModel):
+    title: Optional[str] = None
+    is_active: Optional[bool] = None
+    ended_at: Optional[str] = None  # ISO date string or null
+
+
+class ContactCreate(BaseModel):
+    telegram_id: int
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
 
 
 # --- Helpers ---
 
-def _contact_dict(c: Contact, positions: list[ContactPosition] | None = None) -> dict:
+def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None) -> dict:
     d = {
         "id": c.id,
         "telegram_id": c.telegram_id,
@@ -44,13 +59,19 @@ def _contact_dict(c: Contact, positions: list[ContactPosition] | None = None) ->
     }
     if positions is not None:
         d["positions"] = [
-            {"id": p.id, "organization": p.organization, "title": p.title}
+            {
+                "id": p.id,
+                "organization": p.organization,
+                "title": p.title,
+                "is_active": p.is_active,
+                "ended_at": p.ended_at.isoformat() if p.ended_at else None,
+            }
             for p in positions
         ]
     return d
 
 
-async def _get_positions(db: AsyncSession, contact_id: int) -> list[ContactPosition]:
+async def _get_positions(db: AsyncSession, contact_id: int) -> List[ContactPosition]:
     result = await db.execute(
         select(ContactPosition)
         .where(ContactPosition.contact_id == contact_id)
@@ -130,13 +151,47 @@ async def list_contacts(
             select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
         )
         all_positions = list(pos_result.scalars().all())
-        pos_map: dict[int, list[ContactPosition]] = {}
+        pos_map: Dict[int, List[ContactPosition]] = {}
         for p in all_positions:
             pos_map.setdefault(p.contact_id, []).append(p)
     else:
         pos_map = {}
 
     return [_contact_dict(c, pos_map.get(c.id, [])) for c in contacts]
+
+
+@router.get("/by-telegram/{telegram_id}")
+async def get_contact_by_telegram(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    positions = await _get_positions(db, contact.id)
+    return _contact_dict(contact, positions)
+
+
+@router.post("")
+async def create_contact(
+    data: ContactCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    existing = (await db.execute(
+        select(Contact).where(Contact.telegram_id == data.telegram_id)
+    )).scalar_one_or_none()
+    if existing:
+        positions = await _get_positions(db, existing.id)
+        return _contact_dict(existing, positions)
+    contact = Contact(
+        telegram_id=data.telegram_id,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        username=data.username,
+    )
+    db.add(contact)
+    await db.commit()
+    await db.refresh(contact)
+    return _contact_dict(contact, [])
 
 
 @router.get("/{contact_id}")
@@ -200,6 +255,7 @@ async def add_position(
         contact_id=contact_id,
         organization=org_name,
         title=data.title.strip() if data.title else None,
+        is_active=data.is_active,
     )
     db.add(pos)
     try:
@@ -208,7 +264,55 @@ async def add_position(
     except Exception:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Position already exists")
-    return {"id": pos.id, "organization": pos.organization, "title": pos.title}
+    return {
+        "id": pos.id,
+        "organization": pos.organization,
+        "title": pos.title,
+        "is_active": pos.is_active,
+        "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
+    }
+
+
+@router.put("/{contact_id}/positions/{position_id}")
+async def update_position(
+    contact_id: int,
+    position_id: int,
+    data: PositionUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    pos = (await db.execute(
+        select(ContactPosition).where(
+            ContactPosition.id == position_id,
+            ContactPosition.contact_id == contact_id,
+        )
+    )).scalar_one_or_none()
+    if not pos:
+        raise HTTPException(status_code=404, detail="Position not found")
+    if data.title is not None:
+        pos.title = data.title.strip() or None
+    if data.is_active is not None:
+        pos.is_active = data.is_active
+    if data.ended_at is not None:
+        # Parse ISO date string; empty string clears the date
+        if data.ended_at.strip():
+            try:
+                pos.ended_at = datetime.fromisoformat(data.ended_at.strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid ended_at date format")
+        else:
+            pos.ended_at = None
+    elif data.is_active is True:
+        # Reactivating: clear ended_at
+        pos.ended_at = None
+    await db.commit()
+    await db.refresh(pos)
+    return {
+        "id": pos.id,
+        "organization": pos.organization,
+        "title": pos.title,
+        "is_active": pos.is_active,
+        "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
+    }
 
 
 @router.delete("/{contact_id}/positions/{position_id}")

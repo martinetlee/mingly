@@ -1,14 +1,14 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Chat, Message
+from backend.db.models import Chat, Message, Tag, ChatTag
 
 
 # --- Chats ---
 
-async def get_chats(db: AsyncSession) -> list:
+async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0) -> list:
     last_msg = (
         select(Message.chat_id, func.max(Message.date).label("last_date"))
         .group_by(Message.chat_id)
@@ -19,6 +19,8 @@ async def get_chats(db: AsyncSession) -> list:
         .where(Chat.is_hidden == False, Chat.is_briefing == False)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
         .order_by(desc(last_msg.c.last_date), Chat.name)
+        .limit(limit)
+        .offset(offset)
     )
     return list(result.scalars().all())
 
@@ -101,20 +103,34 @@ async def upsert_chat(
     name: str,
     chat_type: str,
     username: Optional[str] = None,
+    unread_count: Optional[int] = None,
 ) -> Chat:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if chat:
         chat.name = name
         chat.type = chat_type
         chat.username = username
+        if unread_count is not None:
+            chat.unread_count = unread_count
     else:
         chat = Chat(
             telegram_id=telegram_id,
             name=name,
             type=chat_type,
             username=username,
+            unread_count=unread_count if unread_count is not None else 0,
         )
         db.add(chat)
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def mark_chat_read(db: AsyncSession, telegram_id: int) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.unread_count = 0
     await db.commit()
     await db.refresh(chat)
     return chat
@@ -205,3 +221,204 @@ async def update_chat_sync(db: AsyncSession, telegram_id: int) -> None:
     if chat:
         chat.last_synced_at = datetime.utcnow()
         await db.commit()
+
+
+# --- Tags ---
+
+async def get_all_tags(db: AsyncSession) -> list[Tag]:
+    result = await db.execute(select(Tag).order_by(Tag.is_default.desc(), Tag.name))
+    return list(result.scalars().all())
+
+
+async def create_tag(db: AsyncSession, name: str, color: str = "slate", category: Optional[str] = None) -> Tag:
+    tag = Tag(name=name, color=color, category=category, is_default=False)
+    db.add(tag)
+    await db.commit()
+    await db.refresh(tag)
+    return tag
+
+
+async def update_tag(
+    db: AsyncSession,
+    tag_id: int,
+    name: Optional[str] = None,
+    color: Optional[str] = None,
+    category: Optional[str] = None,
+) -> Optional[Tag]:
+    result = await db.execute(select(Tag).where(Tag.id == tag_id))
+    tag = result.scalar_one_or_none()
+    if not tag:
+        return None
+    if name is not None:
+        tag.name = name.strip()
+    if color is not None:
+        tag.color = color
+    if category is not None:
+        tag.category = category.strip() or None
+    await db.commit()
+    await db.refresh(tag)
+    return tag
+
+
+async def delete_tag(db: AsyncSession, tag_id: int) -> bool:
+    result = await db.execute(select(Tag).where(Tag.id == tag_id))
+    tag = result.scalar_one_or_none()
+    if not tag:
+        return False
+    # Remove all chat associations first
+    await db.execute(select(ChatTag).where(ChatTag.tag_id == tag_id))
+    assocs = (await db.execute(select(ChatTag).where(ChatTag.tag_id == tag_id))).scalars().all()
+    for assoc in assocs:
+        await db.delete(assoc)
+    await db.delete(tag)
+    await db.commit()
+    return True
+
+
+async def get_tags_for_chat(db: AsyncSession, chat_telegram_id: int) -> list[Tag]:
+    result = await db.execute(
+        select(Tag)
+        .join(ChatTag, Tag.id == ChatTag.tag_id)
+        .where(ChatTag.chat_id == chat_telegram_id)
+        .order_by(Tag.name)
+    )
+    return list(result.scalars().all())
+
+
+async def add_tag_to_chat(db: AsyncSession, chat_telegram_id: int, tag_id: int) -> Optional[ChatTag]:
+    # Check tag exists
+    tag = (await db.execute(select(Tag).where(Tag.id == tag_id))).scalar_one_or_none()
+    if not tag:
+        return None
+    # Upsert
+    existing = (await db.execute(
+        select(ChatTag).where(ChatTag.chat_id == chat_telegram_id, ChatTag.tag_id == tag_id)
+    )).scalar_one_or_none()
+    if existing:
+        return existing
+    ct = ChatTag(chat_id=chat_telegram_id, tag_id=tag_id)
+    db.add(ct)
+    await db.commit()
+    await db.refresh(ct)
+    return ct
+
+
+async def remove_tag_from_chat(db: AsyncSession, chat_telegram_id: int, tag_id: int) -> bool:
+    result = await db.execute(
+        select(ChatTag).where(ChatTag.chat_id == chat_telegram_id, ChatTag.tag_id == tag_id)
+    )
+    ct = result.scalar_one_or_none()
+    if not ct:
+        return False
+    await db.delete(ct)
+    await db.commit()
+    return True
+
+
+# --- Intelligence tools ---
+
+async def search_messages_by_keyword(db: AsyncSession, keyword: str, limit: int = 30) -> list:
+    """Full-text search across all message text (case-insensitive LIKE)."""
+    result = await db.execute(
+        select(Message, Chat)
+        .join(Chat, Message.chat_id == Chat.telegram_id)
+        .where(Message.text.ilike(f"%{keyword}%"))
+        .order_by(desc(Message.date))
+        .limit(limit)
+    )
+    return result.all()
+
+
+async def get_chat_by_name(db: AsyncSession, name: str) -> Optional[Chat]:
+    """Find a chat whose name contains the given string (case-insensitive)."""
+    result = await db.execute(
+        select(Chat).where(Chat.name.ilike(f"%{name}%")).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def search_chats_by_title(db: AsyncSession, keyword: str, limit: int = 20) -> list:
+    """Return all chats whose name contains the keyword (case-insensitive)."""
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.name.ilike(f"%{keyword}%"))
+        .order_by(Chat.name)
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_chats_by_tag_name(db: AsyncSession, tag_name: str) -> list:
+    """Return all chats that have a tag matching tag_name (case-insensitive)."""
+    result = await db.execute(
+        select(Chat)
+        .join(ChatTag, Chat.telegram_id == ChatTag.chat_id)
+        .join(Tag, ChatTag.tag_id == Tag.id)
+        .where(Tag.name.ilike(f"%{tag_name}%"))
+        .order_by(Chat.name)
+    )
+    return list(result.scalars().all())
+
+
+# --- Mentions ---
+
+async def get_mentions(
+    db: AsyncSession,
+    username: str,
+    limit: int = 50,
+) -> list:
+    """
+    Return messages where the current user's @username appears in the text,
+    limited to non-outgoing messages in group/channel chats.
+    Each row is a (Message, Chat) tuple.
+    """
+    result = await db.execute(
+        select(Message, Chat)
+        .join(Chat, Message.chat_id == Chat.telegram_id)
+        .where(
+            Message.is_outgoing == False,  # noqa: E712
+            Chat.type.in_(["group", "channel"]),
+            Message.text.ilike(f"%@{username}%"),
+        )
+        .order_by(desc(Message.date))
+        .limit(limit)
+    )
+    return result.all()
+
+
+async def get_messages_around(
+    db: AsyncSession,
+    chat_id: int,
+    telegram_id: int,
+    before: int = 2,
+    after: int = 1,
+) -> dict:
+    """
+    Return messages before and after a given telegram_id within the same chat.
+    Returns {"before": [...], "after": [...]} sorted oldest-first.
+    """
+    # Messages before (older): lower telegram_id
+    before_result = await db.execute(
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.telegram_id < telegram_id,
+        )
+        .order_by(desc(Message.telegram_id))
+        .limit(before)
+    )
+    before_msgs = list(reversed(before_result.scalars().all()))
+
+    # Messages after (newer): higher telegram_id
+    after_result = await db.execute(
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.telegram_id > telegram_id,
+        )
+        .order_by(Message.telegram_id)
+        .limit(after)
+    )
+    after_msgs = list(after_result.scalars().all())
+
+    return {"before": before_msgs, "after": after_msgs}

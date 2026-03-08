@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCw, Search, X, Plus, Building2, Pencil, Twitter, Linkedin, Phone, StickyNote, ExternalLink } from 'lucide-react'
+import { RefreshCw, Search, X, Plus, Building2, Pencil, Twitter, Linkedin, Phone, StickyNote, ExternalLink, UserMinus, RotateCcw } from 'lucide-react'
 import type { Contact, ContactPosition } from '../api/types'
-import { getContacts, syncContacts, updateContact, addPosition, removePosition } from '../api/client'
+import { getContacts, syncContacts, updateContact, addPosition, removePosition, updatePosition } from '../api/client'
+import ComboInput from '../components/ComboInput'
 
 function ContactCard({
   contact,
@@ -30,9 +31,9 @@ function ContactCard({
         {contact.username && (
           <p className="truncate text-xs text-slate-500">@{contact.username}</p>
         )}
-        {contact.positions.length > 0 && (
+        {contact.positions.filter((p) => p.is_active !== false).length > 0 && (
           <p className="truncate text-[10px] text-slate-500 mt-0.5">
-            {contact.positions.map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')}
+            {contact.positions.filter((p) => p.is_active !== false).map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')}
           </p>
         )}
       </div>
@@ -124,6 +125,11 @@ export default function Contacts() {
   const [newOrg, setNewOrg] = useState('')
   const [newTitle, setNewTitle] = useState('')
 
+  // Mark-as-former inline state: maps posId -> draft end date string
+  const [formerDrafts, setFormerDrafts] = useState<Record<number, string>>({})
+  // Which position IDs are in "confirm former" mode (showing the date picker)
+  const [confirmingFormer, setConfirmingFormer] = useState<Set<number>>(new Set())
+
   const loadContacts = useCallback(async (query = '') => {
     const data = await getContacts(query)
     setContacts(data)
@@ -150,6 +156,8 @@ export default function Contacts() {
   const handleSelect = (c: Contact) => {
     setSelected(c)
     setShowAddPos(false)
+    setConfirmingFormer(new Set())
+    setFormerDrafts({})
   }
 
   const handleUpdateField = async (field: string, value: string) => {
@@ -174,6 +182,34 @@ export default function Contacts() {
     if (!selected) return
     await removePosition(selected.id, posId)
     const updated = { ...selected, positions: selected.positions.filter((p) => p.id !== posId) }
+    setSelected(updated)
+    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
+  }
+
+  const handleMarkFormer = async (posId: number, endedAt: string) => {
+    if (!selected) return
+    const updatedPos = await updatePosition(selected.id, posId, {
+      is_active: false,
+      ended_at: endedAt || null,
+    })
+    const updated = {
+      ...selected,
+      positions: selected.positions.map((p) => p.id === posId ? updatedPos : p),
+    }
+    setSelected(updated)
+    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
+  }
+
+  const handleReactivate = async (posId: number) => {
+    if (!selected) return
+    const updatedPos = await updatePosition(selected.id, posId, {
+      is_active: true,
+      ended_at: null,
+    })
+    const updated = {
+      ...selected,
+      positions: selected.positions.map((p) => p.id === posId ? updatedPos : p),
+    }
     setSelected(updated)
     setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
   }
@@ -347,32 +383,98 @@ export default function Contacts() {
                 <p className="text-xs text-slate-500">No positions added</p>
               )}
 
-              {selected.positions.map((p) => (
-                <div key={p.id} className="flex items-center gap-2 group">
-                  <Building2 size={12} className="text-slate-500 flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-200 truncate">
-                      {p.title ? <><span className="text-slate-400">{p.title}</span> @ </> : ''}
-                      {p.organization}
-                    </p>
+              {selected.positions.map((p) => {
+                const isFormer = p.is_active === false
+                const isConfirming = confirmingFormer.has(p.id)
+                return (
+                  <div key={p.id} className="flex flex-col gap-1">
+                    <div className={`flex items-center gap-2 group ${isFormer ? 'opacity-60' : ''}`}>
+                      <Building2 size={12} className={`flex-shrink-0 ${isFormer ? 'text-slate-600' : 'text-slate-500'}`} />
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-xs truncate ${isFormer ? 'line-through text-slate-500' : 'text-gray-200'}`}>
+                          {p.title ? <><span className={isFormer ? 'text-slate-600' : 'text-slate-400'}>{p.title}</span> @ </> : ''}
+                          {p.organization}
+                        </p>
+                        {isFormer && p.ended_at && (
+                          <p className="text-[10px] text-slate-600">
+                            left {new Date(p.ended_at).toLocaleDateString()}
+                          </p>
+                        )}
+                        {isFormer && !p.ended_at && (
+                          <p className="text-[10px] text-slate-600 italic">former</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {isFormer ? (
+                          <button
+                            onClick={() => handleReactivate(p.id)}
+                            title="Reactivate"
+                            className="text-slate-500 hover:text-emerald-400 transition-colors p-0.5"
+                          >
+                            <RotateCcw size={10} />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setConfirmingFormer((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(p.id)) { next.delete(p.id) } else { next.add(p.id) }
+                                return next
+                              })
+                              setFormerDrafts((prev) => ({ ...prev, [p.id]: '' }))
+                            }}
+                            title="Mark as former"
+                            className="text-slate-500 hover:text-amber-400 transition-colors p-0.5"
+                          >
+                            <UserMinus size={10} />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleRemovePosition(p.id)}
+                          title="Remove position"
+                          className="text-slate-500 hover:text-rose-400 transition-colors p-0.5"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
+                    </div>
+                    {isConfirming && !isFormer && (
+                      <div className="ml-5 flex items-center gap-2 rounded bg-slate-700/50 border border-slate-600 px-2 py-1.5">
+                        <span className="text-[10px] text-slate-400 whitespace-nowrap">End date:</span>
+                        <input
+                          type="date"
+                          value={formerDrafts[p.id] || ''}
+                          onChange={(e) => setFormerDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                          className="flex-1 bg-transparent text-[10px] text-slate-200 outline-none min-w-0"
+                        />
+                        <button
+                          onClick={async () => {
+                            await handleMarkFormer(p.id, formerDrafts[p.id] || '')
+                            setConfirmingFormer((prev) => { const next = new Set(prev); next.delete(p.id); return next })
+                          }}
+                          className="text-[10px] text-amber-400 hover:text-amber-300 transition-colors whitespace-nowrap font-medium"
+                        >
+                          Mark former
+                        </button>
+                        <button
+                          onClick={() => setConfirmingFormer((prev) => { const next = new Set(prev); next.delete(p.id); return next })}
+                          className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                        >
+                          <X size={9} />
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <button
-                    onClick={() => handleRemovePosition(p.id)}
-                    className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 transition-all p-0.5"
-                  >
-                    <X size={10} />
-                  </button>
-                </div>
-              ))}
+                )
+              })}
 
               {showAddPos && (
                 <div className="flex flex-col gap-2 rounded-lg border border-slate-600 bg-slate-700/50 p-3">
-                  <input
-                    autoFocus
+                  <ComboInput
                     value={newOrg}
-                    onChange={(e) => setNewOrg(e.target.value)}
+                    onChange={setNewOrg}
                     placeholder="Organization name..."
-                    className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
+                    autoFocus
                   />
                   <input
                     value={newTitle}

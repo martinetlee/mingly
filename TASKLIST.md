@@ -1,5 +1,12 @@
-- [x] the height of the horizontal scroll bar for the chat folders is too big. make it smaller, and also a bit more transparent when the mouse is not there. When mouse is closer then it become less transparent.  
-- [x] Create a page to see an id's telegram profile. 
-- [x] Add group member information in the information tab of the chat. Clicking on the name should lead us to the page. 
-- [x] Create a page to display and manage Organization information, it should include: name, members and their respective titles (members should be telegram profile), current context (that is initially empty but can be triggered by user to generate context), latest message in different groups. 
-- [x] Get existing contact from Telegram and show them in the contacts page. Contacts would have extra field, including: organization, title, twitter handle, linkedin page, phone number. Note that one person can hold different positions at multiple organizations at the same time. 
+- [x] the height of the horizontal scroll bar for the chat folders is too big. make it smaller, and also a bit more transparent when the mouse is not there. When mouse is closer then it become less transparent.
+- [x] Create a page to see an id's telegram profile.
+- [x] Add group member information in the information tab of the chat. Clicking on the name should lead us to the page.
+- [x] Create a page to display and manage Organization information, it should include: name, members and their respective titles (members should be telegram profile), current context (that is initially empty but can be triggered by user to generate context), latest message in different groups.
+- [x] Get existing contact from Telegram and show them in the contacts page. Contacts would have extra field, including: organization, title, twitter handle, linkedin page, phone number. Note that one person can hold different positions at multiple organizations at the same time.
+- [x] At the info page of "private" chats, it should allow us to add that id to contact. It should also allow us to add details of the person there as in contacts group. This means the extra fields "organization, title, twitter handle, linkedin page, phone number" for contact is NOT only for contact, but also for others. We can do lazy creation of the detail, only when the user edits then creates the data in relevant tables.
+- [x] Implement unread messages for chat.
+- [x] Organization in the profile page should be a searchable drop down, and also allow create new organization there.
+- [x] Consider the case where a person have worked at multiple organizations before (with different position) but now moved on to other jobs. We still want to be able to represent that for the person and also for the organization. A "former employee" section is needed for the organization.
+- [x] in the intelligence page, make another tab that can view messages which have tagged the user. When showing the message, also show the 2 messages before that target message, and if it exists, show 1 message after that target message. When user clicks on it, it navigates the user to the chat page to that specific chat and position so that the user is seeing that message. and that message is temporarily highlighted.
+- [x] create a sidebar for the chat with llm part in the intelligence page, it should allow us to switch between different conversations with the llm. The conversation title are autosuggested by llm first, but user should be able to modify them.
+- [x] in the intelligence page, make the chat with llm persistent after we switch pages.

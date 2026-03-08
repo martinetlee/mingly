@@ -18,6 +18,7 @@ class Chat(Base):
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     is_briefing: Mapped[bool] = mapped_column(Boolean, default=False)
     is_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    unread_count: Mapped[int] = mapped_column(Integer, default=0)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -89,6 +90,8 @@ class ContactPosition(Base):
     contact_id: Mapped[int] = mapped_column(Integer, ForeignKey("contacts.id"), nullable=False)
     organization: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # True = current, False = former
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # when they left
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -98,4 +101,23 @@ class Organization(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     context: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # null = untitled/pending auto-suggest
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

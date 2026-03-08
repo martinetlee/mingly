@@ -26,6 +26,7 @@ export interface Chat {
   is_hidden: boolean
   is_briefing: boolean
   is_tracked: boolean
+  unread_count?: number
   last_synced_at: string | null
 }
 
@@ -69,6 +70,8 @@ export interface ContactPosition {
   id: number
   organization: string
   title: string | null
+  is_active: boolean
+  ended_at: string | null
 }
 
 export interface Contact {
@@ -92,6 +95,7 @@ export interface OrgMember {
   name: string
   username: string | null
   title: string | null
+  ended_at: string | null
 }
 
 export interface OrgRelatedChat {
@@ -117,6 +121,7 @@ export interface OrgDetail {
   name: string
   context: string | null
   members: OrgMember[]
+  former_members: OrgMember[]
   related_chats: OrgRelatedChat[]
 }
 
@@ -146,6 +151,52 @@ export interface TelegramProfile {
   members_count?: number | null
   photo_url?: string | null
   common_chats?: { id: number; title: string }[]
+}
+
+export interface ConversationSummary {
+  id: number
+  title: string | null
+  created_at: string
+  updated_at: string
+  message_count: number
+}
+
+export interface ConversationMessageItem {
+  id: number
+  role: string
+  content: string
+  created_at: string
+}
+
+export interface ConversationDetail {
+  id: number
+  title: string | null
+  created_at: string
+  updated_at: string
+  messages: ConversationMessageItem[]
+}
+
+export interface MentionMessage {
+  id: number
+  telegram_id: number
+  chat_id: number
+  sender_id: number | null
+  sender_name: string | null
+  text: string | null
+  date: string
+  is_outgoing: boolean
+  media_type: string | null
+}
+
+export interface MentionGroup {
+  mention_msg: MentionMessage
+  context_before: MentionMessage[]
+  context_after: MentionMessage[]
+  chat: {
+    id: number
+    name: string
+    type: string
+  }
 }
 
 export type WSEvent =

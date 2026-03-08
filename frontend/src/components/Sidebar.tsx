@@ -8,6 +8,7 @@ import {
   Building2,
   Radio,
   FileText,
+  Brain,
   RefreshCw,
   Settings,
 } from 'lucide-react'
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
   { to: '/briefing', icon: FileText, label: 'Briefing' },
+  { to: '/intelligence', icon: Brain, label: 'Intelligence' },
 ]
 
 export default function Sidebar() {

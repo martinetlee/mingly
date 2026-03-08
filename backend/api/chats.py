@@ -75,6 +75,7 @@ def _chat_dict(c) -> dict:
         "is_hidden": c.is_hidden,
         "is_briefing": c.is_briefing,
         "is_tracked": c.is_tracked,
+        "unread_count": c.unread_count or 0,
         "last_synced_at": c.last_synced_at,
     }
 
@@ -153,6 +154,14 @@ async def toggle_track(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return {"telegram_id": telegram_id, "is_tracked": chat.is_tracked}
+
+
+@router.post("/{telegram_id}/mark-read")
+async def mark_chat_read(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    chat = await crud.mark_chat_read(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"success": True}
 
 
 @router.get("/{telegram_id}/messages")

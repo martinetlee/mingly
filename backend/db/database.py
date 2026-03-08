@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -31,8 +33,34 @@ async def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_telegram_chat ON messages (telegram_id, chat_id)",
             "ALTER TABLE messages ADD COLUMN text_html TEXT",
             "ALTER TABLE messages ADD COLUMN reactions_json TEXT",
+            # Tag system
+            "CREATE TABLE IF NOT EXISTS tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, color TEXT NOT NULL DEFAULT 'slate', is_default BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME)",
+            "CREATE TABLE IF NOT EXISTS chat_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, UNIQUE(chat_id, tag_id))",
+            "ALTER TABLE tags ADD COLUMN category TEXT",
+            # Conversation persistence for Intelligence chat
+            "CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created_at DATETIME, updated_at DATETIME)",
+            "CREATE TABLE IF NOT EXISTS conversation_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at DATETIME)",
+            # Unread message counts
+            "ALTER TABLE chats ADD COLUMN unread_count INTEGER DEFAULT 0",
+            # Former employee support on ContactPosition
+            "ALTER TABLE contact_positions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE contact_positions ADD COLUMN ended_at TEXT",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))
             except Exception:
-                pass  # column already exists
+                pass  # column/table already exists
+
+        # Seed default tags
+        import sqlalchemy as _sa
+        defaults = [
+            ("Work", "indigo"), ("Personal", "emerald"), ("Family", "rose"),
+            ("Finance", "amber"), ("Projects", "violet"), ("News", "sky"),
+        ]
+        for tag_name, tag_color in defaults:
+            try:
+                await conn.execute(_sa.text(
+                    "INSERT OR IGNORE INTO tags (name, color, is_default, created_at) VALUES (:n, :c, 1, :d)"
+                ), {"n": tag_name, "c": tag_color, "d": datetime.utcnow()})
+            except Exception:
+                pass

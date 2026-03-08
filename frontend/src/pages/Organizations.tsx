@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw } from 'lucide-react'
+import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw, Sparkles, Loader2, ChevronDown, ChevronRight, UserMinus } from 'lucide-react'
 import type { OrgSummary, OrgDetail } from '../api/types'
-import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs } from '../api/client'
+import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs, generateOrgContext } from '../api/client'
 
 function OrgCard({
   org,
@@ -44,6 +44,8 @@ export default function Organizations() {
   const [contextDraft, setContextDraft] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [generatingContext, setGeneratingContext] = useState(false)
+  const [showFormerMembers, setShowFormerMembers] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(300)
   const dragging = useRef(false)
 
@@ -65,6 +67,7 @@ export default function Organizations() {
     setSelected(detail)
     setEditingContext(false)
     setEditingName(false)
+    setShowFormerMembers(false)
   }
 
   const handleCreate = async () => {
@@ -99,6 +102,21 @@ export default function Organizations() {
     setSelected(updated)
     setEditingName(false)
     await loadOrgs(search)
+  }
+
+  const handleGenerateContext = async () => {
+    if (!selected || generatingContext) return
+    setGeneratingContext(true)
+    try {
+      const updated = await generateOrgContext(selected.id)
+      setSelected(updated)
+      await loadOrgs(search)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to generate context'
+      alert(msg)
+    } finally {
+      setGeneratingContext(false)
+    }
   }
 
   const handleDelete = async () => {
@@ -258,13 +276,24 @@ export default function Organizations() {
                   Context
                 </h3>
                 {!editingContext && (
-                  <button
-                    onClick={() => { setEditingContext(true); setContextDraft(selected.context || '') }}
-                    className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
-                  >
-                    <Pencil size={10} />
-                    Edit
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleGenerateContext}
+                      disabled={generatingContext}
+                      title="Generate context with AI"
+                      className="text-xs text-violet-400 hover:text-violet-300 transition-colors flex items-center gap-1 disabled:opacity-40"
+                    >
+                      {generatingContext ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} />}
+                      Generate
+                    </button>
+                    <button
+                      onClick={() => { setEditingContext(true); setContextDraft(selected.context || '') }}
+                      className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
+                    >
+                      <Pencil size={10} />
+                      Edit
+                    </button>
+                  </div>
                 )}
               </div>
               {editingContext ? (
@@ -336,6 +365,59 @@ export default function Organizations() {
                 </div>
               )}
             </div>
+
+            {/* Former Members */}
+            {(selected.former_members?.length ?? 0) > 0 && (
+              <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4 mb-4">
+                <button
+                  onClick={() => setShowFormerMembers((v) => !v)}
+                  className="flex w-full items-center gap-1.5 text-left"
+                >
+                  {showFormerMembers ? (
+                    <ChevronDown size={11} className="text-slate-500 flex-shrink-0" />
+                  ) : (
+                    <ChevronRight size={11} className="text-slate-500 flex-shrink-0" />
+                  )}
+                  <UserMinus size={11} className="text-slate-500 flex-shrink-0" />
+                  <span className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                    Former Members ({selected.former_members.length})
+                  </span>
+                </button>
+                {showFormerMembers && (
+                  <div className="flex flex-col gap-1 mt-3">
+                    {selected.former_members.map((m) => (
+                      <Link
+                        key={m.contact_id}
+                        to={`/profile/${m.telegram_id}`}
+                        className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-700/30 transition-colors group opacity-60"
+                      >
+                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700/60 text-[10px] font-medium text-slate-400">
+                          {m.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
+                            {m.name}
+                          </p>
+                          {m.username && (
+                            <p className="truncate text-[10px] text-slate-600">@{m.username}</p>
+                          )}
+                          {m.ended_at && (
+                            <p className="text-[10px] text-slate-600">
+                              left {new Date(m.ended_at).toLocaleDateString()}
+                            </p>
+                          )}
+                        </div>
+                        {m.title && (
+                          <span className="flex-shrink-0 rounded-full bg-slate-700/50 px-2 py-0.5 text-[10px] text-slate-500">
+                            {m.title}
+                          </span>
+                        )}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Related chats */}
             {selected.related_chats.length > 0 && (

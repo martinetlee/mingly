@@ -1,11 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Link } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot } from 'lucide-react'
-import type { Chat, ChatMember, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers } from '../api/client'
+import { Link, useLocation } from 'react-router-dom'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, Phone, Twitter, Linkedin, StickyNote, Building2, Pencil, UserPlus } from 'lucide-react'
+import type { Chat, ChatMember, Contact, ContactPosition, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, updateContact, addPosition, removePosition, markChatRead } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
+import ComboInput from '../components/ComboInput'
 
 function ChatItem({
   chat,
@@ -74,6 +75,11 @@ function ChatItem({
             </button>
           </>
         )}
+        {!hovered && (chat.unread_count ?? 0) > 0 && (
+          <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white">
+            {(chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count}
+          </span>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); onToggleTrack() }}
           title={chat.is_tracked ? 'Stop tracking' : 'Track this chat'}
@@ -109,6 +115,276 @@ const COLOR_OPTIONS = ['indigo', 'emerald', 'rose', 'amber', 'violet', 'sky', 's
 const COLOR_DOTS: Record<string, string> = {
   indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
   amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
+}
+
+// ---------------------------------------------------------------------------
+// EditableField (reusable inside ChatInfoPanel / PrivateContactSection)
+// ---------------------------------------------------------------------------
+
+function EditableField({
+  icon,
+  label,
+  value,
+  placeholder,
+  onSave,
+  isUrl,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: string | null
+  placeholder: string
+  onSave: (val: string) => void
+  isUrl?: boolean
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(value || '')
+
+  useEffect(() => { setDraft(value || ''); setEditing(false) }, [value])
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-slate-500 flex-shrink-0">{icon}</span>
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { onSave(draft); setEditing(false) }
+            if (e.key === 'Escape') setEditing(false)
+          }}
+          onBlur={() => { onSave(draft); setEditing(false) }}
+          placeholder={placeholder}
+          className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-0.5 text-xs text-slate-200 outline-none focus:border-indigo-500"
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-2 group">
+      <span className="text-slate-500 flex-shrink-0">{icon}</span>
+      <span className="w-14 text-[10px] text-slate-500 uppercase tracking-wider flex-shrink-0">{label}</span>
+      {value ? (
+        isUrl ? (
+          <a
+            href={value.startsWith('http') ? value : `https://${value}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex-1 text-xs text-indigo-400 hover:text-indigo-300 truncate transition-colors"
+          >
+            {value}
+          </a>
+        ) : (
+          <span className="flex-1 text-xs text-gray-200 truncate">{value}</span>
+        )
+      ) : (
+        <span className="flex-1 text-xs text-slate-600 italic">{placeholder}</span>
+      )}
+      <button
+        onClick={() => setEditing(true)}
+        className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-slate-300 transition-opacity p-0.5"
+      >
+        <Pencil size={10} />
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// PrivateContactSection
+// ---------------------------------------------------------------------------
+
+function PrivateContactSection({ chat }: { chat: Chat }) {
+  const [contact, setContact] = useState<Contact | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [creating, setCreating] = useState(false)
+  const [showAddPos, setShowAddPos] = useState(false)
+  const [newOrg, setNewOrg] = useState('')
+  const [newTitle, setNewTitle] = useState('')
+
+  useEffect(() => {
+    setLoading(true)
+    setContact(null)
+    setShowAddPos(false)
+    getContactByTelegram(chat.telegram_id)
+      .then(setContact)
+      .catch(() => setContact(null))
+      .finally(() => setLoading(false))
+  }, [chat.telegram_id])
+
+  const handleAddToContacts = async () => {
+    setCreating(true)
+    try {
+      const created = await createContact({
+        telegram_id: chat.telegram_id,
+        first_name: chat.name.split(' ')[0] || chat.name,
+        last_name: chat.name.split(' ').slice(1).join(' ') || undefined,
+        username: chat.username || undefined,
+      })
+      setContact(created)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const handleUpdateField = async (field: string, value: string) => {
+    if (!contact) return
+    const updated = await updateContact(contact.id, { [field]: value })
+    setContact(updated)
+  }
+
+  const handleAddPosition = async () => {
+    if (!contact || !newOrg.trim()) return
+    const pos = await addPosition(contact.id, newOrg.trim(), newTitle.trim() || undefined)
+    setContact((prev) => prev ? { ...prev, positions: [...prev.positions, pos] } : prev)
+    setNewOrg('')
+    setNewTitle('')
+    setShowAddPos(false)
+  }
+
+  const handleRemovePosition = async (posId: number) => {
+    if (!contact) return
+    await removePosition(contact.id, posId)
+    setContact((prev) => prev ? { ...prev, positions: prev.positions.filter((p: ContactPosition) => p.id !== posId) } : prev)
+  }
+
+  return (
+    <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-3">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400 uppercase tracking-wider">
+        <UserPlus size={11} />
+        Contact
+      </div>
+
+      {loading ? (
+        <p className="text-xs text-slate-500">Loading...</p>
+      ) : !contact ? (
+        <button
+          onClick={handleAddToContacts}
+          disabled={creating}
+          className="flex items-center gap-1.5 self-start rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 hover:text-white disabled:opacity-50 transition-colors"
+        >
+          <UserPlus size={12} />
+          {creating ? 'Adding...' : 'Add to Contacts'}
+        </button>
+      ) : (
+        <>
+          {/* Link to full contact/profile */}
+          <Link
+            to={`/profile/${chat.telegram_id}`}
+            className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors self-start"
+          >
+            View full profile
+          </Link>
+
+          {/* Editable fields */}
+          <div className="flex flex-col gap-2.5">
+            <EditableField
+              icon={<Phone size={12} />}
+              label="Phone"
+              value={contact.phone}
+              placeholder="Add phone..."
+              onSave={(v) => handleUpdateField('phone', v)}
+            />
+            <EditableField
+              icon={<Twitter size={12} />}
+              label="Twitter"
+              value={contact.twitter_handle}
+              placeholder="Add handle..."
+              onSave={(v) => handleUpdateField('twitter_handle', v)}
+            />
+            <EditableField
+              icon={<Linkedin size={12} />}
+              label="LinkedIn"
+              value={contact.linkedin_url}
+              placeholder="Add URL..."
+              onSave={(v) => handleUpdateField('linkedin_url', v)}
+              isUrl
+            />
+            <EditableField
+              icon={<StickyNote size={12} />}
+              label="Notes"
+              value={contact.notes}
+              placeholder="Add notes..."
+              onSave={(v) => handleUpdateField('notes', v)}
+            />
+          </div>
+
+          {/* Positions */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                <Building2 size={10} />
+                Positions
+              </span>
+              <button
+                onClick={() => setShowAddPos((v) => !v)}
+                className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5"
+              >
+                <Plus size={10} />
+                Add
+              </button>
+            </div>
+
+            {contact.positions.length === 0 && !showAddPos && (
+              <p className="text-xs text-slate-500">No positions</p>
+            )}
+
+            {contact.positions.map((p: ContactPosition) => (
+              <div key={p.id} className="flex items-center gap-2 group">
+                <Building2 size={11} className="text-slate-500 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-gray-200 truncate">
+                    {p.title ? <><span className="text-slate-400">{p.title}</span> @ </> : ''}
+                    {p.organization}
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleRemovePosition(p.id)}
+                  className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 transition-all p-0.5"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+
+            {showAddPos && (
+              <div className="flex flex-col gap-2 rounded-lg border border-slate-600 bg-slate-700/50 p-2.5">
+                <ComboInput
+                  value={newOrg}
+                  onChange={setNewOrg}
+                  placeholder="Organization name..."
+                  autoFocus
+                />
+                <input
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddPosition() }}
+                  placeholder="Title (optional)..."
+                  className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleAddPosition}
+                    disabled={!newOrg.trim()}
+                    className="flex-1 rounded bg-indigo-500 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-40 transition-colors"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => setShowAddPos(false)}
+                    className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +683,11 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
         )}
       </div>
 
+      {/* Contact section (private chats only) */}
+      {chat.type === 'private' && (
+        <PrivateContactSection chat={chat} />
+      )}
+
       {/* Members section (groups/channels only) */}
       {chat.type !== 'private' && (
         <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-2">
@@ -459,6 +740,7 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
 // ---------------------------------------------------------------------------
 
 export default function Chats() {
+  const location = useLocation()
   const [chats, setChats] = useState<Chat[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
   const [selectedFolder, setSelectedFolder] = useState<number | null>(null)
@@ -481,6 +763,9 @@ export default function Chats() {
   const [hasMoreChats, setHasMoreChats] = useState(false)
   const [loadingMoreChats, setLoadingMoreChats] = useState(false)
   const chatListRef = useRef<HTMLDivElement>(null)
+  // Highlight a specific message (set from URL params when navigating from Mentions)
+  const [highlightMsgId, setHighlightMsgId] = useState<number | null>(null)
+  const pendingNavRef = useRef<{ chatId: number; msgId: number } | null>(null)
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -558,9 +843,36 @@ export default function Chats() {
   }, [selectedChat, messageOffset, loadingMore, LIMIT])
 
   useEffect(() => {
+    // Parse URL params for mention navigation: ?chatId=X&msgId=Y
+    const params = new URLSearchParams(location.search)
+    const chatIdParam = params.get('chatId')
+    const msgIdParam = params.get('msgId')
+    if (chatIdParam && msgIdParam) {
+      const chatId = parseInt(chatIdParam, 10)
+      const msgId = parseInt(msgIdParam, 10)
+      if (!isNaN(chatId) && !isNaN(msgId)) {
+        pendingNavRef.current = { chatId, msgId }
+      }
+    }
     loadChats()
     loadFolders()
-  }, [loadChats, loadFolders])
+  }, [loadChats, loadFolders, location.search])
+
+  // When chats load, auto-select the chat from URL params if pending
+  useEffect(() => {
+    if (chats.length === 0 || !pendingNavRef.current) return
+    const { chatId, msgId } = pendingNavRef.current
+    pendingNavRef.current = null
+    const target = chats.find((c) => c.telegram_id === chatId)
+    if (target) {
+      setSelectedChat(target)
+      setMessages([])
+      setHasMore(false)
+      setMessageOffset(0)
+      setShowInfo(false)
+      setHighlightMsgId(msgId)
+    }
+  }, [chats])
 
   useEffect(() => {
     if (selectedChat) {
@@ -599,6 +911,14 @@ export default function Chats() {
     setHasMore(false)
     setMessageOffset(0)
     setShowInfo(false)
+    setHighlightMsgId(null)
+    // Mark as read: clear badge locally and persist to backend
+    if ((chat.unread_count ?? 0) > 0) {
+      setChats((prev) =>
+        prev.map((c) => c.telegram_id === chat.telegram_id ? { ...c, unread_count: 0 } : c)
+      )
+      markChatRead(chat.telegram_id).catch(() => {})
+    }
   }
 
   const handleTrackChat = async (chat: Chat) => {
@@ -841,7 +1161,7 @@ export default function Chats() {
                       </button>
                     </div>
                   )}
-                  <MessageList messages={messages} chatType={selectedChat.type} />
+                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} />
                 </div>
               )}
 

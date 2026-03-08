@@ -4,6 +4,7 @@ import type { Message } from '../api/types'
 interface Props {
   message: Message
   showSender: boolean
+  highlighted?: boolean
 }
 
 function formatTime(dateStr: string) {
@@ -43,12 +44,12 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   )
 }
 
-export default function MessageBubble({ message, showSender }: Props) {
+export default function MessageBubble({ message, showSender, highlighted }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
 
   return (
-    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1`}>
+    <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}>
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
         {showSender && !isOut && message.sender_name && (
           message.sender_id ? (
