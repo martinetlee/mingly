@@ -180,6 +180,19 @@ export default function Chats() {
       if (selectedChat && event.chat_id === selectedChat.telegram_id) {
         loadMessages(selectedChat)
       }
+      // Fire desktop notification if not outgoing
+      if (!event.is_outgoing) {
+        const pref = localStorage.getItem('notifPref') ?? 'tracked'
+        const shouldNotify =
+          pref === 'all' || (pref === 'tracked' && event.is_tracked)
+        if (shouldNotify && Notification.permission === 'granted') {
+          const title = event.chat_name ?? 'New message'
+          const body = event.sender_name
+            ? event.sender_name + ': ' + (event.text ?? '')
+            : (event.text ?? '')
+          new Notification(title, { body, silent: false })
+        }
+      }
     }
   }, [selectedChat, loadChats, loadMessages])
 

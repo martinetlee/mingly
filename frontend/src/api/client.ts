@@ -12,6 +12,26 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json()
 }
 
+// --- Vault ---
+
+export const getVaultStatus = () =>
+  request<{ status: 'unset' | 'locked' | 'unlocked' }>('/api/auth/vault-status')
+
+export const initVault = (password: string) =>
+  request<{ success: boolean }>('/api/auth/vault/init', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+
+export const unlockVault = (password: string) =>
+  request<{ success: boolean }>('/api/auth/vault/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+
+export const resetVault = () =>
+  request<{ success: boolean }>('/api/auth/vault/reset', { method: 'POST' })
+
 // --- Auth ---
 
 export const getAuthStatus = () =>
@@ -101,6 +121,17 @@ export const setBriefing = (telegram_id: number, briefing: boolean) =>
   request<{ telegram_id: number; is_briefing: boolean }>(`/api/chats/${telegram_id}/briefing`, {
     method: 'POST',
     body: JSON.stringify({ briefing }),
+  })
+
+// --- Settings / Prefs ---
+
+export const getPrefs = () =>
+  request<{ notif_pref: string }>('/api/settings/prefs')
+
+export const setNotifPref = (pref: 'all' | 'tracked' | 'off') =>
+  request<{ success: boolean; pref: string }>('/api/settings/prefs/notifications', {
+    method: 'POST',
+    body: JSON.stringify({ pref }),
   })
 
 // --- Compose ---

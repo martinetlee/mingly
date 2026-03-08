@@ -52,7 +52,7 @@ export interface Message {
 }
 
 export type WSEvent =
-  | { type: 'new_message'; chat_id: number; message_id: number }
+  | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
   | { type: 'scan_complete'; scanned: number; flagged: number }
   | { type: 'summary_ready'; chat_id: number }

@@ -1,12 +1,19 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+
+if getattr(sys, "frozen", False):
+    # Running inside a PyInstaller .app bundle — persist data in ~/Library
+    DATA_DIR = Path.home() / "Library" / "Application Support" / "Mingly"
+else:
+    DATA_DIR = BASE_DIR / "data"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite+aiosqlite:///{DATA_DIR}/mingly.db"
 

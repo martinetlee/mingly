@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -7,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, chats, compose, todos, contacts, organizations, scan, settings
+from backend.api import auth, chats, compose, todos, contacts, organizations, scan, settings, llm
 
 
 def create_app() -> FastAPI:
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"])
     app.include_router(scan.router, prefix="/api/scan", tags=["scan"])
     app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+    app.include_router(llm.router, prefix="/api/llm", tags=["llm"])
 
     @app.get("/api/media/{file_path:path}")
     async def serve_media(file_path: str):
@@ -39,7 +41,10 @@ def create_app() -> FastAPI:
             ws_manager.disconnect(websocket)
 
     # Serve the built React frontend in production
-    static_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
+    if getattr(sys, "frozen", False):
+        static_dir = Path(sys._MEIPASS) / "frontend" / "dist"  # type: ignore[attr-defined]
+    else:
+        static_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
     if static_dir.exists():
         assets_dir = static_dir / "assets"
         if assets_dir.exists():

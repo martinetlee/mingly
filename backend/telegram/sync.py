@@ -1,4 +1,5 @@
 import json
+import subprocess
 from html import escape as html_escape
 from pathlib import Path
 from typing import Optional
@@ -10,6 +11,20 @@ from backend.db.database import AsyncSessionLocal
 from backend.db import crud
 from backend.telegram.client import get_client
 from backend.ws.manager import ws_manager
+
+
+def _send_native_notification(title: str, body: str) -> None:
+    """Send a macOS native notification via osascript (fire-and-forget)."""
+    try:
+        t = title.replace("\\", "\\\\").replace('"', '\\"')
+        b = body.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.Popen(
+            ["osascript", "-e", f'display notification "{b}" with title "{t}"'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(exist_ok=True)
@@ -282,4 +297,17 @@ async def register_event_handlers() -> None:
             "type": "new_message",
             "chat_id": event.chat_id,
             "message_id": saved.id,
+            "chat_name": chat.name,
+            "sender_name": saved.sender_name,
+            "text": (saved.text or "")[:120],
+            "is_tracked": chat.is_tracked,
+            "is_outgoing": saved.is_outgoing,
         })
+
+        if not saved.is_outgoing:
+            from backend.api.settings import get_notif_pref
+            pref = get_notif_pref()
+            if pref == "all" or (pref == "tracked" and chat.is_tracked):
+                body_text = (saved.text or "")[:100]
+                body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
+                _send_native_notification(chat.name, body)

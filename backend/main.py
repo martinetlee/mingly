@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import threading
 import time
 
@@ -7,6 +8,8 @@ from backend.config import API_HOST, API_PORT
 from backend.db.database import init_db
 from backend.telegram.client import has_credentials, init_client
 from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers
+from backend.llm.registry import get_registry
+from backend.llm.config import load_registry_config
 
 app = create_app()
 
@@ -14,6 +17,15 @@ app = create_app()
 @app.on_event("startup")
 async def on_startup():
     await init_db()
+
+    # Restore LLM registry from persisted config
+    cfg = load_registry_config()
+    registry = get_registry()
+    for instance_cfg in cfg.instances:
+        try:
+            registry.add(instance_cfg)
+        except Exception:
+            pass  # unknown provider etc — skip silently
     if not has_credentials():
         return
     authenticated = await init_client()
@@ -36,7 +48,14 @@ if __name__ == "__main__":
 
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
-    time.sleep(1.5)  # Give uvicorn time to start
+
+    # Wait until the server is accepting connections (up to 15s)
+    for _ in range(50):
+        try:
+            with socket.create_connection((API_HOST, API_PORT), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.3)
 
     webview.create_window(
         "Mingly",

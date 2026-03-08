@@ -2,12 +2,15 @@ import { useState, useEffect } from 'react'
 import {
   hasCredentials, setupCredentials, resolve1Password,
   sendCode, verifyCode, verify2FA,
+  initVault,
 } from '../api/client'
 
-type Step = 'credentials' | 'phone' | 'code' | 'twofa' | 'done'
+type Step = 'set-password' | 'credentials' | 'phone' | 'code' | 'twofa' | 'done'
 
 interface Props {
   onComplete: () => void
+  /** If true, vault doesn't exist yet — show password setup as first step */
+  needsVaultSetup?: boolean
 }
 
 function is1PasswordRef(value: string) {
@@ -74,8 +77,14 @@ function SecretField({ label, hint, value, onChange, type = 'text', placeholder 
   )
 }
 
-export default function Onboarding({ onComplete }: Props) {
+export default function Onboarding({ onComplete, needsVaultSetup = false }: Props) {
   const [step, setStep] = useState<Step | null>(null)
+
+  // Master password setup
+  const [masterPwd, setMasterPwd] = useState('')
+  const [masterPwdConfirm, setMasterPwdConfirm] = useState('')
+  const [pwdError, setPwdError] = useState('')
+  const [pwdLoading, setPwdLoading] = useState(false)
 
   // API credentials
   const [apiId, setApiId] = useState('')
@@ -92,10 +101,37 @@ export default function Onboarding({ onComplete }: Props) {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
+    if (needsVaultSetup) {
+      setStep('set-password')
+      return
+    }
     hasCredentials()
       .then(({ has_credentials }) => setStep(has_credentials ? 'phone' : 'credentials'))
       .catch(() => setStep('credentials'))
-  }, [])
+  }, [needsVaultSetup])
+
+  // ── Step handlers ──────────────────────────────────────────────────────────
+
+  const handleSetPassword = async () => {
+    if (masterPwd !== masterPwdConfirm) {
+      setPwdError("Passwords don't match")
+      return
+    }
+    if (masterPwd.length < 6) {
+      setPwdError('Password must be at least 6 characters')
+      return
+    }
+    setPwdError('')
+    setPwdLoading(true)
+    try {
+      await initVault(masterPwd)
+      setStep('credentials')
+    } catch (e: unknown) {
+      setPwdError(e instanceof Error ? e.message : 'Failed to set password')
+    } finally {
+      setPwdLoading(false)
+    }
+  }
 
   const handleSaveCredentials = async () => {
     setCredError('')
@@ -156,6 +192,14 @@ export default function Onboarding({ onComplete }: Props) {
     }
   }
 
+  // ── Step indicator ────────────────────────────────────────────────────────
+
+  const indicatorSteps: Step[] = needsVaultSetup
+    ? ['set-password', 'credentials', 'phone', 'code']
+    : ['credentials', 'phone', 'code']
+
+  const stepOrder: Step[] = ['set-password', 'credentials', 'phone', 'code', 'twofa', 'done']
+
   if (step === null) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-50">
@@ -178,11 +222,11 @@ export default function Onboarding({ onComplete }: Props) {
 
         {/* Step indicators */}
         <div className="mb-6 flex items-center justify-center gap-2">
-          {(['credentials', 'phone', 'code'] as Step[]).map((s, i) => (
+          {indicatorSteps.map((s, i) => (
             <div key={s} className="flex items-center gap-2">
               <div className={`h-2 w-2 rounded-full transition-colors ${
                 step === s ? 'bg-blue-500' :
-                ['credentials', 'phone', 'code', 'twofa', 'done'].indexOf(step) > i
+                stepOrder.indexOf(step) > stepOrder.indexOf(s)
                   ? 'bg-blue-200' : 'bg-gray-200'
               }`} />
             </div>
@@ -191,6 +235,48 @@ export default function Onboarding({ onComplete }: Props) {
 
         {/* Card */}
         <div className="rounded-2xl bg-white p-8 shadow-sm border border-gray-100">
+
+          {/* Step 0: Set master password */}
+          {step === 'set-password' && (
+            <>
+              <h2 className="mb-1 text-base font-medium text-gray-900">Protect your data</h2>
+              <p className="mb-5 text-sm text-gray-500">
+                Set a master password to encrypt your credentials locally. You'll enter this each time you open Mingly.
+              </p>
+
+              <div className="mb-4">
+                <label className="mb-1 block text-xs font-medium text-gray-600">Master password</label>
+                <input
+                  type="password"
+                  value={masterPwd}
+                  onChange={(e) => { setMasterPwd(e.target.value); setPwdError('') }}
+                  placeholder="At least 6 characters"
+                  autoFocus
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="mb-1 block text-xs font-medium text-gray-600">Confirm password</label>
+                <input
+                  type="password"
+                  value={masterPwdConfirm}
+                  onChange={(e) => { setMasterPwdConfirm(e.target.value); setPwdError('') }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSetPassword()}
+                  placeholder="Repeat password"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              {pwdError && <p className="mb-3 text-sm text-red-500">{pwdError}</p>}
+              <button
+                onClick={handleSetPassword}
+                disabled={!masterPwd || !masterPwdConfirm || pwdLoading}
+                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+              >
+                {pwdLoading ? 'Setting up…' : 'Continue'}
+              </button>
+            </>
+          )}
 
           {/* Step 1: Telegram API credentials */}
           {step === 'credentials' && (
@@ -338,7 +424,7 @@ export default function Onboarding({ onComplete }: Props) {
         </div>
 
         <p className="mt-4 text-center text-xs text-gray-400">
-          Your session and credentials are stored securely in the OS Keychain
+          Your session and credentials are encrypted with your master password
         </p>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 
 from fastapi import APIRouter, HTTPException
@@ -8,8 +9,11 @@ from backend.telegram.client import (
     get_client, send_code, sign_in, sign_in_2fa, persist_session,
     get_me, disconnect, has_credentials, init_client,
 )
-from backend.telegram.sync import sync_dialogs, register_event_handlers
-from backend.secrets import save_secret, delete_secret
+from backend.telegram.sync import sync_dialogs, register_event_handlers, bulk_sync
+from backend.secrets import (
+    save_secret, delete_secret,
+    vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
+)
 
 router = APIRouter()
 
@@ -36,6 +40,52 @@ class CredentialsRequest(BaseModel):
 class ResolveRequest(BaseModel):
     reference: str
 
+
+class VaultPasswordRequest(BaseModel):
+    password: str
+
+
+# ── Vault endpoints ───────────────────────────────────────────────────────────
+
+@router.get("/vault-status")
+async def get_vault_status():
+    return {"status": vault_status()}
+
+
+@router.post("/vault/init")
+async def init_vault(req: VaultPasswordRequest):
+    if vault_status() != "unset":
+        raise HTTPException(status_code=400, detail="Vault already initialized")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    initialize_vault(req.password)
+    return {"success": True}
+
+
+@router.post("/vault/unlock")
+async def do_unlock_vault(req: VaultPasswordRequest):
+    if not unlock_vault_fn(req.password):
+        raise HTTPException(status_code=400, detail="Incorrect password")
+    # Re-init Telegram if credentials are already stored
+    if has_credentials():
+        try:
+            authenticated = await init_client()
+            if authenticated:
+                await sync_dialogs()
+                await register_event_handlers()
+                asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+        except Exception:
+            pass
+    return {"success": True}
+
+
+@router.post("/vault/reset")
+async def do_reset_vault():
+    reset_vault()
+    return {"success": True}
+
+
+# ── Credentials / auth ────────────────────────────────────────────────────────
 
 @router.get("/has-credentials")
 async def auth_has_credentials():

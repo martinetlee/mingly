@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { getAuthStatus } from './api/client'
+import { getVaultStatus, getAuthStatus } from './api/client'
 import Layout from './components/Layout'
 import Onboarding from './pages/Onboarding'
+import Unlock from './pages/Unlock'
 import Chats from './pages/Chats'
 import Inbox from './pages/Inbox'
 import Todos from './pages/Todos'
@@ -12,16 +13,31 @@ import Settings from './pages/Settings'
 import Tracked from './pages/Tracked'
 import Briefing from './pages/Briefing'
 
+type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'app'
+
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
+  const [state, setState] = useState<AppState>('loading')
 
   useEffect(() => {
-    getAuthStatus()
-      .then((s) => setIsAuthenticated(s.authenticated))
-      .catch(() => setIsAuthenticated(false))
+    getVaultStatus()
+      .then(({ status }) => {
+        if (status === 'unset') { setState('vault-unset'); return }
+        if (status === 'locked') { setState('vault-locked'); return }
+        // Vault unlocked — check Telegram auth
+        return getAuthStatus().then((s) =>
+          setState(s.authenticated ? 'app' : 'onboarding')
+        )
+      })
+      .catch(() => setState('vault-unset'))
   }, [])
 
-  if (isAuthenticated === null) {
+  const handleVaultUnlocked = () => {
+    getAuthStatus()
+      .then((s) => setState(s.authenticated ? 'app' : 'onboarding'))
+      .catch(() => setState('onboarding'))
+  }
+
+  if (state === 'loading') {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-50">
         <div className="text-gray-400 text-sm">Loading…</div>
@@ -29,8 +45,16 @@ export default function App() {
     )
   }
 
-  if (!isAuthenticated) {
-    return <Onboarding onComplete={() => setIsAuthenticated(true)} />
+  if (state === 'vault-unset') {
+    return <Onboarding needsVaultSetup onComplete={() => setState('app')} />
+  }
+
+  if (state === 'vault-locked') {
+    return <Unlock onUnlock={handleVaultUnlocked} />
+  }
+
+  if (state === 'onboarding') {
+    return <Onboarding onComplete={() => setState('app')} />
   }
 
   return (
