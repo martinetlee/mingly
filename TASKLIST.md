@@ -10,3 +10,11 @@
 - [x] in the intelligence page, make another tab that can view messages which have tagged the user. When showing the message, also show the 2 messages before that target message, and if it exists, show 1 message after that target message. When user clicks on it, it navigates the user to the chat page to that specific chat and position so that the user is seeing that message. and that message is temporarily highlighted.
 - [x] create a sidebar for the chat with llm part in the intelligence page, it should allow us to switch between different conversations with the llm. The conversation title are autosuggested by llm first, but user should be able to modify them.
 - [x] in the intelligence page, make the chat with llm persistent after we switch pages.
+- [x] in the mention view of the intelligence page:
+    - [x] by default collapse the messages.
+    - [x] if the group is tracked group, highlight them.
+    - [x] allow filtering by group name, chat tag, and time (within 7 days [default], 14 days, 1 month)
+    - [x] if the user has messages after the mention (detected in chat history), then we should mark it as [replied]
+- [] in the chat, we should be able to reply to a specific message as the official telegram
+- [x] in the chat list, when scrolling down to the end, it should trigger to load more chats
+- [] in the intelligence page, make another tab that does summary for briefing and tracking daily or weekly (this is settable at settings page, general tab). by default the  update would be triggered at 9am. If the app was opened after 9am, the app should also trigger the update. For tracked chats, the update should summarize the conversation in one line, and place more importance at messages with the user when summarizing. For chats categorized as brief, the update should ignore the chit chat messages, focus on messages with information, links, technical, and summarize the conversation but in more detail, highlight the topics that are being discussed, or theme that has emerged. Allow the user to trigger the update manually in this page as well. 

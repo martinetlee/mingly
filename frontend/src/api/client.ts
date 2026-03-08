@@ -287,5 +287,11 @@ export const suggestConversationTitle = (id: number) =>
 
 // --- Mentions ---
 
-export const getMentions = () =>
-  request<MentionGroup[]>('/api/intelligence/mentions')
+export const getMentions = (params?: { days?: number; groupName?: string; tagName?: string }) => {
+  const qs = new URLSearchParams()
+  if (params?.days) qs.set('days', String(params.days))
+  if (params?.groupName) qs.set('group_name', params.groupName)
+  if (params?.tagName) qs.set('tag_name', params.tagName)
+  const q = qs.toString()
+  return request<MentionGroup[]>(`/api/intelligence/mentions${q ? `?${q}` : ''}`)
+}

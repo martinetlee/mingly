@@ -17,6 +17,10 @@ import {
   X,
   AtSign,
   RefreshCw,
+  Search,
+  CheckCheck,
+  Bookmark,
+  Tag,
 } from 'lucide-react'
 import {
   listConversations,
@@ -27,6 +31,7 @@ import {
   appendConversationMessage,
   suggestConversationTitle,
   getMentions,
+  getTags,
 } from '../api/client'
 import type { ConversationSummary, MentionGroup, MentionMessage } from '../api/types'
 
@@ -322,6 +327,23 @@ function MentionMsgRow({
   )
 }
 
+// Tag color palette (same as Tags page)
+const TAG_COLORS: Record<string, string> = {
+  slate:  'bg-slate-500/20 text-slate-400',
+  red:    'bg-red-500/20 text-red-400',
+  orange: 'bg-orange-500/20 text-orange-400',
+  amber:  'bg-amber-500/20 text-amber-400',
+  yellow: 'bg-yellow-500/20 text-yellow-400',
+  green:  'bg-green-500/20 text-green-400',
+  teal:   'bg-teal-500/20 text-teal-400',
+  cyan:   'bg-cyan-500/20 text-cyan-400',
+  blue:   'bg-blue-500/20 text-blue-400',
+  indigo: 'bg-indigo-500/20 text-indigo-400',
+  violet: 'bg-violet-500/20 text-violet-400',
+  purple: 'bg-purple-500/20 text-purple-400',
+  pink:   'bg-pink-500/20 text-pink-400',
+}
+
 function MentionCard({
   group,
   onNavigate,
@@ -329,6 +351,8 @@ function MentionCard({
   group: MentionGroup
   onNavigate: (chatId: number, msgId: number) => void
 }) {
+  const [expanded, setExpanded] = useState(false)
+
   const chatTypeColor = {
     group: 'bg-purple-500/20 text-purple-400',
     channel: 'bg-amber-500/20 text-amber-400',
@@ -341,27 +365,92 @@ function MentionCard({
     ...group.context_after.map((m) => ({ msg: m, highlighted: false })),
   ]
 
+  const trackedBorder = group.chat.is_tracked
+    ? 'border-violet-500/40 bg-violet-900/10'
+    : 'border-slate-700/60 bg-slate-800/60'
+
+  const mentionText = group.mention_msg.text || ''
+  const senderName = group.mention_msg.sender_name || 'Unknown'
+
   return (
-    <button
-      onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
-      className="w-full text-left rounded-xl border border-slate-700/60 bg-slate-800/60 hover:border-slate-600 hover:bg-slate-800 transition-colors overflow-hidden"
-    >
-      {/* Chat header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-700/50">
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${chatTypeColor}`}>
+    <div className={`rounded-xl border ${trackedBorder} overflow-hidden transition-colors`}>
+      {/* Header row — always visible, click to expand */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
+        className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30 transition-colors select-none"
+      >
+        {/* Expand chevron */}
+        {expanded ? <ChevronDown size={12} className="shrink-0 text-slate-500" /> : <ChevronRight size={12} className="shrink-0 text-slate-500" />}
+
+        {/* Tracked bookmark */}
+        {group.chat.is_tracked && <Bookmark size={11} className="shrink-0 text-violet-400" />}
+
+        {/* Chat type badge */}
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${chatTypeColor}`}>
           {group.chat.type}
         </span>
-        <span className="flex-1 truncate text-xs font-semibold text-slate-200">{group.chat.name}</span>
+
+        {/* Chat name */}
+        <span className="flex-1 min-w-0 truncate text-xs font-semibold text-slate-200">{group.chat.name}</span>
+
+        {/* Tags */}
+        {group.chat.tags.slice(0, 2).map((t) => (
+          <span key={t.id} className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${TAG_COLORS[t.color] ?? TAG_COLORS.slate}`}>
+            {t.name}
+          </span>
+        ))}
+
+        {/* Replied badge */}
+        {group.replied && (
+          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500/15 text-emerald-400 shrink-0">
+            <CheckCheck size={9} />
+            replied
+          </span>
+        )}
+
+        {/* Mention icon + time */}
         <AtSign size={11} className="shrink-0 text-amber-400" />
+        <span className="shrink-0 text-[10px] text-slate-500">{fmtMsgTime(group.mention_msg.date)}</span>
       </div>
 
-      {/* Message context */}
-      <div className="px-3 py-2.5 space-y-1.5">
-        {allMsgs.map(({ msg, highlighted }, i) => (
-          <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
-        ))}
-      </div>
-    </button>
+      {/* Collapsed preview: just the mention message one-liner */}
+      {!expanded && (
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.id, group.mention_msg.telegram_id) } }}
+          className="px-3 pb-2.5 cursor-pointer"
+        >
+          <p className="text-xs text-slate-500 truncate">
+            <span className="text-amber-300/70 font-medium">{senderName}: </span>
+            {mentionText || <span className="italic">{group.mention_msg.media_type ? `[${group.mention_msg.media_type}]` : '[no text]'}</span>}
+          </p>
+        </div>
+      )}
+
+      {/* Expanded: full context messages + navigate button */}
+      {expanded && (
+        <div className="border-t border-slate-700/50">
+          <div className="px-3 py-2.5 space-y-1.5">
+            {allMsgs.map(({ msg, highlighted }, i) => (
+              <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
+            ))}
+          </div>
+          <div className="px-3 pb-3">
+            <button
+              onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+              className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
+            >
+              Jump to message →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -369,17 +458,36 @@ function MentionCard({
 // Mentions tab
 // ---------------------------------------------------------------------------
 
+const TIME_OPTIONS = [
+  { label: '7 days', value: 7 },
+  { label: '14 days', value: 14 },
+  { label: '1 month', value: 30 },
+]
+
 function MentionsTab() {
   const navigate = useNavigate()
   const [groups, setGroups] = useState<MentionGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const fetchMentions = useCallback(async () => {
+  // Filters
+  const [days, setDays] = useState(7)
+  const [groupSearch, setGroupSearch] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
+  const [availableTags, setAvailableTags] = useState<{ id: number; name: string }[]>([])
+
+  // Debounced group search for fetching
+  const [debouncedGroupSearch, setDebouncedGroupSearch] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedGroupSearch(groupSearch), 350)
+    return () => clearTimeout(t)
+  }, [groupSearch])
+
+  const fetchMentions = useCallback(async (opts?: { days?: number; groupName?: string; tagName?: string }) => {
     setLoading(true)
     setError('')
     try {
-      const data = await getMentions()
+      const data = await getMentions(opts)
       setGroups(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load mentions')
@@ -388,9 +496,15 @@ function MentionsTab() {
     }
   }, [])
 
+  // Fetch tags once on mount
   useEffect(() => {
-    fetchMentions()
-  }, [fetchMentions])
+    getTags().then(setAvailableTags).catch(() => {})
+  }, [])
+
+  // Re-fetch when filters change
+  useEffect(() => {
+    fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+  }, [fetchMentions, days, debouncedGroupSearch, tagFilter])
 
   const handleNavigate = (chatId: number, msgId: number) => {
     navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
@@ -399,20 +513,69 @@ function MentionsTab() {
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
-        <div>
-          <p className="text-sm font-semibold text-slate-100">Mentions</p>
-          <p className="text-xs text-slate-500">Messages where you were tagged</p>
+      <div className="border-b border-slate-700/50 px-4 pt-3 pb-0">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <p className="text-sm font-semibold text-slate-100">Mentions</p>
+            <p className="text-xs text-slate-500">Messages where you were tagged</p>
+          </div>
+          <button
+            onClick={() => fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })}
+            disabled={loading}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            title="Refresh mentions"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
         </div>
-        <button
-          onClick={fetchMentions}
-          disabled={loading}
-          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50 transition-colors"
-          title="Refresh mentions"
-        >
-          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+
+        {/* Filter bar */}
+        <div className="flex items-center gap-2 pb-3 flex-wrap">
+          {/* Group name search */}
+          <div className="relative flex-1 min-w-32">
+            <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+            <input
+              type="text"
+              value={groupSearch}
+              onChange={(e) => setGroupSearch(e.target.value)}
+              placeholder="Filter by group…"
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 pl-6 pr-2 py-1 text-xs text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/50"
+            />
+          </div>
+
+          {/* Tag filter */}
+          <div className="relative">
+            <Tag size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+            <select
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              className="appearance-none rounded-lg border border-slate-700 bg-slate-800 pl-6 pr-3 py-1 text-xs text-slate-200 outline-none focus:border-amber-500/50 cursor-pointer"
+            >
+              <option value="">All tags</option>
+              {availableTags.map((t) => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Time window */}
+          <div className="flex rounded-lg border border-slate-700 overflow-hidden">
+            {TIME_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setDays(opt.value)}
+                className={`px-2.5 py-1 text-xs transition-colors ${
+                  days === opt.value
+                    ? 'bg-amber-600/80 text-white'
+                    : 'text-slate-400 hover:bg-slate-700'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Content */}
@@ -439,14 +602,14 @@ function MentionsTab() {
             <div>
               <p className="text-sm font-medium text-slate-300">No mentions found</p>
               <p className="mt-1 text-xs text-slate-500">
-                Messages in groups that tag your username will appear here.
+                Try adjusting the time window or filters.
               </p>
             </div>
           </div>
         )}
 
         {!loading && !error && groups.length > 0 && (
-          <div className="space-y-3">
+          <div className="space-y-2">
             {groups.map((group, i) => (
               <MentionCard
                 key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`}

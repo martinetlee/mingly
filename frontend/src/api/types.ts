@@ -192,10 +192,13 @@ export interface MentionGroup {
   mention_msg: MentionMessage
   context_before: MentionMessage[]
   context_after: MentionMessage[]
+  replied: boolean
   chat: {
     id: number
     name: string
     type: string
+    is_tracked: boolean
+    tags: { id: number; name: string; color: string }[]
   }
 }
 

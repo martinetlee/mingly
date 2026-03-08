@@ -394,11 +394,21 @@ async def intelligence_status():
 
 
 @router.get("/intelligence/mentions")
-async def intelligence_mentions(db: AsyncSession = Depends(get_db)):
+async def intelligence_mentions(
+    days: int = 7,
+    group_name: str = "",
+    tag_name: str = "",
+    db: AsyncSession = Depends(get_db),
+):
     """
     Return up to 50 mention groups: messages in group/channel chats where
     the authenticated user's username appears in the text.
     Each group includes 2 context messages before and 1 after.
+
+    Query params:
+      - days: time window (7, 14, 30), default 7
+      - group_name: filter by chat name substring
+      - tag_name: filter to chats with this tag
     """
     from backend.telegram.client import get_client
 
@@ -415,7 +425,14 @@ async def intelligence_mentions(db: AsyncSession = Depends(get_db)):
     if not username:
         return []
 
-    mention_rows = await crud.get_mentions(db, username, limit=50)
+    mention_rows = await crud.get_mentions(
+        db,
+        username,
+        limit=50,
+        days=days,
+        group_name_filter=group_name,
+        tag_name_filter=tag_name,
+    )
 
     def _serialize_msg(m: Any) -> dict:
         return {
@@ -440,14 +457,25 @@ async def intelligence_mentions(db: AsyncSession = Depends(get_db)):
             after=1,
         )
 
+        # Fetch tags for the chat
+        chat_tags = await crud.get_tags_for_chat(db, chat.telegram_id)
+
+        # Check if user replied after the mention
+        replied = False
+        if msg.date:
+            replied = await crud.check_replied_after(db, msg.chat_id, msg.date)
+
         groups.append({
             "mention_msg": _serialize_msg(msg),
             "context_before": [_serialize_msg(m) for m in context["before"]],
             "context_after": [_serialize_msg(m) for m in context["after"]],
+            "replied": replied,
             "chat": {
                 "id": chat.telegram_id,
                 "name": chat.name,
                 "type": chat.type,
+                "is_tracked": chat.is_tracked,
+                "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in chat_tags],
             },
         })
 

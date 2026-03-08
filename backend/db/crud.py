@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -366,24 +366,52 @@ async def get_mentions(
     db: AsyncSession,
     username: str,
     limit: int = 50,
+    days: int = 7,
+    group_name_filter: str = "",
+    tag_name_filter: str = "",
 ) -> list:
     """
     Return messages where the current user's @username appears in the text,
     limited to non-outgoing messages in group/channel chats.
     Each row is a (Message, Chat) tuple.
     """
-    result = await db.execute(
+    since = datetime.utcnow() - timedelta(days=days)
+
+    q = (
         select(Message, Chat)
         .join(Chat, Message.chat_id == Chat.telegram_id)
         .where(
             Message.is_outgoing == False,  # noqa: E712
-            Chat.type.in_(["group", "channel"]),
+            Chat.type.in_(["group", "channel", "supergroup"]),
             Message.text.ilike(f"%@{username}%"),
+            Message.date >= since,
         )
-        .order_by(desc(Message.date))
-        .limit(limit)
     )
+    if group_name_filter:
+        q = q.where(Chat.name.ilike(f"%{group_name_filter}%"))
+    if tag_name_filter:
+        q = (
+            q.join(ChatTag, Chat.telegram_id == ChatTag.chat_id)
+            .join(Tag, ChatTag.tag_id == Tag.id)
+            .where(Tag.name.ilike(f"%{tag_name_filter}%"))
+        )
+    q = q.order_by(desc(Message.date)).limit(limit)
+    result = await db.execute(q)
     return result.all()
+
+
+async def check_replied_after(db: AsyncSession, chat_id: int, after_date: datetime) -> bool:
+    """Return True if there is at least one outgoing message in the chat after the given date."""
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.is_outgoing == True,  # noqa: E712
+            Message.date > after_date,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def get_messages_around(
