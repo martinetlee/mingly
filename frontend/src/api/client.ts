@@ -17,6 +17,21 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const getAuthStatus = () =>
   request<AuthStatus>('/auth/status')
 
+export const hasCredentials = () =>
+  request<{ has_credentials: boolean }>('/auth/has-credentials')
+
+export const setupCredentials = (api_id: string, api_hash: string) =>
+  request<{ success: boolean }>('/auth/setup', {
+    method: 'POST',
+    body: JSON.stringify({ api_id, api_hash }),
+  })
+
+export const resolve1Password = (reference: string) =>
+  request<{ value: string }>('/auth/resolve-1password', {
+    method: 'POST',
+    body: JSON.stringify({ reference }),
+  })
+
 export const sendCode = (phone: string) =>
   request<{ phone_code_hash: string }>('/auth/send-code', {
     method: 'POST',

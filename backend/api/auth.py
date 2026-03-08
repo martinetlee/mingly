@@ -1,13 +1,15 @@
+import subprocess
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 
 from backend.telegram.client import (
     get_client, send_code, sign_in, sign_in_2fa, persist_session,
-    get_me, disconnect,
+    get_me, disconnect, has_credentials, init_client,
 )
 from backend.telegram.sync import sync_dialogs, register_event_handlers
-from backend.secrets import delete_secret
+from backend.secrets import save_secret, delete_secret
 
 router = APIRouter()
 
@@ -24,6 +26,63 @@ class CodeRequest(BaseModel):
 
 class PasswordRequest(BaseModel):
     password: str
+
+
+class CredentialsRequest(BaseModel):
+    api_id: str
+    api_hash: str
+
+
+class ResolveRequest(BaseModel):
+    reference: str
+
+
+@router.get("/has-credentials")
+async def auth_has_credentials():
+    return {"has_credentials": has_credentials()}
+
+
+@router.post("/resolve-1password")
+async def auth_resolve_1password(req: ResolveRequest):
+    """Resolve a 1Password secret reference (op://vault/item/field) via the op CLI."""
+    ref = req.reference.strip()
+    if not ref.startswith("op://"):
+        raise HTTPException(status_code=400, detail="Not a 1Password reference (must start with op://)")
+    try:
+        result = subprocess.run(
+            ["op", "read", ref],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=result.stderr.strip() or "Failed to resolve 1Password reference",
+            )
+        return {"value": result.stdout.strip()}
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="1Password CLI (op) not found. Install it from 1password.com/downloads/command-line/")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="1Password CLI timed out. Make sure 1Password is unlocked.")
+
+
+@router.post("/setup")
+async def auth_setup(req: CredentialsRequest):
+    """Save Telegram API credentials to OS Keychain and initialise the client."""
+    api_id = req.api_id.strip()
+    api_hash = req.api_hash.strip()
+    if not api_id.isdigit():
+        raise HTTPException(status_code=400, detail="API ID must be a number")
+    if not api_hash:
+        raise HTTPException(status_code=400, detail="API Hash is required")
+    save_secret("tg_api_id", api_id)
+    save_secret("tg_api_hash", api_hash)
+    try:
+        await init_client()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Credentials saved but client init failed: {e}")
+    return {"success": True}
 
 
 @router.get("/status")

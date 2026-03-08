@@ -1,20 +1,114 @@
-import { useState } from 'react'
-import { sendCode, verifyCode, verify2FA } from '../api/client'
+import { useState, useEffect } from 'react'
+import {
+  hasCredentials, setupCredentials, resolve1Password,
+  sendCode, verifyCode, verify2FA,
+} from '../api/client'
 
-type Step = 'phone' | 'code' | 'twofa' | 'done'
+type Step = 'credentials' | 'phone' | 'code' | 'twofa' | 'done'
 
 interface Props {
   onComplete: () => void
 }
 
+function is1PasswordRef(value: string) {
+  return value.trim().startsWith('op://')
+}
+
+interface SecretFieldProps {
+  label: string
+  hint: string
+  value: string
+  onChange: (v: string) => void
+  type?: 'text' | 'password'
+  placeholder?: string
+}
+
+function SecretField({ label, hint, value, onChange, type = 'text', placeholder }: SecretFieldProps) {
+  const [resolving, setResolving] = useState(false)
+  const [resolveError, setResolveError] = useState('')
+  const [resolved, setResolved] = useState(false)
+  const isOpRef = is1PasswordRef(value)
+
+  const handleResolve = async () => {
+    setResolving(true)
+    setResolveError('')
+    setResolved(false)
+    try {
+      const res = await resolve1Password(value.trim())
+      onChange(res.value)
+      setResolved(true)
+    } catch (e: unknown) {
+      setResolveError(e instanceof Error ? e.message : 'Failed to resolve')
+    } finally {
+      setResolving(false)
+    }
+  }
+
+  return (
+    <div className="mb-4">
+      <label className="mb-1 block text-xs font-medium text-gray-600">{label}</label>
+      <div className="flex gap-2">
+        <input
+          type={type}
+          value={value}
+          onChange={(e) => { onChange(e.target.value); setResolved(false); setResolveError('') }}
+          placeholder={placeholder}
+          className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 font-mono"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        {isOpRef && (
+          <button
+            onClick={handleResolve}
+            disabled={resolving}
+            className="shrink-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-100 disabled:opacity-50"
+          >
+            {resolving ? '…' : resolved ? '✓' : 'Resolve'}
+          </button>
+        )}
+      </div>
+      {resolveError && <p className="mt-1 text-xs text-red-500">{resolveError}</p>}
+      {resolved && <p className="mt-1 text-xs text-green-600">Resolved from 1Password</p>}
+      <p className="mt-1 text-xs text-gray-400">{hint}</p>
+    </div>
+  )
+}
+
 export default function Onboarding({ onComplete }: Props) {
-  const [step, setStep] = useState<Step>('phone')
+  const [step, setStep] = useState<Step | null>(null)
+
+  // API credentials
+  const [apiId, setApiId] = useState('')
+  const [apiHash, setApiHash] = useState('')
+  const [credError, setCredError] = useState('')
+  const [credLoading, setCredLoading] = useState(false)
+
+  // Telegram login
   const [phone, setPhone] = useState('')
   const [phoneCodeHash, setPhoneCodeHash] = useState('')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    hasCredentials()
+      .then(({ has_credentials }) => setStep(has_credentials ? 'phone' : 'credentials'))
+      .catch(() => setStep('credentials'))
+  }, [])
+
+  const handleSaveCredentials = async () => {
+    setCredError('')
+    setCredLoading(true)
+    try {
+      await setupCredentials(apiId.trim(), apiHash.trim())
+      setStep('phone')
+    } catch (e: unknown) {
+      setCredError(e instanceof Error ? e.message : 'Failed to save credentials')
+    } finally {
+      setCredLoading(false)
+    }
+  }
 
   const handleSendCode = async () => {
     setError('')
@@ -62,6 +156,14 @@ export default function Onboarding({ onComplete }: Props) {
     }
   }
 
+  if (step === null) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50">
+        <div className="text-gray-400 text-sm">Loading…</div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-screen items-center justify-center bg-gray-50">
       <div className="w-full max-w-sm">
@@ -74,8 +176,65 @@ export default function Onboarding({ onComplete }: Props) {
           <p className="mt-1 text-sm text-gray-500">Your Telegram, intelligently organised</p>
         </div>
 
+        {/* Step indicators */}
+        <div className="mb-6 flex items-center justify-center gap-2">
+          {(['credentials', 'phone', 'code'] as Step[]).map((s, i) => (
+            <div key={s} className="flex items-center gap-2">
+              <div className={`h-2 w-2 rounded-full transition-colors ${
+                step === s ? 'bg-blue-500' :
+                ['credentials', 'phone', 'code', 'twofa', 'done'].indexOf(step) > i
+                  ? 'bg-blue-200' : 'bg-gray-200'
+              }`} />
+            </div>
+          ))}
+        </div>
+
         {/* Card */}
         <div className="rounded-2xl bg-white p-8 shadow-sm border border-gray-100">
+
+          {/* Step 1: Telegram API credentials */}
+          {step === 'credentials' && (
+            <>
+              <h2 className="mb-1 text-base font-medium text-gray-900">Connect to Telegram</h2>
+              <p className="mb-5 text-sm text-gray-500">
+                Get your free API credentials at{' '}
+                <span className="font-mono text-blue-500">my.telegram.org</span>{' '}
+                → API development tools.
+              </p>
+
+              <SecretField
+                label="API ID"
+                hint='Numeric ID, e.g. 12345678. Supports 1Password references (op://…)'
+                value={apiId}
+                onChange={setApiId}
+                placeholder="12345678 or op://vault/item/field"
+              />
+              <SecretField
+                label="API Hash"
+                hint='32-character hex string. Supports 1Password references (op://…)'
+                value={apiHash}
+                onChange={setApiHash}
+                type="password"
+                placeholder="a1b2c3… or op://vault/item/field"
+              />
+
+              {credError && <p className="mb-3 text-sm text-red-500">{credError}</p>}
+              <button
+                onClick={handleSaveCredentials}
+                disabled={!apiId.trim() || !apiHash.trim() || credLoading || is1PasswordRef(apiId) || is1PasswordRef(apiHash)}
+                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+              >
+                {credLoading ? 'Saving…' : 'Continue'}
+              </button>
+              {(is1PasswordRef(apiId) || is1PasswordRef(apiHash)) && (
+                <p className="mt-2 text-center text-xs text-amber-500">
+                  Resolve all 1Password references before continuing
+                </p>
+              )}
+            </>
+          )}
+
+          {/* Step 2: Phone number */}
           {step === 'phone' && (
             <>
               <h2 className="mb-1 text-base font-medium text-gray-900">Sign in with Telegram</h2>
@@ -97,9 +256,16 @@ export default function Onboarding({ onComplete }: Props) {
               >
                 {loading ? 'Sending…' : 'Send Code'}
               </button>
+              <button
+                onClick={() => setStep('credentials')}
+                className="mt-2 w-full text-sm text-gray-400 hover:text-gray-600"
+              >
+                ← Change API credentials
+              </button>
             </>
           )}
 
+          {/* Step 3: OTP */}
           {step === 'code' && (
             <>
               <h2 className="mb-1 text-base font-medium text-gray-900">Enter the code</h2>
@@ -134,6 +300,7 @@ export default function Onboarding({ onComplete }: Props) {
             </>
           )}
 
+          {/* Step 4: 2FA (conditional) */}
           {step === 'twofa' && (
             <>
               <h2 className="mb-1 text-base font-medium text-gray-900">Two-step verification</h2>
@@ -158,9 +325,10 @@ export default function Onboarding({ onComplete }: Props) {
             </>
           )}
 
+          {/* Done */}
           {step === 'done' && (
             <div className="py-4 text-center">
-              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-green-100 text-green-500">
+              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-green-100 text-green-500 text-lg">
                 ✓
               </div>
               <p className="text-sm font-medium text-gray-900">Signed in successfully</p>
@@ -170,7 +338,7 @@ export default function Onboarding({ onComplete }: Props) {
         </div>
 
         <p className="mt-4 text-center text-xs text-gray-400">
-          Your session is stored securely in the OS Keychain
+          Your session and credentials are stored securely in the OS Keychain
         </p>
       </div>
     </div>

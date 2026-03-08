@@ -11,17 +11,35 @@ def get_client() -> TelegramClient | None:
     return _client
 
 
+def _get_api_credentials() -> tuple[int, str]:
+    """
+    Return (api_id, api_hash). Keychain takes priority over env/.env values.
+    """
+    api_id_str = get_secret("tg_api_id")
+    api_hash = get_secret("tg_api_hash")
+    if api_id_str and api_hash:
+        return int(api_id_str), api_hash
+    return TG_API_ID, TG_API_HASH
+
+
+def has_credentials() -> bool:
+    """Return True if TG API credentials are available from any source."""
+    api_id, api_hash = _get_api_credentials()
+    return bool(api_id and api_hash)
+
+
 async def init_client() -> bool:
     """
     Load session from keychain and connect.
     Returns True if the session is already authorised (skip onboarding).
     """
     global _client
+    api_id, api_hash = _get_api_credentials()
     session_string = get_secret("telegram_session") or ""
     _client = TelegramClient(
         StringSession(session_string),
-        TG_API_ID,
-        TG_API_HASH,
+        api_id,
+        api_hash,
     )
     await _client.connect()
     return await _client.is_user_authorized()
