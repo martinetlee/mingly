@@ -1,0 +1,8 @@
+telethon>=1.36
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+aiosqlite>=0.20
+keyring>=25.0
+pywebview>=5.0
+python-dotenv>=1.0
