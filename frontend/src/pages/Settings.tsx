@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, getTags, createTag, updateTag, deleteTag } from '../api/client'
 import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
@@ -432,6 +432,9 @@ export default function Settings() {
   // Notification preference
   const [notifPref, setNotifPref] = useState<NotifPref>('tracked')
 
+  // Briefing schedule preference
+  const [briefingSchedule, setBriefingSchedule] = useState<'daily' | 'weekly'>('daily')
+
   const refreshOllamaStatus = useCallback(async () => {
     try {
       const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status')
@@ -449,9 +452,12 @@ export default function Settings() {
       .catch(() => {})
       .finally(() => setLoadingCfg(false))
 
-    // Load saved notification preference from backend
+    // Load saved preferences from backend
     getPrefs()
-      .then(({ notif_pref }) => setNotifPref(notif_pref as NotifPref))
+      .then((prefs: Record<string, string>) => {
+        if (prefs.notif_pref) setNotifPref(prefs.notif_pref as NotifPref)
+        if (prefs.briefing_schedule) setBriefingSchedule(prefs.briefing_schedule as 'daily' | 'weekly')
+      })
       .catch(() => {})
 
     // Check Ollama status on mount
@@ -635,6 +641,12 @@ export default function Settings() {
     apiSetNotifPref(pref).catch(() => {})
   }
 
+  const handleBriefingScheduleChange = async (e: ChangeEvent<HTMLSelectElement>) => {
+    const schedule = e.target.value as 'daily' | 'weekly'
+    setBriefingSchedule(schedule)
+    apiSetBriefingSchedule(schedule).catch(() => {})
+  }
+
   // ── Derived ────────────────────────────────────────────────────────────
 
   const pendingModel = MODELS.find((m) => m.id === pendingModelId) ?? null
@@ -799,6 +811,33 @@ export default function Settings() {
                 {notifPref !== 'off' && (
                   <p className="mt-2 text-xs text-emerald-400">✓ Native notifications enabled</p>
                 )}
+              </div>
+            </section>
+
+            {/* ── Briefing Schedule ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Briefing Schedule</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                How often the Intelligence → Briefing tab auto-updates chat summaries.
+                The update runs at 9 AM, or on first app open after 9 AM.
+              </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                  Update frequency
+                </label>
+                <select
+                  value={briefingSchedule}
+                  onChange={handleBriefingScheduleChange}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value="daily">Daily (last 24 hours)</option>
+                  <option value="weekly">Weekly (last 7 days)</option>
+                </select>
+                <p className="mt-2 text-xs text-slate-500">
+                  {briefingSchedule === 'daily'
+                    ? 'Summarises the past day of messages each morning.'
+                    : 'Summarises the past week of messages each Monday morning.'}
+                </p>
               </div>
             </section>
           </>

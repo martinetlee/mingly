@@ -494,3 +494,135 @@ async def intelligence_chat(
             yield chunk
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Briefing / Summary endpoint
+# ---------------------------------------------------------------------------
+
+async def _summarize_chat(
+    client: httpx.AsyncClient,
+    base_url: str,
+    model: str,
+    chat_name: str,
+    chat_category: str,
+    messages_text: str,
+) -> str:
+    """Call LLM to produce a summary; returns the summary string."""
+    if chat_category == "tracked":
+        system = (
+            "You are a concise assistant. Given recent Telegram messages from a chat, "
+            "produce a single sentence (max 30 words) summarising what was discussed. "
+            "Focus especially on any messages involving the user (marked as outgoing). "
+            "Output only the summary sentence, nothing else."
+        )
+    else:
+        system = (
+            "You are a concise assistant. Given recent Telegram messages from a chat, "
+            "produce a structured briefing: ignore chit-chat and pleasantries, focus on "
+            "informational content, links, technical discussion. "
+            "Start with a 1-2 sentence overview, then list up to 4 key topics or themes "
+            "as bullet points (each starting with '•'). "
+            "Output only the briefing text, no extra commentary."
+        )
+
+    user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
+    try:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                "max_tokens": 300,
+                "temperature": 0.3,
+                "stream": False,
+            },
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["choices"][0]["message"].get("content", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+@router.post("/intelligence/briefing")
+async def intelligence_briefing(
+    days: int = 1,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate summaries for all tracked and briefing chats.
+    Streams SSE events:
+      - start: {total: N}
+      - progress: {current: N, chat_name: str}
+      - chat_done: {chat_id, chat_name, category, summary}
+      - done: {}
+      - error: {message}
+    """
+    from datetime import datetime, timedelta
+
+    base_url, model = _get_llm_config()
+    if not base_url:
+        async def _err():
+            yield _sse("error", {"message": "No LLM configured. Set up an AI model in Settings."})
+        return StreamingResponse(_err(), media_type="text/event-stream")
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    async def generate():
+        tracked = await crud.get_tracked_chats(db)
+        briefing = await crud.get_briefing_chats(db)
+        all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
+
+        yield _sse("start", {"total": len(all_chats)})
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            for idx, (category, chat) in enumerate(all_chats):
+                yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
+
+                msgs = await crud.get_messages_since(db, chat.telegram_id, since, limit=200)
+                if not msgs:
+                    yield _sse("chat_done", {
+                        "chat_id": chat.telegram_id,
+                        "chat_name": chat.name,
+                        "category": category,
+                        "summary": "No messages in this period.",
+                    })
+                    continue
+
+                lines = []
+                for m in msgs:
+                    if m.text:
+                        ts = m.date.strftime("%m/%d %H:%M")
+                        sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
+                        lines.append(f"[{ts}] {sender}: {m.text[:300]}")
+
+                if not lines:
+                    yield _sse("chat_done", {
+                        "chat_id": chat.telegram_id,
+                        "chat_name": chat.name,
+                        "category": category,
+                        "summary": "No text messages in this period.",
+                    })
+                    continue
+
+                messages_text = "\n".join(lines[-150:])  # cap context
+                summary = await _summarize_chat(client, base_url, model, chat.name, category, messages_text)
+                if not summary:
+                    summary = "Summary unavailable."
+
+                yield _sse("chat_done", {
+                    "chat_id": chat.telegram_id,
+                    "chat_name": chat.name,
+                    "category": category,
+                    "summary": summary,
+                })
+
+        yield _sse("done", {})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")

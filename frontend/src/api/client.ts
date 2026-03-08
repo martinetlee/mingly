@@ -248,6 +248,17 @@ export const setNotifPref = (pref: 'all' | 'tracked' | 'off') =>
     body: JSON.stringify({ pref }),
   })
 
+export const setBriefingSchedule = (schedule: 'daily' | 'weekly') =>
+  request<{ success: boolean; schedule: string }>('/api/settings/prefs/briefing-schedule', {
+    method: 'POST',
+    body: JSON.stringify({ schedule }),
+  })
+
+export const setBriefingLastRun = () =>
+  request<{ success: boolean; briefing_last_run: string }>('/api/settings/prefs/briefing-last-run', {
+    method: 'POST',
+  })
+
 // --- Compose ---
 
 export const sendMessage = (chat_id: number, text: string, reply_to_id?: number) =>

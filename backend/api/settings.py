@@ -34,6 +34,10 @@ class NotifPrefRequest(BaseModel):
     pref: str  # 'all' | 'tracked' | 'off'
 
 
+class BriefingScheduleRequest(BaseModel):
+    schedule: str  # 'daily' | 'weekly'
+
+
 @router.get("/prefs")
 async def get_prefs():
     return _load_prefs()
@@ -48,3 +52,24 @@ async def set_notif_pref(req: NotifPrefRequest):
     prefs["notif_pref"] = req.pref
     _save_prefs(prefs)
     return {"success": True, "pref": req.pref}
+
+
+@router.post("/prefs/briefing-schedule")
+async def set_briefing_schedule(req: BriefingScheduleRequest):
+    if req.schedule not in ("daily", "weekly"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid schedule")
+    prefs = _load_prefs()
+    prefs["briefing_schedule"] = req.schedule
+    _save_prefs(prefs)
+    return {"success": True, "schedule": req.schedule}
+
+
+@router.post("/prefs/briefing-last-run")
+async def set_briefing_last_run():
+    """Mark that the briefing was just run (stores current UTC ISO timestamp)."""
+    from datetime import datetime
+    prefs = _load_prefs()
+    prefs["briefing_last_run"] = datetime.utcnow().isoformat()
+    _save_prefs(prefs)
+    return {"success": True, "briefing_last_run": prefs["briefing_last_run"]}

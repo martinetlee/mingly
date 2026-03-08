@@ -164,6 +164,22 @@ async def get_messages(
     return list(result.scalars().all())
 
 
+async def get_messages_since(
+    db: AsyncSession,
+    chat_id: int,
+    since: datetime,
+    limit: int = 200,
+) -> list:
+    """Return up to `limit` messages for a chat on or after `since`, oldest-first."""
+    result = await db.execute(
+        select(Message)
+        .where(Message.chat_id == chat_id, Message.date >= since)
+        .order_by(Message.date)
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
 async def message_exists(db: AsyncSession, telegram_id: int, chat_id: int) -> bool:
     result = await db.execute(
         select(Message.id).where(
