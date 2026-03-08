@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.database import Base
@@ -42,4 +42,51 @@ class Message(Base):
     importance_score: Mapped[Optional[float]] = mapped_column(Float)
     importance_reason: Mapped[Optional[str]] = mapped_column(Text)
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    color: Mapped[str] = mapped_column(String, default="slate")
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ChatTag(Base):
+    __tablename__ = "chat_tags"
+    __table_args__ = (UniqueConstraint("chat_id", "tag_id", name="uq_chat_tag"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # telegram_id
+    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id"), nullable=False)
+
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    first_name: Mapped[Optional[str]] = mapped_column(String)
+    last_name: Mapped[Optional[str]] = mapped_column(String)
+    username: Mapped[Optional[str]] = mapped_column(String)
+    phone: Mapped[Optional[str]] = mapped_column(String)
+    twitter_handle: Mapped[Optional[str]] = mapped_column(String)
+    linkedin_url: Mapped[Optional[str]] = mapped_column(String)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ContactPosition(Base):
+    __tablename__ = "contact_positions"
+    __table_args__ = (UniqueConstraint("contact_id", "organization", name="uq_contact_org"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contact_id: Mapped[int] = mapped_column(Integer, ForeignKey("contacts.id"), nullable=False)
+    organization: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

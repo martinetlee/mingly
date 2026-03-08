@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, ChatMember, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -160,6 +160,29 @@ export const removeTagFromChat = (telegram_id: number, tag_id: number) =>
 
 export const suggestTags = (telegram_id: number) =>
   request<TagSuggestion[]>(`/api/chats/${telegram_id}/tags/suggest`, { method: 'POST' })
+
+// --- Contacts ---
+
+export const syncContacts = () =>
+  request<{ imported: number; total: number }>('/api/contacts/sync', { method: 'POST' })
+
+export const getContacts = (search = '', limit = 100, offset = 0) =>
+  request<Contact[]>(`/api/contacts?search=${encodeURIComponent(search)}&limit=${limit}&offset=${offset}`)
+
+export const getContact = (contactId: number) =>
+  request<Contact>(`/api/contacts/${contactId}`)
+
+export const updateContact = (contactId: number, data: { twitter_handle?: string; linkedin_url?: string; phone?: string; notes?: string }) =>
+  request<Contact>(`/api/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const addPosition = (contactId: number, organization: string, title?: string) =>
+  request<ContactPosition>(`/api/contacts/${contactId}/positions`, {
+    method: 'POST',
+    body: JSON.stringify({ organization, title: title || null }),
+  })
+
+export const removePosition = (contactId: number, positionId: number) =>
+  request<{ success: boolean }>(`/api/contacts/${contactId}/positions/${positionId}`, { method: 'DELETE' })
 
 // --- Profiles ---
 

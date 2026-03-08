@@ -65,6 +65,27 @@ export interface Message {
   user_flagged: boolean
 }
 
+export interface ContactPosition {
+  id: number
+  organization: string
+  title: string | null
+}
+
+export interface Contact {
+  id: number
+  telegram_id: number
+  first_name: string | null
+  last_name: string | null
+  name: string
+  username: string | null
+  phone: string | null
+  twitter_handle: string | null
+  linkedin_url: string | null
+  notes: string | null
+  synced_at: string | null
+  positions: ContactPosition[]
+}
+
 export interface ChatMember {
   id: number
   name: string
