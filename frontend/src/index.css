@@ -27,6 +27,22 @@ body {
   background: #9ca3af;
 }
 
+/* Folder tab horizontal scrollbar — thin & fades in on hover */
+.folder-scrollbar::-webkit-scrollbar {
+  height: 3px;
+}
+.folder-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.folder-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.15);
+  border-radius: 2px;
+  transition: background 0.2s;
+}
+.folder-scrollbar:hover::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.5);
+}
+
 /* Formatted message text */
 .formatted-text code {
   background: rgba(0, 0, 0, 0.2);

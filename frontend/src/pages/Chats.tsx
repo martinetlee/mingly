@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { RefreshCw, Radio, EyeOff, Eye, FileText } from 'lucide-react'
-import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked } from '../api/client'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon } from 'lucide-react'
+import type { Chat, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
@@ -89,6 +89,316 @@ function ChatItem({
   )
 }
 
+// ---------------------------------------------------------------------------
+// Tag colours
+// ---------------------------------------------------------------------------
+
+const TAG_COLORS: Record<string, string> = {
+  indigo:  'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
+  emerald: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30',
+  rose:    'bg-rose-500/20 text-rose-300 border border-rose-500/30',
+  amber:   'bg-amber-500/20 text-amber-300 border border-amber-500/30',
+  violet:  'bg-violet-500/20 text-violet-300 border border-violet-500/30',
+  sky:     'bg-sky-500/20 text-sky-300 border border-sky-500/30',
+  slate:   'bg-slate-500/20 text-slate-300 border border-slate-500/30',
+}
+
+const COLOR_OPTIONS = ['indigo', 'emerald', 'rose', 'amber', 'violet', 'sky', 'slate'] as const
+
+const COLOR_DOTS: Record<string, string> = {
+  indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
+  amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
+}
+
+// ---------------------------------------------------------------------------
+// ChatInfoPanel
+// ---------------------------------------------------------------------------
+
+function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
+  const [allTags, setAllTags] = useState<Tag[]>([])
+  const [chatTags, setChatTags] = useState<Tag[]>([])
+  const [suggestions, setSuggestions] = useState<TagSuggestion[]>([])
+  const [suggesting, setSuggesting] = useState(false)
+  const [showAddDropdown, setShowAddDropdown] = useState(false)
+  const [showNewTag, setShowNewTag] = useState(false)
+  const [newTagName, setNewTagName] = useState('')
+  const [newTagColor, setNewTagColor] = useState<string>('slate')
+
+  useEffect(() => {
+    getTags().then(setAllTags).catch(() => {})
+    getChatTags(chat.telegram_id).then(setChatTags).catch(() => {})
+    setSuggestions([])
+  }, [chat.telegram_id])
+
+  const assignedIds = new Set(chatTags.map((t) => t.id))
+  const unassignedTags = allTags.filter((t) => !assignedIds.has(t.id))
+
+  const handleAdd = async (tag: Tag) => {
+    await addTagToChat(chat.telegram_id, tag.id)
+    setChatTags((prev) => [...prev, tag])
+    setAllTags((prev) => prev) // unchanged
+    setShowAddDropdown(false)
+    setSuggestions((prev) => prev.filter((s) => s.name !== tag.name))
+  }
+
+  const handleRemove = async (tag: Tag) => {
+    await removeTagFromChat(chat.telegram_id, tag.id)
+    setChatTags((prev) => prev.filter((t) => t.id !== tag.id))
+  }
+
+  const handleCreateAndAdd = async () => {
+    const name = newTagName.trim()
+    if (!name) return
+    try {
+      const tag = await createTag(name, newTagColor)
+      setAllTags((prev) => [...prev, tag])
+      await addTagToChat(chat.telegram_id, tag.id)
+      setChatTags((prev) => [...prev, tag])
+      setNewTagName('')
+      setNewTagColor('slate')
+      setShowNewTag(false)
+    } catch {
+      // tag name already exists — find and add it
+      const existing = allTags.find((t) => t.name.toLowerCase() === name.toLowerCase())
+      if (existing && !assignedIds.has(existing.id)) await handleAdd(existing)
+    }
+  }
+
+  const handleSuggest = async () => {
+    setSuggesting(true)
+    try {
+      const results = await suggestTags(chat.telegram_id)
+      setSuggestions(results)
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  const handleAcceptSuggestion = async (s: TagSuggestion) => {
+    // Find existing tag or create new
+    const existing = allTags.find((t) => t.name.toLowerCase() === s.name.toLowerCase())
+    if (existing) {
+      if (!assignedIds.has(existing.id)) await handleAdd(existing)
+    } else {
+      try {
+        const tag = await createTag(s.name, s.color)
+        setAllTags((prev) => [...prev, tag])
+        await addTagToChat(chat.telegram_id, tag.id)
+        setChatTags((prev) => [...prev, tag])
+      } catch { /* already exists */ }
+    }
+    setSuggestions((prev) => prev.filter((x) => x.name !== s.name))
+  }
+
+  const typeColor = {
+    private: 'bg-indigo-500/20 text-indigo-400',
+    group: 'bg-purple-500/20 text-purple-400',
+    channel: 'bg-amber-500/20 text-amber-400',
+  }[chat.type] ?? 'bg-slate-600 text-slate-400'
+
+  return (
+    <div className="flex w-72 flex-shrink-0 flex-col border-l border-slate-700/50 bg-slate-800 overflow-y-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
+        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Chat Info</span>
+        <button onClick={onClose} className="rounded p-1 text-slate-500 hover:text-slate-300 transition-colors">
+          <X size={14} />
+        </button>
+      </div>
+
+      {/* Chat identity */}
+      <div className="flex flex-col items-center gap-2 px-4 py-5 border-b border-slate-700/50">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300">
+          {chat.name.charAt(0).toUpperCase()}
+        </div>
+        <p className="text-sm font-semibold text-gray-100 text-center leading-snug">{chat.name}</p>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${typeColor}`}>{chat.type}</span>
+      </div>
+
+      {/* Tags section */}
+      <div className="px-4 py-4 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400 uppercase tracking-wider">
+            <TagIcon size={11} />
+            Tags
+          </div>
+          <button
+            onClick={handleSuggest}
+            disabled={suggesting}
+            title="Get AI tag suggestions"
+            className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-violet-400 hover:bg-violet-500/10 disabled:opacity-50 transition-colors"
+          >
+            <Sparkles size={11} />
+            {suggesting ? 'Thinking…' : 'Suggest'}
+          </button>
+        </div>
+
+        {/* Assigned tags grouped by category */}
+        {chatTags.length === 0 ? (
+          <p className="text-xs text-slate-500">No tags yet</p>
+        ) : (
+          <div className="flex flex-col gap-2.5">
+            {(() => {
+              const grouped = chatTags.reduce<Record<string, Tag[]>>((acc, tag) => {
+                const cat = tag.category?.trim() || 'Uncategorized'
+                ;(acc[cat] = acc[cat] || []).push(tag)
+                return acc
+              }, {})
+              const cats = Object.keys(grouped).sort((a, b) => {
+                if (a === 'Uncategorized') return -1
+                if (b === 'Uncategorized') return 1
+                return a.localeCompare(b)
+              })
+              return cats.map((cat) => (
+                <div key={cat}>
+                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-600">{cat}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {grouped[cat].map((tag) => (
+                      <span
+                        key={tag.id}
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${TAG_COLORS[tag.color] ?? TAG_COLORS.slate}`}
+                      >
+                        {tag.name}
+                        <button
+                          onClick={() => handleRemove(tag)}
+                          className="opacity-60 hover:opacity-100 transition-opacity"
+                        >
+                          <X size={10} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))
+            })()}
+          </div>
+        )}
+
+        {/* AI Suggestions */}
+        {suggestions.length > 0 && (
+          <div className="rounded-lg bg-violet-500/5 border border-violet-500/20 p-2.5 flex flex-col gap-2">
+            <p className="text-[10px] font-medium text-violet-400 uppercase tracking-wider">AI Suggestions</p>
+            <div className="flex flex-wrap gap-1.5">
+              {suggestions.map((s) => (
+                <button
+                  key={s.name}
+                  onClick={() => handleAcceptSuggestion(s)}
+                  title={s.reason}
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium border border-dashed hover:border-solid transition-all ${TAG_COLORS[s.color] ?? TAG_COLORS.slate}`}
+                >
+                  <Plus size={9} />
+                  {s.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Add existing tag */}
+        <div className="relative">
+          <button
+            onClick={() => { setShowAddDropdown((v) => !v); setShowNewTag(false) }}
+            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <Plus size={12} />
+            Add tag
+          </button>
+          {showAddDropdown && (
+            <div className="absolute left-0 top-6 z-20 w-48 rounded-lg border border-slate-600 bg-slate-800 shadow-xl overflow-hidden">
+              {unassignedTags.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-slate-500">All tags assigned</p>
+              ) : (
+                <div className="max-h-48 overflow-y-auto py-1">
+                  {(() => {
+                    const grouped = unassignedTags.reduce<Record<string, Tag[]>>((acc, tag) => {
+                      const cat = tag.category?.trim() || 'Uncategorized'
+                      ;(acc[cat] = acc[cat] || []).push(tag)
+                      return acc
+                    }, {})
+                    const cats = Object.keys(grouped).sort((a, b) => {
+                      if (a === 'Uncategorized') return -1
+                      if (b === 'Uncategorized') return 1
+                      return a.localeCompare(b)
+                    })
+                    return cats.map((cat, i) => (
+                      <div key={cat}>
+                        {(cats.length > 1 || cat !== 'Uncategorized') && (
+                          <p className={`px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500 ${i > 0 ? 'border-t border-slate-700 mt-1 pt-1.5' : ''}`}>{cat}</p>
+                        )}
+                        {grouped[cat].map((tag) => (
+                          <button
+                            key={tag.id}
+                            onClick={() => handleAdd(tag)}
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+                          >
+                            <span className={`h-2 w-2 rounded-full ${COLOR_DOTS[tag.color] ?? 'bg-slate-400'}`} />
+                            {tag.name}
+                          </button>
+                        ))}
+                      </div>
+                    ))
+                  })()}
+                </div>
+              )}
+              <div className="border-t border-slate-700 px-3 py-1.5">
+                <button
+                  onClick={() => { setShowNewTag(true); setShowAddDropdown(false) }}
+                  className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                >
+                  <Plus size={11} />
+                  Create new tag
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* New tag form */}
+        {showNewTag && (
+          <div className="rounded-lg border border-slate-600 bg-slate-700/50 p-3 flex flex-col gap-2">
+            <input
+              autoFocus
+              value={newTagName}
+              onChange={(e) => setNewTagName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleCreateAndAdd(); if (e.key === 'Escape') setShowNewTag(false) }}
+              placeholder="Tag name…"
+              className="w-full rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
+            />
+            <div className="flex gap-1.5">
+              {COLOR_OPTIONS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setNewTagColor(c)}
+                  className={`h-4 w-4 rounded-full ${COLOR_DOTS[c]} transition-transform ${newTagColor === c ? 'scale-125 ring-2 ring-white/40' : 'opacity-60 hover:opacity-100'}`}
+                />
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleCreateAndAdd}
+                disabled={!newTagName.trim()}
+                className="flex-1 rounded bg-indigo-500 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-40 transition-colors"
+              >
+                Create & Add
+              </button>
+              <button
+                onClick={() => setShowNewTag(false)}
+                className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 export default function Chats() {
   const [chats, setChats] = useState<Chat[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
@@ -103,9 +413,15 @@ export default function Chats() {
   const [search, setSearch] = useState('')
   const [showHidden, setShowHidden] = useState(false)
   const [hiddenChats, setHiddenChats] = useState<Chat[]>([])
+  const [showInfo, setShowInfo] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(288) // 72 * 4 = w-72
   const dragging = useRef(false)
   const LIMIT = 100
+  const CHAT_PAGE = 50
+  const [chatOffset, setChatOffset] = useState(0)
+  const [hasMoreChats, setHasMoreChats] = useState(false)
+  const [loadingMoreChats, setLoadingMoreChats] = useState(false)
+  const chatListRef = useRef<HTMLDivElement>(null)
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -128,9 +444,28 @@ export default function Chats() {
   }, [sidebarWidth])
 
   const loadChats = useCallback(async () => {
-    const data = await getChats()
+    const data = await getChats(CHAT_PAGE, 0)
     setChats(data)
-  }, [])
+    setChatOffset(0)
+    setHasMoreChats(data.length === CHAT_PAGE)
+  }, [CHAT_PAGE])
+
+  const loadMoreChats = useCallback(async () => {
+    if (loadingMoreChats || !hasMoreChats) return
+    setLoadingMoreChats(true)
+    try {
+      const nextOffset = chatOffset + CHAT_PAGE
+      const data = await getChats(CHAT_PAGE, nextOffset)
+      setChats((prev) => {
+        const existingIds = new Set(prev.map((c) => c.telegram_id))
+        return [...prev, ...data.filter((c) => !existingIds.has(c.telegram_id))]
+      })
+      setChatOffset(nextOffset)
+      setHasMoreChats(data.length === CHAT_PAGE)
+    } finally {
+      setLoadingMoreChats(false)
+    }
+  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE])
 
   const loadFolders = useCallback(async () => {
     const data = await getFolders()
@@ -204,6 +539,7 @@ export default function Chats() {
     setMessages([])
     setHasMore(false)
     setMessageOffset(0)
+    setShowInfo(false)
   }
 
   const handleTrackChat = async (chat: Chat) => {
@@ -294,7 +630,7 @@ export default function Chats() {
           className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-indigo-500 transition-colors z-10"
         />
         {folders.length > 0 && (
-          <div className="flex overflow-x-auto border-b border-slate-700/50 px-2 pt-2 gap-1 scrollbar-none">
+          <div className="folder-scrollbar flex overflow-x-auto border-b border-slate-700/50 px-2 pt-2 pb-1 gap-1">
             <button
               onClick={() => setSelectedFolder(null)}
               className={`flex-shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
@@ -329,7 +665,16 @@ export default function Chats() {
             className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
           />
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div
+          ref={chatListRef}
+          className="flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            const el = e.currentTarget
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+              loadMoreChats()
+            }
+          }}
+        >
           {filtered.length === 0 ? (
             <p className="px-4 py-6 text-center text-sm text-slate-500">No chats found</p>
           ) : (
@@ -344,6 +689,9 @@ export default function Chats() {
                 onBriefing={() => handleBriefingChat(chat)}
               />
             ))
+          )}
+          {loadingMoreChats && (
+            <p className="px-4 py-3 text-center text-xs text-slate-500">Loading…</p>
           )}
         </div>
 
@@ -382,56 +730,75 @@ export default function Chats() {
         </div>
       </div>
 
-      {/* Message area */}
-      <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
-        {selectedChat ? (
-          <>
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
-              <div>
-                <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                <p className="text-xs text-slate-400">{selectedChat.type}</p>
+      {/* Message area + optional info panel */}
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
+          {selectedChat ? (
+            <>
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
+                  <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShowInfo((v) => !v)}
+                    title="Chat info & tags"
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                      showInfo ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
+                    }`}
+                  >
+                    <Info size={13} />
+                    Info
+                  </button>
+                  <button
+                    onClick={handleSync}
+                    disabled={syncing}
+                    title="Sync messages"
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+                    Sync
+                  </button>
+                </div>
               </div>
-              <button
-                onClick={handleSync}
-                disabled={syncing}
-                title="Sync messages"
-                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-              >
-                <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-                Sync
-              </button>
+
+              {/* Messages */}
+              {loadingMessages ? (
+                <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
+                  Loading…
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col overflow-hidden">
+                  {hasMore && (
+                    <div className="flex justify-center border-b border-slate-700/50 py-2">
+                      <button
+                        onClick={loadMoreMessages}
+                        disabled={loadingMore}
+                        className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                      >
+                        {loadingMore ? 'Loading…' : 'Load older messages'}
+                      </button>
+                    </div>
+                  )}
+                  <MessageList messages={messages} chatType={selectedChat.type} />
+                </div>
+              )}
+
+              {/* Compose */}
+              <ComposeBar onSend={handleSend} />
+            </>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
+              <p className="text-sm">Select a chat to start</p>
             </div>
+          )}
+        </div>
 
-            {/* Messages */}
-            {loadingMessages ? (
-              <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
-                Loading…
-              </div>
-            ) : (
-              <div className="flex flex-1 flex-col overflow-hidden">
-                {hasMore && (
-                  <div className="flex justify-center border-b border-slate-700/50 py-2">
-                    <button
-                      onClick={loadMoreMessages}
-                      disabled={loadingMore}
-                      className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                    >
-                      {loadingMore ? 'Loading…' : 'Load older messages'}
-                    </button>
-                  </div>
-                )}
-                <MessageList messages={messages} chatType={selectedChat.type} />
-              </div>
-            )}
-
-            {/* Compose */}
-            <ComposeBar onSend={handleSend} />
-          </>
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
-            <p className="text-sm">Select a chat to start</p>
-          </div>
+        {/* Info panel */}
+        {showInfo && selectedChat && (
+          <ChatInfoPanel chat={selectedChat} onClose={() => setShowInfo(false)} />
         )}
       </div>
     </div>
