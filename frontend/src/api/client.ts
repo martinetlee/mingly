@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, Folder, Message, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, Folder, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -160,6 +160,26 @@ export const removeTagFromChat = (telegram_id: number, tag_id: number) =>
 
 export const suggestTags = (telegram_id: number) =>
   request<TagSuggestion[]>(`/api/chats/${telegram_id}/tags/suggest`, { method: 'POST' })
+
+// --- Organizations ---
+
+export const getOrganizations = (search = '') =>
+  request<OrgSummary[]>(`/api/organizations?search=${encodeURIComponent(search)}`)
+
+export const createOrganization = (name: string) =>
+  request<OrgDetail>('/api/organizations', { method: 'POST', body: JSON.stringify({ name }) })
+
+export const getOrganization = (orgId: number) =>
+  request<OrgDetail>(`/api/organizations/${orgId}`)
+
+export const updateOrganization = (orgId: number, data: { name?: string; context?: string }) =>
+  request<OrgDetail>(`/api/organizations/${orgId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteOrganization = (orgId: number) =>
+  request<{ success: boolean }>(`/api/organizations/${orgId}`, { method: 'DELETE' })
+
+export const autoDiscoverOrgs = () =>
+  request<{ created: number; total: number }>('/api/organizations/auto-discover', { method: 'POST' })
 
 // --- Contacts ---
 

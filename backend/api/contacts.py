@@ -6,7 +6,7 @@ from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import Contact, ContactPosition
+from backend.db.models import Contact, ContactPosition, Organization
 from backend.telegram.client import get_client, ensure_connected
 
 router = APIRouter()
@@ -188,9 +188,17 @@ async def add_position(
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
+    org_name = data.organization.strip()
+    # Auto-create Organization if it doesn't exist
+    existing_org = (await db.execute(
+        select(Organization).where(Organization.name == org_name)
+    )).scalar_one_or_none()
+    if not existing_org:
+        db.add(Organization(name=org_name))
+
     pos = ContactPosition(
         contact_id=contact_id,
-        organization=data.organization.strip(),
+        organization=org_name,
         title=data.title.strip() if data.title else None,
     )
     db.add(pos)

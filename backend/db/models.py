@@ -90,3 +90,12 @@ class ContactPosition(Base):
     organization: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    context: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

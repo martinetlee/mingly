@@ -86,6 +86,40 @@ export interface Contact {
   positions: ContactPosition[]
 }
 
+export interface OrgMember {
+  contact_id: number
+  telegram_id: number
+  name: string
+  username: string | null
+  title: string | null
+}
+
+export interface OrgRelatedChat {
+  chat_id: number
+  chat_name: string
+  chat_type: string
+  last_message: {
+    text: string | null
+    sender_name: string | null
+    date: string | null
+  } | null
+}
+
+export interface OrgSummary {
+  id: number
+  name: string
+  context: string | null
+  member_count: number
+}
+
+export interface OrgDetail {
+  id: number
+  name: string
+  context: string | null
+  members: OrgMember[]
+  related_chats: OrgRelatedChat[]
+}
+
 export interface ChatMember {
   id: number
   name: string
