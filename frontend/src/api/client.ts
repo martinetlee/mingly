@@ -207,10 +207,16 @@ export const getContact = (contactId: number) =>
 export const updateContact = (contactId: number, data: { twitter_handle?: string; linkedin_url?: string; phone?: string; notes?: string }) =>
   request<Contact>(`/api/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(data) })
 
-export const addPosition = (contactId: number, organization: string, title?: string) =>
+export const addPosition = (
+  contactId: number,
+  organization: string,
+  title?: string,
+  is_active = true,
+  ended_at?: string,
+) =>
   request<ContactPosition>(`/api/contacts/${contactId}/positions`, {
     method: 'POST',
-    body: JSON.stringify({ organization, title: title || null }),
+    body: JSON.stringify({ organization, title: title || null, is_active, ended_at: ended_at || null }),
   })
 
 export const updatePosition = (

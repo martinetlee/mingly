@@ -26,6 +26,7 @@ class PositionCreate(BaseModel):
     organization: str
     title: Optional[str] = None
     is_active: bool = True
+    ended_at: Optional[str] = None  # ISO date string, only used when is_active=False
 
 
 class PositionUpdate(BaseModel):
@@ -251,11 +252,19 @@ async def add_position(
     if not existing_org:
         db.add(Organization(name=org_name))
 
+    ended_at_val = None
+    if not data.is_active and data.ended_at and data.ended_at.strip():
+        try:
+            ended_at_val = datetime.fromisoformat(data.ended_at.strip())
+        except ValueError:
+            pass  # invalid date → leave as None
+
     pos = ContactPosition(
         contact_id=contact_id,
         organization=org_name,
         title=data.title.strip() if data.title else None,
         is_active=data.is_active,
+        ended_at=ended_at_val,
     )
     db.add(pos)
     try:

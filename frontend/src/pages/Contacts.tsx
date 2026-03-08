@@ -124,6 +124,8 @@ export default function Contacts() {
   const [showAddPos, setShowAddPos] = useState(false)
   const [newOrg, setNewOrg] = useState('')
   const [newTitle, setNewTitle] = useState('')
+  const [newIsFormer, setNewIsFormer] = useState(false)
+  const [newEndedAt, setNewEndedAt] = useState('')
 
   // Mark-as-former inline state: maps posId -> draft end date string
   const [formerDrafts, setFormerDrafts] = useState<Record<number, string>>({})
@@ -156,6 +158,10 @@ export default function Contacts() {
   const handleSelect = (c: Contact) => {
     setSelected(c)
     setShowAddPos(false)
+    setNewOrg('')
+    setNewTitle('')
+    setNewIsFormer(false)
+    setNewEndedAt('')
     setConfirmingFormer(new Set())
     setFormerDrafts({})
   }
@@ -169,12 +175,20 @@ export default function Contacts() {
 
   const handleAddPosition = async () => {
     if (!selected || !newOrg.trim()) return
-    const pos = await addPosition(selected.id, newOrg.trim(), newTitle.trim() || undefined)
+    const pos = await addPosition(
+      selected.id,
+      newOrg.trim(),
+      newTitle.trim() || undefined,
+      !newIsFormer,
+      newIsFormer ? newEndedAt || undefined : undefined,
+    )
     const updated = { ...selected, positions: [...selected.positions, pos] }
     setSelected(updated)
     setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
     setNewOrg('')
     setNewTitle('')
+    setNewIsFormer(false)
+    setNewEndedAt('')
     setShowAddPos(false)
   }
 
@@ -483,16 +497,42 @@ export default function Contacts() {
                     placeholder="Title (optional)..."
                     className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
                   />
+                  {/* Former toggle */}
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={newIsFormer}
+                      onChange={(e) => {
+                        setNewIsFormer(e.target.checked)
+                        if (!e.target.checked) setNewEndedAt('')
+                      }}
+                      className="rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500/30"
+                    />
+                    <span className="text-xs text-slate-400">Former position</span>
+                  </label>
+                  {newIsFormer && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-500 whitespace-nowrap">End date (optional):</span>
+                      <input
+                        type="date"
+                        value={newEndedAt}
+                        onChange={(e) => setNewEndedAt(e.target.value)}
+                        className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-0.5 text-xs text-slate-200 outline-none focus:border-amber-500 min-w-0"
+                      />
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <button
                       onClick={handleAddPosition}
                       disabled={!newOrg.trim()}
-                      className="flex-1 rounded bg-indigo-500 px-2 py-1 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-40 transition-colors"
+                      className={`flex-1 rounded px-2 py-1 text-xs font-medium text-white disabled:opacity-40 transition-colors ${
+                        newIsFormer ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-500 hover:bg-indigo-600'
+                      }`}
                     >
-                      Add Position
+                      {newIsFormer ? 'Add Former Position' : 'Add Position'}
                     </button>
                     <button
-                      onClick={() => setShowAddPos(false)}
+                      onClick={() => { setShowAddPos(false); setNewIsFormer(false); setNewEndedAt('') }}
                       className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
                     >
                       Cancel
