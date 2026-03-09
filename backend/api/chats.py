@@ -249,11 +249,11 @@ async def react_to_message(
 
 
 @router.post("/{telegram_id}/sync")
-async def sync_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
+async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depends(get_db)):
     chat = await crud.get_chat_by_telegram_id(db, telegram_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    await sync_messages(telegram_id, limit=100)
+    await sync_messages(telegram_id, limit=min(limit, 200))
     return {"status": "ok"}
 
 

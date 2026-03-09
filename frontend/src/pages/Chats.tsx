@@ -763,6 +763,8 @@ export default function Chats() {
   const [hasMoreChats, setHasMoreChats] = useState(false)
   const [loadingMoreChats, setLoadingMoreChats] = useState(false)
   const chatListRef = useRef<HTMLDivElement>(null)
+  // Track which chat telegram_ids have been auto-synced to avoid duplicate requests
+  const autoSyncedRef = useRef<Set<number>>(new Set())
   // Highlight a specific message (set from URL params when navigating from Mentions)
   const [highlightMsgId, setHighlightMsgId] = useState<number | null>(null)
   const pendingNavRef = useRef<{ chatId: number; msgId: number } | null>(null)
@@ -804,7 +806,15 @@ export default function Chats() {
       const data = await getChats(CHAT_PAGE, nextOffset)
       setChats((prev) => {
         const existingIds = new Set(prev.map((c) => c.telegram_id))
-        return [...prev, ...data.filter((c) => !existingIds.has(c.telegram_id))]
+        const newChats = data.filter((c) => !existingIds.has(c.telegram_id))
+        // Auto-sync 25 messages for each newly visible chat (fire-and-forget)
+        for (const c of newChats) {
+          if (!autoSyncedRef.current.has(c.telegram_id)) {
+            autoSyncedRef.current.add(c.telegram_id)
+            syncChat(c.telegram_id, 25).catch(() => {})
+          }
+        }
+        return [...prev, ...newChats]
       })
       setChatOffset(nextOffset)
       setHasMoreChats(data.length === CHAT_PAGE)
@@ -884,6 +894,16 @@ export default function Chats() {
 
   const handleWsEvent = useCallback((event: WSEvent) => {
     if (event.type === 'new_message') {
+      // If this chat_id is new (not yet seen in our list), sync 25 messages after loading
+      setChats((prev) => {
+        const known = prev.some((c) => c.telegram_id === event.chat_id)
+        if (!known && !autoSyncedRef.current.has(event.chat_id)) {
+          autoSyncedRef.current.add(event.chat_id)
+          // Delay slightly so the chat upsert from loadChats completes first
+          setTimeout(() => syncChat(event.chat_id, 25).catch(() => {}), 1500)
+        }
+        return prev
+      })
       loadChats()
       if (selectedChat && event.chat_id === selectedChat.telegram_id) {
         loadMessages(selectedChat)

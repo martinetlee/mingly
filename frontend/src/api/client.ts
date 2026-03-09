@@ -93,8 +93,8 @@ export const setMonitored = (telegram_id: number, monitored: boolean) =>
 export const getMessages = (telegram_id: number, limit = 50, offset = 0) =>
   request<Message[]>(`/api/chats/${telegram_id}/messages?limit=${limit}&offset=${offset}`)
 
-export const syncChat = (telegram_id: number) =>
-  request<{ status: string }>(`/api/chats/${telegram_id}/sync`, { method: 'POST' })
+export const syncChat = (telegram_id: number, limit?: number) =>
+  request<{ status: string }>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
 
 export const getChatMembers = (telegram_id: number, limit = 100) =>
   request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
