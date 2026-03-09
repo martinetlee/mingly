@@ -77,6 +77,33 @@ interface ModelDef {
 
 const MODELS: ModelDef[] = [
   {
+    id: 'qwen35-9b',
+    name: 'Qwen 3.5 · 9B',
+    detail: '9B · Runs locally · ~6.6 GB download',
+    type: 'local',
+    provider: 'ollama',
+    ollamaModel: 'qwen3.5:9b',
+    available: true,
+  },
+  {
+    id: 'qwen35-4b',
+    name: 'Qwen 3.5 · 4B',
+    detail: '4B · Runs locally · ~3.4 GB download',
+    type: 'local',
+    provider: 'ollama',
+    ollamaModel: 'qwen3.5:4b',
+    available: true,
+  },
+  {
+    id: 'qwen35-2b',
+    name: 'Qwen 3.5 · 2B',
+    detail: '2B · Runs locally · ~2.7 GB download',
+    type: 'local',
+    provider: 'ollama',
+    ollamaModel: 'qwen3.5:2b',
+    available: true,
+  },
+  {
     id: 'qwen25',
     name: 'Qwen 2.5',
     detail: '7B · Runs locally · ~4 GB download',
@@ -445,9 +472,18 @@ export default function Settings() {
   }, [])
 
   useEffect(() => {
-    apiFetch<{ orchestrator_name: string }>('GET', '/api/llm/orchestrator')
-      .then(({ orchestrator_name }) => {
-        if (orchestrator_name === 'local') setOrchestratorId('qwen25')
+    Promise.all([
+      apiFetch<{ orchestrator_name: string }>('GET', '/api/llm/orchestrator'),
+      apiFetch<{ instances: { name: string; model: string }[] }>('GET', '/api/llm/instances'),
+    ])
+      .then(([{ orchestrator_name }, { instances }]) => {
+        if (orchestrator_name) {
+          const inst = instances.find((i) => i.name === orchestrator_name)
+          const matched = inst
+            ? MODELS.find((m) => m.ollamaModel === inst.model)
+            : null
+          setOrchestratorId(matched?.id ?? null)
+        }
       })
       .catch(() => {})
       .finally(() => setLoadingCfg(false))
