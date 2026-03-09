@@ -2,9 +2,12 @@
 Intelligence endpoint — agentic LLM chat with tool access to the local DB.
 """
 import json
+import logging
 import re
 import asyncio
 from typing import Any, Optional, Tuple, List
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -752,18 +755,40 @@ async def _summarize_chat(
                 "temperature": 0.3,
                 "stream": False,
             },
-            timeout=60.0,
+            timeout=180.0,
         )
         if resp.status_code == 200:
             data = resp.json()
-            raw = data["choices"][0]["message"].get("content", "").strip()
+            msg = data["choices"][0]["message"]
+            # Some models (reasoning/thinking) put output in content=null + a separate field
+            raw = (
+                msg.get("content")
+                or msg.get("reasoning_content")
+                or msg.get("text")
+                or ""
+            )
+            # content may be a list of blocks (e.g. Anthropic-style via proxy)
+            if isinstance(raw, list):
+                raw = " ".join(
+                    b.get("text", "") for b in raw if isinstance(b, dict)
+                )
+            raw = str(raw).strip()
+            logger.debug("_summarize_chat raw response for %s: %.200s", chat_name, raw)
+            if not raw:
+                logger.warning("_summarize_chat empty content for chat=%s; full msg: %s", chat_name, msg)
+                return "", []
             summary, source_ids = _parse_summary_response(raw)
             # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
             pos_to_tid, valid_tids = _build_message_map(messages_text)
             source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
             return summary, source_ids
-    except Exception:
-        pass
+        else:
+            logger.error(
+                "_summarize_chat HTTP %s for chat=%s: %s",
+                resp.status_code, chat_name, resp.text[:300],
+            )
+    except Exception as exc:
+        logger.exception("_summarize_chat failed for chat=%s: %s", chat_name, exc)
     return "", []
 
 
@@ -801,22 +826,42 @@ async def _summarize_important_contact(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 300,
+                "max_tokens": 600,
                 "temperature": 0.3,
                 "stream": False,
             },
-            timeout=60.0,
+            timeout=180.0,
         )
         if resp.status_code == 200:
             data = resp.json()
-            raw = data["choices"][0]["message"].get("content", "").strip()
+            msg = data["choices"][0]["message"]
+            raw = (
+                msg.get("content")
+                or msg.get("reasoning_content")
+                or msg.get("text")
+                or ""
+            )
+            if isinstance(raw, list):
+                raw = " ".join(
+                    b.get("text", "") for b in raw if isinstance(b, dict)
+                )
+            raw = str(raw).strip()
+            logger.debug("_summarize_important_contact raw for %s: %.200s", contact_name, raw)
+            if not raw:
+                logger.warning("_summarize_important_contact empty content for contact=%s; full msg: %s", contact_name, msg)
+                return "", []
             summary, source_ids = _parse_summary_response(raw)
             # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
             pos_to_tid, valid_tids = _build_message_map(messages_text)
             source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
             return summary, source_ids
-    except Exception:
-        pass
+        else:
+            logger.error(
+                "_summarize_important_contact HTTP %s for contact=%s: %s",
+                resp.status_code, contact_name, resp.text[:300],
+            )
+    except Exception as exc:
+        logger.exception("_summarize_important_contact failed for contact=%s: %s", contact_name, exc)
     return "", []
 
 
