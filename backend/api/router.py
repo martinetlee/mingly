@@ -30,7 +30,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/media/{file_path:path}")
     async def serve_media(file_path: str):
-        full_path = DATA_DIR / file_path
+        full_path = (DATA_DIR / file_path).resolve()
+        # Containment check: reject any path that escapes DATA_DIR
+        if not str(full_path).startswith(str(DATA_DIR.resolve())):
+            raise HTTPException(status_code=403)
         if not full_path.exists() or not full_path.is_file():
             raise HTTPException(status_code=404)
         return FileResponse(str(full_path))

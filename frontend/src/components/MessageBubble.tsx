@@ -22,11 +22,15 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;')
 }
 
+function safeHref(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : '#'
+}
+
 function simpleMarkdownToHtml(text: string): string {
   let s = escapeHtml(text)
   // [[display]](url) → [display] as link text (matching official Telegram); \s allows [[link]]\n(url)
-  s = s.replace(/\[\[([^\]]+)\]\]\s*\(([^)]+)\)/g, (_, d, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">[${d}]</a>`)
-  s = s.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, (_, d, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${d}</a>`)
+  s = s.replace(/\[\[([^\]]+)\]\]\s*\(([^)]+)\)/g, (_, d, u) => `<a href="${safeHref(u)}" target="_blank" rel="noopener noreferrer">[${d}]</a>`)
+  s = s.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, (_, d, u) => `<a href="${safeHref(u)}" target="_blank" rel="noopener noreferrer">${d}</a>`)
   // **bold** / *italic* / `code`
   s = s.replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>')
   s = s.replace(/\*(.+?)\*/gs, '<i>$1</i>')
