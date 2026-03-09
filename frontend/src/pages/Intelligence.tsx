@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useWebSocket } from '../hooks/useWebSocket'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -40,7 +41,7 @@ import {
   getPrefs,
   setBriefingLastRun,
 } from '../api/client'
-import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary } from '../api/types'
+import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, WSEvent } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -476,6 +477,14 @@ function MentionCard({
           </span>
         )}
 
+        {/* Acknowledged badge (user reacted to the mention) */}
+        {group.mention_msg.my_reaction && !group.replied && (
+          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-400 shrink-0">
+            <span className="text-[10px] leading-none">{group.mention_msg.my_reaction}</span>
+            acknowledged
+          </span>
+        )}
+
         {/* Mention icon + time */}
         <AtSign size={11} className="shrink-0 text-amber-400" />
         <span className="shrink-0 text-[10px] text-slate-500">{fmtMsgTime(group.mention_msg.date)}</span>
@@ -529,6 +538,15 @@ const TIME_OPTIONS = [
   { label: '1 month', value: 30 },
 ]
 
+type ActionFilter = 'all' | 'not_acted' | 'acknowledged' | 'replied'
+
+const ACTION_FILTER_OPTIONS: { label: string; value: ActionFilter }[] = [
+  { label: 'All', value: 'all' },
+  { label: 'Not acted', value: 'not_acted' },
+  { label: 'Acknowledged', value: 'acknowledged' },
+  { label: 'Replied', value: 'replied' },
+]
+
 function MentionsTab() {
   const navigate = useNavigate()
   const [groups, setGroups] = useState<MentionGroup[]>([])
@@ -539,6 +557,7 @@ function MentionsTab() {
   const [days, setDays] = useState(7)
   const [groupSearch, setGroupSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
+  const [actionFilter, setActionFilter] = useState<ActionFilter>('all')
   const [availableTags, setAvailableTags] = useState<{ id: number; name: string }[]>([])
 
   // Debounced group search for fetching
@@ -566,14 +585,34 @@ function MentionsTab() {
     getTags().then(setAvailableTags).catch(() => {})
   }, [])
 
-  // Re-fetch when filters change
+  // Re-fetch when server-side filters change
   useEffect(() => {
     fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
   }, [fetchMentions, days, debouncedGroupSearch, tagFilter])
 
+  // Live update: re-fetch when a new incoming message arrives (potential mention)
+  useWebSocket((evt: WSEvent) => {
+    if (evt.type === 'new_message' && !evt.is_outgoing) {
+      // Re-fetch after a short delay so the backend has processed the message
+      setTimeout(() => {
+        fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+      }, 1500)
+    }
+  })
+
   const handleNavigate = (chatId: number, msgId: number) => {
     navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
   }
+
+  // Client-side action filter applied on top of server results
+  const visibleGroups = groups.filter((g) => {
+    const isReplied = g.replied
+    const isAcknowledged = !!g.mention_msg.my_reaction && !isReplied
+    if (actionFilter === 'replied') return isReplied
+    if (actionFilter === 'acknowledged') return isAcknowledged
+    if (actionFilter === 'not_acted') return !isReplied && !isAcknowledged
+    return true
+  })
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -641,6 +680,32 @@ function MentionsTab() {
             ))}
           </div>
         </div>
+
+        {/* Action filter row */}
+        <div className="flex items-center gap-1.5 pb-3">
+          {ACTION_FILTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setActionFilter(opt.value)}
+              className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                actionFilter === opt.value
+                  ? opt.value === 'not_acted'
+                    ? 'bg-slate-500/30 text-slate-200'
+                    : opt.value === 'acknowledged'
+                      ? 'bg-amber-500/25 text-amber-300'
+                      : opt.value === 'replied'
+                        ? 'bg-emerald-500/25 text-emerald-300'
+                        : 'bg-slate-600 text-slate-200'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+          {groups.length > 0 && (
+            <span className="ml-auto text-[10px] text-slate-500">{visibleGroups.length} / {groups.length}</span>
+          )}
+        </div>
       </div>
 
       {/* Content */}
@@ -659,7 +724,7 @@ function MentionsTab() {
           </div>
         )}
 
-        {!loading && !error && groups.length === 0 && (
+        {!loading && !error && visibleGroups.length === 0 && (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-400">
               <AtSign size={24} />
@@ -667,15 +732,17 @@ function MentionsTab() {
             <div>
               <p className="text-sm font-medium text-slate-300">No mentions found</p>
               <p className="mt-1 text-xs text-slate-500">
-                Try adjusting the time window or filters.
+                {actionFilter !== 'all'
+                  ? `No ${actionFilter.replace('_', ' ')} mentions. Try a different filter.`
+                  : 'Try adjusting the time window or filters.'}
               </p>
             </div>
           </div>
         )}
 
-        {!loading && !error && groups.length > 0 && (
+        {!loading && !error && visibleGroups.length > 0 && (
           <div className="space-y-2">
-            {groups.map((group, i) => (
+            {visibleGroups.map((group, i) => (
               <MentionCard
                 key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`}
                 group={group}

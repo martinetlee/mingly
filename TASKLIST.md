@@ -19,3 +19,13 @@
 - [x] in the chat list, when scrolling down to the end, it should trigger to load more chats
 - [x] in the intelligence page, make another tab that does summary for briefing and tracking daily or weekly (this is settable at settings page, general tab). by default the  update would be triggered at 9am. If the app was opened after 9am, the app should also trigger the update. For tracked chats, the update should summarize the conversation in one line, and place more importance at messages with the user when summarizing. For chats categorized as brief, the update should ignore the chit chat messages, focus on messages with information, links, technical, and summarize the conversation but in more detail, highlight the topics that are being discussed, or theme that has emerged. Allow the user to trigger the update manually in this page as well.
 - [x] now when we reply to a certain message, in the chat the message doesn't look like it was replying to a specific message. we should show this as the official telegram app.
+- [x] allow us to react to messages with emoji
+- [x] in the mention tab of intelligence page, if the message is being reacted by the user, mark it as [acknowledged]
+- [x] in the mention tab of intelligence page, allow us to filter by (not acted, acknowledged, replied)
+- [x] if the user is on the mention tab of intelligence page, when new messages come in with mentions, also add it in.
+- [] once a daily briefing is created, group them by the time generated, and persist them in database. There should also be a way to remove them (by the time generated). This way user can see all the past daily briefing that was generated.
+- [] allow user to set briefing time (when to generate, and also in what frequency), the title should reflect that.
+- [] the chat in the intelligence page doesn't have context persisted within the chat, right? we should architect it so that it has context of the previous messages (but not outside of the chat).
+- [] in the readme section, add details about privacy of using the app.
+- [] in the mention tab of intelligence page, if a message contains a photo, also show them as in the regular chat.
+- [] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.

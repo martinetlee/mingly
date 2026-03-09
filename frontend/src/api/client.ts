@@ -129,6 +129,12 @@ export const setBriefing = (telegram_id: number, briefing: boolean) =>
     body: JSON.stringify({ briefing }),
   })
 
+export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number, emoji: string | null) =>
+  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_telegram_id}/react`, {
+    method: 'POST',
+    body: JSON.stringify({ emoji }),
+  })
+
 // --- Tags ---
 
 export const getTags = () =>

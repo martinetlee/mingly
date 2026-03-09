@@ -72,6 +72,7 @@ export interface Message {
   user_flagged: boolean
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
+  my_reaction?: string | null
 }
 
 export interface ContactPosition {
@@ -194,6 +195,7 @@ export interface MentionMessage {
   date: string
   is_outgoing: boolean
   media_type: string | null
+  my_reaction?: string | null
 }
 
 export interface MentionGroup {

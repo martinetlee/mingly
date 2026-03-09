@@ -445,6 +445,7 @@ async def intelligence_mentions(
             "date": m.date.isoformat() if m.date else None,
             "is_outgoing": m.is_outgoing,
             "media_type": m.media_type,
+            "my_reaction": getattr(m, "my_reaction", None),
         }
 
     groups = []

@@ -7,9 +7,10 @@ interface Props {
   chatType: string
   highlightTelegramId?: number | null
   onReply?: (msg: Message) => void
+  onReact?: (msg: Message, emoji: string | null) => void
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
   const highlightRef = useRef<HTMLDivElement>(null)
@@ -55,6 +56,7 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
               showSender={showSender}
               highlighted={isHighlighted}
               onReply={onReply}
+              onReact={onReact}
             />
           </div>
         )

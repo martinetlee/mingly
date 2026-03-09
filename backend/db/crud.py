@@ -257,6 +257,28 @@ async def update_chat_sync(db: AsyncSession, telegram_id: int) -> None:
         await db.commit()
 
 
+async def set_my_reaction(
+    db: AsyncSession,
+    chat_id: int,
+    telegram_msg_id: int,
+    emoji: Optional[str],
+) -> Optional[Message]:
+    """Set or clear the current user's reaction on a message."""
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == chat_id,
+            Message.telegram_id == telegram_msg_id,
+        ).limit(1)
+    )
+    msg = result.scalars().first()
+    if not msg:
+        return None
+    msg.my_reaction = emoji
+    await db.commit()
+    await db.refresh(msg)
+    return msg
+
+
 # --- Tags ---
 
 async def get_all_tags(db: AsyncSession) -> list[Tag]:

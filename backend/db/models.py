@@ -44,6 +44,7 @@ class Message(Base):
     importance_reason: Mapped[Optional[str]] = mapped_column(Text)
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     reply_to_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

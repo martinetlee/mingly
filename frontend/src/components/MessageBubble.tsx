@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Reply } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { Message } from '../api/types'
@@ -8,7 +8,11 @@ interface Props {
   showSender: boolean
   highlighted?: boolean
   onReply?: (msg: Message) => void
+  onReact?: (msg: Message, emoji: string | null) => void
 }
+
+// Common quick-reaction emojis (mirrors Telegram's default set)
+const QUICK_EMOJIS = ['👍', '❤️', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🙏', '👌', '🎉']
 
 function formatTime(dateStr: string) {
   return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -51,27 +55,85 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply }: Props) {
+/** Floating emoji picker shown on hover */
+function EmojiPicker({
+  isOut,
+  myReaction,
+  onSelect,
+}: {
+  isOut: boolean
+  myReaction: string | null | undefined
+  onSelect: (emoji: string | null) => void
+}) {
+  return (
+    <div
+      className={`absolute bottom-full mb-1 z-50 flex gap-0.5 rounded-xl border border-slate-600 bg-slate-800 shadow-xl p-1 ${
+        isOut ? 'right-0' : 'left-0'
+      }`}
+    >
+      {QUICK_EMOJIS.map((e) => (
+        <button
+          key={e}
+          onClick={() => onSelect(myReaction === e ? null : e)}
+          className={`flex h-7 w-7 items-center justify-center rounded-lg text-base transition-all hover:scale-125 hover:bg-slate-700 ${
+            myReaction === e ? 'bg-indigo-500/30 ring-1 ring-indigo-400' : ''
+          }`}
+          title={myReaction === e ? 'Remove reaction' : e}
+        >
+          {e}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
   const [hovered, setHovered] = useState(false)
+  const [showPicker, setShowPicker] = useState(false)
+  const pickerRef = useRef<HTMLDivElement>(null)
   const reply = message.reply_to_preview
+
+  const handleSelectEmoji = (emoji: string | null) => {
+    setShowPicker(false)
+    onReact?.(message, emoji)
+  }
 
   return (
     <div
       className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 group/bubble ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseLeave={() => { setHovered(false); setShowPicker(false) }}
     >
-      {/* Reply button for outgoing messages — appears on the left */}
-      {isOut && onReply && (
-        <button
-          onClick={() => onReply(message)}
-          className={`mr-1 self-center rounded-full p-1 text-slate-500 transition-all hover:bg-slate-700 hover:text-slate-300 ${hovered ? 'opacity-100' : 'opacity-0'}`}
-          title="Reply"
-        >
-          <Reply size={14} />
-        </button>
+      {/* Action buttons for outgoing messages — appear on the left */}
+      {isOut && (
+        <div className={`mr-1 flex items-center gap-0.5 self-center transition-opacity ${hovered ? 'opacity-100' : 'opacity-0'}`}>
+          {/* Emoji reaction button */}
+          {onReact && (
+            <div className="relative" ref={pickerRef}>
+              <button
+                onClick={() => setShowPicker((v) => !v)}
+                className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-amber-400 transition-all"
+                title="React with emoji"
+              >
+                <span className="text-sm leading-none">😊</span>
+              </button>
+              {showPicker && (
+                <EmojiPicker isOut={isOut} myReaction={message.my_reaction} onSelect={handleSelectEmoji} />
+              )}
+            </div>
+          )}
+          {onReply && (
+            <button
+              onClick={() => onReply(message)}
+              className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all"
+              title="Reply"
+            >
+              <Reply size={14} />
+            </button>
+          )}
+        </div>
       )}
 
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
@@ -137,35 +199,70 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           )}
         </div>
 
-        {/* Reactions */}
-        {message.reactions && message.reactions.length > 0 && (
+        {/* Reactions row: existing aggregate reactions + my reaction highlight */}
+        {(message.reactions && message.reactions.length > 0) || message.my_reaction ? (
           <div className={`flex flex-wrap gap-1 mt-0.5 ${isOut ? 'mr-1' : 'ml-1'}`}>
-            {message.reactions.map((r, i) => (
-              <span
+            {(message.reactions ?? []).map((r, i) => (
+              <button
                 key={i}
-                className="inline-flex items-center gap-0.5 rounded-full bg-slate-700/80 border border-slate-600 px-1.5 py-0.5 text-xs"
+                onClick={() => onReact?.(message, message.my_reaction === r.emoji ? null : r.emoji)}
+                className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-xs transition-all hover:border-indigo-400 ${
+                  message.my_reaction === r.emoji
+                    ? 'border-indigo-400/60 bg-indigo-500/20 text-indigo-300'
+                    : 'border-slate-600 bg-slate-700/80 text-slate-300'
+                }`}
+                title={message.my_reaction === r.emoji ? 'Remove reaction' : `React with ${r.emoji}`}
               >
                 <span>{r.emoji}</span>
                 <span className="text-slate-400">{r.count}</span>
-              </span>
+              </button>
             ))}
+            {/* Show my_reaction pill if not already in aggregate reactions */}
+            {message.my_reaction && !(message.reactions ?? []).some((r) => r.emoji === message.my_reaction) && (
+              <button
+                onClick={() => onReact?.(message, null)}
+                className="inline-flex items-center gap-0.5 rounded-full border border-indigo-400/60 bg-indigo-500/20 px-1.5 py-0.5 text-xs text-indigo-300 hover:border-red-400/60 transition-all"
+                title="Remove reaction"
+              >
+                <span>{message.my_reaction}</span>
+                <span className="text-slate-400">1</span>
+              </button>
+            )}
           </div>
-        )}
+        ) : null}
 
         <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
           {formatTime(message.date)}
         </span>
       </div>
 
-      {/* Reply button for incoming messages — appears on the right */}
-      {!isOut && onReply && (
-        <button
-          onClick={() => onReply(message)}
-          className={`ml-1 self-center rounded-full p-1 text-slate-500 transition-all hover:bg-slate-700 hover:text-slate-300 ${hovered ? 'opacity-100' : 'opacity-0'}`}
-          title="Reply"
-        >
-          <Reply size={14} />
-        </button>
+      {/* Action buttons for incoming messages — appear on the right */}
+      {!isOut && (
+        <div className={`ml-1 flex items-center gap-0.5 self-center transition-opacity ${hovered ? 'opacity-100' : 'opacity-0'}`}>
+          {onReact && (
+            <div className="relative" ref={pickerRef}>
+              <button
+                onClick={() => setShowPicker((v) => !v)}
+                className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-amber-400 transition-all"
+                title="React with emoji"
+              >
+                <span className="text-sm leading-none">😊</span>
+              </button>
+              {showPicker && (
+                <EmojiPicker isOut={isOut} myReaction={message.my_reaction} onSelect={handleSelectEmoji} />
+              )}
+            </div>
+          )}
+          {onReply && (
+            <button
+              onClick={() => onReply(message)}
+              className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all"
+              title="Reply"
+            >
+              <Reply size={14} />
+            </button>
+          )}
+        </div>
       )}
     </div>
   )

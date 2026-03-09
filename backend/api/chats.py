@@ -205,9 +205,47 @@ async def get_messages(
             "user_flagged": m.user_flagged,
             "reply_to_telegram_id": m.reply_to_telegram_id,
             "reply_to_preview": reply_preview,
+            "my_reaction": m.my_reaction,
         }
 
     return [_serialize(row) for row in reversed(rows)]
+
+
+class ReactRequest(BaseModel):
+    emoji: str | None = None
+
+
+@router.post("/{telegram_id}/messages/{msg_telegram_id}/react")
+async def react_to_message(
+    telegram_id: int,
+    msg_telegram_id: int,
+    req: ReactRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Send or remove the current user's emoji reaction on a message via Telethon."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram not connected")
+
+    try:
+        from telethon.tl.functions.messages import SendReactionRequest
+        from telethon.tl.types import ReactionEmoji
+
+        reaction_list = [ReactionEmoji(emoticon=req.emoji)] if req.emoji else []
+        await client(SendReactionRequest(
+            peer=telegram_id,
+            msg_id=msg_telegram_id,
+            reaction=reaction_list,
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send reaction: {e}")
+
+    # Persist to local DB
+    msg = await crud.set_my_reaction(db, telegram_id, msg_telegram_id, req.emoji)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {"success": True, "my_reaction": msg.my_reaction}
 
 
 @router.post("/{telegram_id}/sync")

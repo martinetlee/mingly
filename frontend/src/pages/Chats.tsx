@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, Phone, Twitter, Linkedin, StickyNote, Building2, Pencil, UserPlus } from 'lucide-react'
 import type { Chat, ChatMember, Contact, ContactPosition, Folder, Message, WSEvent, Tag, TagSuggestion } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, updateContact, addPosition, removePosition, markChatRead } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, updateContact, addPosition, removePosition, markChatRead, reactToMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
@@ -985,6 +985,19 @@ export default function Chats() {
     await loadMessages(selectedChat)
   }
 
+  const handleReact = async (msg: Message, emoji: string | null) => {
+    if (!selectedChat) return
+    try {
+      await reactToMessage(selectedChat.telegram_id, msg.telegram_id, emoji)
+      // Update the message's my_reaction in local state immediately
+      setMessages((prev) =>
+        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, my_reaction: emoji } : m)
+      )
+    } catch {
+      // silently ignore
+    }
+  }
+
   const folderFiltered = selectedFolder === null
     ? chats
     : (() => {
@@ -1165,7 +1178,7 @@ export default function Chats() {
                       </button>
                     </div>
                   )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} />
+                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} />
                 </div>
               )}
 

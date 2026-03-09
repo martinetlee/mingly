@@ -47,6 +47,8 @@ async def init_db():
             "ALTER TABLE contact_positions ADD COLUMN ended_at TEXT",
             # Reply-to threading in messages
             "ALTER TABLE messages ADD COLUMN reply_to_telegram_id INTEGER",
+            # User's own reaction to a message (for acknowledged tracking in mentions)
+            "ALTER TABLE messages ADD COLUMN my_reaction TEXT",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))
