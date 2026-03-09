@@ -544,6 +544,52 @@ async def intelligence_chat(
 # Briefing / Summary endpoint
 # ---------------------------------------------------------------------------
 
+def _build_message_map(messages_text: str) -> Tuple[dict, set]:
+    """
+    Parse the messages_text sent to the LLM and return:
+      pos_to_tid  – {1-indexed-position: telegram_id}
+      valid_tids  – set of all telegram_ids present in the context
+    """
+    pos_to_tid: dict = {}
+    valid_tids: set = set()
+    for line in messages_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'\[id:(\d+)\]', line)
+        if m:
+            tid = int(m.group(1))
+            pos = len(pos_to_tid) + 1  # 1-indexed
+            pos_to_tid[pos] = tid
+            valid_tids.add(tid)
+    return pos_to_tid, valid_tids
+
+
+def _resolve_source_ids(
+    raw_ids: List[int], pos_to_tid: dict, valid_tids: set
+) -> List[int]:
+    """
+    Remap LLM-returned source IDs to actual telegram IDs:
+      - If the value is already a valid telegram_id in the context → keep it
+      - If the value looks like a 1-indexed position → map to telegram_id
+      - Otherwise discard
+    Deduplicates while preserving order.
+    """
+    resolved: List[int] = []
+    seen: set = set()
+    for sid in raw_ids:
+        if sid in valid_tids:
+            result = sid  # already a real telegram_id
+        elif sid in pos_to_tid:
+            result = pos_to_tid[sid]  # position number → telegram_id
+        else:
+            continue  # neither valid telegram_id nor known position
+        if result not in seen:
+            seen.add(result)
+            resolved.append(result)
+    return resolved
+
+
 def _extract_ids(ids_raw: list) -> List[int]:
     """Normalise a raw source_ids list to plain ints, capped at 20."""
     valid: List[int] = []
@@ -711,7 +757,11 @@ async def _summarize_chat(
         if resp.status_code == 200:
             data = resp.json()
             raw = data["choices"][0]["message"].get("content", "").strip()
-            return _parse_summary_response(raw)
+            summary, source_ids = _parse_summary_response(raw)
+            # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
+            pos_to_tid, valid_tids = _build_message_map(messages_text)
+            source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
+            return summary, source_ids
     except Exception:
         pass
     return "", []
@@ -760,7 +810,11 @@ async def _summarize_important_contact(
         if resp.status_code == 200:
             data = resp.json()
             raw = data["choices"][0]["message"].get("content", "").strip()
-            return _parse_summary_response(raw)
+            summary, source_ids = _parse_summary_response(raw)
+            # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
+            pos_to_tid, valid_tids = _build_message_map(messages_text)
+            source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
+            return summary, source_ids
     except Exception:
         pass
     return "", []
