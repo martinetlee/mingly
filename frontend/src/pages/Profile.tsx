@@ -93,13 +93,13 @@ export default function Profile() {
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl font-bold text-gray-100">{displayName}</h1>
               {profile.is_verified && (
-                <BadgeCheck size={18} className="text-sky-400" title="Verified" />
+                <span title="Verified"><BadgeCheck size={18} className="text-sky-400" /></span>
               )}
               {profile.is_premium && (
-                <Crown size={16} className="text-amber-400" title="Premium" />
+                <span title="Premium"><Crown size={16} className="text-amber-400" /></span>
               )}
               {profile.is_bot && (
-                <Bot size={16} className="text-violet-400" title="Bot" />
+                <span title="Bot"><Bot size={16} className="text-violet-400" /></span>
               )}
             </div>
             {profile.username && (

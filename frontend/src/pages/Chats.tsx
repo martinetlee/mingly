@@ -721,9 +721,9 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
                     )}
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {m.is_bot && <Bot size={10} className="text-violet-400" title="Bot" />}
-                    {m.role === 'creator' && <Crown size={10} className="text-amber-400" title="Creator" />}
-                    {m.role === 'admin' && <Shield size={10} className="text-sky-400" title="Admin" />}
+                    {m.is_bot && <span title="Bot"><Bot size={10} className="text-violet-400" /></span>}
+                    {m.role === 'creator' && <span title="Creator"><Crown size={10} className="text-amber-400" /></span>}
+                    {m.role === 'admin' && <span title="Admin"><Shield size={10} className="text-sky-400" /></span>}
                   </div>
                 </Link>
               ))}
