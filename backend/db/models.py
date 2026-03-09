@@ -141,5 +141,6 @@ class BriefingEntry(Base):
     run_id: Mapped[int] = mapped_column(Integer, ForeignKey("briefing_runs.id", ondelete="CASCADE"), nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chat_name: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing'
+    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact'
     summary: Mapped[str] = mapped_column(Text, nullable=False)
+    sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON: [{chat_id, telegram_id}]

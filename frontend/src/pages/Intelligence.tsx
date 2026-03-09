@@ -44,7 +44,7 @@ import {
   getBriefingHistory,
   deleteBriefingRun,
 } from '../api/client'
-import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, BriefingRun, WSEvent } from '../api/types'
+import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -868,8 +868,32 @@ function shouldAutoRun(schedule: string, lastRun: string | null): boolean {
   return last < todayMidnight
 }
 
+// Small source-link badges that navigate to the message in context
+function SourceLinks({ sources, onNavigate }: { sources?: BriefingSource[]; onNavigate: (chatId: number, msgId: number) => void }) {
+  if (!sources || sources.length === 0) return null
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {sources.map((src, i) => (
+        <button
+          key={i}
+          onClick={() => onNavigate(src.chat_id, src.telegram_id)}
+          className="rounded px-1.5 py-0.5 text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
+          title={`Jump to message ${src.telegram_id}`}
+        >
+          ↗ source {i + 1}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // Sub-component: renders the chat summaries within a briefing run
 function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
+  const nav = useNavigate()
+  const handleNavigate = (chatId: number, msgId: number) => {
+    nav(`/chats?chatId=${chatId}&msgId=${msgId}`)
+  }
+
   const trackedSummaries = entries.filter((s) => s.category === 'tracked')
   const briefingSummaries = entries.filter((s) => s.category === 'briefing')
   const importantContactSummaries = entries.filter((s) => s.category === 'important_contact')
@@ -896,6 +920,7 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
                 <p className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
                   {s.summary}
                 </p>
+                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
               </div>
             ))}
           </div>
@@ -921,6 +946,7 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
               >
                 <p className="mb-1 text-[11px] font-medium text-violet-300">{s.chat_name}</p>
                 <p className="text-[11px] leading-relaxed text-slate-300">{s.summary}</p>
+                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
               </div>
             ))}
           </div>
@@ -948,6 +974,7 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
                 <div className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
                   {s.summary}
                 </div>
+                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
               </div>
             ))}
           </div>

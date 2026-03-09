@@ -30,6 +30,6 @@
 - [x] in the mention tab of intelligence page, if a message contains a photo, also show them as in the regular chat.
 - [x] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.
 - [x] allow us to mark telegram profile as important
-- [] the update provided in briefing of the intelligence page should summarize the messages of the important profiles.
+- [x] the update provided in briefing of the intelligence page should summarize the messages of the important profiles.
 - [] the update provided in briefing should provide sources, i.e. links to the messages about the update. link to the most representative message of that line of summary.
 - [] when scrolling down on the chat list and new chat is seen, sync 25 messages from each chat that was loaded. when a new message comes in and pushes a chat to the top, if the chat was not previously in the chat list, then sync 25 messages from that chat. A potential direction is basically to make sure to sync 25 messages from chat that newly appeared from the chatlist.

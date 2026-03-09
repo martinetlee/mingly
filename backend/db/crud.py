@@ -535,6 +535,7 @@ async def add_briefing_entry(
     chat_name: str,
     category: str,
     summary: str,
+    sources_json: Optional[str] = None,
 ) -> BriefingEntry:
     entry = BriefingEntry(
         run_id=run_id,
@@ -542,6 +543,7 @@ async def add_briefing_entry(
         chat_name=chat_name,
         category=category,
         summary=summary,
+        sources_json=sources_json,
     )
     db.add(entry)
     await db.commit()

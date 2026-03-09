@@ -543,6 +543,26 @@ async def intelligence_chat(
 # Briefing / Summary endpoint
 # ---------------------------------------------------------------------------
 
+def _parse_summary_response(raw: str) -> tuple[str, list[int]]:
+    """
+    Parse a summary response that may be plain text or JSON with summary + source_ids.
+    Returns (summary_text, list_of_telegram_ids).
+    """
+    raw = raw.strip()
+    # Try to parse as JSON first
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            summary = str(obj.get("summary", "")).strip()
+            ids = obj.get("source_ids", [])
+            if isinstance(ids, list):
+                return summary, [int(x) for x in ids if str(x).lstrip("-").isdigit()]
+    except Exception:
+        pass
+    # Plain text fallback
+    return raw, []
+
+
 async def _summarize_chat(
     client: httpx.AsyncClient,
     base_url: str,
@@ -550,14 +570,16 @@ async def _summarize_chat(
     chat_name: str,
     chat_category: str,
     messages_text: str,
-) -> str:
-    """Call LLM to produce a summary; returns the summary string."""
+) -> tuple[str, list[int]]:
+    """Call LLM to produce a summary + source telegram_ids; returns (summary, [ids])."""
     if chat_category == "tracked":
         system = (
             "You are a concise assistant. Given recent Telegram messages from a chat, "
             "produce a single sentence (max 30 words) summarising what was discussed. "
             "Focus especially on any messages involving the user (marked as outgoing). "
-            "Output only the summary sentence, nothing else."
+            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+            "Respond ONLY with valid JSON in this exact format: "
+            "{\"summary\": \"<one sentence>\", \"source_ids\": [<1-2 most representative message IDs>]}"
         )
     else:
         system = (
@@ -566,10 +588,54 @@ async def _summarize_chat(
             "informational content, links, technical discussion. "
             "Start with a 1-2 sentence overview, then list up to 4 key topics or themes "
             "as bullet points (each starting with '•'). "
-            "Output only the briefing text, no extra commentary."
+            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+            "Respond ONLY with valid JSON in this exact format: "
+            "{\"summary\": \"<briefing text>\", \"source_ids\": [<1-3 most representative message IDs>]}"
         )
 
     user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
+    try:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                "max_tokens": 400,
+                "temperature": 0.3,
+                "stream": False,
+            },
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw = data["choices"][0]["message"].get("content", "").strip()
+            return _parse_summary_response(raw)
+    except Exception:
+        pass
+    return "", []
+
+
+async def _summarize_important_contact(
+    client: httpx.AsyncClient,
+    base_url: str,
+    model: str,
+    contact_name: str,
+    messages_text: str,
+) -> tuple[str, list[int]]:
+    """Summarise what an important contact has been saying; returns (summary, [telegram_ids])."""
+    system = (
+        "You are a concise assistant. Given recent Telegram messages sent by a specific person "
+        "across different chats, produce a brief summary (2-4 sentences) of what they have been "
+        "discussing or communicating. Focus on key topics, notable statements, or any requests "
+        "directed at the user. "
+        "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+        "Respond ONLY with valid JSON in this exact format: "
+        "{\"summary\": \"<summary text>\", \"source_ids\": [<1-2 most representative message IDs>]}"
+    )
+    user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
     try:
         resp = await client.post(
             f"{base_url}/chat/completions",
@@ -587,48 +653,11 @@ async def _summarize_chat(
         )
         if resp.status_code == 200:
             data = resp.json()
-            return data["choices"][0]["message"].get("content", "").strip()
+            raw = data["choices"][0]["message"].get("content", "").strip()
+            return _parse_summary_response(raw)
     except Exception:
         pass
-    return ""
-
-
-async def _summarize_important_contact(
-    client: httpx.AsyncClient,
-    base_url: str,
-    model: str,
-    contact_name: str,
-    messages_text: str,
-) -> str:
-    """Summarise what an important contact has been saying across chats."""
-    system = (
-        "You are a concise assistant. Given recent Telegram messages sent by a specific person "
-        "across different chats, produce a brief summary (2-4 sentences) of what they have been "
-        "discussing or communicating. Focus on key topics, notable statements, or any requests "
-        "directed at the user. Output only the summary, nothing else."
-    )
-    user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
-    try:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_msg},
-                ],
-                "max_tokens": 200,
-                "temperature": 0.3,
-                "stream": False,
-            },
-            timeout=60.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data["choices"][0]["message"].get("content", "").strip()
-    except Exception:
-        pass
-    return ""
+    return "", []
 
 
 @router.get("/intelligence/briefing")
@@ -677,6 +706,7 @@ async def intelligence_briefing(
                         "chat_name": chat.name,
                         "category": category,
                         "summary": "No messages in this period.",
+                        "sources": [],
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
@@ -687,7 +717,7 @@ async def intelligence_briefing(
                     if m.text:
                         ts = m.date.strftime("%m/%d %H:%M")
                         sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
-                        lines.append(f"[{ts}] {sender}: {m.text[:300]}")
+                        lines.append(f"[id:{m.telegram_id}] [{ts}] {sender}: {m.text[:300]}")
 
                 if not lines:
                     entry = {
@@ -695,21 +725,26 @@ async def intelligence_briefing(
                         "chat_name": chat.name,
                         "category": category,
                         "summary": "No text messages in this period.",
+                        "sources": [],
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
                     continue
 
                 messages_text = "\n".join(lines[-150:])  # cap context
-                summary = await _summarize_chat(client, base_url, model, chat.name, category, messages_text)
+                summary, source_ids = await _summarize_chat(client, base_url, model, chat.name, category, messages_text)
                 if not summary:
                     summary = "Summary unavailable."
+
+                # Build source objects: [{chat_id, telegram_id}] for navigation
+                sources = [{"chat_id": chat.telegram_id, "telegram_id": tid} for tid in source_ids]
 
                 entry = {
                     "chat_id": chat.telegram_id,
                     "chat_name": chat.name,
                     "category": category,
                     "summary": summary,
+                    "sources": sources,
                 }
                 collected.append(entry)
                 yield _sse("chat_done", entry)
@@ -734,17 +769,21 @@ async def intelligence_briefing(
                         "chat_name": contact_name,
                         "category": "important_contact",
                         "summary": "No messages in this period.",
+                        "sources": [],
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
                     continue
 
                 lines = []
+                # Keep a mapping from telegram_id -> chat_id for source objects
+                msg_chat_map: dict[int, int] = {}
                 for msg, chat in rows:
                     if msg.text:
                         ts = msg.date.strftime("%m/%d %H:%M")
                         chat_label = chat.name or str(chat.telegram_id)
-                        lines.append(f"[{ts}] [{chat_label}] {msg.text[:300]}")
+                        lines.append(f"[id:{msg.telegram_id}] [{ts}] [{chat_label}] {msg.text[:300]}")
+                        msg_chat_map[msg.telegram_id] = chat.telegram_id
 
                 if not lines:
                     entry = {
@@ -752,23 +791,32 @@ async def intelligence_briefing(
                         "chat_name": contact_name,
                         "category": "important_contact",
                         "summary": "No text messages in this period.",
+                        "sources": [],
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
                     continue
 
                 messages_text = "\n".join(lines[-80:])
-                summary = await _summarize_important_contact(
+                summary, source_ids = await _summarize_important_contact(
                     ic_client, base_url, model, contact_name, messages_text
                 )
                 if not summary:
                     summary = "Summary unavailable."
+
+                # Build source objects including the correct chat_id for each message
+                sources = [
+                    {"chat_id": msg_chat_map[tid], "telegram_id": tid}
+                    for tid in source_ids
+                    if tid in msg_chat_map
+                ]
 
                 entry = {
                     "chat_id": contact.telegram_id,
                     "chat_name": contact_name,
                     "category": "important_contact",
                     "summary": summary,
+                    "sources": sources,
                 }
                 collected.append(entry)
                 yield _sse("chat_done", entry)
@@ -781,6 +829,7 @@ async def intelligence_briefing(
                     run = await crud.create_briefing_run(write_db, days=days)
                     run_id = run.id
                     for e in collected:
+                        sources = e.get("sources", [])
                         await crud.add_briefing_entry(
                             write_db,
                             run_id=run.id,
@@ -788,6 +837,7 @@ async def intelligence_briefing(
                             chat_name=e["chat_name"],
                             category=e["category"],
                             summary=e["summary"],
+                            sources_json=json.dumps(sources) if sources else None,
                         )
             except Exception:
                 pass  # don't fail streaming on persistence error
@@ -819,6 +869,7 @@ async def get_briefing_history(db: AsyncSession = Depends(get_db)):
                     "chat_name": e.chat_name,
                     "category": e.category,
                     "summary": e.summary,
+                    "sources": json.loads(e.sources_json) if e.sources_json else [],
                 }
                 for e in entries
             ],

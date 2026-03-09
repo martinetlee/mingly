@@ -216,11 +216,17 @@ export interface MentionGroup {
   }
 }
 
+export interface BriefingSource {
+  chat_id: number
+  telegram_id: number
+}
+
 export interface BriefingSummary {
   chat_id: number
   chat_name: string
   category: 'tracked' | 'briefing' | 'important_contact'
   summary: string
+  sources?: BriefingSource[]
 }
 
 export interface BriefingHistoryEntry {
@@ -229,6 +235,7 @@ export interface BriefingHistoryEntry {
   chat_name: string
   category: 'tracked' | 'briefing' | 'important_contact'
   summary: string
+  sources?: BriefingSource[]
 }
 
 export interface BriefingRun {
