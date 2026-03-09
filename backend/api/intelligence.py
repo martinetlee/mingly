@@ -2,6 +2,7 @@
 Intelligence endpoint — agentic LLM chat with tool access to the local DB.
 """
 import json
+import re
 import asyncio
 from typing import Any, Optional, Tuple, List
 
@@ -549,6 +550,11 @@ def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
     Returns (summary_text, list_of_telegram_ids).
     """
     raw = raw.strip()
+    # Strip markdown code fences that some LLMs add (```json ... ``` or ``` ... ```)
+    if raw.startswith("```"):
+        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw)
+        raw = re.sub(r'\n?```\s*$', '', raw)
+        raw = raw.strip()
     # Try to parse as JSON first
     try:
         obj = json.loads(raw)
@@ -556,7 +562,15 @@ def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
             summary = str(obj.get("summary", "")).strip()
             ids = obj.get("source_ids", [])
             if isinstance(ids, list):
-                return summary, [int(x) for x in ids if str(x).lstrip("-").isdigit()]
+                valid_ids = []
+                for x in ids:
+                    s = str(x).strip()
+                    # Handle "id:1369" format
+                    if s.startswith("id:"):
+                        s = s[3:]
+                    if s.lstrip("-").isdigit():
+                        valid_ids.append(int(s))
+                return summary, valid_ids
     except Exception:
         pass
     # Plain text fallback
