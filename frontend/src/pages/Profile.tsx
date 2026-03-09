@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { ArrowLeft, Bot, Crown, BadgeCheck, Globe, Phone, AtSign, MessageSquare } from 'lucide-react'
-import type { TelegramProfile } from '../api/types'
-import { getProfile } from '../api/client'
+import { ArrowLeft, Bot, Crown, BadgeCheck, Globe, Phone, AtSign, MessageSquare, Star } from 'lucide-react'
+import type { TelegramProfile, Contact } from '../api/types'
+import { getProfile, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
 
 const STATUS_LABELS: Record<string, string> = {
   online: 'Online',
@@ -23,18 +23,41 @@ export default function Profile() {
   const { userId } = useParams<{ userId: string }>()
   const navigate = useNavigate()
   const [profile, setProfile] = useState<TelegramProfile | null>(null)
+  const [contact, setContact] = useState<Contact | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [togglingImportant, setTogglingImportant] = useState(false)
 
   useEffect(() => {
     if (!userId) return
     setLoading(true)
     setError(null)
-    getProfile(Number(userId))
-      .then(setProfile)
+    const uid = Number(userId)
+    Promise.all([
+      getProfile(uid),
+      getContactByTelegram(uid).catch(() => null),
+    ])
+      .then(([p, c]) => {
+        setProfile(p)
+        setContact(c)
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [userId])
+
+  async function handleToggleImportant() {
+    if (!profile || togglingImportant) return
+    const newVal = !(contact?.is_important ?? false)
+    setTogglingImportant(true)
+    try {
+      const updated = await setContactImportantByTelegram(profile.id, newVal)
+      setContact(updated)
+    } catch {
+      // ignore
+    } finally {
+      setTogglingImportant(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -63,6 +86,7 @@ export default function Profile() {
     : profile.title || `Entity ${profile.id}`
 
   const bioText = profile.bio || profile.about
+  const isImportant = contact?.is_important ?? false
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -100,6 +124,24 @@ export default function Profile() {
               )}
               {profile.is_bot && (
                 <span title="Bot"><Bot size={16} className="text-violet-400" /></span>
+              )}
+              {/* Important toggle — only for user profiles */}
+              {profile.type === 'user' && (
+                <button
+                  onClick={handleToggleImportant}
+                  disabled={togglingImportant}
+                  title={isImportant ? 'Remove from important' : 'Mark as important'}
+                  className={`rounded-full p-1 transition-colors ${
+                    isImportant
+                      ? 'text-amber-400 hover:text-amber-300'
+                      : 'text-slate-600 hover:text-amber-400'
+                  }`}
+                >
+                  <Star
+                    size={18}
+                    className={isImportant ? 'fill-amber-400' : ''}
+                  />
+                </button>
               )}
             </div>
             {profile.username && (

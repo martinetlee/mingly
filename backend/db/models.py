@@ -80,6 +80,7 @@ class Contact(Base):
     twitter_handle: Mapped[Optional[str]] = mapped_column(String)
     linkedin_url: Mapped[Optional[str]] = mapped_column(String)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    is_important: Mapped[bool] = mapped_column(Boolean, default=False)
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCw, Search, X, Plus, Building2, Pencil, Twitter, Linkedin, Phone, StickyNote, ExternalLink, UserMinus, RotateCcw } from 'lucide-react'
+import { RefreshCw, Search, X, Plus, Building2, Pencil, Twitter, Linkedin, Phone, StickyNote, ExternalLink, UserMinus, RotateCcw, Star } from 'lucide-react'
 import type { Contact, ContactPosition } from '../api/types'
-import { getContacts, syncContacts, updateContact, addPosition, removePosition, updatePosition } from '../api/client'
+import { getContacts, syncContacts, updateContact, addPosition, removePosition, updatePosition, setContactImportantByTelegram } from '../api/client'
 import ComboInput from '../components/ComboInput'
 
 function ContactCard({
@@ -25,9 +25,14 @@ function ContactCard({
         {contact.name.charAt(0).toUpperCase()}
       </div>
       <div className="min-w-0 flex-1">
-        <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
-          {contact.name}
-        </p>
+        <div className="flex items-center gap-1.5">
+          <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+            {contact.name}
+          </p>
+          {contact.is_important && (
+            <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" />
+          )}
+        </div>
         {contact.username && (
           <p className="truncate text-xs text-slate-500">@{contact.username}</p>
         )}
@@ -228,6 +233,14 @@ export default function Contacts() {
     setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
   }
 
+  const handleToggleImportant = async () => {
+    if (!selected) return
+    const newVal = !selected.is_important
+    const updated = await setContactImportantByTelegram(selected.telegram_id, newVal)
+    setSelected(updated)
+    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
+  }
+
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     dragging.current = true
@@ -323,12 +336,25 @@ export default function Contacts() {
                 </div>
               </Link>
               <div className="flex-1 min-w-0">
-                <Link
-                  to={`/profile/${selected.telegram_id}`}
-                  className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
-                >
-                  {selected.name}
-                </Link>
+                <div className="flex items-center gap-2">
+                  <Link
+                    to={`/profile/${selected.telegram_id}`}
+                    className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
+                  >
+                    {selected.name}
+                  </Link>
+                  <button
+                    onClick={handleToggleImportant}
+                    title={selected.is_important ? 'Remove from important' : 'Mark as important'}
+                    className={`rounded-full p-0.5 transition-colors ${
+                      selected.is_important
+                        ? 'text-amber-400 hover:text-amber-300'
+                        : 'text-slate-600 hover:text-amber-400'
+                    }`}
+                  >
+                    <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
+                  </button>
+                </div>
                 {selected.username && (
                   <p className="text-sm text-indigo-400">@{selected.username}</p>
                 )}

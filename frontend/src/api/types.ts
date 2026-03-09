@@ -94,6 +94,7 @@ export interface Contact {
   twitter_handle: string | null
   linkedin_url: string | null
   notes: string | null
+  is_important: boolean
   synced_at: string | null
   positions: ContactPosition[]
 }

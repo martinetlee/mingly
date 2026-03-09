@@ -210,8 +210,14 @@ export const getContacts = (search = '', limit = 100, offset = 0) =>
 export const getContact = (contactId: number) =>
   request<Contact>(`/api/contacts/${contactId}`)
 
-export const updateContact = (contactId: number, data: { twitter_handle?: string; linkedin_url?: string; phone?: string; notes?: string }) =>
+export const updateContact = (contactId: number, data: { twitter_handle?: string; linkedin_url?: string; phone?: string; notes?: string; is_important?: boolean }) =>
   request<Contact>(`/api/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const setContactImportantByTelegram = (telegramId: number, is_important: boolean) =>
+  request<Contact>(`/api/contacts/by-telegram/${telegramId}/important`, {
+    method: 'POST',
+    body: JSON.stringify({ is_important }),
+  })
 
 export const addPosition = (
   contactId: number,

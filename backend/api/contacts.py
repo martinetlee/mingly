@@ -20,6 +20,11 @@ class ContactUpdate(BaseModel):
     linkedin_url: Optional[str] = None
     phone: Optional[str] = None
     notes: Optional[str] = None
+    is_important: Optional[bool] = None
+
+
+class ImportantRequest(BaseModel):
+    is_important: bool
 
 
 class PositionCreate(BaseModel):
@@ -56,6 +61,7 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
         "twitter_handle": c.twitter_handle,
         "linkedin_url": c.linkedin_url,
         "notes": c.notes,
+        "is_important": c.is_important,
         "synced_at": c.synced_at,
     }
     if positions is not None:
@@ -172,6 +178,28 @@ async def get_contact_by_telegram(telegram_id: int, db: AsyncSession = Depends(g
     return _contact_dict(contact, positions)
 
 
+@router.post("/by-telegram/{telegram_id}/important")
+async def set_contact_important_by_telegram(
+    telegram_id: int,
+    data: ImportantRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get-or-create a contact by telegram_id and set its importance flag."""
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    if not contact:
+        # Auto-create a minimal contact record
+        contact = Contact(telegram_id=telegram_id)
+        db.add(contact)
+        await db.flush()
+    contact.is_important = data.is_important
+    await db.commit()
+    await db.refresh(contact)
+    positions = await _get_positions(db, contact.id)
+    return _contact_dict(contact, positions)
+
+
 @router.post("")
 async def create_contact(
     data: ContactCreate,
@@ -225,6 +253,8 @@ async def update_contact(
         contact.phone = data.phone.strip() or None
     if data.notes is not None:
         contact.notes = data.notes.strip() or None
+    if data.is_important is not None:
+        contact.is_important = data.is_important
     await db.commit()
     await db.refresh(contact)
     positions = await _get_positions(db, contact.id)
