@@ -272,6 +272,12 @@ export const setBriefingTime = (time: string) =>
     body: JSON.stringify({ time }),
   })
 
+export const setBriefingDay = (day: string) =>
+  request<{ success: boolean; day: string }>('/api/settings/prefs/briefing-day', {
+    method: 'POST',
+    body: JSON.stringify({ day }),
+  })
+
 export const setBriefingLastRun = () =>
   request<{ success: boolean; briefing_last_run: string }>('/api/settings/prefs/briefing-last-run', {
     method: 'POST',

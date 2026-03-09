@@ -82,6 +82,23 @@ async def set_briefing_time(req: BriefingTimeRequest):
     return {"success": True, "time": req.time}
 
 
+class BriefingDayRequest(BaseModel):
+    day: str  # 'monday' | 'tuesday' | ... | 'sunday'
+
+
+@router.post("/prefs/briefing-day")
+async def set_briefing_day(req: BriefingDayRequest):
+    """Set the day of week on which the weekly briefing auto-runs."""
+    valid = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    if req.day not in valid:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid day")
+    prefs = _load_prefs()
+    prefs["briefing_day"] = req.day
+    _save_prefs(prefs)
+    return {"success": True, "day": req.day}
+
+
 @router.post("/prefs/briefing-last-run")
 async def set_briefing_last_run():
     """Mark that the briefing was just run (stores current UTC ISO timestamp)."""

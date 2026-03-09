@@ -43,6 +43,7 @@ import {
   setBriefingLastRun,
   getBriefingHistory,
   deleteBriefingRun,
+  setBriefingDay,
 } from '../api/client'
 import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
 
@@ -995,6 +996,16 @@ const TIMEFRAME_OPTIONS = [
   { label: '30d', value: 30 },
 ]
 
+const DAY_OPTIONS = [
+  { label: 'Mon', value: 'monday'    },
+  { label: 'Tue', value: 'tuesday'   },
+  { label: 'Wed', value: 'wednesday' },
+  { label: 'Thu', value: 'thursday'  },
+  { label: 'Fri', value: 'friday'    },
+  { label: 'Sat', value: 'saturday'  },
+  { label: 'Sun', value: 'sunday'    },
+]
+
 function BriefingTab() {
   // Live run state (current generation)
   const [liveSummaries, setLiveSummaries] = useState<BriefingSummary[]>([])
@@ -1002,9 +1013,13 @@ function BriefingTab() {
   const [progress, setProgress] = useState<{ current: number; total: number; chatName: string } | null>(null)
   const [error, setError] = useState('')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  // Schedule prefs (for auto-run display)
   const [schedule, setSchedule] = useState<'daily' | 'weekly'>('daily')
   const [briefingTime, setBriefingTimeState] = useState<string>('09:00')
+  const [briefingDay, setBriefingDayState] = useState<string>('monday')
+  // Manual generation timeframe (independent of schedule)
   const [selectedDays, setSelectedDays] = useState(1)
+  const scheduleRef = useRef<'daily' | 'weekly'>('daily')
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
 
@@ -1018,12 +1033,12 @@ function BriefingTab() {
       setHistory(runs)
       return runs
     } catch {
-      // ignore
       return []
     }
   }, [])
 
-  const runBriefing = useCallback(async () => {
+  // daysOverride: used by auto-run to force schedule-derived lookback
+  const runBriefing = useCallback(async (daysOverride?: number) => {
     if (runningRef.current) return
     runningRef.current = true
     abortRef.current?.abort()
@@ -1032,8 +1047,9 @@ function BriefingTab() {
     setError('')
     setProgress(null)
     setLiveSummaries([])
+    const days = daysOverride ?? selectedDays
     try {
-      for await (const evt of streamBriefing(selectedDays, abortRef.current.signal)) {
+      for await (const evt of streamBriefing(days, abortRef.current.signal)) {
         const type = evt._event as string
         if (type === 'start') {
           setProgress({ current: 0, total: evt.total as number, chatName: '' })
@@ -1044,7 +1060,6 @@ function BriefingTab() {
         } else if (type === 'done') {
           setLastUpdated(new Date())
           setBriefingLastRun().catch(() => {})
-          // Reload history to include the new run, then auto-expand it
           const runs = await loadHistory()
           if (runs && runs.length > 0) setExpandedRunId(runs[0].id)
         } else if (type === 'error') {
@@ -1061,18 +1076,26 @@ function BriefingTab() {
     }
   }, [selectedDays, loadHistory])
 
+  const handleSetBriefingDay = useCallback((day: string) => {
+    setBriefingDayState(day)
+    setBriefingDay(day).catch(() => {})
+  }, [])
+
   // Load schedule pref, check auto-run, and load history on mount
   useEffect(() => {
     loadHistory()
     getPrefs().then((prefs: Record<string, string>) => {
       const sched = (prefs.briefing_schedule as 'daily' | 'weekly') ?? 'daily'
       const btime = prefs.briefing_time ?? '09:00'
+      const bday  = prefs.briefing_day  ?? 'monday'
       setSchedule(sched)
       setBriefingTimeState(btime)
-      // Initialise timeframe from saved schedule (weekly → 7d, daily → 1d)
-      setSelectedDays(sched === 'weekly' ? 7 : 1)
+      setBriefingDayState(bday)
+      scheduleRef.current = sched
+      // Auto-run uses schedule-derived days (daily=1, weekly=7)
+      const autoRunDays = sched === 'weekly' ? 7 : 1
       if (shouldAutoRun(sched, prefs.briefing_last_run ?? null, btime)) {
-        setTimeout(() => runBriefing(), 500)
+        setTimeout(() => runBriefing(autoRunDays), 500)
       }
     }).catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1103,11 +1126,40 @@ function BriefingTab() {
     <div className="flex flex-1 flex-col overflow-hidden">
       {/* Header bar */}
       <div className="flex shrink-0 items-center justify-between border-b border-slate-700/50 bg-slate-800/40 px-4 py-2.5">
+        {/* Left: schedule info */}
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          <span className="font-medium text-slate-300 capitalize">{schedule}</span>
+          {schedule === 'weekly' && (
+            <>
+              <span className="text-slate-600">·</span>
+              <div className="flex items-center gap-0.5">
+                {DAY_OPTIONS.map((d) => (
+                  <button
+                    key={d.value}
+                    onClick={() => handleSetBriefingDay(d.value)}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                      briefingDay === d.value
+                        ? 'bg-slate-600/60 text-slate-200'
+                        : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          <span className="text-slate-600">·</span>
+          <span>{new Date(`1970-01-01T${briefingTime}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          {lastUpdated && (
+            <span className="text-slate-500">
+              · Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+        </div>
+
+        {/* Right: timeframe picker + generate button */}
         <div className="flex items-center gap-2">
-          <Newspaper size={14} className="text-emerald-400" />
-          <span className="text-xs font-medium text-slate-300">Briefing</span>
-          <span className="text-slate-600 text-xs">·</span>
-          {/* Timeframe selector */}
           <div className="flex items-center gap-1">
             {TIMEFRAME_OPTIONS.map((opt) => (
               <button
@@ -1124,23 +1176,15 @@ function BriefingTab() {
               </button>
             ))}
           </div>
-          <span className="text-xs text-slate-500">
-            · {new Date(`1970-01-01T${briefingTime}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-          </span>
-          {lastUpdated && (
-            <span className="text-xs text-slate-500">
-              · Updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          )}
+          <button
+            onClick={() => runBriefing()}
+            disabled={running}
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40 transition-colors border border-emerald-600/30"
+          >
+            <RotateCcw size={12} className={running ? 'animate-spin' : ''} />
+            {running ? 'Generating…' : 'Generate Now'}
+          </button>
         </div>
-        <button
-          onClick={runBriefing}
-          disabled={running}
-          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40 transition-colors border border-emerald-600/30"
-        >
-          <RotateCcw size={12} className={running ? 'animate-spin' : ''} />
-          {running ? 'Generating…' : 'Generate Now'}
-        </button>
       </div>
 
       {/* Progress bar */}
