@@ -46,15 +46,22 @@ Three tabs for staying informed:
 
 **Briefing**
 - Daily or weekly AI-generated summary of your important chats (configurable in Settings)
-- Auto-triggers at 9am; also triggers on app open if the scheduled run was missed
+- Auto-triggers at the configured time; also triggers on app open if the scheduled run was missed
 - **Tracked chats**: one-line summary, emphasizing messages involving you
 - **Brief chats**: detailed summary focusing on information-dense content, links, technical discussion, and emerging topics — filters out chit-chat
+- **Important contacts**: summary of recent messages from contacts you've starred as important
+- Source links on each summary card to jump directly to the representative message in the chat
+- Past briefings are persisted and viewable as collapsible history cards (with delete)
 - Progress bar while streaming; trigger a manual update anytime
 
+### Contacts & Profiles
+- Mark any Telegram user as **important** (⭐ star) from their profile page or the Contacts panel — important contacts are included in daily/weekly briefings
+
 ### Settings
-- **General**: configure briefing schedule (daily / weekly)
+- **General**: configure briefing schedule (daily / weekly) and the time it auto-runs
 - **Notifications**: All messages / Tracked chats only / Off
 - **AI Models**: configure Ollama endpoint and model, start/stop the Ollama service
+- **Tags**: manage reusable chat tags (name, color, category); assign tags to chats from the chat info panel with AI-powered tag suggestions
 
 ---
 
@@ -190,3 +197,43 @@ Mingly uses a local LLM via [Ollama](https://ollama.com) for:
 - **Briefing generation** — summarizes tracked and brief chats daily or weekly
 
 Configure the Ollama endpoint and model in **Settings → AI Models**. You can start/stop the Ollama service from the same page.
+
+---
+
+## Privacy
+
+Mingly is designed as a **fully local, offline-first application**. Your data never leaves your device unless you explicitly configure it to.
+
+### What stays on your machine
+
+| Data | Where it lives |
+|---|---|
+| Telegram messages, chats, contacts | `mingly.db` (SQLite, local) |
+| Telegram API credentials & session | `vault.enc` (Fernet-encrypted, local) |
+| App preferences | `prefs.json` (local) |
+| Downloaded media | `media/` folder (local) |
+
+### Credentials & Encryption
+
+- Your **Telegram API ID/hash** and **session token** are encrypted at rest using [Fernet](https://cryptography.io/en/latest/fernet/) (AES-128-CBC + HMAC-SHA256), derived from a master password you set on first launch via PBKDF2.
+- The master password itself is **never stored**. Only the encrypted vault file `vault.enc` is written to disk.
+- Decrypted credentials are held only in memory while the app is running and discarded when it exits.
+
+### Telegram Connection
+
+- Mingly connects to Telegram's servers using the official [Telethon](https://docs.telethon.dev) library, which implements the MTProto protocol. This is the same protocol used by all official Telegram clients.
+- **No messages or metadata are relayed through any third-party server.** The connection is directly between your machine and Telegram's infrastructure.
+- Mingly only downloads messages from chats it has been explicitly told to sync (via the Sync button). It does not scan or read all your Telegram data automatically.
+
+### AI / LLM
+
+- Mingly uses a **locally running** LLM via [Ollama](https://ollama.com). All inference runs on your machine — no message content is sent to any external AI service.
+- If you configure a custom Ollama endpoint pointing to a remote server, message excerpts used for summarization and briefing will be sent to that server. Use a local endpoint to keep everything private.
+
+### Network Requests
+
+The only external network connections Mingly makes are:
+1. **Telegram's MTProto servers** — to sync messages and send replies.
+2. **Your configured Ollama endpoint** — for LLM inference (local by default).
+
+No analytics, telemetry, crash reporting, or third-party trackers of any kind are included.

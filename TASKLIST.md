@@ -24,9 +24,9 @@
 - [x] in the mention tab of intelligence page, allow us to filter by (not acted, acknowledged, replied)
 - [x] if the user is on the mention tab of intelligence page, when new messages come in with mentions, also add it in.
 - [x] once a daily briefing is created, group them by the time generated, and persist them in database. There should also be a way to remove them (by the time generated). This way user can see all the past daily briefing that was generated.
-- [] allow user to set briefing time (when to generate, and also in what frequency), the title should reflect that.
+- [x] allow user to set briefing time (when to generate, and also in what frequency), the title should reflect that.
 - [x] the chat in the intelligence page doesn't have context persisted within the chat, right? we should architect it so that it has context of the previous messages (but not outside of the chat).
-- [] in the readme section, add details about privacy of using the app.
+- [x] in the readme section, add details about privacy of using the app.
 - [x] in the mention tab of intelligence page, if a message contains a photo, also show them as in the regular chat.
 - [x] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.
 - [x] allow us to mark telegram profile as important
