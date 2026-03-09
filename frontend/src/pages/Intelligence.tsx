@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Brain,
   Send,
@@ -207,12 +209,68 @@ function ToolCallGroup({ toolCalls }: { toolCalls: ToolCallEvent[] }) {
   )
 }
 
+function MdContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        h1: ({ children }) => <h1 className="mb-2 mt-3 text-base font-semibold text-slate-100">{children}</h1>,
+        h2: ({ children }) => <h2 className="mb-1.5 mt-3 text-sm font-semibold text-slate-200">{children}</h2>,
+        h3: ({ children }) => <h3 className="mb-1 mt-2 text-sm font-medium text-slate-300">{children}</h3>,
+        ul: ({ children }) => <ul className="mb-2 ml-4 list-disc space-y-0.5 last:mb-0">{children}</ul>,
+        ol: ({ children }) => <ol className="mb-2 ml-4 list-decimal space-y-0.5 last:mb-0">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        code: ({ inline, children, ...props }: { inline?: boolean; children?: React.ReactNode; [key: string]: unknown }) =>
+          inline ? (
+            <code className="rounded bg-slate-600/60 px-1 py-0.5 font-mono text-xs text-indigo-300" {...props}>
+              {children}
+            </code>
+          ) : (
+            <code className="block overflow-x-auto rounded-lg bg-slate-800 p-3 font-mono text-xs text-slate-300 leading-relaxed" {...props}>
+              {children}
+            </code>
+          ),
+        pre: ({ children }) => <pre className="mb-2 last:mb-0">{children}</pre>,
+        blockquote: ({ children }) => (
+          <blockquote className="mb-2 border-l-2 border-indigo-500/50 pl-3 text-slate-400 italic last:mb-0">
+            {children}
+          </blockquote>
+        ),
+        a: ({ children, href }) => (
+          <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300">
+            {children}
+          </a>
+        ),
+        strong: ({ children }) => <strong className="font-semibold text-slate-100">{children}</strong>,
+        em: ({ children }) => <em className="italic text-slate-300">{children}</em>,
+        hr: () => <hr className="my-3 border-slate-600/50" />,
+        table: ({ children }) => (
+          <div className="mb-2 overflow-x-auto last:mb-0">
+            <table className="w-full border-collapse text-xs">{children}</table>
+          </div>
+        ),
+        th: ({ children }) => (
+          <th className="border border-slate-600 bg-slate-700/60 px-2 py-1.5 text-left font-medium text-slate-200">
+            {children}
+          </th>
+        ),
+        td: ({ children }) => (
+          <td className="border border-slate-700 px-2 py-1.5 text-slate-300">{children}</td>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  )
+}
+
 function MessageBubble({ msg }: { msg: Message }) {
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end">
         <div className="max-w-[75%] rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-2.5 text-sm text-white">
-          {msg.content}
+          <MdContent content={msg.content} />
         </div>
       </div>
     )
@@ -228,10 +286,10 @@ function MessageBubble({ msg }: { msg: Message }) {
         {toolCalls.length > 1 && <ToolCallGroup toolCalls={toolCalls} />}
 
         {(assistant.content || assistant.streaming) && (
-          <div className="rounded-2xl rounded-tl-sm bg-slate-700 px-4 py-2.5 text-sm text-slate-100 leading-relaxed whitespace-pre-wrap">
-            {assistant.content}
+          <div className="rounded-2xl rounded-tl-sm bg-slate-700 px-4 py-2.5 text-sm text-slate-100">
+            <MdContent content={assistant.content} />
             {assistant.streaming && (
-              <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-slate-400" />
+              <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-slate-400" />
             )}
           </div>
         )}
