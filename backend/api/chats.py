@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -212,7 +213,7 @@ async def get_messages(
 
 
 class ReactRequest(BaseModel):
-    emoji: str | None = None
+    emoji: Optional[str] = None
 
 
 @router.post("/{telegram_id}/messages/{msg_telegram_id}/react")

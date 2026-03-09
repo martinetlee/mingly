@@ -3,7 +3,7 @@ Intelligence endpoint — agentic LLM chat with tool access to the local DB.
 """
 import json
 import asyncio
-from typing import Any
+from typing import Any, Optional, Tuple, List
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -262,10 +262,10 @@ class IntelligenceMessage(BaseModel):
 class IntelligenceChatRequest(BaseModel):
     # Preferred: send conversation_id + the new user message text only.
     # Backend loads full history from DB to build LLM context.
-    conversation_id: int | None = None
-    message: str | None = None
+    conversation_id: Optional[int] = None
+    message: Optional[str] = None
     # Legacy fallback: explicit messages list (kept for compatibility)
-    messages: list[IntelligenceMessage] | None = None
+    messages: Optional[list[IntelligenceMessage]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +543,7 @@ async def intelligence_chat(
 # Briefing / Summary endpoint
 # ---------------------------------------------------------------------------
 
-def _parse_summary_response(raw: str) -> tuple[str, list[int]]:
+def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
     """
     Parse a summary response that may be plain text or JSON with summary + source_ids.
     Returns (summary_text, list_of_telegram_ids).
@@ -570,7 +570,7 @@ async def _summarize_chat(
     chat_name: str,
     chat_category: str,
     messages_text: str,
-) -> tuple[str, list[int]]:
+) -> Tuple[str, List[int]]:
     """Call LLM to produce a summary + source telegram_ids; returns (summary, [ids])."""
     if chat_category == "tracked":
         system = (
@@ -624,7 +624,7 @@ async def _summarize_important_contact(
     model: str,
     contact_name: str,
     messages_text: str,
-) -> tuple[str, list[int]]:
+) -> Tuple[str, List[int]]:
     """Summarise what an important contact has been saying; returns (summary, [telegram_ids])."""
     system = (
         "You are a concise assistant. Given recent Telegram messages sent by a specific person "
