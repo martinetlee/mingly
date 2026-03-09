@@ -41,8 +41,8 @@ export default function Sidebar() {
   return (
     <aside className="flex h-screen w-16 flex-col items-center bg-slate-950 py-4">
       {/* Logo */}
-      <div className="mb-6 flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 text-white font-bold text-sm select-none">
-        M
+      <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
+        <img src="/logo.png" alt="Mingly" className="h-9 w-9 object-contain" />
       </div>
 
       {/* Nav */}

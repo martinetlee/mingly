@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Mingly" width="120" />
+</p>
+
 # Mingly
 
 AI-assisted desktop app that helps you stay on top of important Telegram conversations — chat browser, contact & org profiles, mentions tracking, daily briefings, and AI-powered chat. All data stays on your machine.

@@ -213,9 +213,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500 text-white font-bold text-xl">
-            M
-          </div>
+          <img src="/logo.png" alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
           <h1 className="text-2xl font-semibold text-gray-900">Mingly</h1>
           <p className="mt-1 text-sm text-gray-500">Your Telegram, intelligently organised</p>
         </div>
