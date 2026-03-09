@@ -1009,8 +1009,10 @@ function BriefingTab() {
     try {
       const runs = await getBriefingHistory()
       setHistory(runs)
+      return runs
     } catch {
       // ignore
+      return []
     }
   }, [])
 
@@ -1035,10 +1037,9 @@ function BriefingTab() {
         } else if (type === 'done') {
           setLastUpdated(new Date())
           setBriefingLastRun().catch(() => {})
-          // Reload history to include the new run
-          await loadHistory()
-          // Expand the newest run (first in list after reload)
-          // We'll set it after the reload
+          // Reload history to include the new run, then auto-expand it
+          const runs = await loadHistory()
+          if (runs && runs.length > 0) setExpandedRunId(runs[0].id)
         } else if (type === 'error') {
           setError((evt.message as string) ?? 'Unknown error')
         }
