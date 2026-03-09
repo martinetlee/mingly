@@ -842,10 +842,13 @@ async function* streamBriefing(days: number, signal: AbortSignal): AsyncGenerato
 }
 
 /** Check if briefing should auto-run based on prefs */
-function shouldAutoRun(schedule: string, lastRun: string | null): boolean {
+function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: string = '09:00'): boolean {
   const now = new Date()
-  const nineAM = new Date(now)
-  nineAM.setHours(9, 0, 0, 0)
+  const [hStr, mStr] = briefingTime.split(':')
+  const runHour = parseInt(hStr ?? '9', 10)
+  const runMin = parseInt(mStr ?? '0', 10)
+  const runTime = new Date(now)
+  runTime.setHours(runHour, runMin, 0, 0)
 
   if (!lastRun) return true // Never run
 
@@ -860,8 +863,8 @@ function shouldAutoRun(schedule: string, lastRun: string | null): boolean {
     return last < monday
   }
 
-  // Daily: run if it's past 9am and last run was before 9am today
-  if (now >= nineAM && last < nineAM) return true
+  // Daily: run if it's past the configured run time and last run was before that time today
+  if (now >= runTime && last < runTime) return true
   // Or if last run was yesterday or earlier
   const todayMidnight = new Date(now)
   todayMidnight.setHours(0, 0, 0, 0)
@@ -992,6 +995,7 @@ function BriefingTab() {
   const [error, setError] = useState('')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [schedule, setSchedule] = useState<'daily' | 'weekly'>('daily')
+  const [briefingTime, setBriefingTimeState] = useState<string>('09:00')
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
 
@@ -1054,8 +1058,10 @@ function BriefingTab() {
     loadHistory()
     getPrefs().then((prefs: Record<string, string>) => {
       const sched = (prefs.briefing_schedule as 'daily' | 'weekly') ?? 'daily'
+      const btime = prefs.briefing_time ?? '09:00'
       setSchedule(sched)
-      if (shouldAutoRun(sched, prefs.briefing_last_run ?? null)) {
+      setBriefingTimeState(btime)
+      if (shouldAutoRun(sched, prefs.briefing_last_run ?? null, btime)) {
         setTimeout(() => runBriefing(), 500)
       }
     }).catch(() => {})
@@ -1091,6 +1097,9 @@ function BriefingTab() {
           <Newspaper size={14} className="text-emerald-400" />
           <span className="text-xs font-medium text-slate-300">
             {schedule === 'weekly' ? 'Weekly' : 'Daily'} Briefing
+          </span>
+          <span className="text-xs text-slate-500">
+            · {new Date(`1970-01-01T${briefingTime}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
           {lastUpdated && (
             <span className="text-xs text-slate-500">

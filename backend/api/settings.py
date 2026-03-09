@@ -38,6 +38,10 @@ class BriefingScheduleRequest(BaseModel):
     schedule: str  # 'daily' | 'weekly'
 
 
+class BriefingTimeRequest(BaseModel):
+    time: str  # "HH:MM" in 24h format, e.g. "09:00"
+
+
 @router.get("/prefs")
 async def get_prefs():
     return _load_prefs()
@@ -63,6 +67,19 @@ async def set_briefing_schedule(req: BriefingScheduleRequest):
     prefs["briefing_schedule"] = req.schedule
     _save_prefs(prefs)
     return {"success": True, "schedule": req.schedule}
+
+
+@router.post("/prefs/briefing-time")
+async def set_briefing_time(req: BriefingTimeRequest):
+    """Set the hour/minute at which the briefing auto-runs (local time, 24h HH:MM)."""
+    import re
+    if not re.match(r"^\d{2}:\d{2}$", req.time):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid time format. Use HH:MM.")
+    prefs = _load_prefs()
+    prefs["briefing_time"] = req.time
+    _save_prefs(prefs)
+    return {"success": True, "time": req.time}
 
 
 @router.post("/prefs/briefing-last-run")

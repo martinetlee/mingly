@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, getTags, createTag, updateTag, deleteTag } from '../api/client'
 import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
@@ -461,6 +461,7 @@ export default function Settings() {
 
   // Briefing schedule preference
   const [briefingSchedule, setBriefingSchedule] = useState<'daily' | 'weekly'>('daily')
+  const [briefingTime, setBriefingTime] = useState<string>('09:00')
 
   const refreshOllamaStatus = useCallback(async () => {
     try {
@@ -493,6 +494,7 @@ export default function Settings() {
       .then((prefs: Record<string, string>) => {
         if (prefs.notif_pref) setNotifPref(prefs.notif_pref as NotifPref)
         if (prefs.briefing_schedule) setBriefingSchedule(prefs.briefing_schedule as 'daily' | 'weekly')
+        if (prefs.briefing_time) setBriefingTime(prefs.briefing_time)
       })
       .catch(() => {})
 
@@ -683,6 +685,12 @@ export default function Settings() {
     apiSetBriefingSchedule(schedule).catch(() => {})
   }
 
+  const handleBriefingTimeChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const time = e.target.value  // HH:MM
+    setBriefingTime(time)
+    apiSetBriefingTime(time).catch(() => {})
+  }
+
   // ── Derived ────────────────────────────────────────────────────────────
 
   const pendingModel = MODELS.find((m) => m.id === pendingModelId) ?? null
@@ -855,25 +863,41 @@ export default function Settings() {
               <h2 className="mb-1 text-sm font-medium text-slate-300">Briefing Schedule</h2>
               <p className="mb-4 text-xs text-slate-400">
                 How often the Intelligence → Briefing tab auto-updates chat summaries.
-                The update runs at 9 AM, or on first app open after 9 AM.
+                The update runs at the configured time, or on first app open after that time.
               </p>
-              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <label className="mb-1.5 block text-xs font-medium text-slate-400">
-                  Update frequency
-                </label>
-                <select
-                  value={briefingSchedule}
-                  onChange={handleBriefingScheduleChange}
-                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
-                >
-                  <option value="daily">Daily (last 24 hours)</option>
-                  <option value="weekly">Weekly (last 7 days)</option>
-                </select>
-                <p className="mt-2 text-xs text-slate-500">
-                  {briefingSchedule === 'daily'
-                    ? 'Summarises the past day of messages each morning.'
-                    : 'Summarises the past week of messages each Monday morning.'}
-                </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4 flex flex-col gap-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                    Update frequency
+                  </label>
+                  <select
+                    value={briefingSchedule}
+                    onChange={handleBriefingScheduleChange}
+                    className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                  >
+                    <option value="daily">Daily (last 24 hours)</option>
+                    <option value="weekly">Weekly (last 7 days)</option>
+                  </select>
+                  <p className="mt-2 text-xs text-slate-500">
+                    {briefingSchedule === 'daily'
+                      ? 'Summarises the past day of messages each morning.'
+                      : 'Summarises the past week of messages each Monday morning.'}
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                    Run time (local time)
+                  </label>
+                  <input
+                    type="time"
+                    value={briefingTime}
+                    onChange={handleBriefingTimeChange}
+                    className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                  />
+                  <p className="mt-2 text-xs text-slate-500">
+                    The briefing will auto-run at this time each {briefingSchedule === 'weekly' ? 'Monday' : 'day'}, or on first app open after this time.
+                  </p>
+                </div>
               </div>
             </section>
           </>
