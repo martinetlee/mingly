@@ -377,6 +377,7 @@ function MentionMsgRow({
   msg: MentionMessage
   highlighted: boolean
 }) {
+  const hasPhoto = msg.media_url && msg.media_type === 'photo'
   return (
     <div
       className={`rounded-lg px-3 py-2 text-xs leading-relaxed transition-colors ${
@@ -391,9 +392,23 @@ function MentionMsgRow({
         </span>
         <span className="shrink-0 text-[10px] text-slate-500">{fmtMsgTime(msg.date)}</span>
       </div>
-      <p className="text-slate-400 leading-snug line-clamp-3">
-        {msg.text || <span className="italic text-slate-500">{msg.media_type ? `[${msg.media_type}]` : '[no text]'}</span>}
-      </p>
+      {msg.text && (
+        <p className="text-slate-400 leading-snug line-clamp-3">{msg.text}</p>
+      )}
+      {hasPhoto && (
+        <img
+          src={msg.media_url!}
+          alt="photo"
+          className="mt-1 rounded-md object-cover"
+          style={{ maxWidth: 220, maxHeight: 180 }}
+        />
+      )}
+      {msg.media_type && !hasPhoto && !msg.text && (
+        <span className="italic text-slate-500">[{msg.media_type}]</span>
+      )}
+      {!msg.text && !msg.media_type && (
+        <span className="italic text-slate-500">[no text]</span>
+      )}
     </div>
   )
 }

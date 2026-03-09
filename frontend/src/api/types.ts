@@ -195,6 +195,7 @@ export interface MentionMessage {
   date: string
   is_outgoing: boolean
   media_type: string | null
+  media_url: string | null
   my_reaction?: string | null
 }
 

@@ -440,6 +440,7 @@ async def intelligence_mentions(
     )
 
     def _serialize_msg(m: Any) -> dict:
+        media_path = getattr(m, "media_path", None)
         return {
             "id": m.id,
             "telegram_id": m.telegram_id,
@@ -450,6 +451,7 @@ async def intelligence_mentions(
             "date": m.date.isoformat() if m.date else None,
             "is_outgoing": m.is_outgoing,
             "media_type": m.media_type,
+            "media_url": f"/api/media/{media_path}" if media_path else None,
             "my_reaction": getattr(m, "my_reaction", None),
         }
 
