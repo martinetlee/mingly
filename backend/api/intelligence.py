@@ -573,6 +573,35 @@ def _try_json_parse(text: str):
     return None
 
 
+def _renumber_citations(summary: str, source_ids: List[int]) -> Tuple[str, List[int]]:
+    """
+    Renumber inline [n] citation markers in summary to be strictly sequential [1],[2],[3]...
+    starting from the first citation found, regardless of what numbers the LLM used.
+
+    source_ids must already be ordered by first-appearance of the original citation numbers
+    (i.e. source_ids[0] = telegram ID for whichever [n] appears first in the text).
+
+    Returns (renumbered_summary, trimmed_source_ids).
+    """
+    # Collect unique citation numbers in order of first appearance
+    mapping: dict = {}  # original_n -> sequential_counter
+    for m in re.finditer(r'\[(\d+)\]', summary):
+        n = int(m.group(1))
+        if n not in mapping:
+            mapping[n] = len(mapping) + 1  # 1-based sequential counter
+
+    if not mapping:
+        return summary, source_ids
+
+    def _replace(m: re.Match) -> str:
+        return f'[{mapping[int(m.group(1))]}]'
+
+    new_summary = re.sub(r'\[(\d+)\]', _replace, summary)
+    # Trim source_ids to however many unique citations were found
+    new_source_ids = source_ids[:len(mapping)]
+    return new_summary, new_source_ids
+
+
 def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
     """
     Parse a summary response that may be plain text or JSON with summary + source_ids.
@@ -596,15 +625,27 @@ def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
 
     # Attempt 3: extract the JSON object via regex (handles trailing garbage)
     if obj is None:
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        m = re.search(r'\{.*?\}', raw, re.DOTALL)
         if m:
             obj = _try_json_parse(m.group(0))
+        # Attempt 3b: try from first { to last }
+        if obj is None:
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                obj = _try_json_parse(raw[start:end + 1])
+                if obj is None:
+                    sanitized2 = re.sub(r'(?<!\\)\n', r'\\n', raw[start:end + 1])
+                    obj = _try_json_parse(sanitized2)
 
     if obj is not None:
         summary = str(obj.get("summary", "")).strip()
         ids_raw = obj.get("source_ids", [])
         if isinstance(ids_raw, list):
-            return summary, _extract_ids(ids_raw)
+            source_ids = _extract_ids(ids_raw)
+            # Normalise citation numbering to be strictly sequential [1],[2],[3]...
+            summary, source_ids = _renumber_citations(summary, source_ids)
+            return summary, source_ids
 
     # Plain text fallback
     return raw, []
@@ -661,7 +702,7 @@ async def _summarize_chat(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 400,
+                "max_tokens": 800,
                 "temperature": 0.3,
                 "stream": False,
             },
