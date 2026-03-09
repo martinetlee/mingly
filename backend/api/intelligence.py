@@ -545,7 +545,7 @@ async def intelligence_chat(
 # ---------------------------------------------------------------------------
 
 def _extract_ids(ids_raw: list) -> List[int]:
-    """Normalise a raw source_ids list to plain ints, capped at 10."""
+    """Normalise a raw source_ids list to plain ints, capped at 20."""
     valid: List[int] = []
     seen: set = set()
     for x in ids_raw:
@@ -557,7 +557,7 @@ def _extract_ids(ids_raw: list) -> List[int]:
             if v not in seen:
                 seen.add(v)
                 valid.append(v)
-        if len(valid) >= 10:
+        if len(valid) >= 20:
             break
     return valid
 
@@ -624,27 +624,31 @@ async def _summarize_chat(
             "You are a concise assistant summarising Telegram messages. "
             "Produce ONE sentence (max 30 words) covering what was discussed. "
             "Focus on messages involving the user (marked as outgoing). "
-            "Each message is prefixed with its ID, e.g. [id:12345]. "
-            "Add exactly ONE inline citation [1] at the end of the sentence. "
-            "source_ids contains exactly that one message ID. "
-            "RULES: cite only SINGLE numbers like [1], never comma-lists. No URLs. "
+            "Each message is prefixed with its telegram ID, e.g. [id:12345]. "
+            "Add exactly ONE inline citation at the end of the sentence using the marker [1]. "
+            "[1] is a SEQUENTIAL COUNTER — it is NOT the message ID. "
+            "source_ids is a list containing the telegram ID (the number after 'id:') of the cited message. "
+            "No URLs, no markdown. "
             'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines): '
-            '{"summary": "<sentence> [1]", "source_ids": [<id>]}'
+            '{"summary": "The team discussed X [1].", "source_ids": [12345]}'
         )
     else:
         system = (
             "You are a concise assistant summarising Telegram messages. "
             "Produce 2-4 bullet points (each starting with •) covering key topics. "
             "Ignore chit-chat; focus on informational content and technical discussion. "
-            "Each message is prefixed with its ID, e.g. [id:12345]. "
-            "CITATION RULES (strictly follow): "
-            "(1) Each bullet ends with exactly ONE citation marker like [1] or [2]. "
-            "(2) Use up to 10 UNIQUE sources across all bullets — reuse numbers freely. "
-            "(3) Cite ONLY SINGLE numbers: write [1] not [1,2,3]. "
-            "(4) source_ids lists the unique message IDs in the order their citation number first appears. "
-            "(5) Do NOT include URLs or markdown links in the summary text. "
+            "Each message is prefixed with its telegram ID, e.g. [id:12345]. "
+            "CITATION RULES — read carefully: "
+            "Citations use SEQUENTIAL COUNTERS: the first unique message you cite is [1], "
+            "the second unique message is [2], the third is [3], and so on. "
+            "These numbers are NOT message IDs and NOT list positions — they always start at 1. "
+            "Each bullet ends with exactly one [n] marker. You may reuse a number (e.g. two bullets both end with [1]). "
+            "Use up to 20 unique citations. Never write comma-lists like [1,2,3]. "
+            "source_ids is an ordered list of telegram IDs (numbers after 'id:'), "
+            "where source_ids[0] is the telegram ID for [1], source_ids[1] is for [2], etc. "
+            "Do NOT include URLs or markdown links. "
             'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines in string): '
-            '{"summary": "• Point one [1]\\n• Point two [2]\\n• Point three [1]", "source_ids": [<id_1>, <id_2>]}'
+            '{"summary": "• Point one [1]\\n• Point two [2]\\n• Point three [1]", "source_ids": [id_for_1, id_for_2]}'
         )
 
     user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
@@ -683,15 +687,18 @@ async def _summarize_important_contact(
     system = (
         "You are a concise assistant summarising Telegram messages from a single person. "
         "Produce 2-3 sentences covering their key topics, requests, or notable statements. "
-        "Each message is prefixed with its ID, e.g. [id:12345]. "
-        "CITATION RULES (strictly follow): "
-        "(1) Each sentence ends with ONE citation marker like [1] or [2]. "
-        "(2) Use at most 3 UNIQUE sources total — reuse numbers freely. "
-        "(3) Cite ONLY SINGLE numbers: write [1] not [1,2,3]. "
-        "(4) source_ids lists unique message IDs in the order [1],[2],[3] first appear. "
-        "(5) Do NOT include URLs or markdown links. "
+        "Each message is prefixed with its telegram ID, e.g. [id:12345]. "
+        "CITATION RULES — read carefully: "
+        "Citations use SEQUENTIAL COUNTERS: the first unique message you cite is [1], "
+        "the second is [2], and so on. "
+        "These are NOT message IDs and NOT list positions — they always start at 1. "
+        "Each sentence ends with one [n] marker. You may reuse numbers. "
+        "Use up to 20 unique citations. Never write [1,2,3]. "
+        "source_ids is an ordered list of telegram IDs (numbers after 'id:'), "
+        "where source_ids[0] is the telegram ID for [1], source_ids[1] is for [2], etc. "
+        "Do NOT include URLs or markdown links. "
         'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines in string): '
-        '{"summary": "<sentence one> [1]. <sentence two> [2].", "source_ids": [<id_1>, <id_2>]}'
+        '{"summary": "Sentence one [1]. Sentence two [2].", "source_ids": [id_for_1, id_for_2]}'
     )
     user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
     try:
