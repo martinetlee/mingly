@@ -900,7 +900,7 @@ async def intelligence_briefing(
         # Collect all summaries to persist after streaming
         collected: list[dict] = []
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             for idx, (category, chat) in enumerate(all_chats):
                 yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
 
@@ -956,7 +956,7 @@ async def intelligence_briefing(
 
         # --- Important contacts section ---
         base_idx = len(all_chats)
-        async with httpx.AsyncClient(timeout=120.0) as ic_client:
+        async with httpx.AsyncClient(timeout=180.0) as ic_client:
             for idx, contact in enumerate(important_contacts):
                 contact_name = (
                     f"{contact.first_name or ''} {contact.last_name or ''}".strip()
