@@ -468,16 +468,29 @@ async def intelligence_mentions(
         # Fetch tags for the chat
         chat_tags = await crud.get_tags_for_chat(db, chat.telegram_id)
 
-        # Check if user replied after the mention
+        # Check if user replied after the mention; fetch the actual reply message
         replied = False
-        if msg.date:
-            replied = await crud.check_replied_after(db, msg.chat_id, msg.date)
+        user_reply_msg = None
+        reply_has_gap = False
+        reply_msg = await crud.get_first_reply_after(db, msg.chat_id, msg.telegram_id)
+        if reply_msg:
+            replied = True
+            user_reply_msg = _serialize_msg(reply_msg)
+            # Determine if there are messages between the last context_after message
+            # (or the mention itself) and the reply, indicating omitted messages
+            last_context_id = context["after"][-1].telegram_id if context["after"] else msg.telegram_id
+            gap_count = await crud.count_messages_between(
+                db, msg.chat_id, last_context_id, reply_msg.telegram_id
+            )
+            reply_has_gap = gap_count > 0
 
         groups.append({
             "mention_msg": _serialize_msg(msg),
             "context_before": [_serialize_msg(m) for m in context["before"]],
             "context_after": [_serialize_msg(m) for m in context["after"]],
             "replied": replied,
+            "user_reply_msg": user_reply_msg,
+            "reply_has_gap": reply_has_gap,
             "chat": {
                 "id": chat.telegram_id,
                 "name": chat.name,

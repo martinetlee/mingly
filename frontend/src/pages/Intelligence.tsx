@@ -526,20 +526,47 @@ function MentionCard({
         </div>
       )}
 
-      {/* Expanded: full context messages + navigate button */}
+      {/* Expanded: full context messages + optional reply section + navigate buttons */}
       {expanded && (
         <div className="border-t border-slate-700/50">
+          {/* Context messages (before, mention, after) */}
           <div className="px-3 py-2.5 space-y-1.5">
             {allMsgs.map(({ msg, highlighted }, i) => (
               <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
             ))}
           </div>
+
+          {/* User reply section */}
+          {group.user_reply_msg && (
+            <div className="px-3 pb-2.5 space-y-1.5">
+              {/* [...] gap indicator */}
+              {group.reply_has_gap && (
+                <div className="text-center text-[11px] text-slate-500 py-0.5 select-none">
+                  <span className="rounded bg-slate-700/40 px-2 py-0.5">···</span>
+                </div>
+              )}
+              {/* The user's reply */}
+              <div className="relative">
+                <MentionMsgRow msg={group.user_reply_msg} highlighted={false} />
+                {/* Jump-to-reply button overlaid on the message */}
+                <button
+                  onClick={() => onNavigate(group.chat.id, group.user_reply_msg!.telegram_id)}
+                  className="absolute right-1 top-1 rounded px-1.5 py-0.5 text-[10px] text-indigo-400 hover:bg-indigo-900/30 hover:text-indigo-300 transition-colors"
+                  title="Jump to your reply in chat"
+                >
+                  → jump
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Jump to mention button */}
           <div className="px-3 pb-3">
             <button
               onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
               className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
             >
-              Jump to message →
+              Jump to mention →
             </button>
           </div>
         </div>

@@ -470,6 +470,42 @@ async def check_replied_after(db: AsyncSession, chat_id: int, after_date: dateti
     return result.scalar_one_or_none() is not None
 
 
+async def get_first_reply_after(
+    db: AsyncSession,
+    chat_id: int,
+    after_telegram_id: int,
+) -> Optional[Message]:
+    """Return the first outgoing message with telegram_id > after_telegram_id in the chat."""
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.telegram_id > after_telegram_id,
+            Message.is_outgoing == True,  # noqa: E712
+        )
+        .order_by(Message.telegram_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def count_messages_between(
+    db: AsyncSession,
+    chat_id: int,
+    from_telegram_id: int,
+    to_telegram_id: int,
+) -> int:
+    """Count messages strictly between two telegram_ids (exclusive) in a chat."""
+    result = await db.execute(
+        select(func.count()).where(
+            Message.chat_id == chat_id,
+            Message.telegram_id > from_telegram_id,
+            Message.telegram_id < to_telegram_id,
+        )
+    )
+    return result.scalar() or 0
+
+
 # --- Conversations ---
 
 async def get_conversation_messages(db: AsyncSession, conversation_id: int) -> list:

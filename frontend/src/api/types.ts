@@ -204,6 +204,8 @@ export interface MentionGroup {
   context_before: MentionMessage[]
   context_after: MentionMessage[]
   replied: boolean
+  user_reply_msg: MentionMessage | null
+  reply_has_gap: boolean
   chat: {
     id: number
     name: string

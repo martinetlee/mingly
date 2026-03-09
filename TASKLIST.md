@@ -28,7 +28,7 @@
 - [x] the chat in the intelligence page doesn't have context persisted within the chat, right? we should architect it so that it has context of the previous messages (but not outside of the chat).
 - [] in the readme section, add details about privacy of using the app.
 - [x] in the mention tab of intelligence page, if a message contains a photo, also show them as in the regular chat.
-- [] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.
+- [x] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.
 - [] allow us to mark telegram profile as important
 - [] the update provided in briefing of the intelligence page should summarize the messages of the important profiles.
 - [] the update provided in briefing should provide sources, i.e. links to the messages about the update. link to the most representative message of that line of summary.
