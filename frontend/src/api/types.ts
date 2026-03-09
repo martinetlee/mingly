@@ -219,7 +219,7 @@ export interface MentionGroup {
 export interface BriefingSummary {
   chat_id: number
   chat_name: string
-  category: 'tracked' | 'briefing'
+  category: 'tracked' | 'briefing' | 'important_contact'
   summary: string
 }
 
@@ -227,7 +227,7 @@ export interface BriefingHistoryEntry {
   id: number
   chat_id: number
   chat_name: string
-  category: 'tracked' | 'briefing'
+  category: 'tracked' | 'briefing' | 'important_contact'
   summary: string
 }
 

@@ -593,6 +593,44 @@ async def _summarize_chat(
     return ""
 
 
+async def _summarize_important_contact(
+    client: httpx.AsyncClient,
+    base_url: str,
+    model: str,
+    contact_name: str,
+    messages_text: str,
+) -> str:
+    """Summarise what an important contact has been saying across chats."""
+    system = (
+        "You are a concise assistant. Given recent Telegram messages sent by a specific person "
+        "across different chats, produce a brief summary (2-4 sentences) of what they have been "
+        "discussing or communicating. Focus on key topics, notable statements, or any requests "
+        "directed at the user. Output only the summary, nothing else."
+    )
+    user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
+    try:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                "max_tokens": 200,
+                "temperature": 0.3,
+                "stream": False,
+            },
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["choices"][0]["message"].get("content", "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 @router.get("/intelligence/briefing")
 async def intelligence_briefing(
     days: int = 1,
@@ -621,8 +659,9 @@ async def intelligence_briefing(
         tracked = await crud.get_tracked_chats(db)
         briefing = await crud.get_briefing_chats(db)
         all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
+        important_contacts = await crud.get_important_contacts(db)
 
-        yield _sse("start", {"total": len(all_chats)})
+        yield _sse("start", {"total": len(all_chats) + len(important_contacts)})
 
         # Collect all summaries to persist after streaming
         collected: list[dict] = []
@@ -670,6 +709,65 @@ async def intelligence_briefing(
                     "chat_id": chat.telegram_id,
                     "chat_name": chat.name,
                     "category": category,
+                    "summary": summary,
+                }
+                collected.append(entry)
+                yield _sse("chat_done", entry)
+
+        # --- Important contacts section ---
+        base_idx = len(all_chats)
+        async with httpx.AsyncClient(timeout=120.0) as ic_client:
+            for idx, contact in enumerate(important_contacts):
+                contact_name = (
+                    f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+                    or contact.username
+                    or str(contact.telegram_id)
+                )
+                yield _sse("progress", {"current": base_idx + idx + 1, "chat_name": contact_name})
+
+                rows = await crud.get_messages_from_sender_since(
+                    db, contact.telegram_id, since, limit=100
+                )
+                if not rows:
+                    entry = {
+                        "chat_id": contact.telegram_id,
+                        "chat_name": contact_name,
+                        "category": "important_contact",
+                        "summary": "No messages in this period.",
+                    }
+                    collected.append(entry)
+                    yield _sse("chat_done", entry)
+                    continue
+
+                lines = []
+                for msg, chat in rows:
+                    if msg.text:
+                        ts = msg.date.strftime("%m/%d %H:%M")
+                        chat_label = chat.name or str(chat.telegram_id)
+                        lines.append(f"[{ts}] [{chat_label}] {msg.text[:300]}")
+
+                if not lines:
+                    entry = {
+                        "chat_id": contact.telegram_id,
+                        "chat_name": contact_name,
+                        "category": "important_contact",
+                        "summary": "No text messages in this period.",
+                    }
+                    collected.append(entry)
+                    yield _sse("chat_done", entry)
+                    continue
+
+                messages_text = "\n".join(lines[-80:])
+                summary = await _summarize_important_contact(
+                    ic_client, base_url, model, contact_name, messages_text
+                )
+                if not summary:
+                    summary = "Summary unavailable."
+
+                entry = {
+                    "chat_id": contact.telegram_id,
+                    "chat_name": contact_name,
+                    "category": "important_contact",
                     "summary": summary,
                 }
                 collected.append(entry)

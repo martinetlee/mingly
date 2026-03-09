@@ -3,7 +3,7 @@ from typing import Optional
 from sqlalchemy import select, delete, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage
+from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact
 
 
 # --- Chats ---
@@ -577,6 +577,41 @@ async def delete_briefing_run(db: AsyncSession, run_id: int) -> bool:
     await db.delete(run)
     await db.commit()
     return True
+
+
+async def get_important_contacts(db: AsyncSession) -> list:
+    """Return all contacts marked as important."""
+    result = await db.execute(
+        select(Contact)
+        .where(Contact.is_important == True)  # noqa: E712
+        .order_by(Contact.first_name, Contact.last_name)
+    )
+    return list(result.scalars().all())
+
+
+async def get_messages_from_sender_since(
+    db: AsyncSession,
+    sender_telegram_id: int,
+    since: datetime,
+    limit: int = 100,
+) -> list:
+    """
+    Return up to `limit` messages sent by a specific Telegram user (matched via
+    sender_id == sender_telegram_id) on or after `since`, with chat info.
+    Each row is a (Message, Chat) tuple.
+    """
+    result = await db.execute(
+        select(Message, Chat)
+        .join(Chat, Message.chat_id == Chat.telegram_id)
+        .where(
+            Message.sender_id == sender_telegram_id,
+            Message.date >= since,
+            Message.text.isnot(None),
+        )
+        .order_by(Message.date)
+        .limit(limit)
+    )
+    return result.all()
 
 
 async def get_messages_around(

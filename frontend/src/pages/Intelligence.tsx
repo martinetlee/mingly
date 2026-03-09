@@ -27,6 +27,7 @@ import {
   Newspaper,
   Radio,
   RotateCcw,
+  Star,
 } from 'lucide-react'
 import {
   listConversations,
@@ -871,8 +872,36 @@ function shouldAutoRun(schedule: string, lastRun: string | null): boolean {
 function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
   const trackedSummaries = entries.filter((s) => s.category === 'tracked')
   const briefingSummaries = entries.filter((s) => s.category === 'briefing')
+  const importantContactSummaries = entries.filter((s) => s.category === 'important_contact')
   return (
     <div className="space-y-4">
+      {importantContactSummaries.length > 0 && (
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <Star size={12} className="fill-amber-400 text-amber-400" />
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">
+              Important Contacts
+            </h3>
+            <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-400">
+              {importantContactSummaries.length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {importantContactSummaries.map((s, i) => (
+              <div
+                key={i}
+                className="rounded-lg border border-amber-500/20 bg-amber-900/10 px-3 py-2"
+              >
+                <p className="mb-1 text-[11px] font-medium text-amber-300">{s.chat_name}</p>
+                <p className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
+                  {s.summary}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {trackedSummaries.length > 0 && (
         <section>
           <div className="mb-2 flex items-center gap-2">
