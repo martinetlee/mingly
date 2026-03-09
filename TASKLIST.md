@@ -32,4 +32,4 @@
 - [x] allow us to mark telegram profile as important
 - [x] the update provided in briefing of the intelligence page should summarize the messages of the important profiles.
 - [x] the update provided in briefing should provide sources, i.e. links to the messages about the update. link to the most representative message of that line of summary.
-- [] when scrolling down on the chat list and new chat is seen, sync 25 messages from each chat that was loaded. when a new message comes in and pushes a chat to the top, if the chat was not previously in the chat list, then sync 25 messages from that chat. A potential direction is basically to make sure to sync 25 messages from chat that newly appeared from the chatlist.
+- [x] when scrolling down on the chat list and new chat is seen, sync 25 messages from each chat that was loaded. when a new message comes in and pushes a chat to the top, if the chat was not previously in the chat list, then sync 25 messages from that chat. A potential direction is basically to make sure to sync 25 messages from chat that newly appeared from the chatlist.
