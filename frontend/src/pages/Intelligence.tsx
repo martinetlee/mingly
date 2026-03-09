@@ -872,6 +872,20 @@ function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: s
   return last < todayMidnight
 }
 
+/** Normalise summary text before rendering:
+ *  - Expand comma-list citations [1, 2, 3] → [1][2][3]
+ *  - Strip raw markdown links [[label]](url) → label
+ */
+function normaliseSummary(text: string): string {
+  // Expand [1, 2, 3] → [1][2][3]
+  text = text.replace(/\[(\d+(?:,\s*\d+)+)\]/g, (_match, inner: string) =>
+    inner.split(',').map((n) => `[${n.trim()}]`).join('')
+  )
+  // Strip markdown links [[label]](url) or [label](url) — keep just label
+  text = text.replace(/\[{1,2}([^\]]+)\]{1,2}\([^)]+\)/g, '$1')
+  return text
+}
+
 // Renders summary text with inline [1][2] citation markers as clickable badges
 function SummaryWithSources({
   summary,
@@ -884,8 +898,9 @@ function SummaryWithSources({
   onNavigate: (chatId: number, msgId: number) => void
   className?: string
 }) {
+  const normalised = normaliseSummary(summary)
   // Split on [n] tokens, keeping them as separate parts
-  const parts = summary.split(/(\[\d+\])/g)
+  const parts = normalised.split(/(\[\d+\])/g)
   return (
     <span className={className}>
       {parts.map((part, i) => {
@@ -899,12 +914,14 @@ function SummaryWithSources({
                 key={i}
                 onClick={() => onNavigate(src.chat_id, src.telegram_id)}
                 className="inline-flex items-center mx-0.5 rounded px-1 py-0 text-[10px] font-medium text-indigo-400 bg-indigo-500/15 border border-indigo-500/25 hover:bg-indigo-500/30 transition-colors align-baseline leading-none"
-                title={`Jump to source message`}
+                title="Jump to source message"
               >
                 {part}
               </button>
             )
           }
+          // Citation number out of range — render as plain text
+          return <span key={i} className="text-slate-500">{part}</span>
         }
         return <span key={i}>{part}</span>
       })}

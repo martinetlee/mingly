@@ -544,35 +544,68 @@ async def intelligence_chat(
 # Briefing / Summary endpoint
 # ---------------------------------------------------------------------------
 
+def _extract_ids(ids_raw: list) -> List[int]:
+    """Normalise a raw source_ids list to plain ints, capped at 5."""
+    valid: List[int] = []
+    seen: set = set()
+    for x in ids_raw:
+        s = str(x).strip()
+        if s.startswith("id:"):
+            s = s[3:]
+        if s.lstrip("-").isdigit():
+            v = int(s)
+            if v not in seen:
+                seen.add(v)
+                valid.append(v)
+        if len(valid) >= 5:
+            break
+    return valid
+
+
+def _try_json_parse(text: str):
+    """Attempt json.loads; return parsed dict or None."""
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return None
+
+
 def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
     """
     Parse a summary response that may be plain text or JSON with summary + source_ids.
     Returns (summary_text, list_of_telegram_ids).
     """
     raw = raw.strip()
+
     # Strip markdown code fences that some LLMs add (```json ... ``` or ``` ... ```)
     if raw.startswith("```"):
         raw = re.sub(r'^```(?:json)?\s*\n?', '', raw)
         raw = re.sub(r'\n?```\s*$', '', raw)
         raw = raw.strip()
-    # Try to parse as JSON first
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            summary = str(obj.get("summary", "")).strip()
-            ids = obj.get("source_ids", [])
-            if isinstance(ids, list):
-                valid_ids = []
-                for x in ids:
-                    s = str(x).strip()
-                    # Handle "id:1369" format
-                    if s.startswith("id:"):
-                        s = s[3:]
-                    if s.lstrip("-").isdigit():
-                        valid_ids.append(int(s))
-                return summary, valid_ids
-    except Exception:
-        pass
+
+    # Attempt 1: direct parse
+    obj = _try_json_parse(raw)
+
+    # Attempt 2: LLM sometimes emits literal newlines inside JSON strings
+    if obj is None:
+        sanitized = re.sub(r'(?<!\\)\n', r'\\n', raw)
+        obj = _try_json_parse(sanitized)
+
+    # Attempt 3: extract the JSON object via regex (handles trailing garbage)
+    if obj is None:
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            obj = _try_json_parse(m.group(0))
+
+    if obj is not None:
+        summary = str(obj.get("summary", "")).strip()
+        ids_raw = obj.get("source_ids", [])
+        if isinstance(ids_raw, list):
+            return summary, _extract_ids(ids_raw)
+
     # Plain text fallback
     return raw, []
 
@@ -588,27 +621,30 @@ async def _summarize_chat(
     """Call LLM to produce a summary + source telegram_ids; returns (summary, [ids])."""
     if chat_category == "tracked":
         system = (
-            "You are a concise assistant. Given recent Telegram messages from a chat, "
-            "produce a single sentence (max 30 words) summarising what was discussed. "
-            "Focus especially on any messages involving the user (marked as outgoing). "
-            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-            "Cite 1-2 sources inline using [1], [2] at the end of the relevant clause. "
-            "source_ids must be an ordered list matching the citation numbers. "
-            "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"<one sentence with inline [1] [2] citations>\", \"source_ids\": [<message IDs in citation order>]}"
+            "You are a concise assistant summarising Telegram messages. "
+            "Produce ONE sentence (max 30 words) covering what was discussed. "
+            "Focus on messages involving the user (marked as outgoing). "
+            "Each message is prefixed with its ID, e.g. [id:12345]. "
+            "Add exactly ONE inline citation [1] at the end of the sentence. "
+            "source_ids contains exactly that one message ID. "
+            "RULES: cite only SINGLE numbers like [1], never comma-lists. No URLs. "
+            'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines): '
+            '{"summary": "<sentence> [1]", "source_ids": [<id>]}'
         )
     else:
         system = (
-            "You are a concise assistant. Given recent Telegram messages from a chat, "
-            "produce a structured briefing: ignore chit-chat and pleasantries, focus on "
-            "informational content, links, technical discussion. "
-            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-            "Format the summary as bullet points ONLY (each starting with '•'), up to 4 bullets. "
-            "Every bullet point MUST end with at least one inline citation using [1], [2], etc. "
-            "Citations reference the most representative message for that point. "
-            "source_ids must be an ordered list matching the citation numbers (first appearance order). "
-            "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"• First point [1]\\n• Second point [2]\\n• Third point [1]\", \"source_ids\": [<message IDs in citation order>]}"
+            "You are a concise assistant summarising Telegram messages. "
+            "Produce 2-4 bullet points (each starting with •) covering key topics. "
+            "Ignore chit-chat; focus on informational content and technical discussion. "
+            "Each message is prefixed with its ID, e.g. [id:12345]. "
+            "CITATION RULES (strictly follow): "
+            "(1) Each bullet ends with exactly ONE citation marker like [1] or [2]. "
+            "(2) Use at most 3 UNIQUE sources across ALL bullets — reuse numbers freely. "
+            "(3) Cite ONLY SINGLE numbers: write [1] not [1,2,3]. "
+            "(4) source_ids lists the unique message IDs in the order [1],[2],[3] first appear. "
+            "(5) Do NOT include URLs or markdown links in the summary text. "
+            'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines in string): '
+            '{"summary": "• Point one [1]\\n• Point two [2]\\n• Point three [1]", "source_ids": [<id_1>, <id_2>]}'
         )
 
     user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
@@ -645,15 +681,17 @@ async def _summarize_important_contact(
 ) -> Tuple[str, List[int]]:
     """Summarise what an important contact has been saying; returns (summary, [telegram_ids])."""
     system = (
-        "You are a concise assistant. Given recent Telegram messages sent by a specific person "
-        "across different chats, produce a brief summary (2-4 sentences) of what they have been "
-        "discussing or communicating. Focus on key topics, notable statements, or any requests "
-        "directed at the user. "
-        "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-        "Cite 1-2 sources inline using [1], [2] at the end of the relevant sentence. "
-        "source_ids must be an ordered list matching the citation numbers. "
-        "Respond ONLY with valid JSON in this exact format: "
-        "{\"summary\": \"<summary text with inline [1] [2] citations>\", \"source_ids\": [<message IDs in citation order>]}"
+        "You are a concise assistant summarising Telegram messages from a single person. "
+        "Produce 2-3 sentences covering their key topics, requests, or notable statements. "
+        "Each message is prefixed with its ID, e.g. [id:12345]. "
+        "CITATION RULES (strictly follow): "
+        "(1) Each sentence ends with ONE citation marker like [1] or [2]. "
+        "(2) Use at most 3 UNIQUE sources total — reuse numbers freely. "
+        "(3) Cite ONLY SINGLE numbers: write [1] not [1,2,3]. "
+        "(4) source_ids lists unique message IDs in the order [1],[2],[3] first appear. "
+        "(5) Do NOT include URLs or markdown links. "
+        'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines in string): '
+        '{"summary": "<sentence one> [1]. <sentence two> [2].", "source_ids": [<id_1>, <id_2>]}'
     )
     user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
     try:
