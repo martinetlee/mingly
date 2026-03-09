@@ -751,7 +751,7 @@ async def _summarize_chat(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 800,
+                "max_tokens": 4000,
                 "temperature": 0.3,
                 "stream": False,
             },
@@ -760,23 +760,36 @@ async def _summarize_chat(
         if resp.status_code == 200:
             data = resp.json()
             msg = data["choices"][0]["message"]
-            # Some models (reasoning/thinking) put output in content=null + a separate field
-            raw = (
-                msg.get("content")
-                or msg.get("reasoning_content")
-                or msg.get("text")
-                or ""
-            )
+            # Primary: content field
+            raw = msg.get("content") or ""
             # content may be a list of blocks (e.g. Anthropic-style via proxy)
             if isinstance(raw, list):
                 raw = " ".join(
                     b.get("text", "") for b in raw if isinstance(b, dict)
                 )
             raw = str(raw).strip()
-            logger.debug("_summarize_chat raw response for %s: %.200s", chat_name, raw)
+            # Fallback for reasoning/thinking models (DeepSeek-R1, Qwen3-thinking, etc.)
+            # where the model exhausts max_tokens on CoT and leaves content empty.
+            # Try to extract the final JSON from the reasoning field instead.
             if not raw:
-                logger.warning("_summarize_chat empty content for chat=%s; full msg: %s", chat_name, msg)
+                reasoning = str(msg.get("reasoning") or msg.get("reasoning_content") or "")
+                if reasoning:
+                    # The model was building toward a JSON answer — find the last {...} block
+                    json_match = None
+                    for m in re.finditer(r'\{[^{}]*"summary"[^{}]*\}', reasoning, re.DOTALL):
+                        json_match = m
+                    if json_match:
+                        raw = json_match.group(0)
+                        logger.info(
+                            "_summarize_chat: extracted JSON from reasoning field for %s", chat_name
+                        )
+            if not raw:
+                logger.warning(
+                    "_summarize_chat empty content for chat=%s; msg keys: %s",
+                    chat_name, list(msg.keys()),
+                )
                 return "", []
+            logger.debug("_summarize_chat raw for %s: %.200s", chat_name, raw)
             summary, source_ids = _parse_summary_response(raw)
             # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
             pos_to_tid, valid_tids = _build_message_map(messages_text)
@@ -826,7 +839,7 @@ async def _summarize_important_contact(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 600,
+                "max_tokens": 4000,
                 "temperature": 0.3,
                 "stream": False,
             },
@@ -835,21 +848,30 @@ async def _summarize_important_contact(
         if resp.status_code == 200:
             data = resp.json()
             msg = data["choices"][0]["message"]
-            raw = (
-                msg.get("content")
-                or msg.get("reasoning_content")
-                or msg.get("text")
-                or ""
-            )
+            raw = msg.get("content") or ""
             if isinstance(raw, list):
                 raw = " ".join(
                     b.get("text", "") for b in raw if isinstance(b, dict)
                 )
             raw = str(raw).strip()
-            logger.debug("_summarize_important_contact raw for %s: %.200s", contact_name, raw)
             if not raw:
-                logger.warning("_summarize_important_contact empty content for contact=%s; full msg: %s", contact_name, msg)
+                reasoning = str(msg.get("reasoning") or msg.get("reasoning_content") or "")
+                if reasoning:
+                    json_match = None
+                    for m in re.finditer(r'\{[^{}]*"summary"[^{}]*\}', reasoning, re.DOTALL):
+                        json_match = m
+                    if json_match:
+                        raw = json_match.group(0)
+                        logger.info(
+                            "_summarize_important_contact: extracted JSON from reasoning for %s", contact_name
+                        )
+            if not raw:
+                logger.warning(
+                    "_summarize_important_contact empty content for contact=%s; msg keys: %s",
+                    contact_name, list(msg.keys()),
+                )
                 return "", []
+            logger.debug("_summarize_important_contact raw for %s: %.200s", contact_name, raw)
             summary, source_ids = _parse_summary_response(raw)
             # Validate/remap: LLM sometimes outputs position numbers instead of telegram IDs
             pos_to_tid, valid_tids = _build_message_map(messages_text)
