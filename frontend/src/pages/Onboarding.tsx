@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import logo from '../assets/logo.png'
 import {
   hasCredentials, setupCredentials, resolve1Password,
   sendCode, verifyCode, verify2FA,
@@ -213,7 +214,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="mb-8 text-center">
-          <img src="/logo.png" alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
+          <img src={logo} alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
           <h1 className="text-2xl font-semibold text-gray-900">Mingly</h1>
           <p className="mt-1 text-sm text-gray-500">Your Telegram, intelligently organised</p>
         </div>

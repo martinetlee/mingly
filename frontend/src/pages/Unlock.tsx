@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { unlockVault, resetVault } from '../api/client'
+import logo from '../assets/logo.png'
 
 interface Props {
   onUnlock: () => void
@@ -41,7 +42,7 @@ export default function Unlock({ onUnlock }: Props) {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="mb-8 text-center">
-          <img src="/logo.png" alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
+          <img src={logo} alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
           <h1 className="text-2xl font-semibold text-gray-900">Mingly</h1>
           <p className="mt-1 text-sm text-gray-500">Enter your password to unlock</p>
         </div>

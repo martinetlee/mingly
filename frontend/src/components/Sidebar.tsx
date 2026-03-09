@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
+import logo from '../assets/logo.png'
 import {
   MessageSquare,
   Inbox,
@@ -42,7 +43,7 @@ export default function Sidebar() {
     <aside className="flex h-screen w-16 flex-col items-center bg-slate-950 py-4">
       {/* Logo */}
       <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
-        <img src="/logo.png" alt="Mingly" className="h-9 w-9 object-contain" />
+        <img src={logo} alt="Mingly" className="h-9 w-9 object-contain" />
       </div>
 
       {/* Nav */}
