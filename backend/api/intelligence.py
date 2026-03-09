@@ -592,19 +592,23 @@ async def _summarize_chat(
             "produce a single sentence (max 30 words) summarising what was discussed. "
             "Focus especially on any messages involving the user (marked as outgoing). "
             "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+            "Cite 1-2 sources inline using [1], [2] at the end of the relevant clause. "
+            "source_ids must be an ordered list matching the citation numbers. "
             "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"<one sentence>\", \"source_ids\": [<1-2 most representative message IDs>]}"
+            "{\"summary\": \"<one sentence with inline [1] [2] citations>\", \"source_ids\": [<message IDs in citation order>]}"
         )
     else:
         system = (
             "You are a concise assistant. Given recent Telegram messages from a chat, "
             "produce a structured briefing: ignore chit-chat and pleasantries, focus on "
             "informational content, links, technical discussion. "
-            "Start with a 1-2 sentence overview, then list up to 4 key topics or themes "
-            "as bullet points (each starting with '•'). "
             "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+            "Format the summary as bullet points ONLY (each starting with '•'), up to 4 bullets. "
+            "Every bullet point MUST end with at least one inline citation using [1], [2], etc. "
+            "Citations reference the most representative message for that point. "
+            "source_ids must be an ordered list matching the citation numbers (first appearance order). "
             "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"<briefing text>\", \"source_ids\": [<1-3 most representative message IDs>]}"
+            "{\"summary\": \"• First point [1]\\n• Second point [2]\\n• Third point [1]\", \"source_ids\": [<message IDs in citation order>]}"
         )
 
     user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
@@ -646,8 +650,10 @@ async def _summarize_important_contact(
         "discussing or communicating. Focus on key topics, notable statements, or any requests "
         "directed at the user. "
         "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
+        "Cite 1-2 sources inline using [1], [2] at the end of the relevant sentence. "
+        "source_ids must be an ordered list matching the citation numbers. "
         "Respond ONLY with valid JSON in this exact format: "
-        "{\"summary\": \"<summary text>\", \"source_ids\": [<1-2 most representative message IDs>]}"
+        "{\"summary\": \"<summary text with inline [1] [2] citations>\", \"source_ids\": [<message IDs in citation order>]}"
     )
     user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
     try:

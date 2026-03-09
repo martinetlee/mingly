@@ -872,22 +872,43 @@ function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: s
   return last < todayMidnight
 }
 
-// Small source-link badges that navigate to the message in context
-function SourceLinks({ sources, onNavigate }: { sources?: BriefingSource[]; onNavigate: (chatId: number, msgId: number) => void }) {
-  if (!sources || sources.length === 0) return null
+// Renders summary text with inline [1][2] citation markers as clickable badges
+function SummaryWithSources({
+  summary,
+  sources,
+  onNavigate,
+  className,
+}: {
+  summary: string
+  sources?: BriefingSource[]
+  onNavigate: (chatId: number, msgId: number) => void
+  className?: string
+}) {
+  // Split on [n] tokens, keeping them as separate parts
+  const parts = summary.split(/(\[\d+\])/g)
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1">
-      {sources.map((src, i) => (
-        <button
-          key={i}
-          onClick={() => onNavigate(src.chat_id, src.telegram_id)}
-          className="rounded px-1.5 py-0.5 text-[10px] text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
-          title={`Jump to message ${src.telegram_id}`}
-        >
-          ↗ source {i + 1}
-        </button>
-      ))}
-    </div>
+    <span className={className}>
+      {parts.map((part, i) => {
+        const match = part.match(/^\[(\d+)\]$/)
+        if (match) {
+          const idx = parseInt(match[1], 10) - 1
+          const src = sources?.[idx]
+          if (src) {
+            return (
+              <button
+                key={i}
+                onClick={() => onNavigate(src.chat_id, src.telegram_id)}
+                className="inline-flex items-center mx-0.5 rounded px-1 py-0 text-[10px] font-medium text-indigo-400 bg-indigo-500/15 border border-indigo-500/25 hover:bg-indigo-500/30 transition-colors align-baseline leading-none"
+                title={`Jump to source message`}
+              >
+                {part}
+              </button>
+            )
+          }
+        }
+        return <span key={i}>{part}</span>
+      })}
+    </span>
   )
 }
 
@@ -922,9 +943,8 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
               >
                 <p className="mb-1 text-[11px] font-medium text-amber-300">{s.chat_name}</p>
                 <p className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
-                  {s.summary}
+                  <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
                 </p>
-                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
               </div>
             ))}
           </div>
@@ -949,8 +969,9 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
                 className="rounded-lg border border-violet-500/20 bg-violet-900/10 px-3 py-2"
               >
                 <p className="mb-1 text-[11px] font-medium text-violet-300">{s.chat_name}</p>
-                <p className="text-[11px] leading-relaxed text-slate-300">{s.summary}</p>
-                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
+                <p className="text-[11px] leading-relaxed text-slate-300">
+                  <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
+                </p>
               </div>
             ))}
           </div>
@@ -976,9 +997,8 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
               >
                 <p className="mb-1 text-[11px] font-medium text-emerald-300">{s.chat_name}</p>
                 <div className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
-                  {s.summary}
+                  <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
                 </div>
-                <SourceLinks sources={s.sources} onNavigate={handleNavigate} />
               </div>
             ))}
           </div>
