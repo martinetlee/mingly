@@ -45,6 +45,8 @@ async def init_db():
             # Former employee support on ContactPosition
             "ALTER TABLE contact_positions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE contact_positions ADD COLUMN ended_at TEXT",
+            # Reply-to threading in messages
+            "ALTER TABLE messages ADD COLUMN reply_to_telegram_id INTEGER",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))

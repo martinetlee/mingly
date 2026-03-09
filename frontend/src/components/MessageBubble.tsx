@@ -51,6 +51,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
   const [hovered, setHovered] = useState(false)
+  const reply = message.reply_to_preview
 
   return (
     <div
@@ -91,6 +92,27 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               : 'rounded-bl-sm bg-slate-700 text-gray-100 border border-slate-600'
           }`}
         >
+          {/* Reply-to quote block */}
+          {reply && (
+            <div className={`mx-2 mt-2 flex rounded-lg border-l-2 px-2 py-1 ${
+              isOut
+                ? 'border-indigo-300/60 bg-indigo-700/60'
+                : 'border-purple-400/60 bg-slate-600/60'
+            }`}>
+              <div className="min-w-0">
+                <p className={`text-[11px] font-semibold truncate ${isOut ? 'text-indigo-200' : 'text-purple-300'}`}>
+                  {reply.sender_name ?? 'Unknown'}
+                </p>
+                <p className={`truncate text-[11px] ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
+                  {reply.text
+                    ? reply.text.slice(0, 80)
+                    : reply.media_type
+                      ? `[${reply.media_type}]`
+                      : ''}
+                </p>
+              </div>
+            </div>
+          )}
           {message.text && (
             <p className="px-3 py-2">
               <FormattedText html={message.text_html ?? simpleMarkdownToHtml(message.text)} isOut={isOut} />

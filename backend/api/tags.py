@@ -120,10 +120,10 @@ async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
     all_tag_names = [t.name for t in all_tags]
 
     # Fetch last 20 messages for context
-    messages = await crud.get_messages(db, telegram_id, limit=20, offset=0)
+    rows = await crud.get_messages(db, telegram_id, limit=20, offset=0)
     messages_text = "\n".join(
         f"{m.sender_name or 'Me'}: {(m.text or '').strip()[:120]}"
-        for m in messages if (m.text or "").strip()
+        for m, *_ in rows if (m.text or "").strip()
     ) or "(no messages yet)"
 
     system_prompt = (

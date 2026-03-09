@@ -154,14 +154,29 @@ async def get_messages(
     limit: int = 50,
     offset: int = 0,
 ) -> list:
+    """
+    Return messages with optional reply-to preview.
+    Each element is a (Message, reply_sender_name, reply_text, reply_media_type) tuple.
+    """
+    Reply = Message.__table__.alias("reply_msg")
     result = await db.execute(
-        select(Message)
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+            Reply.c.media_type.label("reply_media_type"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
         .where(Message.chat_id == chat_id)
         .order_by(desc(Message.date))
         .limit(limit)
         .offset(offset)
     )
-    return list(result.scalars().all())
+    return list(result.all())
 
 
 async def get_messages_since(
@@ -208,6 +223,9 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
             updated = True
         if kwargs.get("reactions_json"):
             msg.reactions_json = kwargs["reactions_json"]
+            updated = True
+        if "reply_to_telegram_id" in kwargs and kwargs["reply_to_telegram_id"] is not None and msg.reply_to_telegram_id is None:
+            msg.reply_to_telegram_id = kwargs["reply_to_telegram_id"]
             updated = True
         if updated:
             await db.commit()

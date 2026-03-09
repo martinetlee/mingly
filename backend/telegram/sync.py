@@ -256,6 +256,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
+                reply_to_telegram_id=msg.reply_to_msg_id,
             )
 
         await crud.update_chat_sync(db, chat_telegram_id)
@@ -293,6 +294,7 @@ async def register_event_handlers() -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
+                reply_to_telegram_id=msg.reply_to_msg_id,
             )
 
         await ws_manager.broadcast({

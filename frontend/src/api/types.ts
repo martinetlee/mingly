@@ -49,6 +49,12 @@ export interface Reaction {
   count: number
 }
 
+export interface ReplyPreview {
+  sender_name: string | null
+  text: string | null
+  media_type: string | null
+}
+
 export interface Message {
   id: number
   telegram_id: number
@@ -64,6 +70,8 @@ export interface Message {
   media_url: string | null
   importance_score: number | null
   user_flagged: boolean
+  reply_to_telegram_id?: number | null
+  reply_to_preview?: ReplyPreview | null
 }
 
 export interface ContactPosition {

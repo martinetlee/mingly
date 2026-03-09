@@ -177,11 +177,11 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             chat = await crud.get_chat_by_name(db, chat_name)
             if not chat:
                 return f"No chat found matching '{chat_name}'."
-            messages = await crud.get_messages(db, chat.telegram_id, limit=limit)
-            if not messages:
+            rows = await crud.get_messages(db, chat.telegram_id, limit=limit)
+            if not rows:
                 return f"No messages found in {_qname(chat.name)}."
             lines = [f"[{m.date.strftime('%Y-%m-%d %H:%M')}] {m.sender_name or 'Unknown'}: {m.text or ''}"
-                     for m in reversed(messages) if m.text]
+                     for m, *_ in reversed(rows) if m.text]
             return f"Last {len(lines)} messages in {_qname(chat.name)}:\n" + "\n".join(lines)
 
         elif name == "find_chats_by_tag":

@@ -177,10 +177,18 @@ async def get_messages(
         if chat and chat.last_synced_at is None and not chat.is_hidden and not chat.is_briefing:
             await sync_messages(telegram_id, limit=100)
 
-    messages = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
+    rows = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
     # Return in chronological order (DB returns newest-first)
-    return [
-        {
+    def _serialize(row):
+        m, reply_sender, reply_text, reply_media_type = row
+        reply_preview = None
+        if m.reply_to_telegram_id is not None:
+            reply_preview = {
+                "sender_name": reply_sender,
+                "text": reply_text,
+                "media_type": reply_media_type,
+            }
+        return {
             "id": m.id,
             "telegram_id": m.telegram_id,
             "chat_id": m.chat_id,
@@ -195,9 +203,11 @@ async def get_messages(
             "reactions": json.loads(m.reactions_json) if m.reactions_json else None,
             "importance_score": m.importance_score,
             "user_flagged": m.user_flagged,
+            "reply_to_telegram_id": m.reply_to_telegram_id,
+            "reply_to_preview": reply_preview,
         }
-        for m in reversed(messages)
-    ]
+
+    return [_serialize(row) for row in reversed(rows)]
 
 
 @router.post("/{telegram_id}/sync")
