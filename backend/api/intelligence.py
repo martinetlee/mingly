@@ -545,7 +545,7 @@ async def intelligence_chat(
 # ---------------------------------------------------------------------------
 
 def _extract_ids(ids_raw: list) -> List[int]:
-    """Normalise a raw source_ids list to plain ints, capped at 5."""
+    """Normalise a raw source_ids list to plain ints, capped at 10."""
     valid: List[int] = []
     seen: set = set()
     for x in ids_raw:
@@ -557,7 +557,7 @@ def _extract_ids(ids_raw: list) -> List[int]:
             if v not in seen:
                 seen.add(v)
                 valid.append(v)
-        if len(valid) >= 5:
+        if len(valid) >= 10:
             break
     return valid
 
@@ -639,9 +639,9 @@ async def _summarize_chat(
             "Each message is prefixed with its ID, e.g. [id:12345]. "
             "CITATION RULES (strictly follow): "
             "(1) Each bullet ends with exactly ONE citation marker like [1] or [2]. "
-            "(2) Use at most 3 UNIQUE sources across ALL bullets — reuse numbers freely. "
+            "(2) Use up to 10 UNIQUE sources across all bullets — reuse numbers freely. "
             "(3) Cite ONLY SINGLE numbers: write [1] not [1,2,3]. "
-            "(4) source_ids lists the unique message IDs in the order [1],[2],[3] first appear. "
+            "(4) source_ids lists the unique message IDs in the order their citation number first appears. "
             "(5) Do NOT include URLs or markdown links in the summary text. "
             'Respond ONLY with valid compact JSON (no markdown fences, no literal newlines in string): '
             '{"summary": "• Point one [1]\\n• Point two [2]\\n• Point three [1]", "source_ids": [<id_1>, <id_2>]}'

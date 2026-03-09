@@ -90,8 +90,11 @@ export const setMonitored = (telegram_id: number, monitored: boolean) =>
     body: JSON.stringify({ monitored }),
   })
 
-export const getMessages = (telegram_id: number, limit = 50, offset = 0) =>
-  request<Message[]>(`/api/chats/${telegram_id}/messages?limit=${limit}&offset=${offset}`)
+export const getMessages = (telegram_id: number, limit = 50, offset = 0, anchorTelegramId?: number) => {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (anchorTelegramId != null) params.set('anchor_telegram_id', String(anchorTelegramId))
+  return request<Message[]>(`/api/chats/${telegram_id}/messages?${params}`)
+}
 
 export const syncChat = (telegram_id: number, limit?: number) =>
   request<{ status: string }>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })

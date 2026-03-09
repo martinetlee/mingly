@@ -875,6 +875,7 @@ function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: s
 /** Normalise summary text before rendering:
  *  - Expand comma-list citations [1, 2, 3] → [1][2][3]
  *  - Strip raw markdown links [[label]](url) → label
+ *  - Ensure every bullet point (•) starts on its own line
  */
 function normaliseSummary(text: string): string {
   // Expand [1, 2, 3] → [1][2][3]
@@ -883,7 +884,9 @@ function normaliseSummary(text: string): string {
   )
   // Strip markdown links [[label]](url) or [label](url) — keep just label
   text = text.replace(/\[{1,2}([^\]]+)\]{1,2}\([^)]+\)/g, '$1')
-  return text
+  // Ensure every • bullet starts on its own line (LLM sometimes omits \n between them)
+  text = text.replace(/([^\n])\s*•/g, '$1\n•')
+  return text.trim()
 }
 
 // Renders summary text with inline [1][2] citation markers as clickable badges

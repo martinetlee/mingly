@@ -179,6 +179,36 @@ async def get_messages(
     return list(result.all())
 
 
+async def get_offset_for_anchor(
+    db: AsyncSession,
+    chat_id: int,
+    anchor_telegram_id: int,
+    half_window: int = 50,
+) -> int:
+    """
+    Return the offset to pass to get_messages() so the anchor message
+    lands roughly in the centre of the result window.
+    Messages are ordered newest-first, so offset = (count of messages newer
+    than anchor) - half_window, floored at 0.
+    """
+    # Get date of anchor message
+    anchor_date_result = await db.execute(
+        select(Message.date)
+        .where(Message.chat_id == chat_id, Message.telegram_id == anchor_telegram_id)
+    )
+    anchor_date = anchor_date_result.scalar_one_or_none()
+    if anchor_date is None:
+        return 0
+    # Count messages strictly newer than the anchor
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.chat_id == chat_id, Message.date > anchor_date)
+    )
+    newer_count = count_result.scalar() or 0
+    return max(0, newer_count - half_window)
+
+
 async def get_messages_since(
     db: AsyncSession,
     chat_id: int,

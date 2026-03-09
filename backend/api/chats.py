@@ -170,8 +170,13 @@ async def get_messages(
     telegram_id: int,
     limit: int = 100,
     offset: int = 0,
+    anchor_telegram_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    # When anchoring to a specific message, compute offset so it lands near the middle
+    if anchor_telegram_id is not None:
+        offset = await crud.get_offset_for_anchor(db, telegram_id, anchor_telegram_id)
+
     # Auto-sync on first open (skip hidden chats)
     if offset == 0:
         chat = await crud.get_chat_by_telegram_id(db, telegram_id)
