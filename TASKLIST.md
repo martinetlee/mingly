@@ -25,10 +25,11 @@
 - [x] if the user is on the mention tab of intelligence page, when new messages come in with mentions, also add it in.
 - [x] once a daily briefing is created, group them by the time generated, and persist them in database. There should also be a way to remove them (by the time generated). This way user can see all the past daily briefing that was generated.
 - [] allow user to set briefing time (when to generate, and also in what frequency), the title should reflect that.
-- [] the chat in the intelligence page doesn't have context persisted within the chat, right? we should architect it so that it has context of the previous messages (but not outside of the chat).
+- [x] the chat in the intelligence page doesn't have context persisted within the chat, right? we should architect it so that it has context of the previous messages (but not outside of the chat).
 - [] in the readme section, add details about privacy of using the app.
 - [] in the mention tab of intelligence page, if a message contains a photo, also show them as in the regular chat.
 - [] in the mention tab of intelligence page, if a mention is replied, provide an option for user to jump to the replied message from the user. and also show what the user replied after. Use [...] to represent messages that are ommitted in between.
 - [] allow us to mark telegram profile as important
 - [] the update provided in briefing of the intelligence page should summarize the messages of the important profiles.
 - [] the update provided in briefing should provide sources, i.e. links to the messages about the update. link to the most representative message of that line of summary.
+- [] when scrolling down on the chat list and new chat is seen, sync 25 messages from each chat that was loaded. when a new message comes in and pushes a chat to the top, if the chat was not previously in the chat list, then sync 25 messages from that chat. A potential direction is basically to make sure to sync 25 messages from chat that newly appeared from the chatlist.

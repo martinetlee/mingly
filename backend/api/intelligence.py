@@ -260,7 +260,12 @@ class IntelligenceMessage(BaseModel):
 
 
 class IntelligenceChatRequest(BaseModel):
-    messages: list[IntelligenceMessage]
+    # Preferred: send conversation_id + the new user message text only.
+    # Backend loads full history from DB to build LLM context.
+    conversation_id: int | None = None
+    message: str | None = None
+    # Legacy fallback: explicit messages list (kept for compatibility)
+    messages: list[IntelligenceMessage] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +493,29 @@ async def intelligence_chat(
     req: IntelligenceChatRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    messages_in = [{"role": m.role, "content": m.content} for m in req.messages]
+    """
+    Streaming agentic chat endpoint.
+
+    Preferred usage: send {conversation_id, message} — the backend loads the
+    full persisted conversation history from DB and appends the new user message
+    as context, ensuring isolation between conversations.
+
+    Legacy fallback: send {messages: [...]} for backwards compatibility.
+    """
+    if req.conversation_id is not None and req.message is not None:
+        # Load persisted history from DB to build context
+        prior_msgs = await crud.get_conversation_messages(db, req.conversation_id)
+        messages_in = [
+            {"role": m.role, "content": m.content}
+            for m in prior_msgs
+        ]
+        # Append the new user message (frontend already persisted it)
+        messages_in.append({"role": "user", "content": req.message})
+    elif req.messages:
+        # Legacy: full messages list provided by caller
+        messages_in = [{"role": m.role, "content": m.content} for m in req.messages]
+    else:
+        messages_in = []
 
     async def generate():
         async for chunk in _run_agent(messages_in, db):

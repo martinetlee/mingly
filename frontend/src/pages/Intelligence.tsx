@@ -87,13 +87,16 @@ const TOOL_LABELS: Record<string, (args: Record<string, unknown>) => string> = {
 // ---------------------------------------------------------------------------
 
 async function* streamChat(
-  messages: { role: string; content: string }[],
+  conversationId: number,
+  message: string,
   signal: AbortSignal,
 ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
+  // Send only the conversation_id + new message; backend loads full history from DB.
+  // This ensures context is always the full persisted conversation, isolated per chat.
   const resp = await fetch('/api/intelligence/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ conversation_id: conversationId, message }),
     signal,
   })
 
@@ -1363,7 +1366,8 @@ export default function Intelligence() {
     const history = [...messages, userMsg]
     setMessages(history)
 
-    // Persist user message
+    // Persist user message BEFORE calling the backend so the backend can load it
+    // as part of the conversation history context.
     try {
       await appendConversationMessage(activeConvId, 'user', text)
     } catch {
@@ -1383,13 +1387,12 @@ export default function Intelligence() {
     const ctrl = new AbortController()
     abortRef.current = ctrl
 
-    // Build message array for API (only role+content)
-    const apiMessages = history.map((m) => ({ role: m.role, content: m.content }))
-
     let finalContent = ''
 
     try {
-      for await (const { event, data } of streamChat(apiMessages, ctrl.signal)) {
+      // Backend loads full conversation history from DB (conversation_id) and
+      // appends the new user message — ensures context is always the persisted history.
+      for await (const { event, data } of streamChat(activeConvId, text, ctrl.signal)) {
         if (event === 'tool_call') {
           setMessages((prev) => {
             const next = [...prev]

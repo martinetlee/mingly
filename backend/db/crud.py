@@ -3,7 +3,7 @@ from typing import Optional
 from sqlalchemy import select, delete, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry
+from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage
 
 
 # --- Chats ---
@@ -468,6 +468,18 @@ async def check_replied_after(db: AsyncSession, chat_id: int, after_date: dateti
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+# --- Conversations ---
+
+async def get_conversation_messages(db: AsyncSession, conversation_id: int) -> list:
+    """Return all messages in a conversation, ordered oldest-first."""
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at)
+    )
+    return list(result.scalars().all())
 
 
 # --- Briefing History ---
