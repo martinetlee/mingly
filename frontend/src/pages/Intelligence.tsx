@@ -761,11 +761,13 @@ function BriefingTab() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [schedule, setSchedule] = useState<'daily' | 'weekly'>('daily')
   const abortRef = useRef<AbortController | null>(null)
+  const runningRef = useRef(false)
 
   const days = schedule === 'weekly' ? 7 : 1
 
   const runBriefing = useCallback(async () => {
-    if (running) return
+    if (runningRef.current) return
+    runningRef.current = true
     abortRef.current?.abort()
     abortRef.current = new AbortController()
     setRunning(true)
@@ -792,10 +794,11 @@ function BriefingTab() {
       const err = e as Error
       if (err?.name !== 'AbortError') setError('Briefing failed: ' + err?.message)
     } finally {
+      runningRef.current = false
       setRunning(false)
       setProgress(null)
     }
-  }, [running, days])
+  }, [days])
 
   // Load schedule pref and check auto-run on mount
   useEffect(() => {

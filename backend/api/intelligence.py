@@ -550,7 +550,7 @@ async def _summarize_chat(
     return ""
 
 
-@router.post("/intelligence/briefing")
+@router.get("/intelligence/briefing")
 async def intelligence_briefing(
     days: int = 1,
     db: AsyncSession = Depends(get_db),
