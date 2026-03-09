@@ -123,3 +123,22 @@ class ConversationMessage(Base):
     role: Mapped[str] = mapped_column(String, nullable=False)  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BriefingRun(Base):
+    __tablename__ = "briefing_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    days: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class BriefingEntry(Base):
+    __tablename__ = "briefing_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("briefing_runs.id", ondelete="CASCADE"), nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_name: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing'
+    summary: Mapped[str] = mapped_column(Text, nullable=False)

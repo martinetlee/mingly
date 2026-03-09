@@ -40,8 +40,10 @@ import {
   getTags,
   getPrefs,
   setBriefingLastRun,
+  getBriefingHistory,
+  deleteBriefingRun,
 } from '../api/client'
-import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, WSEvent } from '../api/types'
+import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, BriefingRun, WSEvent } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -820,8 +822,70 @@ function shouldAutoRun(schedule: string, lastRun: string | null): boolean {
   return last < todayMidnight
 }
 
+// Sub-component: renders the chat summaries within a briefing run
+function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
+  const trackedSummaries = entries.filter((s) => s.category === 'tracked')
+  const briefingSummaries = entries.filter((s) => s.category === 'briefing')
+  return (
+    <div className="space-y-4">
+      {trackedSummaries.length > 0 && (
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <Radio size={12} className="text-violet-400" />
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-violet-400">
+              Tracked Chats
+            </h3>
+            <span className="rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-400">
+              {trackedSummaries.length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {trackedSummaries.map((s, i) => (
+              <div
+                key={i}
+                className="rounded-lg border border-violet-500/20 bg-violet-900/10 px-3 py-2"
+              >
+                <p className="mb-1 text-[11px] font-medium text-violet-300">{s.chat_name}</p>
+                <p className="text-[11px] leading-relaxed text-slate-300">{s.summary}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {briefingSummaries.length > 0 && (
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <Newspaper size={12} className="text-emerald-400" />
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
+              Briefing Chats
+            </h3>
+            <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-400">
+              {briefingSummaries.length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {briefingSummaries.map((s, i) => (
+              <div
+                key={i}
+                className="rounded-lg border border-emerald-500/20 bg-emerald-900/10 px-3 py-2"
+              >
+                <p className="mb-1 text-[11px] font-medium text-emerald-300">{s.chat_name}</p>
+                <div className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
+                  {s.summary}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
 function BriefingTab() {
-  const [summaries, setSummaries] = useState<BriefingSummary[]>([])
+  // Live run state (current generation)
+  const [liveSummaries, setLiveSummaries] = useState<BriefingSummary[]>([])
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ current: number; total: number; chatName: string } | null>(null)
   const [error, setError] = useState('')
@@ -830,7 +894,20 @@ function BriefingTab() {
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
 
+  // History state
+  const [history, setHistory] = useState<BriefingRun[]>([])
+  const [expandedRunId, setExpandedRunId] = useState<number | null>(null)
+
   const days = schedule === 'weekly' ? 7 : 1
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const runs = await getBriefingHistory()
+      setHistory(runs)
+    } catch {
+      // ignore
+    }
+  }, [])
 
   const runBriefing = useCallback(async () => {
     if (runningRef.current) return
@@ -840,7 +917,7 @@ function BriefingTab() {
     setRunning(true)
     setError('')
     setProgress(null)
-    setSummaries([])
+    setLiveSummaries([])
     try {
       for await (const evt of streamBriefing(days, abortRef.current.signal)) {
         const type = evt._event as string
@@ -849,10 +926,14 @@ function BriefingTab() {
         } else if (type === 'progress') {
           setProgress((p) => ({ current: evt.current as number, total: p?.total ?? 0, chatName: evt.chat_name as string }))
         } else if (type === 'chat_done') {
-          setSummaries((prev) => [...prev, evt as unknown as BriefingSummary])
+          setLiveSummaries((prev) => [...prev, evt as unknown as BriefingSummary])
         } else if (type === 'done') {
           setLastUpdated(new Date())
           setBriefingLastRun().catch(() => {})
+          // Reload history to include the new run
+          await loadHistory()
+          // Expand the newest run (first in list after reload)
+          // We'll set it after the reload
         } else if (type === 'error') {
           setError((evt.message as string) ?? 'Unknown error')
         }
@@ -865,23 +946,41 @@ function BriefingTab() {
       setRunning(false)
       setProgress(null)
     }
-  }, [days])
+  }, [days, loadHistory])
 
-  // Load schedule pref and check auto-run on mount
+  // Load schedule pref, check auto-run, and load history on mount
   useEffect(() => {
+    loadHistory()
     getPrefs().then((prefs: Record<string, string>) => {
       const sched = (prefs.briefing_schedule as 'daily' | 'weekly') ?? 'daily'
       setSchedule(sched)
       if (shouldAutoRun(sched, prefs.briefing_last_run ?? null)) {
-        // slight delay so UI is ready
         setTimeout(() => runBriefing(), 500)
       }
     }).catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const trackedSummaries = summaries.filter((s) => s.category === 'tracked')
-  const briefingSummaries = summaries.filter((s) => s.category === 'briefing')
+  const handleDeleteRun = async (runId: number) => {
+    try {
+      await deleteBriefingRun(runId)
+      setHistory((prev) => prev.filter((r) => r.id !== runId))
+      if (expandedRunId === runId) setExpandedRunId(null)
+    } catch {
+      // ignore
+    }
+  }
+
+  const formatRunDate = (isoStr: string) => {
+    const d = new Date(isoStr)
+    return d.toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  }
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -934,67 +1033,66 @@ function BriefingTab() {
         </div>
       )}
 
-      {/* Empty state */}
-      {!running && summaries.length === 0 && !error && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500">
-          <Newspaper size={32} className="opacity-30" />
-          <p className="text-sm">No summaries yet. Click "Update Now" to generate briefings.</p>
-        </div>
-      )}
-
-      {/* Summaries */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6">
-        {trackedSummaries.length > 0 && (
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {/* Live generation results */}
+        {running && liveSummaries.length > 0 && (
           <section>
             <div className="mb-3 flex items-center gap-2">
-              <Radio size={13} className="text-violet-400" />
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-violet-400">
-                Tracked Chats
-              </h3>
-              <span className="rounded-full bg-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-400">
-                {trackedSummaries.length}
-              </span>
+              <Loader2 size={13} className="text-emerald-400 animate-spin" />
+              <h3 className="text-xs font-semibold text-emerald-400">Generating…</h3>
             </div>
-            <div className="space-y-2">
-              {trackedSummaries.map((s) => (
-                <div
-                  key={s.chat_id}
-                  className="rounded-xl border border-violet-500/20 bg-violet-900/10 px-4 py-3"
-                >
-                  <p className="mb-1 text-xs font-medium text-violet-300">{s.chat_name}</p>
-                  <p className="text-xs leading-relaxed text-slate-300">{s.summary}</p>
-                </div>
-              ))}
-            </div>
+            <BriefingRunSummaries entries={liveSummaries} />
           </section>
         )}
 
-        {briefingSummaries.length > 0 && (
-          <section>
-            <div className="mb-3 flex items-center gap-2">
-              <Newspaper size={13} className="text-emerald-400" />
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                Briefing Chats
-              </h3>
-              <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-400">
-                {briefingSummaries.length}
-              </span>
-            </div>
-            <div className="space-y-3">
-              {briefingSummaries.map((s) => (
-                <div
-                  key={s.chat_id}
-                  className="rounded-xl border border-emerald-500/20 bg-emerald-900/10 px-4 py-3"
-                >
-                  <p className="mb-2 text-xs font-medium text-emerald-300">{s.chat_name}</p>
-                  <div className="text-xs leading-relaxed text-slate-300 whitespace-pre-line">
-                    {s.summary}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+        {/* History */}
+        {history.length === 0 && !running && (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500 py-16">
+            <Newspaper size={32} className="opacity-30" />
+            <p className="text-sm">No briefings yet. Click "Update Now" to generate one.</p>
+          </div>
         )}
+
+        {history.map((run) => {
+          const isExpanded = expandedRunId === run.id
+          return (
+            <div key={run.id} className="rounded-xl border border-slate-700/50 bg-slate-800/30 overflow-hidden">
+              {/* Run header */}
+              <div
+                className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-slate-700/20 transition-colors"
+                onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
+              >
+                <div className="flex items-center gap-2">
+                  {isExpanded ? (
+                    <ChevronDown size={14} className="text-slate-400" />
+                  ) : (
+                    <ChevronRight size={14} className="text-slate-400" />
+                  )}
+                  <span className="text-xs font-medium text-slate-200">
+                    {formatRunDate(run.generated_at)}
+                  </span>
+                  <span className="rounded-full bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-400">
+                    {run.days === 1 ? 'Daily' : `${run.days}d`} · {run.entries.length} chat{run.entries.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleDeleteRun(run.id) }}
+                  className="rounded-md p-1.5 text-slate-500 hover:bg-rose-900/30 hover:text-rose-400 transition-colors"
+                  title="Delete this briefing"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+
+              {/* Run entries (expanded) */}
+              {isExpanded && (
+                <div className="px-4 pb-4 pt-1 border-t border-slate-700/40">
+                  <BriefingRunSummaries entries={run.entries as BriefingSummary[]} />
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

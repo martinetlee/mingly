@@ -49,6 +49,9 @@ async def init_db():
             "ALTER TABLE messages ADD COLUMN reply_to_telegram_id INTEGER",
             # User's own reaction to a message (for acknowledged tracking in mentions)
             "ALTER TABLE messages ADD COLUMN my_reaction TEXT",
+            # Briefing history persistence
+            "CREATE TABLE IF NOT EXISTS briefing_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at DATETIME, days INTEGER DEFAULT 1)",
+            "CREATE TABLE IF NOT EXISTS briefing_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE, chat_id INTEGER NOT NULL, chat_name TEXT NOT NULL, category TEXT NOT NULL, summary TEXT NOT NULL)",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))

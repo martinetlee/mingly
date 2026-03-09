@@ -1,4 +1,4 @@
-import type { AuthStatus, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -263,6 +263,14 @@ export const setBriefingSchedule = (schedule: 'daily' | 'weekly') =>
 export const setBriefingLastRun = () =>
   request<{ success: boolean; briefing_last_run: string }>('/api/settings/prefs/briefing-last-run', {
     method: 'POST',
+  })
+
+export const getBriefingHistory = () =>
+  request<BriefingRun[]>('/api/intelligence/briefing/history')
+
+export const deleteBriefingRun = (run_id: number) =>
+  request<{ success: boolean }>(`/api/intelligence/briefing/history/${run_id}`, {
+    method: 'DELETE',
   })
 
 // --- Compose ---

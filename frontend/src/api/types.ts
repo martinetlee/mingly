@@ -219,6 +219,21 @@ export interface BriefingSummary {
   summary: string
 }
 
+export interface BriefingHistoryEntry {
+  id: number
+  chat_id: number
+  chat_name: string
+  category: 'tracked' | 'briefing'
+  summary: string
+}
+
+export interface BriefingRun {
+  id: number
+  generated_at: string
+  days: number
+  entries: BriefingHistoryEntry[]
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }

@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, desc, func, or_
+from sqlalchemy import select, delete, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Chat, Message, Tag, ChatTag
+from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry
 
 
 # --- Chats ---
@@ -468,6 +468,67 @@ async def check_replied_after(db: AsyncSession, chat_id: int, after_date: dateti
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+# --- Briefing History ---
+
+async def create_briefing_run(db: AsyncSession, days: int = 1) -> BriefingRun:
+    run = BriefingRun(days=days, generated_at=datetime.utcnow())
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def add_briefing_entry(
+    db: AsyncSession,
+    run_id: int,
+    chat_id: int,
+    chat_name: str,
+    category: str,
+    summary: str,
+) -> BriefingEntry:
+    entry = BriefingEntry(
+        run_id=run_id,
+        chat_id=chat_id,
+        chat_name=chat_name,
+        category=category,
+        summary=summary,
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return entry
+
+
+async def list_briefing_runs(db: AsyncSession) -> list[BriefingRun]:
+    result = await db.execute(
+        select(BriefingRun).order_by(desc(BriefingRun.generated_at))
+    )
+    return list(result.scalars().all())
+
+
+async def get_briefing_run_entries(db: AsyncSession, run_id: int) -> list[BriefingEntry]:
+    result = await db.execute(
+        select(BriefingEntry)
+        .where(BriefingEntry.run_id == run_id)
+        .order_by(BriefingEntry.id)
+    )
+    return list(result.scalars().all())
+
+
+async def delete_briefing_run(db: AsyncSession, run_id: int) -> bool:
+    result = await db.execute(
+        select(BriefingRun).where(BriefingRun.id == run_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        return False
+    # Delete entries first (cascade may not work on SQLite without PRAGMA foreign_keys=ON)
+    await db.execute(delete(BriefingEntry).where(BriefingEntry.run_id == run_id))
+    await db.delete(run)
+    await db.commit()
+    return True
 
 
 async def get_messages_around(

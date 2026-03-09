@@ -562,7 +562,7 @@ async def intelligence_briefing(
       - start: {total: N}
       - progress: {current: N, chat_name: str}
       - chat_done: {chat_id, chat_name, category, summary}
-      - done: {}
+      - done: {run_id}
       - error: {message}
     """
     from datetime import datetime, timedelta
@@ -582,18 +582,23 @@ async def intelligence_briefing(
 
         yield _sse("start", {"total": len(all_chats)})
 
+        # Collect all summaries to persist after streaming
+        collected: list[dict] = []
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             for idx, (category, chat) in enumerate(all_chats):
                 yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
 
                 msgs = await crud.get_messages_since(db, chat.telegram_id, since, limit=200)
                 if not msgs:
-                    yield _sse("chat_done", {
+                    entry = {
                         "chat_id": chat.telegram_id,
                         "chat_name": chat.name,
                         "category": category,
                         "summary": "No messages in this period.",
-                    })
+                    }
+                    collected.append(entry)
+                    yield _sse("chat_done", entry)
                     continue
 
                 lines = []
@@ -604,12 +609,14 @@ async def intelligence_briefing(
                         lines.append(f"[{ts}] {sender}: {m.text[:300]}")
 
                 if not lines:
-                    yield _sse("chat_done", {
+                    entry = {
                         "chat_id": chat.telegram_id,
                         "chat_name": chat.name,
                         "category": category,
                         "summary": "No text messages in this period.",
-                    })
+                    }
+                    collected.append(entry)
+                    yield _sse("chat_done", entry)
                     continue
 
                 messages_text = "\n".join(lines[-150:])  # cap context
@@ -617,13 +624,73 @@ async def intelligence_briefing(
                 if not summary:
                     summary = "Summary unavailable."
 
-                yield _sse("chat_done", {
+                entry = {
                     "chat_id": chat.telegram_id,
                     "chat_name": chat.name,
                     "category": category,
                     "summary": summary,
-                })
+                }
+                collected.append(entry)
+                yield _sse("chat_done", entry)
 
-        yield _sse("done", {})
+        # Persist the run and its entries to DB
+        run_id = None
+        if collected:
+            try:
+                async with AsyncSessionLocal() as write_db:
+                    run = await crud.create_briefing_run(write_db, days=days)
+                    run_id = run.id
+                    for e in collected:
+                        await crud.add_briefing_entry(
+                            write_db,
+                            run_id=run.id,
+                            chat_id=e["chat_id"],
+                            chat_name=e["chat_name"],
+                            category=e["category"],
+                            summary=e["summary"],
+                        )
+            except Exception:
+                pass  # don't fail streaming on persistence error
+
+        yield _sse("done", {"run_id": run_id})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Briefing history endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/intelligence/briefing/history")
+async def get_briefing_history(db: AsyncSession = Depends(get_db)):
+    """Return all past briefing runs with their entries, newest first."""
+    runs = await crud.list_briefing_runs(db)
+    result = []
+    for run in runs:
+        entries = await crud.get_briefing_run_entries(db, run.id)
+        result.append({
+            "id": run.id,
+            "generated_at": run.generated_at.isoformat() if run.generated_at else None,
+            "days": run.days,
+            "entries": [
+                {
+                    "id": e.id,
+                    "chat_id": e.chat_id,
+                    "chat_name": e.chat_name,
+                    "category": e.category,
+                    "summary": e.summary,
+                }
+                for e in entries
+            ],
+        })
+    return result
+
+
+@router.delete("/intelligence/briefing/history/{run_id}")
+async def delete_briefing_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a past briefing run and all its entries."""
+    from fastapi import HTTPException
+    success = await crud.delete_briefing_run(db, run_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Briefing run not found")
+    return {"success": True}
