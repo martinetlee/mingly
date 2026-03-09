@@ -987,6 +987,14 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
   )
 }
 
+const TIMEFRAME_OPTIONS = [
+  { label: '1d',  value: 1  },
+  { label: '3d',  value: 3  },
+  { label: '7d',  value: 7  },
+  { label: '14d', value: 14 },
+  { label: '30d', value: 30 },
+]
+
 function BriefingTab() {
   // Live run state (current generation)
   const [liveSummaries, setLiveSummaries] = useState<BriefingSummary[]>([])
@@ -996,14 +1004,13 @@ function BriefingTab() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [schedule, setSchedule] = useState<'daily' | 'weekly'>('daily')
   const [briefingTime, setBriefingTimeState] = useState<string>('09:00')
+  const [selectedDays, setSelectedDays] = useState(1)
   const abortRef = useRef<AbortController | null>(null)
   const runningRef = useRef(false)
 
   // History state
   const [history, setHistory] = useState<BriefingRun[]>([])
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null)
-
-  const days = schedule === 'weekly' ? 7 : 1
 
   const loadHistory = useCallback(async () => {
     try {
@@ -1026,7 +1033,7 @@ function BriefingTab() {
     setProgress(null)
     setLiveSummaries([])
     try {
-      for await (const evt of streamBriefing(days, abortRef.current.signal)) {
+      for await (const evt of streamBriefing(selectedDays, abortRef.current.signal)) {
         const type = evt._event as string
         if (type === 'start') {
           setProgress({ current: 0, total: evt.total as number, chatName: '' })
@@ -1052,7 +1059,7 @@ function BriefingTab() {
       setRunning(false)
       setProgress(null)
     }
-  }, [days, loadHistory])
+  }, [selectedDays, loadHistory])
 
   // Load schedule pref, check auto-run, and load history on mount
   useEffect(() => {
@@ -1062,6 +1069,8 @@ function BriefingTab() {
       const btime = prefs.briefing_time ?? '09:00'
       setSchedule(sched)
       setBriefingTimeState(btime)
+      // Initialise timeframe from saved schedule (weekly → 7d, daily → 1d)
+      setSelectedDays(sched === 'weekly' ? 7 : 1)
       if (shouldAutoRun(sched, prefs.briefing_last_run ?? null, btime)) {
         setTimeout(() => runBriefing(), 500)
       }
@@ -1096,9 +1105,25 @@ function BriefingTab() {
       <div className="flex shrink-0 items-center justify-between border-b border-slate-700/50 bg-slate-800/40 px-4 py-2.5">
         <div className="flex items-center gap-2">
           <Newspaper size={14} className="text-emerald-400" />
-          <span className="text-xs font-medium text-slate-300">
-            {schedule === 'weekly' ? 'Weekly' : 'Daily'} Briefing
-          </span>
+          <span className="text-xs font-medium text-slate-300">Briefing</span>
+          <span className="text-slate-600 text-xs">·</span>
+          {/* Timeframe selector */}
+          <div className="flex items-center gap-1">
+            {TIMEFRAME_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setSelectedDays(opt.value)}
+                disabled={running}
+                className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${
+                  selectedDays === opt.value
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                    : 'text-slate-500 hover:text-slate-300 border border-transparent hover:border-slate-600/50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
           <span className="text-xs text-slate-500">
             · {new Date(`1970-01-01T${briefingTime}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
@@ -1114,7 +1139,7 @@ function BriefingTab() {
           className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40 transition-colors border border-emerald-600/30"
         >
           <RotateCcw size={12} className={running ? 'animate-spin' : ''} />
-          {running ? 'Updating…' : 'Update Now'}
+          {running ? 'Generating…' : 'Generate Now'}
         </button>
       </div>
 
@@ -1151,6 +1176,9 @@ function BriefingTab() {
             <div className="mb-3 flex items-center gap-2">
               <Loader2 size={13} className="text-emerald-400 animate-spin" />
               <h3 className="text-xs font-semibold text-emerald-400">Generating…</h3>
+              <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-500">
+                Last {selectedDays === 1 ? '24h' : selectedDays === 7 ? '7 days' : selectedDays === 14 ? '14 days' : selectedDays === 30 ? '30 days' : `${selectedDays} days`}
+              </span>
             </div>
             <BriefingRunSummaries entries={liveSummaries} />
           </section>
@@ -1160,7 +1188,7 @@ function BriefingTab() {
         {history.length === 0 && !running && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500 py-16">
             <Newspaper size={32} className="opacity-30" />
-            <p className="text-sm">No briefings yet. Click "Update Now" to generate one.</p>
+            <p className="text-sm">No briefings yet. Select a timeframe and click "Generate Now".</p>
           </div>
         )}
 
@@ -1183,7 +1211,7 @@ function BriefingTab() {
                     {formatRunDate(run.generated_at)}
                   </span>
                   <span className="rounded-full bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-400">
-                    {run.days === 1 ? 'Daily' : `${run.days}d`} · {run.entries.length} chat{run.entries.length !== 1 ? 's' : ''}
+                    Last {run.days === 1 ? '24h' : run.days === 7 ? '7 days' : run.days === 14 ? '14 days' : run.days === 30 ? '30 days' : `${run.days} days`} · {run.entries.length} chat{run.entries.length !== 1 ? 's' : ''}
                   </span>
                 </div>
                 <button
