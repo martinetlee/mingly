@@ -92,7 +92,8 @@ async def _run_briefing_background(days: int) -> None:
                     continue
 
                 lines = []
-                for m in msgs:
+                for row in msgs:
+                    m = row[0]
                     if m.text:
                         ts = m.date.strftime("%m/%d %H:%M")
                         sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
@@ -146,7 +147,8 @@ async def _run_briefing_background(days: int) -> None:
 
                 lines = []
                 msg_chat_map: dict[int, int] = {}
-                for msg, chat in rows:
+                for row in rows:
+                    msg, chat = row[0], row[1]
                     if msg.text:
                         ts = msg.date.strftime("%m/%d %H:%M")
                         chat_label = chat.name or str(chat.telegram_id)
