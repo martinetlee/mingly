@@ -108,8 +108,11 @@ export default function ComboInput({
                 }`}
               >
                 {org.name}
-                {org.member_count > 0 && (
-                  <span className="ml-auto text-[10px] text-slate-500">{org.member_count} member{org.member_count !== 1 ? 's' : ''}</span>
+                {(org.member_count > 0 || org.former_member_count > 0) && (
+                  <span className="ml-auto text-[10px] text-slate-500">
+                    {org.member_count} member{org.member_count !== 1 ? 's' : ''}
+                    {org.former_member_count > 0 && `, ${org.former_member_count} former`}
+                  </span>
                 )}
               </button>
             ))}

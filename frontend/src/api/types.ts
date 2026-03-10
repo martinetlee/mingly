@@ -124,6 +124,7 @@ export interface OrgSummary {
   name: string
   context: string | null
   member_count: number
+  former_member_count: number
 }
 
 export interface OrgDetail {

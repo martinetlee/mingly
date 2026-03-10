@@ -104,19 +104,27 @@ async def list_organizations(
     result = await db.execute(q)
     orgs = list(result.scalars().all())
 
-    # Lightweight list: org + member count
+    # Lightweight list: org + member count (split active vs former)
     out = []
     for org in orgs:
-        count_result = await db.execute(
+        active_result = await db.execute(
             select(func.count(ContactPosition.id))
             .where(ContactPosition.organization == org.name)
+            .where(ContactPosition.is_active.is_(True))
         )
-        member_count = count_result.scalar() or 0
+        member_count = active_result.scalar() or 0
+        former_result = await db.execute(
+            select(func.count(ContactPosition.id))
+            .where(ContactPosition.organization == org.name)
+            .where(ContactPosition.is_active.is_(False))
+        )
+        former_member_count = former_result.scalar() or 0
         out.append({
             "id": org.id,
             "name": org.name,
             "context": org.context,
             "member_count": member_count,
+            "former_member_count": former_member_count,
         })
     return out
 
