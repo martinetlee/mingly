@@ -167,6 +167,7 @@ async def sync_dialogs() -> None:
                 chat_type=_chat_type(entity),
                 username=getattr(entity, "username", None),
                 unread_count=dialog.unread_count,
+                members_count=getattr(entity, "participants_count", None),
             )
 
 
@@ -187,6 +188,7 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
                 chat_type=_chat_type(entity),
                 username=getattr(entity, "username", None),
                 unread_count=dialog.unread_count,
+                members_count=getattr(entity, "participants_count", None),
             )
             if chat.is_hidden or chat.is_briefing:
                 continue

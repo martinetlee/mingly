@@ -167,6 +167,35 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_chats_by_member_count",
+            "description": (
+                "Find chats by their member count. Supports filtering for chats with "
+                "more than, exactly, or less than a given number of members."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "The member count threshold to compare against.",
+                    },
+                    "operator": {
+                        "type": "string",
+                        "enum": ["more_than", "exactly", "less_than"],
+                        "description": (
+                            "'more_than' = chats with more than `count` members; "
+                            "'exactly' = chats with exactly `count` members; "
+                            "'less_than' = chats with fewer than `count` members."
+                        ),
+                    },
+                },
+                "required": ["count", "operator"],
+            },
+        },
+    },
 ]
 
 SYSTEM_PROMPT = (
@@ -260,6 +289,17 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 return f"No chats in category '{category}'."
             names = [_qname(c.name, str(c.telegram_id)) for c in chats]
             return f"Chats in '{category}':\n" + "\n".join(f"- {n}" for n in names)
+
+        elif name == "find_chats_by_member_count":
+            count = int(args.get("count", 0))
+            operator = args.get("operator", "more_than")
+            chats = await crud.find_chats_by_member_count(db, count=count, operator=operator)
+            if not chats:
+                op_label = {"more_than": "more than", "exactly": "exactly", "less_than": "less than"}.get(operator, operator)
+                return f"No chats found with {op_label} {count} members."
+            op_label = {"more_than": "more than", "exactly": "exactly", "less_than": "fewer than"}.get(operator, operator)
+            lines = [f"- {_qname(c.name, str(c.telegram_id))} ({c.members_count} members)" for c in chats]
+            return f"Chats with {op_label} {count} members:\n" + "\n".join(lines)
 
         return f"Unknown tool: {name}"
     except Exception as e:
