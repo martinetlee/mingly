@@ -10,6 +10,7 @@ from backend.telegram.client import has_credentials, init_client
 from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
+from backend.briefing_scheduler import start_briefing_scheduler
 
 app = create_app()
 
@@ -26,6 +27,9 @@ async def on_startup():
             registry.add(instance_cfg)
         except Exception:
             pass  # unknown provider etc — skip silently
+    # Start the background briefing scheduler (runs regardless of Telegram auth)
+    start_briefing_scheduler()
+
     if not has_credentials():
         return
     authenticated = await init_client()

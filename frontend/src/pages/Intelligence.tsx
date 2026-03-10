@@ -842,36 +842,6 @@ async function* streamBriefing(days: number, signal: AbortSignal): AsyncGenerato
   }
 }
 
-/** Check if briefing should auto-run based on prefs */
-function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: string = '09:00'): boolean {
-  const now = new Date()
-  const [hStr, mStr] = briefingTime.split(':')
-  const runHour = parseInt(hStr ?? '9', 10)
-  const runMin = parseInt(mStr ?? '0', 10)
-  const runTime = new Date(now)
-  runTime.setHours(runHour, runMin, 0, 0)
-
-  if (!lastRun) return true // Never run
-
-  const last = new Date(lastRun)
-
-  if (schedule === 'weekly') {
-    // Run if last run was before the start of this week (Monday)
-    const monday = new Date(now)
-    monday.setHours(0, 0, 0, 0)
-    const day = monday.getDay() // 0=Sun
-    monday.setDate(monday.getDate() - (day === 0 ? 6 : day - 1))
-    return last < monday
-  }
-
-  // Daily: run if it's past the configured run time and last run was before that time today
-  if (now >= runTime && last < runTime) return true
-  // Or if last run was yesterday or earlier
-  const todayMidnight = new Date(now)
-  todayMidnight.setHours(0, 0, 0, 0)
-  return last < todayMidnight
-}
-
 // Small source-link badges that navigate to the message in context
 function SourceLinks({ sources, onNavigate }: { sources?: BriefingSource[]; onNavigate: (chatId: number, msgId: number) => void }) {
   if (!sources || sources.length === 0) return null
@@ -1081,7 +1051,8 @@ function BriefingTab() {
     setBriefingDay(day).catch(() => {})
   }, [])
 
-  // Load schedule pref, check auto-run, and load history on mount
+  // Load schedule pref and history on mount
+  // Note: auto-run is handled by the backend scheduler, not the frontend
   useEffect(() => {
     loadHistory()
     getPrefs().then((prefs: Record<string, string>) => {
@@ -1092,11 +1063,6 @@ function BriefingTab() {
       setBriefingTimeState(btime)
       setBriefingDayState(bday)
       scheduleRef.current = sched
-      // Auto-run uses schedule-derived days (daily=1, weekly=7)
-      const autoRunDays = sched === 'weekly' ? 7 : 1
-      if (shouldAutoRun(sched, prefs.briefing_last_run ?? null, btime)) {
-        setTimeout(() => runBriefing(autoRunDays), 500)
-      }
     }).catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
