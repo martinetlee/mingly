@@ -104,6 +104,6 @@ async def set_briefing_last_run():
     """Mark that the briefing was just run (stores current UTC ISO timestamp)."""
     from datetime import datetime
     prefs = _load_prefs()
-    prefs["briefing_last_run"] = datetime.utcnow().isoformat()
+    prefs["briefing_last_run"] = datetime.now().isoformat()
     _save_prefs(prefs)
     return {"success": True, "briefing_last_run": prefs["briefing_last_run"]}

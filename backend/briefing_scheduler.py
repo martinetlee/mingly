@@ -3,6 +3,8 @@ Background scheduler that auto-triggers briefing generation at the user's
 configured time, without requiring the frontend to be open.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -16,6 +18,11 @@ from backend.db.database import AsyncSessionLocal
 from backend.db import crud
 
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 _scheduler_task: asyncio.Task | None = None
 
@@ -35,8 +42,6 @@ def _should_auto_run(schedule: str, last_run: str | None, briefing_time: str = "
         return True
 
     last = datetime.fromisoformat(last_run)
-    # Convert UTC last_run to local time for comparison
-    # (prefs store UTC, but schedule times are local)
 
     if schedule == "weekly":
         # Run if last run was before the start of this week (Monday 00:00)
@@ -200,7 +205,7 @@ async def _run_briefing_background(days: int) -> None:
 
     # Update last-run timestamp in prefs
     prefs = _load_prefs()
-    prefs["briefing_last_run"] = datetime.utcnow().isoformat()
+    prefs["briefing_last_run"] = datetime.now().isoformat()
     _save_prefs(prefs)
 
 
