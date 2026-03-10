@@ -44,8 +44,10 @@ import {
   getBriefingHistory,
   deleteBriefingRun,
   setBriefingDay,
+  getBriefingPrompts,
+  setBriefingPrompts,
 } from '../api/client'
-import type { ConversationSummary, MentionGroup, MentionMessage, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
+import type { ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -842,6 +844,47 @@ async function* streamBriefing(days: number, signal: AbortSignal): AsyncGenerato
   }
 }
 
+async function* streamRegenerateBriefingEntry(
+  runId: number,
+  entryId: number,
+  signal: AbortSignal,
+): AsyncGenerator<Record<string, unknown>> {
+  const res = await fetch(`/api/intelligence/briefing/history/${runId}/entries/${entryId}/regenerate`, {
+    method: 'POST',
+    signal,
+  })
+  if (!res.ok || !res.body) throw new Error('Regeneration stream unavailable')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split('\n\n')
+      buffer = blocks.pop() ?? ''
+      for (const block of blocks) {
+        const lines = block.trim().split('\n')
+        let evt = ''
+        let data = ''
+        for (const l of lines) {
+          if (l.startsWith('event: ')) evt = l.slice(7)
+          if (l.startsWith('data: ')) data = l.slice(6)
+        }
+        if (!data) continue
+        try {
+          yield { _event: evt, ...(JSON.parse(data) as Record<string, unknown>) }
+        } catch {
+          // ignore malformed chunks
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /** Check if briefing should auto-run based on prefs */
 function shouldAutoRun(schedule: string, lastRun: string | null, briefingTime: string = '09:00'): boolean {
   const now = new Date()
@@ -933,11 +976,32 @@ function SummaryWithSources({
 }
 
 // Sub-component: renders the chat summaries within a briefing run
-function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
+function BriefingRunSummaries({
+  entries,
+  onRegenerateEntry,
+  onStopRegenerate,
+  onToggleRegenerateFlow,
+  regenerationFlowOpenByEntry,
+  regenerationReasoningByEntry,
+  regenerationTokensByEntry,
+  regeneratingEntryId,
+}: {
+  entries: (BriefingSummary | BriefingHistoryEntry)[]
+  onRegenerateEntry?: (entry: BriefingHistoryEntry) => void
+  onStopRegenerate?: (entryId: number) => void
+  onToggleRegenerateFlow?: (entryId: number) => void
+  regenerationFlowOpenByEntry?: Record<number, boolean>
+  regenerationReasoningByEntry?: Record<number, string>
+  regenerationTokensByEntry?: Record<number, number>
+  regeneratingEntryId?: number | null
+}) {
   const nav = useNavigate()
   const handleNavigate = (chatId: number, msgId: number) => {
     nav(`/chats?chatId=${chatId}&msgId=${msgId}`)
   }
+
+  const isHistoryEntry = (entry: BriefingSummary | BriefingHistoryEntry): entry is BriefingHistoryEntry =>
+    typeof (entry as BriefingHistoryEntry).id === 'number'
 
   const trackedSummaries = entries.filter((s) => s.category === 'tracked')
   const briefingSummaries = entries.filter((s) => s.category === 'briefing')
@@ -958,13 +1022,58 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
           <div className="space-y-2">
             {importantContactSummaries.map((s, i) => (
               <div
-                key={i}
+                key={isHistoryEntry(s) ? s.id : `${s.chat_id}-${i}-important`}
                 className="rounded-lg border border-amber-500/20 bg-amber-900/10 px-3 py-2"
               >
-                <p className="mb-1 text-[11px] font-medium text-amber-300">{s.chat_name}</p>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium text-amber-300">{s.chat_name}</p>
+                  {onRegenerateEntry && isHistoryEntry(s) && (
+                    <div className="inline-flex items-center gap-1">
+                      {regeneratingEntryId === s.id ? (
+                        <button
+                          onClick={() => onStopRegenerate?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-rose-500/30 px-1.5 py-0.5 text-[10px] text-rose-300 hover:bg-rose-900/40"
+                          title="Stop regenerating"
+                        >
+                          <X size={10} />
+                          Stop
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => onRegenerateEntry(s)}
+                          className="inline-flex items-center gap-1 rounded border border-amber-500/30 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-900/40"
+                          title="Regenerate this summary only"
+                        >
+                          <RefreshCw size={10} />
+                          Regenerate
+                        </button>
+                      )}
+                      {(regeneratingEntryId === s.id || (regenerationReasoningByEntry?.[s.id]?.length ?? 0) > 0) && (
+                        <button
+                          onClick={() => onToggleRegenerateFlow?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200 hover:bg-amber-900/30"
+                          title="Show or hide reasoning flow"
+                        >
+                          {(regenerationFlowOpenByEntry?.[s.id] ?? false) ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          Flow
+                          {regeneratingEntryId === s.id && typeof regenerationTokensByEntry?.[s.id] === 'number' && (
+                            <span className="text-[9px] opacity-80">{regenerationTokensByEntry[s.id]}</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <p className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
                   <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
                 </p>
+                {isHistoryEntry(s) && (regenerationFlowOpenByEntry?.[s.id] ?? false) && (
+                  <div className="mt-2 rounded border border-amber-500/20 bg-slate-900/60 p-2">
+                    <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-400">
+                      {(regenerationReasoningByEntry?.[s.id] ?? '') || 'Waiting for reasoning stream…'}
+                    </pre>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -985,13 +1094,58 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
           <div className="space-y-2">
             {trackedSummaries.map((s, i) => (
               <div
-                key={i}
+                key={isHistoryEntry(s) ? s.id : `${s.chat_id}-${i}-tracked`}
                 className="rounded-lg border border-violet-500/20 bg-violet-900/10 px-3 py-2"
               >
-                <p className="mb-1 text-[11px] font-medium text-violet-300">{s.chat_name}</p>
-                <p className="text-[11px] leading-relaxed text-slate-300">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium text-violet-300">{s.chat_name}</p>
+                  {onRegenerateEntry && isHistoryEntry(s) && (
+                    <div className="inline-flex items-center gap-1">
+                      {regeneratingEntryId === s.id ? (
+                        <button
+                          onClick={() => onStopRegenerate?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-rose-500/30 px-1.5 py-0.5 text-[10px] text-rose-300 hover:bg-rose-900/40"
+                          title="Stop regenerating"
+                        >
+                          <X size={10} />
+                          Stop
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => onRegenerateEntry(s)}
+                          className="inline-flex items-center gap-1 rounded border border-violet-500/30 px-1.5 py-0.5 text-[10px] text-violet-300 hover:bg-violet-900/40"
+                          title="Regenerate this summary only"
+                        >
+                          <RefreshCw size={10} />
+                          Regenerate
+                        </button>
+                      )}
+                      {(regeneratingEntryId === s.id || (regenerationReasoningByEntry?.[s.id]?.length ?? 0) > 0) && (
+                        <button
+                          onClick={() => onToggleRegenerateFlow?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-violet-900/30"
+                          title="Show or hide reasoning flow"
+                        >
+                          {(regenerationFlowOpenByEntry?.[s.id] ?? false) ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          Flow
+                          {regeneratingEntryId === s.id && typeof regenerationTokensByEntry?.[s.id] === 'number' && (
+                            <span className="text-[9px] opacity-80">{regenerationTokensByEntry[s.id]}</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <p className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
                   <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
                 </p>
+                {isHistoryEntry(s) && (regenerationFlowOpenByEntry?.[s.id] ?? false) && (
+                  <div className="mt-2 rounded border border-violet-500/20 bg-slate-900/60 p-2">
+                    <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-400">
+                      {(regenerationReasoningByEntry?.[s.id] ?? '') || 'Waiting for reasoning stream…'}
+                    </pre>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1012,13 +1166,58 @@ function BriefingRunSummaries({ entries }: { entries: BriefingSummary[] }) {
           <div className="space-y-2">
             {briefingSummaries.map((s, i) => (
               <div
-                key={i}
+                key={isHistoryEntry(s) ? s.id : `${s.chat_id}-${i}-briefing`}
                 className="rounded-lg border border-emerald-500/20 bg-emerald-900/10 px-3 py-2"
               >
-                <p className="mb-1 text-[11px] font-medium text-emerald-300">{s.chat_name}</p>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-medium text-emerald-300">{s.chat_name}</p>
+                  {onRegenerateEntry && isHistoryEntry(s) && (
+                    <div className="inline-flex items-center gap-1">
+                      {regeneratingEntryId === s.id ? (
+                        <button
+                          onClick={() => onStopRegenerate?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-rose-500/30 px-1.5 py-0.5 text-[10px] text-rose-300 hover:bg-rose-900/40"
+                          title="Stop regenerating"
+                        >
+                          <X size={10} />
+                          Stop
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => onRegenerateEntry(s)}
+                          className="inline-flex items-center gap-1 rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-900/40"
+                          title="Regenerate this summary only"
+                        >
+                          <RefreshCw size={10} />
+                          Regenerate
+                        </button>
+                      )}
+                      {(regeneratingEntryId === s.id || (regenerationReasoningByEntry?.[s.id]?.length ?? 0) > 0) && (
+                        <button
+                          onClick={() => onToggleRegenerateFlow?.(s.id)}
+                          className="inline-flex items-center gap-1 rounded border border-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-200 hover:bg-emerald-900/30"
+                          title="Show or hide reasoning flow"
+                        >
+                          {(regenerationFlowOpenByEntry?.[s.id] ?? false) ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          Flow
+                          {regeneratingEntryId === s.id && typeof regenerationTokensByEntry?.[s.id] === 'number' && (
+                            <span className="text-[9px] opacity-80">{regenerationTokensByEntry[s.id]}</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <div className="text-[11px] leading-relaxed text-slate-300 whitespace-pre-line">
                   <SummaryWithSources summary={s.summary} sources={s.sources} onNavigate={handleNavigate} />
                 </div>
+                {isHistoryEntry(s) && (regenerationFlowOpenByEntry?.[s.id] ?? false) && (
+                  <div className="mt-2 rounded border border-emerald-500/20 bg-slate-900/60 p-2">
+                    <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-400">
+                      {(regenerationReasoningByEntry?.[s.id] ?? '') || 'Waiting for reasoning stream…'}
+                    </pre>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1050,13 +1249,26 @@ function BriefingTab() {
   // Live run state (current generation)
   const [liveSummaries, setLiveSummaries] = useState<BriefingSummary[]>([])
   const [running, setRunning] = useState(false)
-  const [progress, setProgress] = useState<{ current: number; total: number; chatName: string } | null>(null)
+  const [progress, setProgress] = useState<{ current: number; total: number; chatName: string; tokens?: number } | null>(null)
+  const [showFlow, setShowFlow] = useState(false)
+  const [flowOrder, setFlowOrder] = useState<string[]>([])
+  const [flowByChat, setFlowByChat] = useState<Record<string, string>>({})
   const [error, setError] = useState('')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   // Schedule prefs (for auto-run display)
   const [schedule, setSchedule] = useState<'daily' | 'weekly'>('daily')
   const [briefingTime, setBriefingTimeState] = useState<string>('09:00')
   const [briefingDay, setBriefingDayState] = useState<string>('monday')
+  const [showPromptEditor, setShowPromptEditor] = useState(false)
+  const [trackedPromptDraft, setTrackedPromptDraft] = useState('')
+  const [briefingPromptDraft, setBriefingPromptDraft] = useState('')
+  const [trackedPromptSaved, setTrackedPromptSaved] = useState('')
+  const [briefingPromptSaved, setBriefingPromptSaved] = useState('')
+  const [trackedPromptDefault, setTrackedPromptDefault] = useState('')
+  const [briefingPromptDefault, setBriefingPromptDefault] = useState('')
+  const [trackedIsCustom, setTrackedIsCustom] = useState(false)
+  const [briefingIsCustom, setBriefingIsCustom] = useState(false)
+  const [savingPrompt, setSavingPrompt] = useState(false)
   // Manual generation timeframe (independent of schedule)
   const [selectedDays, setSelectedDays] = useState(1)
   const scheduleRef = useRef<'daily' | 'weekly'>('daily')
@@ -1066,6 +1278,12 @@ function BriefingTab() {
   // History state
   const [history, setHistory] = useState<BriefingRun[]>([])
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null)
+  const [regeneratingEntryId, setRegeneratingEntryId] = useState<number | null>(null)
+  const [regenerationFlowOpenByEntry, setRegenerationFlowOpenByEntry] = useState<Record<number, boolean>>({})
+  const [regenerationReasoningByEntry, setRegenerationReasoningByEntry] = useState<Record<number, string>>({})
+  const [regenerationTokensByEntry, setRegenerationTokensByEntry] = useState<Record<number, number>>({})
+  const regenerationAbortRef = useRef<AbortController | null>(null)
+  const promptDirty = trackedPromptDraft !== trackedPromptSaved || briefingPromptDraft !== briefingPromptSaved
 
   const loadHistory = useCallback(async () => {
     try {
@@ -1087,6 +1305,9 @@ function BriefingTab() {
     setError('')
     setProgress(null)
     setLiveSummaries([])
+    setShowFlow(false)
+    setFlowOrder([])
+    setFlowByChat({})
     const days = daysOverride ?? selectedDays
     try {
       for await (const evt of streamBriefing(days, abortRef.current.signal)) {
@@ -1094,7 +1315,20 @@ function BriefingTab() {
         if (type === 'start') {
           setProgress({ current: 0, total: evt.total as number, chatName: '' })
         } else if (type === 'progress') {
-          setProgress((p) => ({ current: evt.current as number, total: p?.total ?? 0, chatName: evt.chat_name as string }))
+          const chatName = evt.chat_name as string
+          setProgress((p) => ({ current: evt.current as number, total: p?.total ?? 0, chatName, tokens: 0 }))
+          setFlowOrder((prev) => (prev.includes(chatName) ? prev : [...prev, chatName]))
+        } else if (type === 'thinking') {
+          const chatName = evt.chat_name as string
+          const tokens = evt.tokens as number | undefined
+          const reasoning = evt.reasoning as string | undefined
+          if (typeof tokens === 'number') {
+            setProgress((p) => p ? { ...p, chatName, tokens } : p)
+          }
+          if (typeof reasoning === 'string' && reasoning.length > 0) {
+            setFlowOrder((prev) => (prev.includes(chatName) ? prev : [...prev, chatName]))
+            setFlowByChat((prev) => ({ ...prev, [chatName]: (prev[chatName] ?? '') + reasoning }))
+          }
         } else if (type === 'chat_done') {
           setLiveSummaries((prev) => [...prev, evt as unknown as BriefingSummary])
         } else if (type === 'done') {
@@ -1121,6 +1355,44 @@ function BriefingTab() {
     setBriefingDay(day).catch(() => {})
   }, [])
 
+  const handleSavePrompt = useCallback(async () => {
+    setSavingPrompt(true)
+    try {
+      const trackedTrimmed = trackedPromptDraft.trim()
+      const briefingTrimmed = briefingPromptDraft.trim()
+      await setBriefingPrompts(trackedTrimmed, briefingTrimmed)
+      setTrackedPromptSaved(trackedTrimmed)
+      setBriefingPromptSaved(briefingTrimmed)
+      setTrackedPromptDraft(trackedTrimmed)
+      setBriefingPromptDraft(briefingTrimmed)
+      setTrackedIsCustom(trackedTrimmed.length > 0)
+      setBriefingIsCustom(briefingTrimmed.length > 0)
+    } catch (e: unknown) {
+      const err = e as Error
+      setError(`Failed to save briefing prompt: ${err.message}`)
+    } finally {
+      setSavingPrompt(false)
+    }
+  }, [trackedPromptDraft, briefingPromptDraft])
+
+  const handleResetPrompt = useCallback(async () => {
+    setSavingPrompt(true)
+    try {
+      await setBriefingPrompts('', '')
+      setTrackedPromptSaved('')
+      setBriefingPromptSaved('')
+      setTrackedPromptDraft('')
+      setBriefingPromptDraft('')
+      setTrackedIsCustom(false)
+      setBriefingIsCustom(false)
+    } catch (e: unknown) {
+      const err = e as Error
+      setError(`Failed to reset briefing prompt: ${err.message}`)
+    } finally {
+      setSavingPrompt(false)
+    }
+  }, [])
+
   // Load schedule pref, check auto-run, and load history on mount
   useEffect(() => {
     loadHistory()
@@ -1138,6 +1410,16 @@ function BriefingTab() {
         setTimeout(() => runBriefing(autoRunDays), 500)
       }
     }).catch(() => {})
+    getBriefingPrompts().then(({ tracked, briefing }) => {
+      setTrackedPromptDefault(tracked.default)
+      setBriefingPromptDefault(briefing.default)
+      setTrackedPromptSaved((tracked.custom ?? '').trim())
+      setBriefingPromptSaved((briefing.custom ?? '').trim())
+      setTrackedPromptDraft((tracked.custom ?? '').trim())
+      setBriefingPromptDraft((briefing.custom ?? '').trim())
+      setTrackedIsCustom(!!tracked.is_custom)
+      setBriefingIsCustom(!!briefing.is_custom)
+    }).catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1150,6 +1432,59 @@ function BriefingTab() {
       // ignore
     }
   }
+
+  const handleRegenerateEntry = useCallback(async (runId: number, entry: BriefingHistoryEntry) => {
+    regenerationAbortRef.current?.abort()
+    const controller = new AbortController()
+    regenerationAbortRef.current = controller
+    setRegeneratingEntryId(entry.id)
+    setRegenerationFlowOpenByEntry((prev) => ({ ...prev, [entry.id]: false }))
+    setRegenerationReasoningByEntry((prev) => ({ ...prev, [entry.id]: '' }))
+    setRegenerationTokensByEntry((prev) => ({ ...prev, [entry.id]: 0 }))
+    try {
+      for await (const evt of streamRegenerateBriefingEntry(runId, entry.id, controller.signal)) {
+        const type = evt._event as string
+        if (type === 'thinking') {
+          if (typeof evt.tokens === 'number') {
+            setRegenerationTokensByEntry((prev) => ({ ...prev, [entry.id]: evt.tokens as number }))
+          }
+          if (typeof evt.reasoning === 'string' && (evt.reasoning as string).length > 0) {
+            setRegenerationReasoningByEntry((prev) => ({
+              ...prev,
+              [entry.id]: (prev[entry.id] ?? '') + (evt.reasoning as string),
+            }))
+          }
+        } else if (type === 'done') {
+          const updated = evt.entry as BriefingHistoryEntry
+          setHistory((prev) => prev.map((run) => {
+            if (run.id !== runId) return run
+            return {
+              ...run,
+              entries: run.entries.map((e) => (e.id === entry.id ? updated : e)),
+            }
+          }))
+        } else if (type === 'error') {
+          setError(`Regeneration failed: ${String(evt.message ?? 'Unknown error')}`)
+        }
+      }
+    } catch (e: unknown) {
+      const err = e as Error
+      if (err?.name !== 'AbortError') setError(`Regeneration failed: ${err.message}`)
+    } finally {
+      setRegeneratingEntryId(null)
+      regenerationAbortRef.current = null
+    }
+  }, [])
+
+  const handleStopRegenerate = useCallback((entryId: number) => {
+    if (regeneratingEntryId === entryId) {
+      regenerationAbortRef.current?.abort()
+    }
+  }, [regeneratingEntryId])
+
+  const toggleRegenerationFlow = useCallback((entryId: number) => {
+    setRegenerationFlowOpenByEntry((prev) => ({ ...prev, [entryId]: !prev[entryId] }))
+  }, [])
 
   const formatRunDate = (isoStr: string) => {
     const d = new Date(isoStr)
@@ -1216,15 +1551,74 @@ function BriefingTab() {
               </button>
             ))}
           </div>
-          <button
-            onClick={() => runBriefing()}
-            disabled={running}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 disabled:opacity-40 transition-colors border border-emerald-600/30"
-          >
-            <RotateCcw size={12} className={running ? 'animate-spin' : ''} />
-            {running ? 'Generating…' : 'Generate Now'}
-          </button>
+          {running ? (
+            <button
+              onClick={() => abortRef.current?.abort()}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-rose-400 hover:bg-rose-900/30 hover:text-rose-300 transition-colors border border-rose-600/30"
+            >
+              <X size={12} />
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={() => runBriefing()}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-900/30 hover:text-emerald-300 transition-colors border border-emerald-600/30"
+            >
+              <RotateCcw size={12} />
+              Generate Now
+            </button>
+          )}
         </div>
+      </div>
+
+      {/* Prompt editor */}
+      <div className="shrink-0 border-b border-slate-700/40 bg-slate-900/20 px-4 py-2">
+        <button
+          onClick={() => setShowPromptEditor((v) => !v)}
+          className="inline-flex items-center gap-1 rounded border border-slate-600/60 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700/30"
+        >
+          {showPromptEditor ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          Briefing Prompts
+        </button>
+        {showPromptEditor && (
+          <div className="mt-2 rounded border border-slate-700/60 bg-slate-900/50 p-2">
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-300">
+              Tracked Chats Prompt {trackedIsCustom ? '(Custom)' : '(Default)'}
+            </p>
+            <textarea
+              value={trackedPromptDraft || trackedPromptDefault}
+              onChange={(e) => setTrackedPromptDraft(e.target.value)}
+              placeholder="Leave empty to use built-in default prompt."
+              className="h-28 w-full resize-y rounded border border-violet-700/60 bg-slate-950/70 px-2 py-1.5 text-[11px] leading-relaxed text-slate-200 outline-none focus:border-violet-500/60"
+            />
+            <p className="mb-1 mt-3 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+              Briefing Chats Prompt {briefingIsCustom ? '(Custom)' : '(Default)'}
+            </p>
+            <textarea
+              value={briefingPromptDraft || briefingPromptDefault}
+              onChange={(e) => setBriefingPromptDraft(e.target.value)}
+              placeholder="Leave empty to use built-in default prompt."
+              className="h-32 w-full resize-y rounded border border-slate-700 bg-slate-950/70 px-2 py-1.5 text-[11px] leading-relaxed text-slate-200 outline-none focus:border-emerald-500/60"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                onClick={handleSavePrompt}
+                disabled={savingPrompt || !promptDirty}
+                className="rounded border border-emerald-600/40 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-900/30 disabled:opacity-50"
+              >
+                {savingPrompt ? 'Saving…' : 'Save Prompt'}
+              </button>
+              <button
+                onClick={handleResetPrompt}
+                disabled={savingPrompt || (!trackedPromptSaved && !briefingPromptSaved)}
+                className="rounded border border-slate-600/50 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-700/30 disabled:opacity-50"
+              >
+                Reset to Default
+              </button>
+              {promptDirty && <span className="text-[10px] text-amber-300">Unsaved changes</span>}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Progress bar */}
@@ -1233,8 +1627,20 @@ function BriefingTab() {
           <div className="mb-1 flex items-center justify-between">
             <span className="text-xs text-slate-400">
               Summarising <span className="text-slate-200 font-medium">{progress.chatName}</span>…
+              {progress.tokens != null && progress.tokens > 0 && (
+                <span className="ml-1.5 text-amber-400/80">({progress.tokens} tokens)</span>
+              )}
             </span>
-            <span className="text-xs text-slate-500">{progress.current}/{progress.total}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">{progress.current}/{progress.total}</span>
+              <button
+                onClick={() => abortRef.current?.abort()}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-rose-400 hover:bg-rose-900/30 hover:text-rose-300 transition-colors border border-rose-600/30"
+              >
+                <X size={9} />
+                Stop
+              </button>
+            </div>
           </div>
           <div className="h-1 w-full rounded-full bg-slate-700">
             <div
@@ -1242,6 +1648,33 @@ function BriefingTab() {
               style={{ width: progress.total > 0 ? `${(progress.current / progress.total) * 100}%` : '0%' }}
             />
           </div>
+
+          <div className="mt-2">
+            <button
+              onClick={() => setShowFlow((v) => !v)}
+              className="inline-flex items-center gap-1 rounded border border-slate-600/60 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700/40"
+            >
+              {showFlow ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              {showFlow ? 'Hide' : 'Show'} LLM Flow
+            </button>
+          </div>
+
+          {showFlow && (
+            <div className="mt-2 max-h-64 overflow-y-auto rounded border border-slate-700/60 bg-slate-900/60 p-2 space-y-2">
+              {flowOrder.length === 0 ? (
+                <p className="text-[11px] text-slate-500">Waiting for reasoning stream…</p>
+              ) : (
+                flowOrder.map((chatName) => (
+                  <div key={chatName} className="rounded border border-slate-700/50 bg-slate-800/50 p-2">
+                    <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-300">{chatName}</p>
+                    <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-400">
+                      {flowByChat[chatName] || '(no reasoning chunks yet)'}
+                    </pre>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1310,7 +1743,16 @@ function BriefingTab() {
               {/* Run entries (expanded) */}
               {isExpanded && (
                 <div className="px-4 pb-4 pt-1 border-t border-slate-700/40">
-                  <BriefingRunSummaries entries={run.entries as BriefingSummary[]} />
+                  <BriefingRunSummaries
+                    entries={run.entries}
+                    onRegenerateEntry={(entry) => handleRegenerateEntry(run.id, entry)}
+                    onStopRegenerate={handleStopRegenerate}
+                    onToggleRegenerateFlow={toggleRegenerationFlow}
+                    regenerationFlowOpenByEntry={regenerationFlowOpenByEntry}
+                    regenerationReasoningByEntry={regenerationReasoningByEntry}
+                    regenerationTokensByEntry={regenerationTokensByEntry}
+                    regeneratingEntryId={regeneratingEntryId}
+                  />
                 </div>
               )}
             </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, getTags, createTag, updateTag, deleteTag } from '../api/client'
 import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
@@ -462,11 +462,23 @@ export default function Settings() {
   // Briefing schedule preference
   const [briefingSchedule, setBriefingSchedule] = useState<'daily' | 'weekly'>('daily')
   const [briefingTime, setBriefingTime] = useState<string>('09:00')
+  const [briefingMaxTokens, setBriefingMaxTokens] = useState<number>(4000)
+
+  // Ollama models already downloaded on disk
+  const [downloadedModels, setDownloadedModels] = useState<string[]>([])
 
   const refreshOllamaStatus = useCallback(async () => {
     try {
       const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status')
       setOllamaRunning(running)
+      if (running) {
+        try {
+          const { models } = await apiFetch<{ models: { name: string }[] }>('GET', '/api/llm/ollama/models')
+          setDownloadedModels(models.map((m) => m.name))
+        } catch {
+          // Ignore — model list is optional
+        }
+      }
     } catch {
       setOllamaRunning(false)
     }
@@ -495,6 +507,7 @@ export default function Settings() {
         if (prefs.notif_pref) setNotifPref(prefs.notif_pref as NotifPref)
         if (prefs.briefing_schedule) setBriefingSchedule(prefs.briefing_schedule as 'daily' | 'weekly')
         if (prefs.briefing_time) setBriefingTime(prefs.briefing_time)
+        if (prefs.briefing_max_tokens) setBriefingMaxTokens(Number(prefs.briefing_max_tokens))
       })
       .catch(() => {})
 
@@ -548,15 +561,50 @@ export default function Settings() {
     }
   }
 
+  const handleSwitchDirect = async (model: ModelDef) => {
+    setSetup({ phase: 'registering', label: 'Switching model…', pct: 0 })
+    try {
+      try {
+        await apiFetch('POST', '/api/llm/instances', {
+          name: 'local',
+          provider: model.provider,
+          model: model.ollamaModel,
+          base_url: 'http://localhost:11434/v1',
+        })
+      } catch (e) {
+        if (!(e instanceof Error && e.message.toLowerCase().includes('already'))) throw e
+      }
+      await apiFetch('PUT', '/api/llm/orchestrator', {
+        orchestrator_name: 'local',
+        orchestrator_prompt: '',
+      })
+      setOrchestratorId(model.id)
+      setPendingModelId(null)
+      setSetup({ phase: 'done', label: '', pct: 100 })
+    } catch (e) {
+      setSetup((prev) => ({
+        ...prev!,
+        phase: 'error',
+        error: e instanceof Error ? e.message : 'Switch failed',
+      }))
+    }
+  }
+
   const handleConfirmSelection = () => {
     const model = MODELS.find((m) => m.id === pendingModelId)
     if (!model) return
     if (model.type === 'local') {
-      // Start download/setup flow
-      const ctrl = new AbortController()
-      abortRef.current = ctrl
-      setSetup({ phase: 'install-binary', label: 'Checking…', pct: 0 })
-      runSetup(model, ctrl.signal)
+      const alreadyDownloaded = !!(model.ollamaModel && downloadedModels.some((n) => n === model.ollamaModel || n.startsWith(model.ollamaModel + ':')))
+      if (alreadyDownloaded) {
+        // Model is already on disk — just switch the orchestrator
+        handleSwitchDirect(model)
+      } else {
+        // Full download + setup flow
+        const ctrl = new AbortController()
+        abortRef.current = ctrl
+        setSetup({ phase: 'install-binary', label: 'Checking…', pct: 0 })
+        runSetup(model, ctrl.signal)
+      }
     }
     // cloud: do nothing (coming soon)
   }
@@ -691,6 +739,14 @@ export default function Settings() {
     apiSetBriefingTime(time).catch(() => {})
   }
 
+  const handleBriefingMaxTokensChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const raw = parseInt(e.target.value, 10)
+    if (isNaN(raw)) return
+    const clamped = Math.max(256, Math.min(32000, raw))
+    setBriefingMaxTokens(clamped)
+    apiSetBriefingMaxTokens(clamped).catch(() => {})
+  }
+
   // ── Derived ────────────────────────────────────────────────────────────
 
   const pendingModel = MODELS.find((m) => m.id === pendingModelId) ?? null
@@ -760,30 +816,35 @@ export default function Settings() {
                 </select>
 
                 {/* Inline confirm when pending change */}
-                {pendingModelId && pendingModelId !== orchestratorId && (
-                  <div className="mt-3 flex items-center justify-between rounded-lg bg-blue-900/40 border border-blue-700/50 px-3 py-2.5">
-                    <span className="text-sm text-blue-300">
-                      {pendingModel?.type === 'local'
-                        ? `Set up ${pendingModel?.name} locally?`
-                        : `Switch to ${pendingModel?.name}?`}
-                    </span>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleCancelPending}
-                        className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-400 hover:bg-slate-700 hover:text-slate-200"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleConfirmSelection}
-                        disabled={!pendingModel?.available}
-                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                      >
-                        {pendingModel?.type === 'local' ? 'Download & Set up' : 'Apply'}
-                      </button>
+                {pendingModelId && pendingModelId !== orchestratorId && (() => {
+                  const alreadyDownloaded = !!(pendingModel?.ollamaModel && downloadedModels.some((n) => n === pendingModel.ollamaModel || n.startsWith(pendingModel.ollamaModel! + ':')))
+                  const confirmLabel = pendingModel?.type === 'local'
+                    ? (alreadyDownloaded ? 'Switch' : 'Download & Set up')
+                    : 'Apply'
+                  const confirmHint = pendingModel?.type === 'local'
+                    ? (alreadyDownloaded ? `Switch to ${pendingModel?.name}?` : `Download & set up ${pendingModel?.name} locally?`)
+                    : `Switch to ${pendingModel?.name}?`
+                  return (
+                    <div className="mt-3 flex items-center justify-between rounded-lg bg-blue-900/40 border border-blue-700/50 px-3 py-2.5">
+                      <span className="text-sm text-blue-300">{confirmHint}</span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleCancelPending}
+                          className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleConfirmSelection}
+                          disabled={!pendingModel?.available}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                        >
+                          {confirmLabel}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )
+                })()}
 
                 {/* Current status */}
                 {orchestratorId && !pendingModelId && (
@@ -896,6 +957,40 @@ export default function Settings() {
                   />
                   <p className="mt-2 text-xs text-slate-500">
                     The briefing will auto-run at this time each {briefingSchedule === 'weekly' ? 'Monday' : 'day'}, or on first app open after this time.
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                    Max tokens per summary
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={256}
+                      max={32000}
+                      step={256}
+                      value={briefingMaxTokens}
+                      onChange={handleBriefingMaxTokensChange}
+                      className="w-32 rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                    <div className="flex gap-1.5">
+                      {[1024, 2048, 4000, 8000].map((preset) => (
+                        <button
+                          key={preset}
+                          onClick={() => { setBriefingMaxTokens(preset); apiSetBriefingMaxTokens(preset).catch(() => {}) }}
+                          className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                            briefingMaxTokens === preset
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-slate-200'
+                          }`}
+                        >
+                          {preset >= 1000 ? `${preset / 1000}k` : preset}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Higher values allow longer, more detailed summaries but increase generation time. Reasoning models need 8k+ tokens to think before answering.
                   </p>
                 </div>
               </div>

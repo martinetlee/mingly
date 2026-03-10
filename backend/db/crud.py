@@ -215,14 +215,28 @@ async def get_messages_since(
     since: datetime,
     limit: int = 200,
 ) -> list:
-    """Return up to `limit` messages for a chat on or after `since`, oldest-first."""
+    """
+    Return up to `limit` messages for a chat on or after `since`, oldest-first.
+    Each element is a (Message, reply_sender_name, reply_text) tuple.
+    reply_sender_name and reply_text are None when the message is not a reply.
+    """
+    Reply = Message.__table__.alias("reply_msg")
     result = await db.execute(
-        select(Message)
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
         .where(Message.chat_id == chat_id, Message.date >= since)
         .order_by(Message.date)
         .limit(limit)
     )
-    return list(result.scalars().all())
+    return list(result.all())
 
 
 async def message_exists(db: AsyncSession, telegram_id: int, chat_id: int) -> bool:
@@ -630,11 +644,23 @@ async def get_messages_from_sender_since(
     """
     Return up to `limit` messages sent by a specific Telegram user (matched via
     sender_id == sender_telegram_id) on or after `since`, with chat info.
-    Each row is a (Message, Chat) tuple.
+    Each row is a (Message, Chat, reply_sender_name, reply_text) tuple.
+    reply_sender_name and reply_text are None when the message is not a reply.
     """
+    Reply = Message.__table__.alias("reply_msg")
     result = await db.execute(
-        select(Message, Chat)
+        select(
+            Message,
+            Chat,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+        )
         .join(Chat, Message.chat_id == Chat.telegram_id)
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
         .where(
             Message.sender_id == sender_telegram_id,
             Message.date >= since,
