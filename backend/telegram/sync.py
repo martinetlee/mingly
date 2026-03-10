@@ -122,6 +122,12 @@ def _entities_to_html(text: str, entities) -> Optional[str]:
         from telethon.extensions import html as thtml
         try:
             result = thtml.unparse(text, entities)
+            # Convert tg://user?id=X mention links to in-app profile links
+            result = re.sub(
+                r'href="tg://user\?id=(\d+)"',
+                r'href="/profile/\1" data-mention="true"',
+                result,
+            )
             return _markdown_pass(result)
         except Exception:
             pass

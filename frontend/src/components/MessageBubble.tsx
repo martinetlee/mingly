@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useCallback } from 'react'
 import { Reply } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 
 interface Props {
@@ -46,11 +46,39 @@ function simpleMarkdownToHtml(text: string): string {
   return s
 }
 
+/** Convert tg://user mention links to in-app /profile links and wrap plain @username text */
+function processMentions(html: string): string {
+  // Convert any remaining tg://user?id=X links from older syncs
+  let s = html.replace(
+    /href="tg:\/\/user\?id=(\d+)"/g,
+    'href="/profile/$1" data-mention="true"',
+  )
+  // Wrap plain @username text that isn't already inside an <a> tag
+  s = s.replace(
+    /(?<!["\/\w])@([A-Za-z]\w{3,})/g,
+    '<a href="/profile/@$1" data-mention="true" class="mention-link">@$1</a>',
+  )
+  return s
+}
+
 function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
+  const navigate = useNavigate()
+
+  const handleClick = useCallback((e: React.MouseEvent<HTMLSpanElement>) => {
+    const anchor = (e.target as HTMLElement).closest('a')
+    if (!anchor) return
+    const href = anchor.getAttribute('href')
+    if (href && href.startsWith('/profile/')) {
+      e.preventDefault()
+      navigate(href)
+    }
+  }, [navigate])
+
   return (
     <span
       className={`formatted-text ${isOut ? 'formatted-out' : 'formatted-in'}`}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: processMentions(html) }}
+      onClick={handleClick}
     />
   )
 }

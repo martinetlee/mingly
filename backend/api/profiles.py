@@ -11,15 +11,19 @@ PROFILE_PHOTO_DIR.mkdir(exist_ok=True)
 
 
 @router.get("/{user_id}")
-async def get_profile(user_id: int):
-    """Fetch a Telegram user's profile by their numeric ID."""
+async def get_profile(user_id: str):
+    """Fetch a Telegram user's profile by numeric ID or @username."""
     client = get_client()
     if not client:
         raise HTTPException(status_code=503, detail="Telegram client not connected")
     await ensure_connected()
 
     try:
-        entity = await client.get_entity(user_id)
+        # Support both numeric IDs and @username lookups
+        if user_id.startswith("@"):
+            entity = await client.get_entity(user_id)
+        else:
+            entity = await client.get_entity(int(user_id))
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"User not found: {e}")
 

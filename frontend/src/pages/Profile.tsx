@@ -32,14 +32,21 @@ export default function Profile() {
     if (!userId) return
     setLoading(true)
     setError(null)
-    const uid = Number(userId)
+    // Support both numeric IDs and @username lookups
+    const isUsername = userId.startsWith('@')
+    const profileKey = isUsername ? userId : Number(userId)
+    const contactKey = isUsername ? NaN : Number(userId)
     Promise.all([
-      getProfile(uid),
-      getContactByTelegram(uid).catch(() => null),
+      getProfile(profileKey),
+      isUsername ? Promise.resolve(null) : getContactByTelegram(contactKey).catch(() => null),
     ])
       .then(([p, c]) => {
         setProfile(p)
         setContact(c)
+        // If resolved via username, fetch contact info using the returned numeric ID
+        if (isUsername && p?.id) {
+          getContactByTelegram(p.id).then(setContact).catch(() => {})
+        }
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
