@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft, Bot, Crown, BadgeCheck, Globe, Phone, AtSign, MessageSquare, Star } from 'lucide-react'
 import type { TelegramProfile, Contact } from '../api/types'
 import { getProfile, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
+import ContactInfoSection from '../components/ContactInfoSection'
 
 const STATUS_LABELS: Record<string, string> = {
   online: 'Online',
@@ -189,6 +190,13 @@ export default function Profile() {
             )}
           </div>
         </div>
+
+        {/* Contact extra info (twitter, linkedin, notes, positions) */}
+        {contact && (
+          <div className="mb-6 flex flex-col gap-4">
+            <ContactInfoSection contact={contact} onContactChange={setContact} />
+          </div>
+        )}
 
         {/* Common chats */}
         {profile.common_chats && profile.common_chats.length > 0 && (
