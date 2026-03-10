@@ -765,9 +765,11 @@ export default function Chats() {
   const chatListRef = useRef<HTMLDivElement>(null)
   // Track which chat telegram_ids have been auto-synced to avoid duplicate requests
   const autoSyncedRef = useRef<Set<number>>(new Set())
-  // Highlight a specific message (set from URL params when navigating from Mentions)
+  // Highlight a specific message (set from URL params when navigating from Mentions/Briefing)
   const [highlightMsgId, setHighlightMsgId] = useState<number | null>(null)
   const pendingNavRef = useRef<{ chatId: number; msgId: number } | null>(null)
+  // When set, loadMessages will use anchor-based fetching to land near this message
+  const pendingAnchorRef = useRef<number | null>(null)
   // Reply-to state
   const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
 
@@ -830,9 +832,12 @@ export default function Chats() {
 
   const loadMessages = useCallback(async (chat: Chat) => {
     setLoadingMessages(true)
+    // Consume the pending anchor (if navigating from a citation) and compute offset server-side
+    const anchor = pendingAnchorRef.current
+    pendingAnchorRef.current = null
     setMessageOffset(0)
     try {
-      const data = await getMessages(chat.telegram_id, LIMIT, 0)
+      const data = await getMessages(chat.telegram_id, LIMIT, 0, anchor ?? undefined)
       setMessages(data)
       setHasMore(data.length === LIMIT)
     } finally {
@@ -877,6 +882,7 @@ export default function Chats() {
     pendingNavRef.current = null
     const target = chats.find((c) => c.telegram_id === chatId)
     if (target) {
+      pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
       setSelectedChat(target)
       setMessages([])
       setHasMore(false)

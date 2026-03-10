@@ -1,10 +1,15 @@
 import json
 import os
+from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from backend.config import DATA_DIR
+from backend.llm.briefing_prompts import (
+    DEFAULT_BRIEFING_CHAT_PROMPT,
+    DEFAULT_TRACKED_CHAT_PROMPT,
+)
 
 router = APIRouter()
 
@@ -97,6 +102,139 @@ async def set_briefing_day(req: BriefingDayRequest):
     prefs["briefing_day"] = req.day
     _save_prefs(prefs)
     return {"success": True, "day": req.day}
+
+
+class BriefingMaxTokensRequest(BaseModel):
+    max_tokens: int
+
+
+class BriefingPromptRequest(BaseModel):
+    prompt: str
+
+
+class BriefingPromptsRequest(BaseModel):
+    tracked_prompt: str
+    briefing_prompt: str
+
+
+def get_briefing_max_tokens() -> int:
+    """Returns the configured max_tokens for briefing generation (default 4000)."""
+    val = _load_prefs().get("briefing_max_tokens", 4000)
+    try:
+        return max(256, min(32000, int(val)))
+    except (TypeError, ValueError):
+        return 4000
+
+
+def get_briefing_prompt_override() -> Optional[str]:
+    """Returns the user-provided briefing prompt override, if any."""
+    val = _load_prefs().get("briefing_prompt_override")
+    if isinstance(val, str):
+        val = val.strip()
+        return val or None
+    return None
+
+
+def _normalize_prompt(v: object) -> Optional[str]:
+    if isinstance(v, str):
+        s = v.strip()
+        return s or None
+    return None
+
+
+def get_briefing_prompt_overrides() -> dict:
+    prefs = _load_prefs()
+    return {
+        "tracked": _normalize_prompt(prefs.get("briefing_prompt_tracked")),
+        "briefing": _normalize_prompt(prefs.get("briefing_prompt_briefing")),
+    }
+
+
+@router.post("/prefs/briefing-max-tokens")
+async def set_briefing_max_tokens(req: BriefingMaxTokensRequest):
+    """Set max_tokens used when calling the LLM for each briefing summary."""
+    from fastapi import HTTPException
+    if not (256 <= req.max_tokens <= 32000):
+        raise HTTPException(status_code=400, detail="max_tokens must be between 256 and 32000")
+    prefs = _load_prefs()
+    prefs["briefing_max_tokens"] = req.max_tokens
+    _save_prefs(prefs)
+    return {"success": True, "max_tokens": req.max_tokens}
+
+
+@router.get("/prefs/briefing-prompt")
+async def get_briefing_prompt():
+    """Get briefing prompt override. Empty means use system default prompt."""
+    prompt = get_briefing_prompt_override() or ""
+    return {"prompt": prompt, "is_custom": bool(prompt)}
+
+
+@router.post("/prefs/briefing-prompt")
+async def set_briefing_prompt(req: BriefingPromptRequest):
+    """
+    Set briefing prompt override.
+    Send empty string to clear override and revert to default.
+    """
+    prefs = _load_prefs()
+    prompt = (req.prompt or "").strip()
+    if prompt:
+        prefs["briefing_prompt_override"] = prompt
+    else:
+        prefs.pop("briefing_prompt_override", None)
+    _save_prefs(prefs)
+    return {"success": True, "is_custom": bool(prompt)}
+
+
+@router.get("/prefs/briefing-prompts")
+async def get_briefing_prompts():
+    """
+    Return tracked/briefing prompts with default + custom + effective values.
+    """
+    overrides = get_briefing_prompt_overrides()
+    tracked_custom = overrides["tracked"] or ""
+    briefing_custom = overrides["briefing"] or ""
+    return {
+        "tracked": {
+            "default": DEFAULT_TRACKED_CHAT_PROMPT,
+            "custom": tracked_custom,
+            "effective": tracked_custom or DEFAULT_TRACKED_CHAT_PROMPT,
+            "is_custom": bool(tracked_custom),
+        },
+        "briefing": {
+            "default": DEFAULT_BRIEFING_CHAT_PROMPT,
+            "custom": briefing_custom,
+            "effective": briefing_custom or DEFAULT_BRIEFING_CHAT_PROMPT,
+            "is_custom": bool(briefing_custom),
+        },
+    }
+
+
+@router.post("/prefs/briefing-prompts")
+async def set_briefing_prompts(req: BriefingPromptsRequest):
+    """
+    Set tracked/briefing prompt overrides.
+    Send empty string for either field to use default for that category.
+    """
+    prefs = _load_prefs()
+    tracked = (req.tracked_prompt or "").strip()
+    briefing = (req.briefing_prompt or "").strip()
+
+    if tracked:
+        prefs["briefing_prompt_tracked"] = tracked
+    else:
+        prefs.pop("briefing_prompt_tracked", None)
+
+    if briefing:
+        prefs["briefing_prompt_briefing"] = briefing
+    else:
+        prefs.pop("briefing_prompt_briefing", None)
+
+    _save_prefs(prefs)
+    return {
+        "success": True,
+        "tracked_is_custom": bool(tracked),
+        "briefing_is_custom": bool(briefing),
+    }
 
 
 @router.post("/prefs/briefing-last-run")

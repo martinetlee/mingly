@@ -2,18 +2,34 @@
 Intelligence endpoint — agentic LLM chat with tool access to the local DB.
 """
 import json
+import logging
+import re
 import asyncio
-from typing import Any, Optional, Tuple, List
+from typing import Any, AsyncGenerator, Optional, Tuple, List
+
+logger = logging.getLogger(__name__)
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db, AsyncSessionLocal
 from backend.db import crud
+from backend.db.models import BriefingRun, BriefingEntry
 from backend.llm.config import load_registry_config
+from backend.llm.briefing_prompts import (
+    DEFAULT_BRIEFING_CHAT_PROMPT,
+    DEFAULT_IMPORTANT_CONTACT_PROMPT,
+    DEFAULT_TRACKED_CHAT_PROMPT,
+)
+from backend.api.settings import (
+    get_briefing_max_tokens,
+    get_briefing_prompt_override,
+    get_briefing_prompt_overrides,
+)
 
 router = APIRouter()
 
@@ -308,18 +324,22 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession):
     async with httpx.AsyncClient(timeout=120.0) as client:
         for _ in range(8):  # max tool-call rounds
             # ── Non-streaming call to check for tool calls ──
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": TOOLS,
-                    "tool_choice": "auto",
-                    "max_tokens": 2048,
-                    "temperature": 0.3,
-                    "stream": False,
-                },
-            )
+            try:
+                resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "tools": TOOLS,
+                        "tool_choice": "auto",
+                        "max_tokens": 2048,
+                        "temperature": 0.3,
+                        "stream": False,
+                    },
+                )
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                yield _sse("error", {"message": f"LLM unreachable: {exc}"})
+                return
             if resp.status_code != 200:
                 yield _sse("error", {"message": f"LLM error: {resp.text[:200]}"})
                 return
@@ -543,24 +563,200 @@ async def intelligence_chat(
 # Briefing / Summary endpoint
 # ---------------------------------------------------------------------------
 
+def _build_message_map(messages_text: str) -> Tuple[dict, set]:
+    """
+    Parse the messages_text sent to the LLM and return:
+      pos_to_tid  – {1-indexed-position: telegram_id}
+      valid_tids  – set of all telegram_ids present in the context
+    """
+    pos_to_tid: dict = {}
+    valid_tids: set = set()
+    for line in messages_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r'\[id:(\d+)\]', line)
+        if m:
+            tid = int(m.group(1))
+            pos = len(pos_to_tid) + 1  # 1-indexed
+            pos_to_tid[pos] = tid
+            valid_tids.add(tid)
+    return pos_to_tid, valid_tids
+
+
+def _resolve_source_ids(
+    raw_ids: List[int], pos_to_tid: dict, valid_tids: set
+) -> List[int]:
+    """
+    Remap LLM-returned source IDs to actual telegram IDs:
+      - If the value is already a valid telegram_id in the context → keep it
+      - If the value looks like a 1-indexed position → map to telegram_id
+      - Otherwise discard
+    Deduplicates while preserving order.
+    """
+    resolved: List[int] = []
+    seen: set = set()
+    for sid in raw_ids:
+        if sid in valid_tids:
+            result = sid  # already a real telegram_id
+        elif sid in pos_to_tid:
+            result = pos_to_tid[sid]  # position number → telegram_id
+        else:
+            continue  # neither valid telegram_id nor known position
+        if result not in seen:
+            seen.add(result)
+            resolved.append(result)
+    return resolved
+
+
+def _extract_ids(ids_raw: list) -> List[int]:
+    """Normalise a raw source_ids list to plain ints, capped at 20."""
+    valid: List[int] = []
+    seen: set = set()
+    for x in ids_raw:
+        s = str(x).strip()
+        if s.startswith("id:"):
+            s = s[3:]
+        if s.lstrip("-").isdigit():
+            v = int(s)
+            if v not in seen:
+                seen.add(v)
+                valid.append(v)
+        if len(valid) >= 20:
+            break
+    return valid
+
+
+def _try_json_parse(text: str):
+    """Attempt json.loads; return parsed dict or None."""
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return None
+
+
+def _renumber_citations(summary: str, source_ids: List[int]) -> Tuple[str, List[int]]:
+    """
+    Renumber inline [n] citation markers in summary to be strictly sequential [1],[2],[3]...
+    starting from the first citation found, regardless of what numbers the LLM used.
+
+    source_ids must already be ordered by first-appearance of the original citation numbers
+    (i.e. source_ids[0] = telegram ID for whichever [n] appears first in the text).
+
+    Returns (renumbered_summary, trimmed_source_ids).
+    """
+    # Collect unique citation numbers in order of first appearance
+    mapping: dict = {}  # original_n -> sequential_counter
+    for m in re.finditer(r'\[(\d+)\]', summary):
+        n = int(m.group(1))
+        if n not in mapping:
+            mapping[n] = len(mapping) + 1  # 1-based sequential counter
+
+    if not mapping:
+        return summary, source_ids
+
+    def _replace(m: re.Match) -> str:
+        return f'[{mapping[int(m.group(1))]}]'
+
+    new_summary = re.sub(r'\[(\d+)\]', _replace, summary)
+    # Trim source_ids to however many unique citations were found
+    new_source_ids = source_ids[:len(mapping)]
+    return new_summary, new_source_ids
+
+
+def _clean_summary(text: str) -> str:
+    """Strip markdown formatting and URLs from LLM summary output."""
+    # Remove URLs (http/https)
+    text = re.sub(r'https?://\S+', '', text)
+    # Remove bold/italic/strikethrough markers (*bold*, **bold**, _italic_, ~~strike~~)
+    text = re.sub(r'\*{1,3}([^*\n]+?)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,2}([^_\n]+?)_{1,2}', r'\1', text)
+    text = re.sub(r'~~([^~\n]+?)~~', r'\1', text)
+    # Remove inline code backticks
+    text = re.sub(r'`([^`\n]+?)`', r'\1', text)
+    # Collapse extra spaces left by removals
+    text = re.sub(r'  +', ' ', text)
+    # Clean up trailing spaces on each line
+    text = '\n'.join(line.rstrip() for line in text.splitlines())
+    return text.strip()
+
+
 def _parse_summary_response(raw: str) -> Tuple[str, List[int]]:
     """
     Parse a summary response that may be plain text or JSON with summary + source_ids.
     Returns (summary_text, list_of_telegram_ids).
     """
     raw = raw.strip()
-    # Try to parse as JSON first
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            summary = str(obj.get("summary", "")).strip()
-            ids = obj.get("source_ids", [])
-            if isinstance(ids, list):
-                return summary, [int(x) for x in ids if str(x).lstrip("-").isdigit()]
-    except Exception:
-        pass
+
+    # Strip markdown code fences that some LLMs add (```json ... ``` or ``` ... ```)
+    if raw.startswith("```"):
+        raw = re.sub(r'^```(?:json)?\s*\n?', '', raw)
+        raw = re.sub(r'\n?```\s*$', '', raw)
+        raw = raw.strip()
+
+    # Attempt 1: direct parse
+    obj = _try_json_parse(raw)
+
+    # Attempt 2: LLM sometimes emits literal newlines inside JSON strings
+    if obj is None:
+        sanitized = re.sub(r'(?<!\\)\n', r'\\n', raw)
+        obj = _try_json_parse(sanitized)
+
+    # Attempt 3: extract the JSON object via regex (handles trailing garbage)
+    if obj is None:
+        m = re.search(r'\{.*?\}', raw, re.DOTALL)
+        if m:
+            obj = _try_json_parse(m.group(0))
+        # Attempt 3b: try from first { to last }
+        if obj is None:
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                obj = _try_json_parse(raw[start:end + 1])
+                if obj is None:
+                    sanitized2 = re.sub(r'(?<!\\)\n', r'\\n', raw[start:end + 1])
+                    obj = _try_json_parse(sanitized2)
+
+    def _coerce_summary_text(value: Any) -> str:
+        """Normalise summary field to readable text (handles list/object payloads)."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            lines: list[str] = []
+            for item in value:
+                txt = str(item).strip()
+                if not txt:
+                    continue
+                # Keep existing bullets/numbering, otherwise make it a bullet line.
+                if re.match(r'^(?:[•\-\*\d]+[\.\)]?\s+)', txt):
+                    lines.append(txt)
+                else:
+                    lines.append(f"• {txt}")
+            return "\n".join(lines).strip()
+        if isinstance(value, dict):
+            # Some models return nested shape: {"text": "..."} or {"summary": "..."}.
+            for k in ("summary", "text", "content"):
+                if k in value:
+                    return _coerce_summary_text(value.get(k))
+            return json.dumps(value, ensure_ascii=False)
+        return str(value).strip()
+
+    if obj is not None:
+        summary = _coerce_summary_text(obj.get("summary", ""))
+        ids_raw = obj.get("source_ids", [])
+        if isinstance(ids_raw, list):
+            source_ids = _extract_ids(ids_raw)
+            # Normalise citation numbering to be strictly sequential [1],[2],[3]...
+            summary, source_ids = _renumber_citations(summary, source_ids)
+            return _clean_summary(summary), source_ids
+
     # Plain text fallback
-    return raw, []
+    return _clean_summary(raw), []
 
 
 async def _summarize_chat(
@@ -570,32 +766,28 @@ async def _summarize_chat(
     chat_name: str,
     chat_category: str,
     messages_text: str,
-) -> Tuple[str, List[int]]:
-    """Call LLM to produce a summary + source telegram_ids; returns (summary, [ids])."""
-    if chat_category == "tracked":
-        system = (
-            "You are a concise assistant. Given recent Telegram messages from a chat, "
-            "produce a single sentence (max 30 words) summarising what was discussed. "
-            "Focus especially on any messages involving the user (marked as outgoing). "
-            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-            "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"<one sentence>\", \"source_ids\": [<1-2 most representative message IDs>]}"
-        )
+    max_tokens: int = 4000,
+    cancel: Optional[asyncio.Event] = None,
+) -> AsyncGenerator[Tuple[str, Any], None]:
+    """Async generator: yields ('token'|'reasoning', data) then ('result', (summary, ids))."""
+    prompt_override = get_briefing_prompt_override()
+    if prompt_override:
+        system = prompt_override
     else:
-        system = (
-            "You are a concise assistant. Given recent Telegram messages from a chat, "
-            "produce a structured briefing: ignore chit-chat and pleasantries, focus on "
-            "informational content, links, technical discussion. "
-            "Start with a 1-2 sentence overview, then list up to 4 key topics or themes "
-            "as bullet points (each starting with '•'). "
-            "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-            "Respond ONLY with valid JSON in this exact format: "
-            "{\"summary\": \"<briefing text>\", \"source_ids\": [<1-3 most representative message IDs>]}"
-        )
+        category_overrides = get_briefing_prompt_overrides()
+        if chat_category == "tracked":
+            system = category_overrides.get("tracked") or DEFAULT_TRACKED_CHAT_PROMPT
+        else:
+            system = category_overrides.get("briefing") or DEFAULT_BRIEFING_CHAT_PROMPT
 
     user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
+    content_acc = ""
+    reasoning_acc = ""
+    token_count = 0
+
     try:
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             f"{base_url}/chat/completions",
             json={
                 "model": model,
@@ -603,19 +795,73 @@ async def _summarize_chat(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 400,
+                "max_tokens": max_tokens,
                 "temperature": 0.3,
-                "stream": False,
+                "stream": True,
             },
-            timeout=60.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data["choices"][0]["message"].get("content", "").strip()
-            return _parse_summary_response(raw)
-    except Exception:
-        pass
-    return "", []
+            timeout=180.0,
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                logger.error("_summarize_chat HTTP %s for %s: %.300s", resp.status_code, chat_name, body)
+                yield ("result", ("", []))
+                return
+
+            async for line in resp.aiter_lines():
+                if cancel is not None and cancel.is_set():
+                    logger.info("_summarize_chat cancelled for %s", chat_name)
+                    yield ("result", ("", []))
+                    return
+                if not line.startswith("data: "):
+                    continue
+                chunk = line[6:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                    delta = data["choices"][0]["delta"]
+                    content_delta = delta.get("content") or ""
+                    reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                    content_acc += content_delta
+                    reasoning_acc += reasoning_delta
+                    if reasoning_delta:
+                        yield ("reasoning", reasoning_delta)
+                    token_count += 1
+                    if token_count % 10 == 0:
+                        yield ("token", token_count)
+                except Exception:
+                    pass
+
+    except Exception as exc:
+        logger.exception("_summarize_chat failed for chat=%s: %s", chat_name, exc)
+        yield ("result", ("", []))
+        return
+
+    # Emit final token count
+    if token_count > 0:
+        yield ("token", token_count)
+
+    # Parse accumulated response
+    raw = content_acc.strip()
+    if not raw and reasoning_acc:
+        # Reasoning model put answer in thinking field — extract last JSON block
+        json_match = None
+        for m in re.finditer(r'\{[^{}]*"summary"[^{}]*\}', reasoning_acc, re.DOTALL):
+            json_match = m
+        if json_match:
+            raw = json_match.group(0)
+            logger.info("_summarize_chat: extracted JSON from reasoning for %s", chat_name)
+
+    if not raw:
+        logger.warning("_summarize_chat empty content for chat=%s, tokens=%d", chat_name, token_count)
+        yield ("result", ("", []))
+        return
+
+    logger.debug("_summarize_chat raw for %s: %.200s", chat_name, raw)
+    summary, source_ids = _parse_summary_response(raw)
+    pos_to_tid, valid_tids = _build_message_map(messages_text)
+    source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
+    yield ("result", (summary, source_ids))
 
 
 async def _summarize_important_contact(
@@ -624,20 +870,19 @@ async def _summarize_important_contact(
     model: str,
     contact_name: str,
     messages_text: str,
-) -> Tuple[str, List[int]]:
-    """Summarise what an important contact has been saying; returns (summary, [telegram_ids])."""
-    system = (
-        "You are a concise assistant. Given recent Telegram messages sent by a specific person "
-        "across different chats, produce a brief summary (2-4 sentences) of what they have been "
-        "discussing or communicating. Focus on key topics, notable statements, or any requests "
-        "directed at the user. "
-        "Each message is prefixed with its ID in brackets, e.g. [id:12345]. "
-        "Respond ONLY with valid JSON in this exact format: "
-        "{\"summary\": \"<summary text>\", \"source_ids\": [<1-2 most representative message IDs>]}"
-    )
+    max_tokens: int = 4000,
+    cancel: Optional[asyncio.Event] = None,
+) -> AsyncGenerator[Tuple[str, Any], None]:
+    """Async generator: yields ('token'|'reasoning', data) then ('result', (summary, ids))."""
+    system = DEFAULT_IMPORTANT_CONTACT_PROMPT
     user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
+    content_acc = ""
+    reasoning_acc = ""
+    token_count = 0
+
     try:
-        resp = await client.post(
+        async with client.stream(
+            "POST",
             f"{base_url}/chat/completions",
             json={
                 "model": model,
@@ -645,23 +890,75 @@ async def _summarize_important_contact(
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_tokens": 300,
+                "max_tokens": max_tokens,
                 "temperature": 0.3,
-                "stream": False,
+                "stream": True,
             },
-            timeout=60.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data["choices"][0]["message"].get("content", "").strip()
-            return _parse_summary_response(raw)
-    except Exception:
-        pass
-    return "", []
+            timeout=180.0,
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                logger.error("_summarize_important_contact HTTP %s for %s: %.300s", resp.status_code, contact_name, body)
+                yield ("result", ("", []))
+                return
+
+            async for line in resp.aiter_lines():
+                if cancel is not None and cancel.is_set():
+                    logger.info("_summarize_important_contact cancelled for %s", contact_name)
+                    yield ("result", ("", []))
+                    return
+                if not line.startswith("data: "):
+                    continue
+                chunk = line[6:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                    delta = data["choices"][0]["delta"]
+                    content_delta = delta.get("content") or ""
+                    reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                    content_acc += content_delta
+                    reasoning_acc += reasoning_delta
+                    if reasoning_delta:
+                        yield ("reasoning", reasoning_delta)
+                    token_count += 1
+                    if token_count % 10 == 0:
+                        yield ("token", token_count)
+                except Exception:
+                    pass
+
+    except Exception as exc:
+        logger.exception("_summarize_important_contact failed for contact=%s: %s", contact_name, exc)
+        yield ("result", ("", []))
+        return
+
+    if token_count > 0:
+        yield ("token", token_count)
+
+    raw = content_acc.strip()
+    if not raw and reasoning_acc:
+        json_match = None
+        for m in re.finditer(r'\{[^{}]*"summary"[^{}]*\}', reasoning_acc, re.DOTALL):
+            json_match = m
+        if json_match:
+            raw = json_match.group(0)
+            logger.info("_summarize_important_contact: extracted JSON from reasoning for %s", contact_name)
+
+    if not raw:
+        logger.warning("_summarize_important_contact empty content for contact=%s, tokens=%d", contact_name, token_count)
+        yield ("result", ("", []))
+        return
+
+    logger.debug("_summarize_important_contact raw for %s: %.200s", contact_name, raw)
+    summary, source_ids = _parse_summary_response(raw)
+    pos_to_tid, valid_tids = _build_message_map(messages_text)
+    source_ids = _resolve_source_ids(source_ids, pos_to_tid, valid_tids)
+    yield ("result", (summary, source_ids))
 
 
 @router.get("/intelligence/briefing")
 async def intelligence_briefing(
+    request: Request,
     days: int = 1,
     db: AsyncSession = Depends(get_db),
 ):
@@ -685,164 +982,213 @@ async def intelligence_briefing(
     since = datetime.utcnow() - timedelta(days=days)
 
     async def generate():
-        tracked = await crud.get_tracked_chats(db)
-        briefing = await crud.get_briefing_chats(db)
-        all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
-        important_contacts = await crud.get_important_contacts(db)
+        cancel = asyncio.Event()
 
-        yield _sse("start", {"total": len(all_chats) + len(important_contacts)})
+        async def _watch_disconnect():
+            while not cancel.is_set():
+                if await request.is_disconnected():
+                    cancel.set()
+                    return
+                await asyncio.sleep(0.3)
 
-        # Collect all summaries to persist after streaming
-        collected: list[dict] = []
+        watcher = asyncio.create_task(_watch_disconnect())
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for idx, (category, chat) in enumerate(all_chats):
-                yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
+        try:
+            tracked = await crud.get_tracked_chats(db)
+            briefing = await crud.get_briefing_chats(db)
+            all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
+            important_contacts = await crud.get_important_contacts(db)
 
-                msgs = await crud.get_messages_since(db, chat.telegram_id, since, limit=200)
-                if not msgs:
+            yield _sse("start", {"total": len(all_chats) + len(important_contacts)})
+
+            collected: list[dict] = []
+
+            # --- Chat summaries ---
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                for idx, (category, chat) in enumerate(all_chats):
+                    if cancel.is_set():
+                        break
+                    yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
+
+                    msgs = await crud.get_messages_since(db, chat.telegram_id, since, limit=200)
+                    if not msgs:
+                        entry = {
+                            "chat_id": chat.telegram_id,
+                            "chat_name": chat.name,
+                            "category": category,
+                            "summary": "No messages in this period.",
+                            "sources": [],
+                        }
+                        collected.append(entry)
+                        yield _sse("chat_done", entry)
+                        continue
+
+                    lines = []
+                    for row in msgs:
+                        m, reply_sender, reply_text = row[0], row[1], row[2]
+                        if m.text:
+                            sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
+                            if reply_sender and reply_text:
+                                snippet = reply_text[:60].rstrip()
+                                lines.append(f'{sender} [↩ {reply_sender}: "{snippet}"]: {m.text[:300]}')
+                            else:
+                                lines.append(f"{sender}: {m.text[:300]}")
+
+                    if not lines:
+                        entry = {
+                            "chat_id": chat.telegram_id,
+                            "chat_name": chat.name,
+                            "category": category,
+                            "summary": "No text messages in this period.",
+                            "sources": [],
+                        }
+                        collected.append(entry)
+                        yield _sse("chat_done", entry)
+                        continue
+
+                    messages_text = "\n".join(lines[-150:])
+                    summary, source_ids = "", []
+                    async for event_type, data in _summarize_chat(
+                        client, base_url, model, chat.name, category, messages_text,
+                        max_tokens=get_briefing_max_tokens(), cancel=cancel,
+                    ):
+                        if event_type == "token":
+                            yield _sse("thinking", {"chat_name": chat.name, "tokens": data})
+                        elif event_type == "reasoning":
+                            yield _sse("thinking", {"chat_name": chat.name, "reasoning": data})
+                        else:
+                            summary, source_ids = data
+                    if cancel.is_set():
+                        break
+                    if not summary:
+                        summary = "Summary unavailable."
+
+                    sources = [{"chat_id": chat.telegram_id, "telegram_id": tid} for tid in source_ids]
                     entry = {
                         "chat_id": chat.telegram_id,
                         "chat_name": chat.name,
                         "category": category,
-                        "summary": "No messages in this period.",
-                        "sources": [],
+                        "summary": summary,
+                        "sources": sources,
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
-                    continue
 
-                lines = []
-                for m in msgs:
-                    if m.text:
-                        ts = m.date.strftime("%m/%d %H:%M")
-                        sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
-                        lines.append(f"[id:{m.telegram_id}] [{ts}] {sender}: {m.text[:300]}")
+            # --- Important contacts ---
+            base_idx = len(all_chats)
+            async with httpx.AsyncClient(timeout=180.0) as ic_client:
+                for idx, contact in enumerate(important_contacts):
+                    if cancel.is_set():
+                        break
+                    contact_name = (
+                        f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+                        or contact.username
+                        or str(contact.telegram_id)
+                    )
+                    yield _sse("progress", {"current": base_idx + idx + 1, "chat_name": contact_name})
 
-                if not lines:
-                    entry = {
-                        "chat_id": chat.telegram_id,
-                        "chat_name": chat.name,
-                        "category": category,
-                        "summary": "No text messages in this period.",
-                        "sources": [],
-                    }
-                    collected.append(entry)
-                    yield _sse("chat_done", entry)
-                    continue
+                    rows = await crud.get_messages_from_sender_since(
+                        db, contact.telegram_id, since, limit=100
+                    )
+                    if not rows:
+                        entry = {
+                            "chat_id": contact.telegram_id,
+                            "chat_name": contact_name,
+                            "category": "important_contact",
+                            "summary": "No messages in this period.",
+                            "sources": [],
+                        }
+                        collected.append(entry)
+                        yield _sse("chat_done", entry)
+                        continue
 
-                messages_text = "\n".join(lines[-150:])  # cap context
-                summary, source_ids = await _summarize_chat(client, base_url, model, chat.name, category, messages_text)
-                if not summary:
-                    summary = "Summary unavailable."
+                    lines = []
+                    msg_chat_map: dict[int, int] = {}
+                    for row in rows:
+                        msg, chat, reply_sender, reply_text = row[0], row[1], row[2], row[3]
+                        if msg.text:
+                            chat_label = chat.name or str(chat.telegram_id)
+                            if reply_sender and reply_text:
+                                snippet = reply_text[:60].rstrip()
+                                lines.append(f'[{chat_label}] [↩ {reply_sender}: "{snippet}"]: {msg.text[:300]}')
+                            else:
+                                lines.append(f"[{chat_label}] {msg.text[:300]}")
+                            msg_chat_map[msg.telegram_id] = chat.telegram_id
 
-                # Build source objects: [{chat_id, telegram_id}] for navigation
-                sources = [{"chat_id": chat.telegram_id, "telegram_id": tid} for tid in source_ids]
+                    if not lines:
+                        entry = {
+                            "chat_id": contact.telegram_id,
+                            "chat_name": contact_name,
+                            "category": "important_contact",
+                            "summary": "No text messages in this period.",
+                            "sources": [],
+                        }
+                        collected.append(entry)
+                        yield _sse("chat_done", entry)
+                        continue
 
-                entry = {
-                    "chat_id": chat.telegram_id,
-                    "chat_name": chat.name,
-                    "category": category,
-                    "summary": summary,
-                    "sources": sources,
-                }
-                collected.append(entry)
-                yield _sse("chat_done", entry)
+                    messages_text = "\n".join(lines[-80:])
+                    summary, source_ids = "", []
+                    async for event_type, data in _summarize_important_contact(
+                        ic_client, base_url, model, contact_name, messages_text,
+                        max_tokens=get_briefing_max_tokens(), cancel=cancel,
+                    ):
+                        if event_type == "token":
+                            yield _sse("thinking", {"chat_name": contact_name, "tokens": data})
+                        elif event_type == "reasoning":
+                            yield _sse("thinking", {"chat_name": contact_name, "reasoning": data})
+                        else:
+                            summary, source_ids = data
+                    if cancel.is_set():
+                        break
+                    if not summary:
+                        summary = "Summary unavailable."
 
-        # --- Important contacts section ---
-        base_idx = len(all_chats)
-        async with httpx.AsyncClient(timeout=120.0) as ic_client:
-            for idx, contact in enumerate(important_contacts):
-                contact_name = (
-                    f"{contact.first_name or ''} {contact.last_name or ''}".strip()
-                    or contact.username
-                    or str(contact.telegram_id)
-                )
-                yield _sse("progress", {"current": base_idx + idx + 1, "chat_name": contact_name})
-
-                rows = await crud.get_messages_from_sender_since(
-                    db, contact.telegram_id, since, limit=100
-                )
-                if not rows:
+                    sources = [
+                        {"chat_id": msg_chat_map[tid], "telegram_id": tid}
+                        for tid in source_ids
+                        if tid in msg_chat_map
+                    ]
                     entry = {
                         "chat_id": contact.telegram_id,
                         "chat_name": contact_name,
                         "category": "important_contact",
-                        "summary": "No messages in this period.",
-                        "sources": [],
+                        "summary": summary,
+                        "sources": sources,
                     }
                     collected.append(entry)
                     yield _sse("chat_done", entry)
-                    continue
 
-                lines = []
-                # Keep a mapping from telegram_id -> chat_id for source objects
-                msg_chat_map: dict[int, int] = {}
-                for msg, chat in rows:
-                    if msg.text:
-                        ts = msg.date.strftime("%m/%d %H:%M")
-                        chat_label = chat.name or str(chat.telegram_id)
-                        lines.append(f"[id:{msg.telegram_id}] [{ts}] [{chat_label}] {msg.text[:300]}")
-                        msg_chat_map[msg.telegram_id] = chat.telegram_id
+            # Persist the run and its entries to DB
+            run_id = None
+            if collected:
+                try:
+                    async with AsyncSessionLocal() as write_db:
+                        run = await crud.create_briefing_run(write_db, days=days)
+                        run_id = run.id
+                        for e in collected:
+                            sources = e.get("sources", [])
+                            await crud.add_briefing_entry(
+                                write_db,
+                                run_id=run.id,
+                                chat_id=e["chat_id"],
+                                chat_name=e["chat_name"],
+                                category=e["category"],
+                                summary=e["summary"],
+                                sources_json=json.dumps(sources) if sources else None,
+                            )
+                except Exception:
+                    pass  # don't fail streaming on persistence error
 
-                if not lines:
-                    entry = {
-                        "chat_id": contact.telegram_id,
-                        "chat_name": contact_name,
-                        "category": "important_contact",
-                        "summary": "No text messages in this period.",
-                        "sources": [],
-                    }
-                    collected.append(entry)
-                    yield _sse("chat_done", entry)
-                    continue
+            yield _sse("done", {"run_id": run_id})
 
-                messages_text = "\n".join(lines[-80:])
-                summary, source_ids = await _summarize_important_contact(
-                    ic_client, base_url, model, contact_name, messages_text
-                )
-                if not summary:
-                    summary = "Summary unavailable."
-
-                # Build source objects including the correct chat_id for each message
-                sources = [
-                    {"chat_id": msg_chat_map[tid], "telegram_id": tid}
-                    for tid in source_ids
-                    if tid in msg_chat_map
-                ]
-
-                entry = {
-                    "chat_id": contact.telegram_id,
-                    "chat_name": contact_name,
-                    "category": "important_contact",
-                    "summary": summary,
-                    "sources": sources,
-                }
-                collected.append(entry)
-                yield _sse("chat_done", entry)
-
-        # Persist the run and its entries to DB
-        run_id = None
-        if collected:
+        finally:
+            cancel.set()
+            watcher.cancel()
             try:
-                async with AsyncSessionLocal() as write_db:
-                    run = await crud.create_briefing_run(write_db, days=days)
-                    run_id = run.id
-                    for e in collected:
-                        sources = e.get("sources", [])
-                        await crud.add_briefing_entry(
-                            write_db,
-                            run_id=run.id,
-                            chat_id=e["chat_id"],
-                            chat_name=e["chat_name"],
-                            category=e["category"],
-                            summary=e["summary"],
-                            sources_json=json.dumps(sources) if sources else None,
-                        )
-            except Exception:
-                pass  # don't fail streaming on persistence error
-
-        yield _sse("done", {"run_id": run_id})
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -877,10 +1223,193 @@ async def get_briefing_history(db: AsyncSession = Depends(get_db)):
     return result
 
 
+@router.post("/intelligence/briefing/history/{run_id}/entries/{entry_id}/regenerate")
+async def regenerate_briefing_entry(
+    request: Request,
+    run_id: int,
+    entry_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Regenerate a single briefing entry in-place for an existing run.
+    Streams SSE events so the frontend can show progress/reasoning and cancel.
+    """
+    async def generate():
+        cancel = asyncio.Event()
+
+        async def _watch_disconnect():
+            while not cancel.is_set():
+                if await request.is_disconnected():
+                    cancel.set()
+                    return
+                await asyncio.sleep(0.3)
+
+        watcher = asyncio.create_task(_watch_disconnect())
+
+        try:
+            run_res = await db.execute(select(BriefingRun).where(BriefingRun.id == run_id))
+            run = run_res.scalar_one_or_none()
+            if not run:
+                yield _sse("error", {"message": "Briefing run not found"})
+                return
+
+            entry_res = await db.execute(
+                select(BriefingEntry).where(
+                    BriefingEntry.id == entry_id,
+                    BriefingEntry.run_id == run_id,
+                )
+            )
+            entry = entry_res.scalar_one_or_none()
+            if not entry:
+                yield _sse("error", {"message": "Briefing entry not found"})
+                return
+
+            from datetime import datetime, timedelta
+
+            base_url, model = _get_llm_config()
+            if not base_url:
+                yield _sse("error", {"message": "No LLM configured. Set up an AI model in Settings."})
+                return
+
+            yield _sse(
+                "start",
+                {"entry_id": entry.id, "chat_name": entry.chat_name, "category": entry.category},
+            )
+
+            since = datetime.utcnow() - timedelta(days=run.days or 1)
+            summary = ""
+            sources: list[dict[str, int]] = []
+
+            if entry.category in ("tracked", "briefing"):
+                msgs = await crud.get_messages_since(db, entry.chat_id, since, limit=200)
+                if not msgs:
+                    summary = "No messages in this period."
+                else:
+                    lines = []
+                    for row in msgs:
+                        m, reply_sender, reply_text = row[0], row[1], row[2]
+                        if m.text:
+                            sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
+                            if reply_sender and reply_text:
+                                snippet = reply_text[:60].rstrip()
+                                lines.append(f'{sender} [↩ {reply_sender}: "{snippet}"]: {m.text[:300]}')
+                            else:
+                                lines.append(f"{sender}: {m.text[:300]}")
+
+                    if not lines:
+                        summary = "No text messages in this period."
+                    else:
+                        messages_text = "\n".join(lines[-150:])
+                        source_ids: list[int] = []
+                        async with httpx.AsyncClient(timeout=180.0) as client:
+                            async for event_type, data in _summarize_chat(
+                                client,
+                                base_url,
+                                model,
+                                entry.chat_name,
+                                entry.category,
+                                messages_text,
+                                max_tokens=get_briefing_max_tokens(),
+                                cancel=cancel,
+                            ):
+                                if event_type == "token":
+                                    yield _sse("thinking", {"entry_id": entry.id, "tokens": data, "chat_name": entry.chat_name})
+                                elif event_type == "reasoning":
+                                    yield _sse("thinking", {"entry_id": entry.id, "reasoning": data, "chat_name": entry.chat_name})
+                                else:
+                                    summary, source_ids = data
+                        if not summary:
+                            summary = "Summary unavailable."
+                        sources = [{"chat_id": entry.chat_id, "telegram_id": tid} for tid in source_ids]
+
+            elif entry.category == "important_contact":
+                rows = await crud.get_messages_from_sender_since(db, entry.chat_id, since, limit=100)
+                if not rows:
+                    summary = "No messages in this period."
+                else:
+                    lines = []
+                    msg_chat_map: dict[int, int] = {}
+                    for row in rows:
+                        msg, chat, reply_sender, reply_text = row[0], row[1], row[2], row[3]
+                        if msg.text:
+                            chat_label = chat.name or str(chat.telegram_id)
+                            if reply_sender and reply_text:
+                                snippet = reply_text[:60].rstrip()
+                                lines.append(f'[{chat_label}] [↩ {reply_sender}: "{snippet}"]: {msg.text[:300]}')
+                            else:
+                                lines.append(f"[{chat_label}] {msg.text[:300]}")
+                            msg_chat_map[msg.telegram_id] = chat.telegram_id
+
+                    if not lines:
+                        summary = "No text messages in this period."
+                    else:
+                        messages_text = "\n".join(lines[-80:])
+                        source_ids: list[int] = []
+                        async with httpx.AsyncClient(timeout=180.0) as client:
+                            async for event_type, data in _summarize_important_contact(
+                                client,
+                                base_url,
+                                model,
+                                entry.chat_name,
+                                messages_text,
+                                max_tokens=get_briefing_max_tokens(),
+                                cancel=cancel,
+                            ):
+                                if event_type == "token":
+                                    yield _sse("thinking", {"entry_id": entry.id, "tokens": data, "chat_name": entry.chat_name})
+                                elif event_type == "reasoning":
+                                    yield _sse("thinking", {"entry_id": entry.id, "reasoning": data, "chat_name": entry.chat_name})
+                                else:
+                                    summary, source_ids = data
+                        if not summary:
+                            summary = "Summary unavailable."
+                        sources = [
+                            {"chat_id": msg_chat_map[tid], "telegram_id": tid}
+                            for tid in source_ids
+                            if tid in msg_chat_map
+                        ]
+            else:
+                yield _sse("error", {"message": f"Unsupported category: {entry.category}"})
+                return
+
+            if cancel.is_set():
+                yield _sse("cancelled", {"entry_id": entry.id})
+                return
+
+            entry.summary = summary
+            entry.sources_json = json.dumps(sources) if sources else None
+            await db.commit()
+            await db.refresh(entry)
+
+            yield _sse(
+                "done",
+                {
+                    "entry": {
+                        "id": entry.id,
+                        "run_id": entry.run_id,
+                        "chat_id": entry.chat_id,
+                        "chat_name": entry.chat_name,
+                        "category": entry.category,
+                        "summary": entry.summary,
+                        "sources": sources,
+                    }
+                },
+            )
+
+        finally:
+            cancel.set()
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @router.delete("/intelligence/briefing/history/{run_id}")
 async def delete_briefing_run(run_id: int, db: AsyncSession = Depends(get_db)):
     """Delete a past briefing run and all its entries."""
-    from fastapi import HTTPException
     success = await crud.delete_briefing_run(db, run_id)
     if not success:
         raise HTTPException(status_code=404, detail="Briefing run not found")

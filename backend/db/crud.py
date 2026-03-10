@@ -179,20 +179,64 @@ async def get_messages(
     return list(result.all())
 
 
+async def get_offset_for_anchor(
+    db: AsyncSession,
+    chat_id: int,
+    anchor_telegram_id: int,
+    half_window: int = 50,
+) -> int:
+    """
+    Return the offset to pass to get_messages() so the anchor message
+    lands roughly in the centre of the result window.
+    Messages are ordered newest-first, so offset = (count of messages newer
+    than anchor) - half_window, floored at 0.
+    """
+    # Get date of anchor message
+    anchor_date_result = await db.execute(
+        select(Message.date)
+        .where(Message.chat_id == chat_id, Message.telegram_id == anchor_telegram_id)
+    )
+    anchor_date = anchor_date_result.scalar_one_or_none()
+    if anchor_date is None:
+        return 0
+    # Count messages strictly newer than the anchor
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.chat_id == chat_id, Message.date > anchor_date)
+    )
+    newer_count = count_result.scalar() or 0
+    return max(0, newer_count - half_window)
+
+
 async def get_messages_since(
     db: AsyncSession,
     chat_id: int,
     since: datetime,
     limit: int = 200,
 ) -> list:
-    """Return up to `limit` messages for a chat on or after `since`, oldest-first."""
+    """
+    Return up to `limit` messages for a chat on or after `since`, oldest-first.
+    Each element is a (Message, reply_sender_name, reply_text) tuple.
+    reply_sender_name and reply_text are None when the message is not a reply.
+    """
+    Reply = Message.__table__.alias("reply_msg")
     result = await db.execute(
-        select(Message)
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
         .where(Message.chat_id == chat_id, Message.date >= since)
         .order_by(Message.date)
         .limit(limit)
     )
-    return list(result.scalars().all())
+    return list(result.all())
 
 
 async def message_exists(db: AsyncSession, telegram_id: int, chat_id: int) -> bool:
@@ -600,11 +644,23 @@ async def get_messages_from_sender_since(
     """
     Return up to `limit` messages sent by a specific Telegram user (matched via
     sender_id == sender_telegram_id) on or after `since`, with chat info.
-    Each row is a (Message, Chat) tuple.
+    Each row is a (Message, Chat, reply_sender_name, reply_text) tuple.
+    reply_sender_name and reply_text are None when the message is not a reply.
     """
+    Reply = Message.__table__.alias("reply_msg")
     result = await db.execute(
-        select(Message, Chat)
+        select(
+            Message,
+            Chat,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+        )
         .join(Chat, Message.chat_id == Chat.telegram_id)
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
         .where(
             Message.sender_id == sender_telegram_id,
             Message.date >= since,

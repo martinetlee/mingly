@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -90,8 +90,11 @@ export const setMonitored = (telegram_id: number, monitored: boolean) =>
     body: JSON.stringify({ monitored }),
   })
 
-export const getMessages = (telegram_id: number, limit = 50, offset = 0) =>
-  request<Message[]>(`/api/chats/${telegram_id}/messages?limit=${limit}&offset=${offset}`)
+export const getMessages = (telegram_id: number, limit = 50, offset = 0, anchorTelegramId?: number) => {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (anchorTelegramId != null) params.set('anchor_telegram_id', String(anchorTelegramId))
+  return request<Message[]>(`/api/chats/${telegram_id}/messages?${params}`)
+}
 
 export const syncChat = (telegram_id: number, limit?: number) =>
   request<{ status: string }>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
@@ -283,12 +286,44 @@ export const setBriefingLastRun = () =>
     method: 'POST',
   })
 
+export const setBriefingMaxTokens = (max_tokens: number) =>
+  request<{ success: boolean; max_tokens: number }>('/api/settings/prefs/briefing-max-tokens', {
+    method: 'POST',
+    body: JSON.stringify({ max_tokens }),
+  })
+
+export const getBriefingPrompt = () =>
+  request<{ prompt: string; is_custom: boolean }>('/api/settings/prefs/briefing-prompt')
+
+export const setBriefingPrompt = (prompt: string) =>
+  request<{ success: boolean; is_custom: boolean }>('/api/settings/prefs/briefing-prompt', {
+    method: 'POST',
+    body: JSON.stringify({ prompt }),
+  })
+
+export const getBriefingPrompts = () =>
+  request<{
+    tracked: { default: string; custom: string; effective: string; is_custom: boolean }
+    briefing: { default: string; custom: string; effective: string; is_custom: boolean }
+  }>('/api/settings/prefs/briefing-prompts')
+
+export const setBriefingPrompts = (tracked_prompt: string, briefing_prompt: string) =>
+  request<{ success: boolean; tracked_is_custom: boolean; briefing_is_custom: boolean }>('/api/settings/prefs/briefing-prompts', {
+    method: 'POST',
+    body: JSON.stringify({ tracked_prompt, briefing_prompt }),
+  })
+
 export const getBriefingHistory = () =>
   request<BriefingRun[]>('/api/intelligence/briefing/history')
 
 export const deleteBriefingRun = (run_id: number) =>
   request<{ success: boolean }>(`/api/intelligence/briefing/history/${run_id}`, {
     method: 'DELETE',
+  })
+
+export const regenerateBriefingEntry = (run_id: number, entry_id: number) =>
+  request<BriefingHistoryEntry>(`/api/intelligence/briefing/history/${run_id}/entries/${entry_id}/regenerate`, {
+    method: 'POST',
   })
 
 // --- Compose ---
