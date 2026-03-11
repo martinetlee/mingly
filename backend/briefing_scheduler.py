@@ -93,11 +93,14 @@ async def _run_briefing_background(days: int) -> None:
 
                 lines = []
                 for row in msgs:
-                    m = row[0]
+                    m, reply_sender, reply_text = row[0], row[1], row[2]
                     if m.text:
-                        ts = m.date.strftime("%m/%d %H:%M")
                         sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
-                        lines.append(f"[id:{m.telegram_id}] [{ts}] {sender}: {m.text[:300]}")
+                        if reply_sender and reply_text:
+                            snippet = reply_text[:60].rstrip()
+                            lines.append(f'{sender} [↩ {reply_sender}: "{snippet}"]: {m.text[:300]}')
+                        else:
+                            lines.append(f"{sender}: {m.text[:300]}")
 
                 if not lines:
                     collected.append({
@@ -110,7 +113,12 @@ async def _run_briefing_background(days: int) -> None:
                     continue
 
                 messages_text = "\n".join(lines[-150:])
-                summary, source_ids = await _summarize_chat(client, base_url, model, chat.name, category, messages_text)
+                summary, source_ids = "", []
+                async for event_type, data in _summarize_chat(
+                    client, base_url, model, chat.name, category, messages_text
+                ):
+                    if event_type == "result":
+                        summary, source_ids = data
                 if not summary:
                     summary = "Summary unavailable."
 
@@ -148,11 +156,14 @@ async def _run_briefing_background(days: int) -> None:
                 lines = []
                 msg_chat_map: dict[int, int] = {}
                 for row in rows:
-                    msg, chat = row[0], row[1]
+                    msg, chat, reply_sender, reply_text = row[0], row[1], row[2], row[3]
                     if msg.text:
-                        ts = msg.date.strftime("%m/%d %H:%M")
                         chat_label = chat.name or str(chat.telegram_id)
-                        lines.append(f"[id:{msg.telegram_id}] [{ts}] [{chat_label}] {msg.text[:300]}")
+                        if reply_sender and reply_text:
+                            snippet = reply_text[:60].rstrip()
+                            lines.append(f'[{chat_label}] [↩ {reply_sender}: "{snippet}"]: {msg.text[:300]}')
+                        else:
+                            lines.append(f"[{chat_label}] {msg.text[:300]}")
                         msg_chat_map[msg.telegram_id] = chat.telegram_id
 
                 if not lines:
@@ -166,9 +177,12 @@ async def _run_briefing_background(days: int) -> None:
                     continue
 
                 messages_text = "\n".join(lines[-80:])
-                summary, source_ids = await _summarize_important_contact(
+                summary, source_ids = "", []
+                async for event_type, data in _summarize_important_contact(
                     ic_client, base_url, model, contact_name, messages_text
-                )
+                ):
+                    if event_type == "result":
+                        summary, source_ids = data
                 if not summary:
                     summary = "Summary unavailable."
 
