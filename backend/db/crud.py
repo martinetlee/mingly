@@ -666,6 +666,97 @@ async def get_important_contacts(db: AsyncSession) -> list:
     return list(result.scalars().all())
 
 
+VALID_STATUSES = {"new", "active", "nurturing", "stalled", "cold", "needs_reply"}
+
+
+async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tuple:
+    """Compute relationship status for a contact based on message history."""
+    # Find the private chat matching this contact
+    chat = await db.execute(
+        select(Chat).where(Chat.telegram_id == contact.telegram_id, Chat.type == "private")
+    )
+    chat_obj = chat.scalar_one_or_none()
+    if not chat_obj:
+        return ("new", None, None, None)
+
+    # Get last outgoing and incoming message dates
+    last_out_result = await db.execute(
+        select(func.max(Message.date))
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == True)  # noqa: E712
+    )
+    last_outgoing = last_out_result.scalar()
+
+    last_in_result = await db.execute(
+        select(func.max(Message.date))
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == False)  # noqa: E712
+    )
+    last_incoming = last_in_result.scalar()
+
+    if not last_outgoing and not last_incoming:
+        return ("new", None, None, None)
+
+    last_interaction = max(filter(None, [last_outgoing, last_incoming]))
+
+    # No outgoing messages at all
+    if not last_outgoing:
+        return ("new", last_interaction, None, last_incoming)
+
+    # They messaged more recently than we replied
+    if last_incoming and last_incoming > last_outgoing:
+        return ("needs_reply", last_interaction, last_outgoing, last_incoming)
+
+    # Time-based status
+    from datetime import datetime
+    days_since = (datetime.utcnow() - last_interaction).days
+    if days_since <= 7:
+        status = "active"
+    elif days_since <= 30:
+        status = "nurturing"
+    elif days_since <= 90:
+        status = "stalled"
+    else:
+        status = "cold"
+
+    return (status, last_interaction, last_outgoing, last_incoming)
+
+
+async def refresh_contact_status(db: AsyncSession, contact_id: int) -> Optional[Contact]:
+    """Recompute and save relationship status for a contact (skip manual overrides)."""
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        return None
+    if contact.relationship_status_manual:
+        return contact
+
+    status, last_interaction, last_outgoing, last_incoming = await compute_relationship_status(db, contact)
+    contact.relationship_status = status
+    contact.last_interaction_at = last_interaction
+    contact.last_outgoing_at = last_outgoing
+    contact.last_incoming_at = last_incoming
+    await db.commit()
+    await db.refresh(contact)
+    return contact
+
+
+async def refresh_all_contact_statuses(db: AsyncSession) -> int:
+    """Batch refresh relationship statuses for all non-manual contacts."""
+    result = await db.execute(
+        select(Contact).where(Contact.relationship_status_manual == False)  # noqa: E712
+    )
+    contacts = list(result.scalars().all())
+    count = 0
+    for contact in contacts:
+        status, last_interaction, last_outgoing, last_incoming = await compute_relationship_status(db, contact)
+        contact.relationship_status = status
+        contact.last_interaction_at = last_interaction
+        contact.last_outgoing_at = last_outgoing
+        contact.last_incoming_at = last_incoming
+        count += 1
+    await db.commit()
+    return count
+
+
 async def get_messages_from_sender_since(
     db: AsyncSession,
     sender_telegram_id: int,

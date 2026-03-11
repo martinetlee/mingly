@@ -247,6 +247,15 @@ export const updatePosition = (
 export const removePosition = (contactId: number, positionId: number) =>
   request<{ success: boolean }>(`/api/contacts/${contactId}/positions/${positionId}`, { method: 'DELETE' })
 
+export const setRelationshipStatus = (contactId: number, status: string) =>
+  request<Contact>(`/api/contacts/${contactId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
+
+export const resetRelationshipStatus = (contactId: number) =>
+  request<Contact>(`/api/contacts/${contactId}/relationship-status/auto`, { method: 'POST' })
+
+export const refreshAllStatuses = () =>
+  request<{ refreshed: number }>('/api/contacts/refresh-statuses', { method: 'POST' })
+
 // --- Profiles ---
 
 export const getProfile = (userId: number | string) =>
