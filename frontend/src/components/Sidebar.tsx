@@ -40,7 +40,7 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="flex h-screen w-16 flex-col items-center bg-slate-950 py-4">
+    <aside className="flex h-screen w-[4.5rem] flex-col items-center bg-slate-950 py-4">
       {/* Logo */}
       <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
         <img src={logo} alt="Mingly" className="h-9 w-9 object-contain" />
@@ -54,14 +54,15 @@ export default function Sidebar() {
             to={to}
             title={label}
             className={({ isActive }) =>
-              `flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+              `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
                 isActive
                   ? 'bg-indigo-500/20 text-indigo-400'
                   : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
               }`
             }
           >
-            <Icon size={20} />
+            <Icon size={18} />
+            <span className="text-[9px] leading-tight">{label}</span>
           </NavLink>
         ))}
       </nav>
@@ -71,9 +72,10 @@ export default function Sidebar() {
         onClick={handleBulkSync}
         disabled={syncing}
         title="Sync latest 50 chats"
-        className="mb-1 flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors disabled:opacity-40"
+        className="mb-1 flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors disabled:opacity-40"
       >
-        <RefreshCw size={20} className={syncing ? 'animate-spin' : ''} />
+        <RefreshCw size={18} className={syncing ? 'animate-spin' : ''} />
+        <span className="text-[9px] leading-tight">Sync</span>
       </button>
 
       {/* Settings at bottom */}
@@ -81,14 +83,15 @@ export default function Sidebar() {
         to="/settings"
         title="Settings"
         className={({ isActive }) =>
-          `flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+          `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
             isActive
               ? 'bg-indigo-500/20 text-indigo-400'
               : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
           }`
         }
       >
-        <Settings size={20} />
+        <Settings size={18} />
+        <span className="text-[9px] leading-tight">Settings</span>
       </NavLink>
     </aside>
   )
