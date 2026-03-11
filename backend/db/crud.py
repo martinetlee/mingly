@@ -104,6 +104,7 @@ async def upsert_chat(
     chat_type: str,
     username: Optional[str] = None,
     unread_count: Optional[int] = None,
+    members_count: Optional[int] = None,
 ) -> Chat:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if chat:
@@ -112,6 +113,8 @@ async def upsert_chat(
         chat.username = username
         if unread_count is not None:
             chat.unread_count = unread_count
+        if members_count is not None:
+            chat.members_count = members_count
     else:
         chat = Chat(
             telegram_id=telegram_id,
@@ -119,6 +122,7 @@ async def upsert_chat(
             type=chat_type,
             username=username,
             unread_count=unread_count if unread_count is not None else 0,
+            members_count=members_count,
         )
         db.add(chat)
     await db.commit()
@@ -443,6 +447,33 @@ async def search_chats_by_title(db: AsyncSession, keyword: str, limit: int = 20)
         select(Chat)
         .where(Chat.name.ilike(f"%{keyword}%"))
         .order_by(Chat.name)
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def find_chats_by_member_count(
+    db: AsyncSession,
+    count: int,
+    operator: str = "more_than",
+    limit: int = 50,
+) -> list:
+    """Return chats filtered by member count.
+
+    operator: 'more_than' | 'exactly' | 'less_than'
+    """
+    if operator == "more_than":
+        condition = Chat.members_count > count
+    elif operator == "exactly":
+        condition = Chat.members_count == count
+    elif operator == "less_than":
+        condition = Chat.members_count < count
+    else:
+        return []
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.members_count.isnot(None), condition)
+        .order_by(Chat.members_count.desc())
         .limit(limit)
     )
     return list(result.scalars().all())
