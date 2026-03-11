@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -261,6 +261,15 @@ export const resetRelationshipStatus = (contactId: number) =>
 
 export const refreshAllStatuses = () =>
   request<{ refreshed: number }>('/api/contacts/refresh-statuses', { method: 'POST' })
+
+export const resolvePerson = (telegramId: number) =>
+  request<PersonSummary>(`/api/contacts/resolve/${telegramId}`)
+
+export const resolvePersonsBatch = (telegramIds: number[]) =>
+  request<Record<number, PersonSummary>>('/api/contacts/resolve-batch', {
+    method: 'POST',
+    body: JSON.stringify({ telegram_ids: telegramIds }),
+  })
 
 // --- Profiles ---
 
