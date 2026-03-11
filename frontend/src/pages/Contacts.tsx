@@ -4,6 +4,7 @@ import { RefreshCw, Search, ExternalLink, Star, RotateCcw } from 'lucide-react'
 import type { Contact, RelationshipStatus } from '../api/types'
 import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, refreshAllStatuses } from '../api/client'
 import ContactInfoSection from '../components/ContactInfoSection'
+import PersonCard from '../components/PersonCard'
 
 const STATUS_COLORS: Record<string, string> = {
   new: 'bg-blue-500/20 text-blue-400',
@@ -237,38 +238,40 @@ export default function Contacts() {
         {selected ? (
           <div className="flex-1 overflow-y-auto px-6 py-6 max-w-2xl">
             {/* Identity */}
-            <div className="flex items-start gap-4 mb-6">
-              <Link to={`/profile/${selected.telegram_id}`}>
-                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300 hover:ring-2 hover:ring-indigo-500 transition-all">
-                  {selected.name.charAt(0).toUpperCase()}
-                </div>
-              </Link>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <Link
-                    to={`/profile/${selected.telegram_id}`}
-                    className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
-                  >
-                    {selected.name}
-                  </Link>
-                  <button
-                    onClick={handleToggleImportant}
-                    title={selected.is_important ? 'Remove from important' : 'Mark as important'}
-                    className={`rounded-full p-0.5 transition-colors ${
-                      selected.is_important
-                        ? 'text-amber-400 hover:text-amber-300'
-                        : 'text-slate-600 hover:text-amber-400'
-                    }`}
-                  >
-                    <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
-                  </button>
-                </div>
-                {selected.username && (
-                  <p className="text-sm text-indigo-400">@{selected.username}</p>
-                )}
+            <div className="mb-6">
+              <PersonCard
+                telegramId={selected.telegram_id}
+                name={selected.name}
+                username={selected.username}
+                isImportant={selected.is_important}
+                contactId={selected.id}
+                position={
+                  selected.positions.filter((p) => p.is_active !== false).length > 0
+                    ? { title: selected.positions.filter((p) => p.is_active !== false)[0].title, organization: selected.positions.filter((p) => p.is_active !== false)[0].organization }
+                    : null
+                }
+                phone={selected.phone}
+                twitterHandle={selected.twitter_handle}
+                linkedinUrl={selected.linkedin_url}
+                hasNotes={!!selected.notes}
+                mode="full"
+                showStatus={false}
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={handleToggleImportant}
+                  title={selected.is_important ? 'Remove from important' : 'Mark as important'}
+                  className={`rounded-full p-0.5 transition-colors ${
+                    selected.is_important
+                      ? 'text-amber-400 hover:text-amber-300'
+                      : 'text-slate-600 hover:text-amber-400'
+                  }`}
+                >
+                  <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
+                </button>
                 <Link
                   to={`/profile/${selected.telegram_id}`}
-                  className="inline-flex items-center gap-1 mt-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                  className="inline-flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                 >
                   <ExternalLink size={9} />
                   View Telegram profile

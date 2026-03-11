@@ -111,6 +111,21 @@ export interface Contact {
   positions: ContactPosition[]
 }
 
+export interface PersonSummary {
+  telegram_id: number
+  name: string
+  username: string | null
+  is_important: boolean
+  contact_id: number | null
+  relationship_status: string | null
+  last_interaction_at: string | null
+  primary_position: { title: string | null; organization: string } | null
+  phone: string | null
+  twitter_handle: string | null
+  linkedin_url: string | null
+  has_notes: boolean
+}
+
 export interface DashboardStats {
   total_unread: number
   messages_today: number

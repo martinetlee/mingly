@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Link } from 'react-router-dom'
 import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw, Sparkles, Loader2, ChevronDown, ChevronRight, UserMinus } from 'lucide-react'
 import type { OrgSummary, OrgDetail } from '../api/types'
 import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs, generateOrgContext } from '../api/client'
+import PersonCard from '../components/PersonCard'
 
 function OrgCard({
   org,
@@ -351,28 +351,20 @@ export default function Organizations() {
               ) : (
                 <div className="flex flex-col gap-1">
                   {selected.members.map((m) => (
-                    <Link
+                    <PersonCard
                       key={m.contact_id}
-                      to={`/profile/${m.telegram_id}`}
-                      className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-700/50 transition-colors group"
-                    >
-                      <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
-                        {m.name.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p title={m.name} className="truncate text-sm text-gray-200 group-hover:text-indigo-300 transition-colors">
-                          {m.name}
-                        </p>
-                        {m.username && (
-                          <p title={`@${m.username}`} className="truncate text-[10px] text-slate-500">@{m.username}</p>
-                        )}
-                      </div>
-                      {m.title && (
-                        <span title={m.title} className="flex-shrink-0 rounded-full bg-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
-                          {m.title}
-                        </span>
-                      )}
-                    </Link>
+                      telegramId={m.telegram_id}
+                      name={m.name}
+                      username={m.username}
+                      contactId={m.contact_id}
+                      extraBadge={
+                        m.title ? (
+                          <span title={m.title} className="flex-shrink-0 rounded-full bg-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
+                            {m.title}
+                          </span>
+                        ) : undefined
+                      }
+                    />
                   ))}
                 </div>
               )}
@@ -398,33 +390,28 @@ export default function Organizations() {
                 {showFormerMembers && (
                   <div className="flex flex-col gap-1 mt-3">
                     {selected.former_members.map((m) => (
-                      <Link
+                      <PersonCard
                         key={m.contact_id}
-                        to={`/profile/${m.telegram_id}`}
-                        className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-700/30 transition-colors group opacity-60"
-                      >
-                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700/60 text-[10px] font-medium text-slate-400">
-                          {m.name.charAt(0).toUpperCase()}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p title={m.name} className="truncate text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
-                            {m.name}
-                          </p>
-                          {m.username && (
-                            <p title={`@${m.username}`} className="truncate text-[10px] text-slate-600">@{m.username}</p>
-                          )}
-                          {m.ended_at && (
-                            <p className="text-[10px] text-slate-600">
-                              left {new Date(m.ended_at).toLocaleDateString()}
-                            </p>
-                          )}
-                        </div>
-                        {m.title && (
-                          <span className="flex-shrink-0 rounded-full bg-slate-700/50 px-2 py-0.5 text-[10px] text-slate-500">
-                            {m.title}
-                          </span>
-                        )}
-                      </Link>
+                        telegramId={m.telegram_id}
+                        name={m.name}
+                        username={m.username}
+                        contactId={m.contact_id}
+                        muted
+                        extraBadge={
+                          <div className="flex items-center gap-2">
+                            {m.ended_at && (
+                              <span className="text-[10px] text-slate-600">
+                                left {new Date(m.ended_at).toLocaleDateString()}
+                              </span>
+                            )}
+                            {m.title && (
+                              <span className="flex-shrink-0 rounded-full bg-slate-700/50 px-2 py-0.5 text-[10px] text-slate-500">
+                                {m.title}
+                              </span>
+                            )}
+                          </div>
+                        }
+                      />
                     ))}
                   </div>
                 )}
