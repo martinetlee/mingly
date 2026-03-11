@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import logo from '../assets/logo.png'
 import {
   MessageSquare,
@@ -22,11 +22,12 @@ const NAV = [
   { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
-  { to: '/briefing', icon: FileText, label: 'Briefing' },
+  { to: '/intelligence?tab=briefing', icon: FileText, label: 'Briefing' },
   { to: '/intelligence', icon: Brain, label: 'Intelligence' },
 ]
 
 export default function Sidebar() {
+  const location = useLocation()
   const [syncing, setSyncing] = useState(false)
 
   const handleBulkSync = async () => {
@@ -48,23 +49,30 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1">
-        {NAV.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            title={label}
-            className={({ isActive }) =>
-              `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
-                isActive
-                  ? 'bg-indigo-500/20 text-indigo-400'
-                  : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
-              }`
-            }
-          >
-            <Icon size={18} />
-            <span className="text-[9px] leading-tight">{label}</span>
-          </NavLink>
-        ))}
+        {NAV.map(({ to, icon: Icon, label }) => {
+          // Custom active detection for intelligence tabs
+          const url = new URL(to, 'http://x')
+          const isActive = url.searchParams.has('tab')
+            ? location.pathname === url.pathname && new URLSearchParams(location.search).get('tab') === url.searchParams.get('tab')
+            : location.pathname === url.pathname && !new URLSearchParams(location.search).has('tab')
+          return (
+            <NavLink
+              key={to}
+              to={to}
+              title={label}
+              className={
+                `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
+                  isActive
+                    ? 'bg-indigo-500/20 text-indigo-400'
+                    : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
+                }`
+              }
+            >
+              <Icon size={18} />
+              <span className="text-[9px] leading-tight">{label}</span>
+            </NavLink>
+          )
+        })}
       </nav>
 
       {/* Bulk sync */}

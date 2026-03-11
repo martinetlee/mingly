@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useWebSocket } from '../hooks/useWebSocket'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1734,8 +1734,12 @@ function BriefingTab() {
 // ---------------------------------------------------------------------------
 
 export default function Intelligence() {
-  // Top-level tab
-  const [activeTab, setActiveTab] = useState<'chat' | 'mentions' | 'briefing'>('chat')
+  // Top-level tab — read initial tab from URL query param
+  const [searchParams] = useSearchParams()
+  const initialTab = (['chat', 'mentions', 'briefing'] as const).includes(
+    searchParams.get('tab') as 'chat' | 'mentions' | 'briefing'
+  ) ? (searchParams.get('tab') as 'chat' | 'mentions' | 'briefing') : 'chat'
+  const [activeTab, setActiveTab] = useState<'chat' | 'mentions' | 'briefing'>(initialTab)
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(true)

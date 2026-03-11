@@ -11,7 +11,6 @@ import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
 import Settings from './pages/Settings'
 import Tracked from './pages/Tracked'
-import Briefing from './pages/Briefing'
 import Intelligence from './pages/Intelligence'
 import Profile from './pages/Profile'
 
@@ -70,7 +69,7 @@ export default function App() {
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
           <Route path="tracked" element={<Tracked />} />
-          <Route path="briefing" element={<Briefing />} />
+          <Route path="briefing" element={<Navigate to="/intelligence?tab=briefing" replace />} />
           <Route path="intelligence" element={<Intelligence />} />
           <Route path="profile/:userId" element={<Profile />} />
           <Route path="settings" element={<Settings />} />
