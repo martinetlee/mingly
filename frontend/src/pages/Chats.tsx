@@ -838,6 +838,13 @@ export default function Chats() {
     c.name.toLowerCase().includes(search.toLowerCase())
   )
 
+  // Clear selected chat when it's no longer in the filtered list
+  useEffect(() => {
+    if (selectedChat && !filtered.some((c) => c.telegram_id === selectedChat.telegram_id)) {
+      setSelectedChat(null)
+    }
+  }, [filtered, selectedChat])
+
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* Chat list */}
