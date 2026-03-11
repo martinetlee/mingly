@@ -11,6 +11,7 @@ import {
   Brain,
   RefreshCw,
   Settings,
+  Search,
 } from 'lucide-react'
 import { bulkSync } from '../api/client'
 
@@ -24,7 +25,7 @@ const NAV = [
   { to: '/intelligence', icon: Brain, label: 'Intelligence' },
 ]
 
-export default function Sidebar() {
+export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void }) {
   const location = useLocation()
   const [syncing, setSyncing] = useState(false)
 
@@ -44,6 +45,16 @@ export default function Sidebar() {
       <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
         <img src={logo} alt="Mingly" className="h-9 w-9 object-contain" />
       </div>
+
+      {/* Search */}
+      <button
+        onClick={onSearchClick}
+        title="Search (⌘K)"
+        className="mb-3 flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors"
+      >
+        <Search size={18} />
+        <span className="text-[9px] leading-tight">Search</span>
+      </button>
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1">
