@@ -174,6 +174,28 @@ export interface DashboardData {
   latest_briefing: DashboardBriefing | null
 }
 
+export interface SearchMessageResult {
+  telegram_id: number
+  chat_id: number
+  chat_name: string
+  sender_name: string | null
+  text: string
+  date: string
+}
+
+export interface SearchOrgResult {
+  id: number
+  name: string
+  context: string | null
+}
+
+export interface GlobalSearchResults {
+  messages: SearchMessageResult[]
+  chats: Chat[]
+  contacts: Contact[]
+  organizations: SearchOrgResult[]
+}
+
 export interface OrgMember {
   contact_id: number
   telegram_id: number

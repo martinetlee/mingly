@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -402,3 +402,8 @@ export const getMentions = (params?: { days?: number; groupName?: string; tagNam
 
 export const getDashboard = () =>
   request<DashboardData>('/api/dashboard')
+
+// --- Global Search ---
+
+export const globalSearch = (query: string, limit = 20) =>
+  request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`)
