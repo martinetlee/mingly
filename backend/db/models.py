@@ -82,6 +82,11 @@ class Contact(Base):
     linkedin_url: Mapped[Optional[str]] = mapped_column(String)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     is_important: Mapped[bool] = mapped_column(Boolean, default=False)
+    relationship_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    relationship_status_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_interaction_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_outgoing_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_incoming_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

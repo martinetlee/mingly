@@ -83,6 +83,8 @@ export interface ContactPosition {
   ended_at: string | null
 }
 
+export type RelationshipStatus = 'new' | 'active' | 'nurturing' | 'stalled' | 'cold' | 'needs_reply'
+
 export interface Contact {
   id: number
   telegram_id: number
@@ -95,6 +97,11 @@ export interface Contact {
   linkedin_url: string | null
   notes: string | null
   is_important: boolean
+  relationship_status: RelationshipStatus | null
+  relationship_status_manual: boolean
+  last_interaction_at: string | null
+  last_outgoing_at: string | null
+  last_incoming_at: string | null
   synced_at: string | null
   positions: ContactPosition[]
 }
