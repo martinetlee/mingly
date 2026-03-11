@@ -76,6 +76,16 @@ body {
 .formatted-in a:hover {
   color: #a5b4fc;
 }
+.formatted-text a[data-mention] {
+  text-decoration: none;
+  font-weight: 500;
+}
+.formatted-out a[data-mention] {
+  color: #c4b5fd; /* purple-300 */
+}
+.formatted-in a[data-mention] {
+  color: #a78bfa; /* purple-400 */
+}
 .formatted-text .spoiler {
   background: #475569;
   color: transparent;

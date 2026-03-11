@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft, Bot, Crown, BadgeCheck, Globe, Phone, AtSign, MessageSquare, Star } from 'lucide-react'
 import type { TelegramProfile, Contact } from '../api/types'
 import { getProfile, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
+import ContactInfoSection from '../components/ContactInfoSection'
 
 const STATUS_LABELS: Record<string, string> = {
   online: 'Online',
@@ -32,14 +33,21 @@ export default function Profile() {
     if (!userId) return
     setLoading(true)
     setError(null)
-    const uid = Number(userId)
+    // Support both numeric IDs and @username lookups
+    const isUsername = userId.startsWith('@')
+    const profileKey = isUsername ? userId : Number(userId)
+    const contactKey = isUsername ? NaN : Number(userId)
     Promise.all([
-      getProfile(uid),
-      getContactByTelegram(uid).catch(() => null),
+      getProfile(profileKey),
+      isUsername ? Promise.resolve(null) : getContactByTelegram(contactKey).catch(() => null),
     ])
       .then(([p, c]) => {
         setProfile(p)
         setContact(c)
+        // If resolved via username, fetch contact info using the returned numeric ID
+        if (isUsername && p?.id) {
+          getContactByTelegram(p.id).then(setContact).catch(() => {})
+        }
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
@@ -182,6 +190,13 @@ export default function Profile() {
             )}
           </div>
         </div>
+
+        {/* Contact extra info (twitter, linkedin, notes, positions) */}
+        {contact && (
+          <div className="mb-6 flex flex-col gap-4">
+            <ContactInfoSection contact={contact} onContactChange={setContact} />
+          </div>
+        )}
 
         {/* Common chats */}
         {profile.common_chats && profile.common_chats.length > 0 && (

@@ -27,7 +27,10 @@ function OrgCard({
         <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
           {org.name}
         </p>
-        <p className="text-xs text-slate-500">{org.member_count} member{org.member_count !== 1 ? 's' : ''}</p>
+        <p className="text-xs text-slate-500">
+          {org.member_count} member{org.member_count !== 1 ? 's' : ''}
+          {org.former_member_count > 0 && `, ${org.former_member_count} former`}
+        </p>
       </div>
     </div>
   )

@@ -249,7 +249,7 @@ export const removePosition = (contactId: number, positionId: number) =>
 
 // --- Profiles ---
 
-export const getProfile = (userId: number) =>
+export const getProfile = (userId: number | string) =>
   request<TelegramProfile>(`/api/profiles/${userId}`)
 
 // --- Settings / Prefs ---
