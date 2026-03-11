@@ -5,8 +5,6 @@ import Layout from './components/Layout'
 import Onboarding from './pages/Onboarding'
 import Unlock from './pages/Unlock'
 import Chats from './pages/Chats'
-import Inbox from './pages/Inbox'
-import Todos from './pages/Todos'
 import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
 import Settings from './pages/Settings'
@@ -64,8 +62,6 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/chats" replace />} />
           <Route path="chats" element={<Chats />} />
-          <Route path="inbox" element={<Inbox />} />
-          <Route path="todos" element={<Todos />} />
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
           <Route path="tracked" element={<Tracked />} />

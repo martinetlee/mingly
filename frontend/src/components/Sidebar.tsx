@@ -3,8 +3,6 @@ import { NavLink, useLocation } from 'react-router-dom'
 import logo from '../assets/logo.png'
 import {
   MessageSquare,
-  Inbox,
-  CheckSquare,
   Users,
   Building2,
   Radio,
@@ -17,9 +15,7 @@ import { bulkSync } from '../api/client'
 
 const NAV = [
   { to: '/chats', icon: MessageSquare, label: 'Chats' },
-  { to: '/inbox', icon: Inbox, label: 'Inbox' },
-  { to: '/todos', icon: CheckSquare, label: 'Todos' },
-  { to: '/contacts', icon: Users, label: 'Contacts' },
+{ to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
   { to: '/intelligence?tab=briefing', icon: FileText, label: 'Briefing' },
