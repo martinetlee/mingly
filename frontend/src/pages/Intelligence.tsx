@@ -46,8 +46,10 @@ import {
   setBriefingDay,
   getBriefingPrompts,
   setBriefingPrompts,
+  getBriefingChats,
+  setBriefing,
 } from '../api/client'
-import type { ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
+import type { Chat, ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1255,6 +1257,16 @@ function BriefingTab() {
   const regenerationAbortRef = useRef<AbortController | null>(null)
   const promptDirty = trackedPromptDraft !== trackedPromptSaved || briefingPromptDraft !== briefingPromptSaved
 
+  // Sources (briefing chat management) state
+  const [showSources, setShowSources] = useState(false)
+  const [briefingChats, setBriefingChats] = useState<Chat[]>([])
+  const [sourceSearch, setSourceSearch] = useState('')
+
+  const handleRemoveSource = useCallback(async (chat: Chat) => {
+    await setBriefing(chat.telegram_id, false)
+    setBriefingChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+  }, [])
+
   const loadHistory = useCallback(async () => {
     try {
       const runs = await getBriefingHistory()
@@ -1363,10 +1375,11 @@ function BriefingTab() {
     }
   }, [])
 
-  // Load schedule pref and history on mount
+  // Load schedule pref, history, and briefing chats on mount
   // Note: auto-run is handled by the backend scheduler, not the frontend
   useEffect(() => {
     loadHistory()
+    getBriefingChats().then(setBriefingChats).catch(() => {})
     getPrefs().then((prefs: Record<string, string>) => {
       const sched = (prefs.briefing_schedule as 'daily' | 'weekly') ?? 'daily'
       const btime = prefs.briefing_time ?? '09:00'
@@ -1537,15 +1550,73 @@ function BriefingTab() {
         </div>
       </div>
 
-      {/* Prompt editor */}
+      {/* Settings drawers: Briefing Prompts + Sources */}
       <div className="shrink-0 border-b border-slate-700/40 bg-slate-900/20 px-4 py-2">
-        <button
-          onClick={() => setShowPromptEditor((v) => !v)}
-          className="inline-flex items-center gap-1 rounded border border-slate-600/60 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700/30"
-        >
-          {showPromptEditor ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          Briefing Prompts
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowPromptEditor((v) => !v)}
+            className="inline-flex items-center gap-1 rounded border border-slate-600/60 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700/30"
+          >
+            {showPromptEditor ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            Briefing Prompts
+          </button>
+          <button
+            onClick={() => setShowSources((v) => !v)}
+            className="inline-flex items-center gap-1 rounded border border-slate-600/60 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700/30"
+          >
+            {showSources ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            Sources
+            <span className="ml-0.5 text-slate-500">({briefingChats.length})</span>
+          </button>
+        </div>
+
+        {/* Sources panel */}
+        {showSources && (() => {
+          const filteredSources = briefingChats.filter((c) =>
+            c.name.toLowerCase().includes(sourceSearch.toLowerCase())
+          )
+          return (
+            <div className="mt-2 rounded border border-slate-700/60 bg-slate-900/50 p-2">
+              <input
+                type="text"
+                placeholder="Filter chats…"
+                value={sourceSearch}
+                onChange={(e) => setSourceSearch(e.target.value)}
+                className="mb-2 w-full rounded border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] text-gray-200 placeholder:text-slate-500 outline-none focus:border-emerald-500/60"
+              />
+              <div className="max-h-40 overflow-y-auto space-y-0.5">
+                {filteredSources.length === 0 ? (
+                  <p className="py-3 text-center text-[11px] text-slate-500">
+                    {briefingChats.length === 0
+                      ? 'No briefing chats. Mark chats for briefing from the Chats page.'
+                      : 'No matches.'}
+                  </p>
+                ) : (
+                  filteredSources.map((chat) => (
+                    <div
+                      key={chat.telegram_id}
+                      className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-slate-700/40"
+                    >
+                      <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-[9px] font-medium text-emerald-400">
+                        {chat.name.charAt(0).toUpperCase()}
+                      </div>
+                      <span className="flex-1 truncate text-[11px] text-slate-200" title={chat.name}>{chat.name}</span>
+                      <span className="text-[9px] text-slate-500">{chat.type}</span>
+                      <button
+                        onClick={() => handleRemoveSource(chat)}
+                        title="Remove from briefing"
+                        className="hidden group-hover:flex rounded p-0.5 text-slate-500 hover:text-rose-400 transition-colors"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )
+        })()}
+
         {showPromptEditor && (
           <div className="mt-2 rounded border border-slate-700/60 bg-slate-900/50 p-2">
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-300">
