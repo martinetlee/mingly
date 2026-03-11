@@ -47,7 +47,7 @@ function ChatItem({
 
       {/* Name + type */}
       <div className="min-w-0 flex-1">
-        <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+        <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
           {chat.name}
         </p>
         <span className={`inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
@@ -509,11 +509,11 @@ function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
                     {m.name.charAt(0).toUpperCase()}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs text-gray-200 group-hover:text-indigo-300 transition-colors">
+                    <p title={m.name} className="truncate text-xs text-gray-200 group-hover:text-indigo-300 transition-colors">
                       {m.name}
                     </p>
                     {m.username && (
-                      <p className="truncate text-[10px] text-slate-500">@{m.username}</p>
+                      <p title={`@${m.username}`} className="truncate text-[10px] text-slate-500">@{m.username}</p>
                     )}
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
@@ -939,7 +939,7 @@ export default function Chats() {
                     <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-400">
                       {chat.name.charAt(0).toUpperCase()}
                     </div>
-                    <p className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
+                    <p title={chat.name} className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
                     <button
                       onClick={() => handleUnhideChat(chat)}
                       title="Unhide"

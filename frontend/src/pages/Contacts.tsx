@@ -26,7 +26,7 @@ function ContactCard({
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+          <p title={contact.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
             {contact.name}
           </p>
           {contact.is_important && (
@@ -34,10 +34,10 @@ function ContactCard({
           )}
         </div>
         {contact.username && (
-          <p className="truncate text-xs text-slate-500">@{contact.username}</p>
+          <p title={`@${contact.username}`} className="truncate text-xs text-slate-500">@{contact.username}</p>
         )}
         {contact.positions.filter((p) => p.is_active !== false).length > 0 && (
-          <p className="truncate text-[10px] text-slate-500 mt-0.5">
+          <p title={contact.positions.filter((p) => p.is_active !== false).map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')} className="truncate text-[10px] text-slate-500 mt-0.5">
             {contact.positions.filter((p) => p.is_active !== false).map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')}
           </p>
         )}

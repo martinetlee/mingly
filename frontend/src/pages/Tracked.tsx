@@ -158,7 +158,7 @@ export default function Tracked() {
                   {chat.name.charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
+                  <p title={chat.name} className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
                     {chat.name}
                   </p>
                   <span className="text-[10px] text-slate-500">{chat.type}</span>
