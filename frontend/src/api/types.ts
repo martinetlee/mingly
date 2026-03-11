@@ -99,6 +99,54 @@ export interface Contact {
   positions: ContactPosition[]
 }
 
+export interface DashboardStats {
+  total_unread: number
+  messages_today: number
+  active_contacts: number
+}
+
+export interface DashboardNeedsReply {
+  chat: Chat
+  last_message: {
+    sender_name: string | null
+    text: string | null
+    date: string
+  }
+}
+
+export interface DashboardAttentionContact {
+  id: number
+  telegram_id: number
+  name: string
+  username: string | null
+  is_important: boolean
+  relationship_status: string | null
+  last_interaction_at: string | null
+  primary_position: { title: string | null; organization: string } | null
+}
+
+export interface DashboardBriefingEntry {
+  id: number
+  chat_id: number
+  chat_name: string
+  category: string
+  summary: string
+}
+
+export interface DashboardBriefing {
+  id: number
+  generated_at: string
+  days: number
+  entries: DashboardBriefingEntry[]
+}
+
+export interface DashboardData {
+  stats: DashboardStats
+  needs_reply: DashboardNeedsReply[]
+  attention_contacts: DashboardAttentionContact[]
+  latest_briefing: DashboardBriefing | null
+}
+
 export interface OrgMember {
   contact_id: number
   telegram_id: number
