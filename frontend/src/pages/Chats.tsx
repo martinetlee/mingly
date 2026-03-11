@@ -8,6 +8,17 @@ import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
 
+function fmtDate(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffDays = Math.floor(diffMs / 86400000)
+  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 function ChatItem({
   chat,
   selected,
@@ -45,14 +56,29 @@ function ChatItem({
         {chat.name.charAt(0).toUpperCase()}
       </div>
 
-      {/* Name + type */}
+      {/* Name + preview */}
       <div className="min-w-0 flex-1">
-        <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
-          {chat.name}
-        </p>
-        <span className={`inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
-          {chat.type}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+            {chat.name}
+          </p>
+          <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
+            {chat.type}
+          </span>
+          {chat.last_message?.date && (
+            <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
+              {fmtDate(chat.last_message.date)}
+            </span>
+          )}
+        </div>
+        {chat.last_message && (
+          <p className="truncate text-xs text-slate-500 mt-0.5">
+            {chat.last_message.sender_name && (
+              <span className="text-slate-400">{chat.last_message.sender_name}: </span>
+            )}
+            {chat.last_message.text || '[media]'}
+          </p>
+        )}
       </div>
 
       {/* Actions */}
@@ -120,6 +146,7 @@ export default function Chats() {
   const [showInfo, setShowInfo] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(288) // 72 * 4 = w-72
   const dragging = useRef(false)
+  const [sortBy, setSortBy] = useState<'recent' | 'unread' | 'alpha'>('recent')
   const LIMIT = 100
   const CHAT_PAGE = 50
   const [chatOffset, setChatOffset] = useState(0)
@@ -157,18 +184,18 @@ export default function Chats() {
   }, [sidebarWidth])
 
   const loadChats = useCallback(async () => {
-    const data = await getChats(CHAT_PAGE, 0)
+    const data = await getChats(CHAT_PAGE, 0, sortBy)
     setChats(data)
     setChatOffset(0)
     setHasMoreChats(data.length === CHAT_PAGE)
-  }, [CHAT_PAGE])
+  }, [CHAT_PAGE, sortBy])
 
   const loadMoreChats = useCallback(async () => {
     if (loadingMoreChats || !hasMoreChats) return
     setLoadingMoreChats(true)
     try {
       const nextOffset = chatOffset + CHAT_PAGE
-      const data = await getChats(CHAT_PAGE, nextOffset)
+      const data = await getChats(CHAT_PAGE, nextOffset, sortBy)
       setChats((prev) => {
         const existingIds = new Set(prev.map((c) => c.telegram_id))
         const newChats = data.filter((c) => !existingIds.has(c.telegram_id))
@@ -186,7 +213,7 @@ export default function Chats() {
     } finally {
       setLoadingMoreChats(false)
     }
-  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE])
+  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE, sortBy])
 
   const loadFolders = useCallback(async () => {
     const data = await getFolders()
@@ -448,7 +475,7 @@ export default function Chats() {
             ))}
           </div>
         )}
-        <div className="border-b border-slate-700/50 px-3 py-3">
+        <div className="border-b border-slate-700/50 px-3 py-3 flex flex-col gap-2">
           <input
             type="text"
             placeholder="Search chats…"
@@ -456,6 +483,21 @@ export default function Chats() {
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
           />
+          <div className="flex rounded-lg border border-slate-700 overflow-hidden text-[11px]">
+            {(['recent', 'unread', 'alpha'] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSortBy(s)}
+                className={`flex-1 py-1 transition-colors ${
+                  sortBy === s
+                    ? 'bg-indigo-500/20 text-indigo-400 font-medium'
+                    : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
+                }`}
+              >
+                {s === 'recent' ? 'Recent' : s === 'unread' ? 'Unread' : 'A-Z'}
+              </button>
+            ))}
+          </div>
         </div>
         <div
           ref={chatListRef}

@@ -75,8 +75,8 @@ export const logout = () =>
 
 // --- Chats ---
 
-export const getChats = (limit = 50, offset = 0) =>
-  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}`)
+export const getChats = (limit = 50, offset = 0, sortBy = 'recent') =>
+  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}`)
 
 export const bulkSync = () =>
   request<{ synced: number }>('/api/chats/bulk-sync', { method: 'POST' })

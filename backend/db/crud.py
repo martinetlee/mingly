@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, delete, desc, func, or_
+from sqlalchemy import select, delete, desc, asc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact
@@ -8,21 +8,48 @@ from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, Briefing
 
 # --- Chats ---
 
-async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0) -> list:
-    last_msg = (
-        select(Message.chat_id, func.max(Message.date).label("last_date"))
-        .group_by(Message.chat_id)
+async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by: str = "recent") -> list:
+    # Subquery: latest message per chat using window function
+    row_num = func.row_number().over(
+        partition_by=Message.chat_id,
+        order_by=desc(Message.date),
+    ).label("rn")
+    ranked = (
+        select(
+            Message.chat_id,
+            Message.text.label("last_text"),
+            Message.sender_name.label("last_sender"),
+            Message.date.label("last_date"),
+            row_num,
+        )
         .subquery()
     )
-    result = await db.execute(
-        select(Chat)
+    last_msg = (
+        select(
+            ranked.c.chat_id,
+            ranked.c.last_text,
+            ranked.c.last_sender,
+            ranked.c.last_date,
+        )
+        .where(ranked.c.rn == 1)
+        .subquery()
+    )
+
+    query = (
+        select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
         .where(Chat.is_hidden == False, Chat.is_briefing == False)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
-        .order_by(desc(last_msg.c.last_date), Chat.name)
-        .limit(limit)
-        .offset(offset)
     )
-    return list(result.scalars().all())
+
+    if sort_by == "unread":
+        query = query.order_by(desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
+    elif sort_by == "alpha":
+        query = query.order_by(asc(Chat.name))
+    else:  # recent
+        query = query.order_by(desc(last_msg.c.last_date), Chat.name)
+
+    result = await db.execute(query.limit(limit).offset(offset))
+    return list(result.all())
 
 
 async def get_tracked_chats(db: AsyncSession) -> list:

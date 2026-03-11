@@ -28,6 +28,11 @@ export interface Chat {
   is_tracked: boolean
   unread_count?: number
   last_synced_at: string | null
+  last_message?: {
+    text: string
+    sender_name: string | null
+    date: string | null
+  } | null
 }
 
 export interface Tag {

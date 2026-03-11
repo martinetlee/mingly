@@ -65,8 +65,8 @@ async def list_folders():
     return result
 
 
-def _chat_dict(c) -> dict:
-    return {
+def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
+    d = {
         "id": c.id,
         "telegram_id": c.telegram_id,
         "name": c.name,
@@ -79,6 +79,15 @@ def _chat_dict(c) -> dict:
         "unread_count": c.unread_count or 0,
         "last_synced_at": c.last_synced_at,
     }
+    if last_text is not None or last_sender is not None or last_date is not None:
+        d["last_message"] = {
+            "text": (last_text[:100] if last_text and len(last_text) > 100 else last_text) or "",
+            "sender_name": last_sender,
+            "date": last_date.isoformat() if last_date else None,
+        }
+    else:
+        d["last_message"] = None
+    return d
 
 
 @router.post("/bulk-sync")
@@ -88,8 +97,9 @@ async def bulk_sync_chats():
 
 
 @router.get("")
-async def list_chats(limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db)):
-    return [_chat_dict(c) for c in await crud.get_chats(db, limit=limit, offset=offset)]
+async def list_chats(limit: int = 50, offset: int = 0, sort_by: str = "recent", db: AsyncSession = Depends(get_db)):
+    rows = await crud.get_chats(db, limit=limit, offset=offset, sort_by=sort_by)
+    return [_chat_dict(chat, last_text, last_sender, last_date) for chat, last_text, last_sender, last_date in rows]
 
 
 @router.get("/hidden")
