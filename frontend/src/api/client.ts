@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -382,3 +382,8 @@ export const getMentions = (params?: { days?: number; groupName?: string; tagNam
   const q = qs.toString()
   return request<MentionGroup[]>(`/api/intelligence/mentions${q ? `?${q}` : ''}`)
 }
+
+// --- Dashboard ---
+
+export const getDashboard = () =>
+  request<DashboardData>('/api/dashboard')

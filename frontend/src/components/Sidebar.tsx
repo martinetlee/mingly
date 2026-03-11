@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import logo from '../assets/logo.png'
 import {
+  Home,
   MessageSquare,
   Users,
   Building2,
@@ -14,6 +15,7 @@ import {
 import { bulkSync } from '../api/client'
 
 const NAV = [
+  { to: '/home', icon: Home, label: 'Home' },
   { to: '/chats', icon: MessageSquare, label: 'Chats' },
 { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },

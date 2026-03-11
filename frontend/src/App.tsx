@@ -4,6 +4,7 @@ import { getVaultStatus, getAuthStatus } from './api/client'
 import Layout from './components/Layout'
 import Onboarding from './pages/Onboarding'
 import Unlock from './pages/Unlock'
+import Home from './pages/Home'
 import Chats from './pages/Chats'
 import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
@@ -60,7 +61,8 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
-          <Route index element={<Navigate to="/chats" replace />} />
+          <Route index element={<Navigate to="/home" replace />} />
+          <Route path="home" element={<Home />} />
           <Route path="chats" element={<Chats />} />
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
