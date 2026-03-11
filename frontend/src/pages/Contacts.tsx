@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCw, Search, ExternalLink, Star } from 'lucide-react'
 import type { Contact } from '../api/types'
 import { getContacts, syncContacts, setContactImportantByTelegram } from '../api/client'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import ContactInfoSection from '../components/ContactInfoSection'
 
 function ContactCard({
@@ -54,6 +55,7 @@ export default function Contacts() {
   const [loading, setLoading] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const loadContacts = useCallback(async (query = '') => {
     const data = await getContacts(query)
@@ -111,6 +113,33 @@ export default function Contacts() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
+  // Keyboard shortcuts
+  const contactShortcuts = useMemo(() => ({
+    'j': () => {
+      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
+      const next = contacts[idx + 1]
+      if (next) setSelected(next)
+    },
+    'arrowdown': () => {
+      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
+      const next = contacts[idx + 1]
+      if (next) setSelected(next)
+    },
+    'k': () => {
+      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = contacts[idx - 1]
+      if (prev) setSelected(prev)
+    },
+    'arrowup': () => {
+      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = contacts[idx - 1]
+      if (prev) setSelected(prev)
+    },
+    '/': () => searchInputRef.current?.focus(),
+  }), [selected, contacts])
+
+  useKeyboardShortcuts(contactShortcuts)
+
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* Contact list */}
@@ -139,6 +168,7 @@ export default function Contacts() {
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
+              ref={searchInputRef}
               type="text"
               placeholder="Search contacts..."
               value={search}
