@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
@@ -162,6 +162,12 @@ export default function Chats() {
   const pendingAnchorRef = useRef<number | null>(null)
   // Reply-to state
   const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
+  // In-chat search state
+  const [showChatSearch, setShowChatSearch] = useState(false)
+  const [chatSearch, setChatSearch] = useState('')
+  const [chatSearchResults, setChatSearchResults] = useState<Message[]>([])
+  const [searchingChat, setSearchingChat] = useState(false)
+  const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -322,6 +328,52 @@ export default function Chats() {
 
   useWebSocket(handleWsEvent)
 
+  // Debounced in-chat search
+  useEffect(() => {
+    if (!selectedChat || !chatSearch.trim()) {
+      setChatSearchResults([])
+      return
+    }
+    if (chatSearchTimerRef.current) clearTimeout(chatSearchTimerRef.current)
+    chatSearchTimerRef.current = setTimeout(async () => {
+      setSearchingChat(true)
+      try {
+        const results = await searchChatMessages(selectedChat.telegram_id, chatSearch.trim())
+        setChatSearchResults(results)
+      } finally {
+        setSearchingChat(false)
+      }
+    }, 300)
+    return () => { if (chatSearchTimerRef.current) clearTimeout(chatSearchTimerRef.current) }
+  }, [chatSearch, selectedChat])
+
+  const handleDateJump = async (dateStr: string) => {
+    if (!selectedChat || !dateStr) return
+    const { offset } = await getChatDateOffset(selectedChat.telegram_id, dateStr)
+    setLoadingMessages(true)
+    try {
+      const data = await getMessages(selectedChat.telegram_id, LIMIT, offset)
+      setMessages(data)
+      setMessageOffset(offset)
+      setHasMore(offset + data.length < offset + LIMIT || data.length === LIMIT)
+    } finally {
+      setLoadingMessages(false)
+    }
+  }
+
+  const handleJumpToMessage = async (msg: Message) => {
+    if (!selectedChat) return
+    setLoadingMessages(true)
+    try {
+      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.telegram_id)
+      setMessages(data)
+      setHighlightMsgId(msg.telegram_id)
+      setTimeout(() => setHighlightMsgId(null), 3000)
+    } finally {
+      setLoadingMessages(false)
+    }
+  }
+
   const handleSelectChat = (chat: Chat) => {
     if (selectedChat?.telegram_id === chat.telegram_id) return
     setSelectedChat(chat)
@@ -331,6 +383,9 @@ export default function Chats() {
     setShowInfo(false)
     setHighlightMsgId(null)
     setReplyToMessage(null)
+    setShowChatSearch(false)
+    setChatSearch('')
+    setChatSearchResults([])
     // Mark as read: clear badge locally and persist to backend
     if ((chat.unread_count ?? 0) > 0) {
       setChats((prev) =>
@@ -577,6 +632,16 @@ export default function Chats() {
                 </div>
                 <div className="flex items-center gap-1">
                   <button
+                    onClick={() => { setShowChatSearch((v) => !v); if (showChatSearch) { setChatSearch(''); setChatSearchResults([]) } }}
+                    title="Search in chat"
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                      showChatSearch ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
+                    }`}
+                  >
+                    <Search size={13} />
+                    Search
+                  </button>
+                  <button
                     onClick={() => setShowInfo((v) => !v)}
                     title="Chat info & tags"
                     className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
@@ -597,6 +662,55 @@ export default function Chats() {
                   </button>
                 </div>
               </div>
+
+              {/* In-chat search bar */}
+              {showChatSearch && (
+                <div className="border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <Search size={14} className="text-slate-500 flex-shrink-0" />
+                    <input
+                      autoFocus
+                      type="text"
+                      placeholder="Search messages…"
+                      value={chatSearch}
+                      onChange={(e) => setChatSearch(e.target.value)}
+                      className="flex-1 bg-transparent text-sm text-gray-200 placeholder:text-slate-500 outline-none"
+                    />
+                    <input
+                      type="date"
+                      onChange={(e) => handleDateJump(e.target.value)}
+                      title="Jump to date"
+                      className="rounded border border-slate-600 bg-slate-700 px-2 py-0.5 text-[11px] text-slate-300 outline-none"
+                    />
+                    <button
+                      onClick={() => { setShowChatSearch(false); setChatSearch(''); setChatSearchResults([]) }}
+                      className="text-slate-500 hover:text-slate-300"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  {chatSearch.trim() && (
+                    <div className="text-[11px] text-slate-500">
+                      {searchingChat ? 'Searching…' : `${chatSearchResults.length} result${chatSearchResults.length !== 1 ? 's' : ''}`}
+                    </div>
+                  )}
+                  {chatSearchResults.length > 0 && (
+                    <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
+                      {chatSearchResults.map((msg) => (
+                        <button
+                          key={msg.telegram_id}
+                          onClick={() => handleJumpToMessage(msg)}
+                          className="flex items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-slate-700/50 transition-colors"
+                        >
+                          <span className="text-slate-400 flex-shrink-0">{msg.sender_name || 'Unknown'}</span>
+                          <span className="truncate text-slate-500">{msg.text || '[media]'}</span>
+                          {msg.date && <span className="ml-auto flex-shrink-0 text-[10px] text-slate-600">{new Date(msg.date).toLocaleDateString()}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Messages */}
               {loadingMessages ? (

@@ -240,6 +240,49 @@ async def get_offset_for_anchor(
     return max(0, newer_count - half_window)
 
 
+async def search_messages_in_chat(
+    db: AsyncSession,
+    chat_id: int,
+    keyword: str,
+    limit: int = 50,
+) -> list:
+    """Search messages in a chat by keyword (case-insensitive)."""
+    Reply = Message.__table__.alias("reply_msg")
+    result = await db.execute(
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+            Reply.c.media_type.label("reply_media_type"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
+        .where(Message.chat_id == chat_id, Message.text.ilike(f"%{keyword}%"))
+        .order_by(desc(Message.date))
+        .limit(limit)
+    )
+    return list(result.all())
+
+
+async def get_date_offset(
+    db: AsyncSession,
+    chat_id: int,
+    target_date: datetime,
+    half_window: int = 50,
+) -> int:
+    """Return offset so that messages around target_date appear in view."""
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.chat_id == chat_id, Message.date > target_date)
+    )
+    newer_count = count_result.scalar() or 0
+    return max(0, newer_count - half_window)
+
+
 async def get_messages_since(
     db: AsyncSession,
     chat_id: int,
