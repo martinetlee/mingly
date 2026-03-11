@@ -93,7 +93,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='Mingly.app',
-    icon=None,              # Set to 'assets/icon.icns' when you have one
+    icon='assets/icon.icns',
     bundle_identifier='com.mingly.app',
     info_plist={
         'NSHighResolutionCapable': True,

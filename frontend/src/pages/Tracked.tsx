@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { RefreshCw, Bookmark, X } from 'lucide-react'
+import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
 import type { Chat, Message, WSEvent } from '../api/types'
 import { getTrackedChats, getMessages, setTracked, syncChat, sendMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
+import ChatInfoPanel from '../components/ChatInfoPanel'
 
 const LIMIT = 100
 
@@ -17,6 +18,7 @@ export default function Tracked() {
   const [messageOffset, setMessageOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [showInfo, setShowInfo] = useState(false)
   const [search, setSearch] = useState('')
   const [sidebarWidth, setSidebarWidth] = useState(288)
   const dragging = useRef(false)
@@ -71,6 +73,7 @@ export default function Tracked() {
     setMessages([])
     setHasMore(false)
     setMessageOffset(0)
+    setShowInfo(false)
   }
 
   const handleSync = async () => {
@@ -158,11 +161,16 @@ export default function Tracked() {
                   {chat.name.charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
+                  <p title={chat.name} className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
                     {chat.name}
                   </p>
                   <span className="text-[10px] text-slate-500">{chat.type}</span>
                 </div>
+                {(chat.unread_count ?? 0) > 0 && (
+                  <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white group-hover:hidden">
+                    {(chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count}
+                  </span>
+                )}
                 <button
                   onClick={(e) => { e.stopPropagation(); handleUntrack(chat) }}
                   title="Untrack"
@@ -185,14 +193,26 @@ export default function Tracked() {
                 <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
                 <p className="text-xs text-slate-500">{selectedChat.type}</p>
               </div>
-              <button
-                onClick={handleSync}
-                disabled={syncing}
-                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-              >
-                <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-                Sync
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setShowInfo((v) => !v)}
+                  title="Chat info & tags"
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                    showInfo ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
+                  }`}
+                >
+                  <Info size={13} />
+                  Info
+                </button>
+                <button
+                  onClick={handleSync}
+                  disabled={syncing}
+                  className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                >
+                  <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+                  Sync
+                </button>
+              </div>
             </div>
 
             {loadingMessages ? (
@@ -222,6 +242,10 @@ export default function Tracked() {
           </div>
         )}
       </div>
+
+      {showInfo && selectedChat && (
+        <ChatInfoPanel chat={selectedChat} onClose={() => setShowInfo(false)} />
+      )}
     </div>
   )
 }

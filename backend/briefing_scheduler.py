@@ -237,6 +237,11 @@ async def _scheduler_loop() -> None:
             last_run = prefs.get("briefing_last_run")
 
             if _should_auto_run(schedule, last_run, briefing_time):
+                # Update timestamp BEFORE running to prevent duplicate triggers
+                # while the (potentially long-running) briefing generation executes.
+                prefs["briefing_last_run"] = datetime.now().isoformat()
+                _save_prefs(prefs)
+
                 days = 7 if schedule == "weekly" else 1
                 logger.info("Briefing scheduler: auto-run triggered (schedule=%s, days=%d).", schedule, days)
                 await _run_briefing_background(days)

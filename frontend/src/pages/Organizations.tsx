@@ -24,7 +24,7 @@ function OrgCard({
         <Building2 size={16} />
       </div>
       <div className="min-w-0 flex-1">
-        <p className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+        <p title={org.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
           {org.name}
         </p>
         <p className="text-xs text-slate-500">
@@ -49,6 +49,7 @@ export default function Organizations() {
   const [nameDraft, setNameDraft] = useState('')
   const [generatingContext, setGeneratingContext] = useState(false)
   const [showFormerMembers, setShowFormerMembers] = useState(false)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(300)
   const dragging = useRef(false)
 
@@ -116,7 +117,8 @@ export default function Organizations() {
       await loadOrgs(search)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to generate context'
-      alert(msg)
+      setErrorMsg(msg)
+      setTimeout(() => setErrorMsg(null), 5000)
     } finally {
       setGeneratingContext(false)
     }
@@ -148,7 +150,14 @@ export default function Organizations() {
   }, [sidebarWidth])
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div className="flex flex-1 overflow-hidden relative">
+      {/* Error toast */}
+      {errorMsg && (
+        <div className="absolute top-4 right-4 z-50 flex items-center gap-2 rounded-lg bg-red-900/90 px-4 py-2.5 text-sm text-red-200 shadow-lg border border-red-700/50">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="ml-1 text-red-400 hover:text-red-200">✕</button>
+        </div>
+      )}
       {/* Sidebar */}
       <div className="flex flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800 relative" style={{ width: sidebarWidth }}>
         <div
@@ -351,15 +360,15 @@ export default function Organizations() {
                         {m.name.charAt(0).toUpperCase()}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm text-gray-200 group-hover:text-indigo-300 transition-colors">
+                        <p title={m.name} className="truncate text-sm text-gray-200 group-hover:text-indigo-300 transition-colors">
                           {m.name}
                         </p>
                         {m.username && (
-                          <p className="truncate text-[10px] text-slate-500">@{m.username}</p>
+                          <p title={`@${m.username}`} className="truncate text-[10px] text-slate-500">@{m.username}</p>
                         )}
                       </div>
                       {m.title && (
-                        <span className="flex-shrink-0 rounded-full bg-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
+                        <span title={m.title} className="flex-shrink-0 rounded-full bg-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
                           {m.title}
                         </span>
                       )}
@@ -398,11 +407,11 @@ export default function Organizations() {
                           {m.name.charAt(0).toUpperCase()}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
+                          <p title={m.name} className="truncate text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
                             {m.name}
                           </p>
                           {m.username && (
-                            <p className="truncate text-[10px] text-slate-600">@{m.username}</p>
+                            <p title={`@${m.username}`} className="truncate text-[10px] text-slate-600">@{m.username}</p>
                           )}
                           {m.ended_at && (
                             <p className="text-[10px] text-slate-600">
@@ -439,7 +448,7 @@ export default function Organizations() {
                       </div>
                       {rc.last_message ? (
                         <div className="ml-5">
-                          <p className="text-xs text-slate-400 truncate">
+                          <p title={`${rc.last_message.sender_name ? `${rc.last_message.sender_name}: ` : ''}${rc.last_message.text || '[media]'}`} className="text-xs text-slate-400 truncate">
                             {rc.last_message.sender_name && (
                               <span className="text-slate-500">{rc.last_message.sender_name}: </span>
                             )}
