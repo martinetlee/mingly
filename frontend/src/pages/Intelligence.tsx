@@ -2357,7 +2357,7 @@ export default function Intelligence() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask about your chats\u2026"
+              placeholder="Ask about your chats…"
               rows={1}
               disabled={running || !activeConvId}
               className="flex-1 resize-none bg-transparent text-sm text-slate-100 placeholder-slate-500 outline-none disabled:opacity-50"
