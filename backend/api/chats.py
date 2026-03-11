@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -63,6 +64,36 @@ async def list_folders():
             "include_bots": f.bots,
         })
     return result
+
+
+def _serialize_msg(row) -> dict:
+    m, reply_sender, reply_text, reply_media_type = row
+    reply_preview = None
+    if m.reply_to_telegram_id is not None:
+        reply_preview = {
+            "sender_name": reply_sender,
+            "text": reply_text,
+            "media_type": reply_media_type,
+        }
+    return {
+        "id": m.id,
+        "telegram_id": m.telegram_id,
+        "chat_id": m.chat_id,
+        "sender_id": m.sender_id,
+        "sender_name": m.sender_name,
+        "text": m.text,
+        "date": m.date,
+        "is_outgoing": m.is_outgoing,
+        "media_type": m.media_type,
+        "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
+        "text_html": m.text_html,
+        "reactions": json.loads(m.reactions_json) if m.reactions_json else None,
+        "importance_score": m.importance_score,
+        "user_flagged": m.user_flagged,
+        "reply_to_telegram_id": m.reply_to_telegram_id,
+        "reply_to_preview": reply_preview,
+        "my_reaction": m.my_reaction,
+    }
 
 
 def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
@@ -194,37 +225,31 @@ async def get_messages(
             await sync_messages(telegram_id, limit=100)
 
     rows = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
-    # Return in chronological order (DB returns newest-first)
-    def _serialize(row):
-        m, reply_sender, reply_text, reply_media_type = row
-        reply_preview = None
-        if m.reply_to_telegram_id is not None:
-            reply_preview = {
-                "sender_name": reply_sender,
-                "text": reply_text,
-                "media_type": reply_media_type,
-            }
-        return {
-            "id": m.id,
-            "telegram_id": m.telegram_id,
-            "chat_id": m.chat_id,
-            "sender_id": m.sender_id,
-            "sender_name": m.sender_name,
-            "text": m.text,
-            "date": m.date,
-            "is_outgoing": m.is_outgoing,
-            "media_type": m.media_type,
-            "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
-            "text_html": m.text_html,
-            "reactions": json.loads(m.reactions_json) if m.reactions_json else None,
-            "importance_score": m.importance_score,
-            "user_flagged": m.user_flagged,
-            "reply_to_telegram_id": m.reply_to_telegram_id,
-            "reply_to_preview": reply_preview,
-            "my_reaction": m.my_reaction,
-        }
+    return [_serialize_msg(row) for row in reversed(rows)]
 
-    return [_serialize(row) for row in reversed(rows)]
+
+@router.get("/{telegram_id}/messages/search")
+async def search_messages(
+    telegram_id: int,
+    q: str = "",
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
+    if not q.strip():
+        return []
+    rows = await crud.search_messages_in_chat(db, telegram_id, q.strip(), limit=limit)
+    return [_serialize_msg(row) for row in reversed(rows)]
+
+
+@router.get("/{telegram_id}/messages/date-offset")
+async def get_date_offset(
+    telegram_id: int,
+    date: str,
+    db: AsyncSession = Depends(get_db),
+):
+    target = datetime.fromisoformat(date)
+    offset = await crud.get_date_offset(db, telegram_id, target)
+    return {"offset": offset}
 
 
 class ReactRequest(BaseModel):

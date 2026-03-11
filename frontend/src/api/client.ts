@@ -96,6 +96,12 @@ export const getMessages = (telegram_id: number, limit = 50, offset = 0, anchorT
   return request<Message[]>(`/api/chats/${telegram_id}/messages?${params}`)
 }
 
+export const searchChatMessages = (telegram_id: number, query: string, limit = 50) =>
+  request<Message[]>(`/api/chats/${telegram_id}/messages/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+
+export const getChatDateOffset = (telegram_id: number, date: string) =>
+  request<{ offset: number }>(`/api/chats/${telegram_id}/messages/date-offset?date=${encodeURIComponent(date)}`)
+
 export const syncChat = (telegram_id: number, limit?: number) =>
   request<{ status: string }>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
 
