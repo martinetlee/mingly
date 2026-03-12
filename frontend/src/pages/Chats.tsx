@@ -487,12 +487,33 @@ export default function Chats() {
     c.name.toLowerCase().includes(search.toLowerCase())
   )
 
+  // Apply client-side sort to guarantee correct order
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === 'unread') {
+      const ua = a.unread_count ?? 0
+      const ub = b.unread_count ?? 0
+      if (ub !== ua) return ub - ua
+      // fallback: recent
+      const da = a.last_message?.date ?? ''
+      const db2 = b.last_message?.date ?? ''
+      return db2.localeCompare(da)
+    }
+    if (sortBy === 'alpha') {
+      return a.name.localeCompare(b.name)
+    }
+    // recent (default)
+    const da = a.last_message?.date ?? ''
+    const db2 = b.last_message?.date ?? ''
+    if (da !== db2) return db2.localeCompare(da)
+    return a.name.localeCompare(b.name)
+  })
+
   // Clear selected chat when it's no longer in the filtered list
   useEffect(() => {
-    if (selectedChat && !filtered.some((c) => c.telegram_id === selectedChat.telegram_id)) {
+    if (selectedChat && !sorted.some((c) => c.telegram_id === selectedChat.telegram_id)) {
       setSelectedChat(null)
     }
-  }, [filtered, selectedChat])
+  }, [sorted, selectedChat])
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -564,10 +585,10 @@ export default function Chats() {
             }
           }}
         >
-          {filtered.length === 0 ? (
+          {sorted.length === 0 ? (
             <p className="px-4 py-6 text-center text-sm text-slate-500">No chats found</p>
           ) : (
-            filtered.map((chat) => (
+            sorted.map((chat) => (
               <ChatItem
                 key={chat.telegram_id}
                 chat={chat}
