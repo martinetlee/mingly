@@ -6,8 +6,17 @@ function isInputFocused(): boolean {
   const el = document.activeElement
   if (!el) return false
   const tag = el.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (tag === 'SELECT') return true
   if ((el as HTMLElement).isContentEditable) return true
+  if (tag === 'INPUT' || tag === 'TEXTAREA') {
+    // Allow single-key shortcuts to pass through when input/textarea is empty
+    // and has the data-shortcut-passthrough attribute
+    const input = el as HTMLInputElement | HTMLTextAreaElement
+    if ((el as HTMLElement).dataset.shortcutPassthrough !== undefined && input.value === '') {
+      return false
+    }
+    return true
+  }
   return false
 }
 

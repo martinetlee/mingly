@@ -93,6 +93,7 @@ export default function ComposeBar({ onSend, disabled, replyTo, onCancelReply }:
           onKeyDown={handleKeyDown}
           placeholder={replyTo ? 'Write a reply…' : 'Message… (Enter to send)'}
           disabled={disabled}
+          data-shortcut-passthrough=""
           className="flex-1 resize-none bg-transparent text-sm text-gray-100 outline-none placeholder:text-slate-500 disabled:opacity-50"
           style={{ maxHeight: 120 }}
         />

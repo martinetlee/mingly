@@ -520,28 +520,32 @@ export default function Chats() {
   // Keyboard shortcuts
   const chatShortcuts = useMemo(() => ({
     'j': () => {
-      const idx = selectedChat ? filtered.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const next = filtered[idx + 1]
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const next = sorted[idx + 1]
       if (next) handleSelectChat(next)
     },
     'arrowdown': () => {
-      const idx = selectedChat ? filtered.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const next = filtered[idx + 1]
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const next = sorted[idx + 1]
       if (next) handleSelectChat(next)
     },
     'k': () => {
-      const idx = selectedChat ? filtered.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const prev = filtered[idx - 1]
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const prev = sorted[idx - 1]
       if (prev) handleSelectChat(prev)
     },
     'arrowup': () => {
-      const idx = selectedChat ? filtered.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const prev = filtered[idx - 1]
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const prev = sorted[idx - 1]
       if (prev) handleSelectChat(prev)
     },
     '/': () => searchInputRef.current?.focus(),
     'i': () => setShowInfo((v) => !v),
-  }), [selectedChat, filtered, handleSelectChat])
+    'mod+f': () => setShowChatSearch((v) => !v),
+    'enter': () => {
+      if (!selectedChat && sorted.length > 0) handleSelectChat(sorted[0])
+    },
+  }), [selectedChat, sorted, handleSelectChat])
 
   useKeyboardShortcuts(chatShortcuts)
 

@@ -151,30 +151,35 @@ export default function Contacts() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
+  const visibleContacts = useMemo(() =>
+    contacts.filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter),
+    [contacts, statusFilter]
+  )
+
   // Keyboard shortcuts
   const contactShortcuts = useMemo(() => ({
     'j': () => {
-      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
-      const next = contacts[idx + 1]
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const next = visibleContacts[idx + 1]
       if (next) setSelected(next)
     },
     'arrowdown': () => {
-      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
-      const next = contacts[idx + 1]
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const next = visibleContacts[idx + 1]
       if (next) setSelected(next)
     },
     'k': () => {
-      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
-      const prev = contacts[idx - 1]
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = visibleContacts[idx - 1]
       if (prev) setSelected(prev)
     },
     'arrowup': () => {
-      const idx = selected ? contacts.findIndex((c) => c.id === selected.id) : -1
-      const prev = contacts[idx - 1]
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = visibleContacts[idx - 1]
       if (prev) setSelected(prev)
     },
     '/': () => searchInputRef.current?.focus(),
-  }), [selected, contacts])
+  }), [selected, visibleContacts])
 
   useKeyboardShortcuts(contactShortcuts)
 
@@ -249,8 +254,7 @@ export default function Contacts() {
               </button>
             </div>
           ) : (
-            contacts
-              .filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter)
+            visibleContacts
               .map((c) => (
                 <ContactCard
                   key={c.id}

@@ -5,7 +5,7 @@ import ShortcutHelp from './ShortcutHelp'
 import GlobalSearch from './GlobalSearch'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
-const NAV_ROUTES = ['/chats', '/contacts', '/organizations', '/tracked', '/intelligence?tab=briefing', '/intelligence', '/settings']
+const NAV_ROUTES = ['/home', '/chats', '/contacts', '/organizations', '/tracked', '/intelligence?tab=briefing', '/intelligence', '/settings']
 
 export default function Layout() {
   const [helpOpen, setHelpOpen] = useState(false)
@@ -24,6 +24,7 @@ export default function Layout() {
       'mod+5': () => navigate(NAV_ROUTES[4]),
       'mod+6': () => navigate(NAV_ROUTES[5]),
       'mod+7': () => navigate(NAV_ROUTES[6]),
+      'mod+8': () => navigate(NAV_ROUTES[7]),
     }),
     [navigate],
   )

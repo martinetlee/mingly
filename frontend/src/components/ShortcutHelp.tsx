@@ -8,7 +8,7 @@ const GROUPS: ShortcutGroup[] = [
     title: 'Global',
     shortcuts: [
       { keys: '⌘K', description: 'Open global search' },
-      { keys: '⌘1-7', description: 'Navigate to sidebar pages' },
+      { keys: '⌘1-8', description: 'Navigate to sidebar pages' },
       { keys: 'Esc', description: 'Close modal / panel' },
       { keys: '?', description: 'Show this help' },
     ],
@@ -18,8 +18,10 @@ const GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: 'j / ↓', description: 'Next chat' },
       { keys: 'k / ↑', description: 'Previous chat' },
+      { keys: 'Enter', description: 'Open first chat' },
       { keys: '/', description: 'Focus search' },
       { keys: 'i', description: 'Toggle info panel' },
+      { keys: '⌘F', description: 'Search in chat' },
     ],
   },
   {
