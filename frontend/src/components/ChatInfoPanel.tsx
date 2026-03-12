@@ -4,6 +4,7 @@ import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus 
 import type { Chat, ChatMember, Contact, Tag, TagSuggestion } from '../api/types'
 import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact } from '../api/client'
 import ContactInfoSection from './ContactInfoSection'
+import PersonCard from './PersonCard'
 
 const TAG_COLORS: Record<string, string> = {
   indigo:  'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
@@ -394,28 +395,20 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
           ) : (
             <div className="flex flex-col gap-0.5 max-h-64 overflow-y-auto">
               {members.map((m) => (
-                <Link
+                <PersonCard
                   key={m.id}
-                  to={`/profile/${m.id}`}
-                  className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-700/50 transition-colors group"
-                >
-                  <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
-                    {m.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p title={m.name} className="truncate text-xs text-gray-200 group-hover:text-indigo-300 transition-colors">
-                      {m.name}
-                    </p>
-                    {m.username && (
-                      <p title={`@${m.username}`} className="truncate text-[10px] text-slate-500">@{m.username}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {m.is_bot && <span title="Bot"><Bot size={10} className="text-violet-400" /></span>}
-                    {m.role === 'creator' && <span title="Creator"><Crown size={10} className="text-amber-400" /></span>}
-                    {m.role === 'admin' && <span title="Admin"><Shield size={10} className="text-sky-400" /></span>}
-                  </div>
-                </Link>
+                  telegramId={m.id}
+                  name={m.name}
+                  username={m.username}
+                  showStatus={false}
+                  extraBadge={
+                    <div className="flex items-center gap-1">
+                      {m.is_bot && <span title="Bot"><Bot size={10} className="text-violet-400" /></span>}
+                      {m.role === 'creator' && <span title="Creator"><Crown size={10} className="text-amber-400" /></span>}
+                      {m.role === 'admin' && <span title="Admin"><Shield size={10} className="text-sky-400" /></span>}
+                    </div>
+                  }
+                />
               ))}
             </div>
           )}

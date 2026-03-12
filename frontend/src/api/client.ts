@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, Folder, MentionGroup, Message, OrgDetail, OrgSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -75,8 +75,8 @@ export const logout = () =>
 
 // --- Chats ---
 
-export const getChats = (limit = 50, offset = 0) =>
-  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}`)
+export const getChats = (limit = 50, offset = 0, sortBy = 'recent') =>
+  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}`)
 
 export const bulkSync = () =>
   request<{ synced: number }>('/api/chats/bulk-sync', { method: 'POST' })
@@ -95,6 +95,12 @@ export const getMessages = (telegram_id: number, limit = 50, offset = 0, anchorT
   if (anchorTelegramId != null) params.set('anchor_telegram_id', String(anchorTelegramId))
   return request<Message[]>(`/api/chats/${telegram_id}/messages?${params}`)
 }
+
+export const searchChatMessages = (telegram_id: number, query: string, limit = 50) =>
+  request<Message[]>(`/api/chats/${telegram_id}/messages/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+
+export const getChatDateOffset = (telegram_id: number, date: string) =>
+  request<{ offset: number }>(`/api/chats/${telegram_id}/messages/date-offset?date=${encodeURIComponent(date)}`)
 
 export const syncChat = (telegram_id: number, limit?: number) =>
   request<{ status: string }>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
@@ -247,6 +253,24 @@ export const updatePosition = (
 export const removePosition = (contactId: number, positionId: number) =>
   request<{ success: boolean }>(`/api/contacts/${contactId}/positions/${positionId}`, { method: 'DELETE' })
 
+export const setRelationshipStatus = (contactId: number, status: string) =>
+  request<Contact>(`/api/contacts/${contactId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
+
+export const resetRelationshipStatus = (contactId: number) =>
+  request<Contact>(`/api/contacts/${contactId}/relationship-status/auto`, { method: 'POST' })
+
+export const refreshAllStatuses = () =>
+  request<{ refreshed: number }>('/api/contacts/refresh-statuses', { method: 'POST' })
+
+export const resolvePerson = (telegramId: number) =>
+  request<PersonSummary>(`/api/contacts/resolve/${telegramId}`)
+
+export const resolvePersonsBatch = (telegramIds: number[]) =>
+  request<Record<number, PersonSummary>>('/api/contacts/resolve-batch', {
+    method: 'POST',
+    body: JSON.stringify({ telegram_ids: telegramIds }),
+  })
+
 // --- Profiles ---
 
 export const getProfile = (userId: number | string) =>
@@ -373,3 +397,13 @@ export const getMentions = (params?: { days?: number; groupName?: string; tagNam
   const q = qs.toString()
   return request<MentionGroup[]>(`/api/intelligence/mentions${q ? `?${q}` : ''}`)
 }
+
+// --- Dashboard ---
+
+export const getDashboard = () =>
+  request<DashboardData>('/api/dashboard')
+
+// --- Global Search ---
+
+export const globalSearch = (query: string, limit = 20) =>
+  request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`)

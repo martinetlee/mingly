@@ -56,6 +56,12 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS briefing_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE, chat_id INTEGER NOT NULL, chat_name TEXT NOT NULL, category TEXT NOT NULL, summary TEXT NOT NULL)",
             "ALTER TABLE briefing_entries ADD COLUMN sources_json TEXT",
             "ALTER TABLE chats ADD COLUMN members_count INTEGER",
+            # Relationship status tracking on contacts
+            "ALTER TABLE contacts ADD COLUMN relationship_status TEXT",
+            "ALTER TABLE contacts ADD COLUMN relationship_status_manual BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE contacts ADD COLUMN last_interaction_at DATETIME",
+            "ALTER TABLE contacts ADD COLUMN last_outgoing_at DATETIME",
+            "ALTER TABLE contacts ADD COLUMN last_incoming_at DATETIME",
         ]:
             try:
                 await conn.execute(__import__('sqlalchemy').text(stmt))

@@ -28,6 +28,11 @@ export interface Chat {
   is_tracked: boolean
   unread_count?: number
   last_synced_at: string | null
+  last_message?: {
+    text: string
+    sender_name: string | null
+    date: string | null
+  } | null
 }
 
 export interface Tag {
@@ -83,6 +88,8 @@ export interface ContactPosition {
   ended_at: string | null
 }
 
+export type RelationshipStatus = 'new' | 'active' | 'nurturing' | 'stalled' | 'cold' | 'needs_reply'
+
 export interface Contact {
   id: number
   telegram_id: number
@@ -95,8 +102,98 @@ export interface Contact {
   linkedin_url: string | null
   notes: string | null
   is_important: boolean
+  relationship_status: RelationshipStatus | null
+  relationship_status_manual: boolean
+  last_interaction_at: string | null
+  last_outgoing_at: string | null
+  last_incoming_at: string | null
   synced_at: string | null
   positions: ContactPosition[]
+}
+
+export interface PersonSummary {
+  telegram_id: number
+  name: string
+  username: string | null
+  is_important: boolean
+  contact_id: number | null
+  relationship_status: string | null
+  last_interaction_at: string | null
+  primary_position: { title: string | null; organization: string } | null
+  phone: string | null
+  twitter_handle: string | null
+  linkedin_url: string | null
+  has_notes: boolean
+}
+
+export interface DashboardStats {
+  total_unread: number
+  messages_today: number
+  active_contacts: number
+}
+
+export interface DashboardNeedsReply {
+  chat: Chat
+  last_message: {
+    sender_name: string | null
+    text: string | null
+    date: string
+  }
+}
+
+export interface DashboardAttentionContact {
+  id: number
+  telegram_id: number
+  name: string
+  username: string | null
+  is_important: boolean
+  relationship_status: string | null
+  last_interaction_at: string | null
+  primary_position: { title: string | null; organization: string } | null
+}
+
+export interface DashboardBriefingEntry {
+  id: number
+  chat_id: number
+  chat_name: string
+  category: string
+  summary: string
+}
+
+export interface DashboardBriefing {
+  id: number
+  generated_at: string
+  days: number
+  entries: DashboardBriefingEntry[]
+}
+
+export interface DashboardData {
+  stats: DashboardStats
+  needs_reply: DashboardNeedsReply[]
+  attention_contacts: DashboardAttentionContact[]
+  latest_briefing: DashboardBriefing | null
+}
+
+export interface SearchMessageResult {
+  telegram_id: number
+  chat_id: number
+  chat_name: string
+  sender_name: string | null
+  text: string
+  date: string
+}
+
+export interface SearchOrgResult {
+  id: number
+  name: string
+  context: string | null
+}
+
+export interface GlobalSearchResults {
+  messages: SearchMessageResult[]
+  chats: Chat[]
+  contacts: Contact[]
+  organizations: SearchOrgResult[]
 }
 
 export interface OrgMember {

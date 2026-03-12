@@ -1,10 +1,42 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCw, Search, ExternalLink, Star } from 'lucide-react'
-import type { Contact } from '../api/types'
-import { getContacts, syncContacts, setContactImportantByTelegram } from '../api/client'
+import { RefreshCw, Search, ExternalLink, Star, RotateCcw } from 'lucide-react'
+import type { Contact, RelationshipStatus } from '../api/types'
+import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, refreshAllStatuses } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import ContactInfoSection from '../components/ContactInfoSection'
+import PersonCard from '../components/PersonCard'
+
+const STATUS_COLORS: Record<string, string> = {
+  new: 'bg-blue-500/20 text-blue-400',
+  active: 'bg-emerald-500/20 text-emerald-400',
+  nurturing: 'bg-amber-500/20 text-amber-400',
+  stalled: 'bg-orange-500/20 text-orange-400',
+  cold: 'bg-slate-500/20 text-slate-400',
+  needs_reply: 'bg-red-500/20 text-red-400',
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  new: 'New',
+  active: 'Active',
+  nurturing: 'Nurturing',
+  stalled: 'Stalled',
+  cold: 'Cold',
+  needs_reply: 'Needs Reply',
+}
+
+function fmtRelative(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffDays = Math.floor(diffMs / 86400000)
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return `${diffDays} days ago`
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`
+  if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`
+  return `${Math.floor(diffDays / 365)} years ago`
+}
 
 function ContactCard({
   contact,
@@ -33,6 +65,11 @@ function ContactCard({
           {contact.is_important && (
             <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" />
           )}
+          {contact.relationship_status && (
+            <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${STATUS_COLORS[contact.relationship_status] ?? ''}`}>
+              {STATUS_LABELS[contact.relationship_status] ?? contact.relationship_status}
+            </span>
+          )}
         </div>
         {contact.username && (
           <p title={`@${contact.username}`} className="truncate text-xs text-slate-500">@{contact.username}</p>
@@ -53,6 +90,7 @@ export default function Contacts() {
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [statusFilter, setStatusFilter] = useState<RelationshipStatus | 'all'>('all')
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -178,6 +216,23 @@ export default function Contacts() {
           </div>
         </div>
 
+        {/* Status filter tabs */}
+        <div className="border-b border-slate-700/50 px-3 py-2 flex flex-wrap gap-1">
+          {(['all', 'needs_reply', 'active', 'nurturing', 'stalled', 'cold'] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s)}
+              className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                statusFilter === s
+                  ? s === 'all' ? 'bg-indigo-500/20 text-indigo-400' : STATUS_COLORS[s]
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {s === 'all' ? 'All' : STATUS_LABELS[s]}
+            </button>
+          ))}
+        </div>
+
         {/* List */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
@@ -194,14 +249,16 @@ export default function Contacts() {
               </button>
             </div>
           ) : (
-            contacts.map((c) => (
-              <ContactCard
-                key={c.id}
-                contact={c}
-                selected={selected?.id === c.id}
-                onClick={() => handleSelect(c)}
-              />
-            ))
+            contacts
+              .filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter)
+              .map((c) => (
+                <ContactCard
+                  key={c.id}
+                  contact={c}
+                  selected={selected?.id === c.id}
+                  onClick={() => handleSelect(c)}
+                />
+              ))
           )}
         </div>
       </div>
@@ -211,43 +268,88 @@ export default function Contacts() {
         {selected ? (
           <div className="flex-1 overflow-y-auto px-6 py-6 max-w-2xl">
             {/* Identity */}
-            <div className="flex items-start gap-4 mb-6">
-              <Link to={`/profile/${selected.telegram_id}`}>
-                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300 hover:ring-2 hover:ring-indigo-500 transition-all">
-                  {selected.name.charAt(0).toUpperCase()}
-                </div>
-              </Link>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <Link
-                    to={`/profile/${selected.telegram_id}`}
-                    className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
-                  >
-                    {selected.name}
-                  </Link>
-                  <button
-                    onClick={handleToggleImportant}
-                    title={selected.is_important ? 'Remove from important' : 'Mark as important'}
-                    className={`rounded-full p-0.5 transition-colors ${
-                      selected.is_important
-                        ? 'text-amber-400 hover:text-amber-300'
-                        : 'text-slate-600 hover:text-amber-400'
-                    }`}
-                  >
-                    <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
-                  </button>
-                </div>
-                {selected.username && (
-                  <p className="text-sm text-indigo-400">@{selected.username}</p>
-                )}
+            <div className="mb-6">
+              <PersonCard
+                telegramId={selected.telegram_id}
+                name={selected.name}
+                username={selected.username}
+                isImportant={selected.is_important}
+                contactId={selected.id}
+                position={
+                  selected.positions.filter((p) => p.is_active !== false).length > 0
+                    ? { title: selected.positions.filter((p) => p.is_active !== false)[0].title, organization: selected.positions.filter((p) => p.is_active !== false)[0].organization }
+                    : null
+                }
+                phone={selected.phone}
+                twitterHandle={selected.twitter_handle}
+                linkedinUrl={selected.linkedin_url}
+                hasNotes={!!selected.notes}
+                mode="full"
+                showStatus={false}
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={handleToggleImportant}
+                  title={selected.is_important ? 'Remove from important' : 'Mark as important'}
+                  className={`rounded-full p-0.5 transition-colors ${
+                    selected.is_important
+                      ? 'text-amber-400 hover:text-amber-300'
+                      : 'text-slate-600 hover:text-amber-400'
+                  }`}
+                >
+                  <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
+                </button>
                 <Link
                   to={`/profile/${selected.telegram_id}`}
-                  className="inline-flex items-center gap-1 mt-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                  className="inline-flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                 >
                   <ExternalLink size={9} />
                   View Telegram profile
                 </Link>
               </div>
+            </div>
+
+            {/* Relationship status */}
+            <div className="mb-6 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Relationship Status</span>
+                {selected.relationship_status_manual && (
+                  <button
+                    onClick={async () => {
+                      const updated = await resetRelationshipStatus(selected.id)
+                      handleContactChange(updated)
+                    }}
+                    title="Reset to auto-calculated"
+                    className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    <RotateCcw size={10} />
+                    Auto
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(['new', 'active', 'nurturing', 'stalled', 'cold', 'needs_reply'] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={async () => {
+                      const updated = await setRelationshipStatus(selected.id, s)
+                      handleContactChange(updated)
+                    }}
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                      selected.relationship_status === s
+                        ? STATUS_COLORS[s]
+                        : 'text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600'
+                    }`}
+                  >
+                    {STATUS_LABELS[s]}
+                  </button>
+                ))}
+              </div>
+              {selected.last_interaction_at && (
+                <p className="text-xs text-slate-500">
+                  Last interaction: {fmtRelative(selected.last_interaction_at)}
+                </p>
+              )}
             </div>
 
             <ContactInfoSection contact={selected} onContactChange={handleContactChange} />

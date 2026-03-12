@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, delete, desc, func, or_
+from sqlalchemy import select, delete, desc, asc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact
@@ -8,21 +8,48 @@ from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, Briefing
 
 # --- Chats ---
 
-async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0) -> list:
-    last_msg = (
-        select(Message.chat_id, func.max(Message.date).label("last_date"))
-        .group_by(Message.chat_id)
+async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by: str = "recent") -> list:
+    # Subquery: latest message per chat using window function
+    row_num = func.row_number().over(
+        partition_by=Message.chat_id,
+        order_by=desc(Message.date),
+    ).label("rn")
+    ranked = (
+        select(
+            Message.chat_id,
+            Message.text.label("last_text"),
+            Message.sender_name.label("last_sender"),
+            Message.date.label("last_date"),
+            row_num,
+        )
         .subquery()
     )
-    result = await db.execute(
-        select(Chat)
+    last_msg = (
+        select(
+            ranked.c.chat_id,
+            ranked.c.last_text,
+            ranked.c.last_sender,
+            ranked.c.last_date,
+        )
+        .where(ranked.c.rn == 1)
+        .subquery()
+    )
+
+    query = (
+        select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
         .where(Chat.is_hidden == False, Chat.is_briefing == False)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
-        .order_by(desc(last_msg.c.last_date), Chat.name)
-        .limit(limit)
-        .offset(offset)
     )
-    return list(result.scalars().all())
+
+    if sort_by == "unread":
+        query = query.order_by(desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
+    elif sort_by == "alpha":
+        query = query.order_by(asc(Chat.name))
+    else:  # recent
+        query = query.order_by(desc(last_msg.c.last_date), Chat.name)
+
+    result = await db.execute(query.limit(limit).offset(offset))
+    return list(result.all())
 
 
 async def get_tracked_chats(db: AsyncSession) -> list:
@@ -208,6 +235,49 @@ async def get_offset_for_anchor(
         select(func.count())
         .select_from(Message)
         .where(Message.chat_id == chat_id, Message.date > anchor_date)
+    )
+    newer_count = count_result.scalar() or 0
+    return max(0, newer_count - half_window)
+
+
+async def search_messages_in_chat(
+    db: AsyncSession,
+    chat_id: int,
+    keyword: str,
+    limit: int = 50,
+) -> list:
+    """Search messages in a chat by keyword (case-insensitive)."""
+    Reply = Message.__table__.alias("reply_msg")
+    result = await db.execute(
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender_name"),
+            Reply.c.text.label("reply_text"),
+            Reply.c.media_type.label("reply_media_type"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
+        .where(Message.chat_id == chat_id, Message.text.ilike(f"%{keyword}%"))
+        .order_by(desc(Message.date))
+        .limit(limit)
+    )
+    return list(result.all())
+
+
+async def get_date_offset(
+    db: AsyncSession,
+    chat_id: int,
+    target_date: datetime,
+    half_window: int = 50,
+) -> int:
+    """Return offset so that messages around target_date appear in view."""
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.chat_id == chat_id, Message.date > target_date)
     )
     newer_count = count_result.scalar() or 0
     return max(0, newer_count - half_window)
@@ -664,6 +734,97 @@ async def get_important_contacts(db: AsyncSession) -> list:
         .order_by(Contact.first_name, Contact.last_name)
     )
     return list(result.scalars().all())
+
+
+VALID_STATUSES = {"new", "active", "nurturing", "stalled", "cold", "needs_reply"}
+
+
+async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tuple:
+    """Compute relationship status for a contact based on message history."""
+    # Find the private chat matching this contact
+    chat = await db.execute(
+        select(Chat).where(Chat.telegram_id == contact.telegram_id, Chat.type == "private")
+    )
+    chat_obj = chat.scalar_one_or_none()
+    if not chat_obj:
+        return ("new", None, None, None)
+
+    # Get last outgoing and incoming message dates
+    last_out_result = await db.execute(
+        select(func.max(Message.date))
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == True)  # noqa: E712
+    )
+    last_outgoing = last_out_result.scalar()
+
+    last_in_result = await db.execute(
+        select(func.max(Message.date))
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == False)  # noqa: E712
+    )
+    last_incoming = last_in_result.scalar()
+
+    if not last_outgoing and not last_incoming:
+        return ("new", None, None, None)
+
+    last_interaction = max(filter(None, [last_outgoing, last_incoming]))
+
+    # No outgoing messages at all
+    if not last_outgoing:
+        return ("new", last_interaction, None, last_incoming)
+
+    # They messaged more recently than we replied
+    if last_incoming and last_incoming > last_outgoing:
+        return ("needs_reply", last_interaction, last_outgoing, last_incoming)
+
+    # Time-based status
+    from datetime import datetime
+    days_since = (datetime.utcnow() - last_interaction).days
+    if days_since <= 7:
+        status = "active"
+    elif days_since <= 30:
+        status = "nurturing"
+    elif days_since <= 90:
+        status = "stalled"
+    else:
+        status = "cold"
+
+    return (status, last_interaction, last_outgoing, last_incoming)
+
+
+async def refresh_contact_status(db: AsyncSession, contact_id: int) -> Optional[Contact]:
+    """Recompute and save relationship status for a contact (skip manual overrides)."""
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        return None
+    if contact.relationship_status_manual:
+        return contact
+
+    status, last_interaction, last_outgoing, last_incoming = await compute_relationship_status(db, contact)
+    contact.relationship_status = status
+    contact.last_interaction_at = last_interaction
+    contact.last_outgoing_at = last_outgoing
+    contact.last_incoming_at = last_incoming
+    await db.commit()
+    await db.refresh(contact)
+    return contact
+
+
+async def refresh_all_contact_statuses(db: AsyncSession) -> int:
+    """Batch refresh relationship statuses for all non-manual contacts."""
+    result = await db.execute(
+        select(Contact).where(Contact.relationship_status_manual == False)  # noqa: E712
+    )
+    contacts = list(result.scalars().all())
+    count = 0
+    for contact in contacts:
+        status, last_interaction, last_outgoing, last_incoming = await compute_relationship_status(db, contact)
+        contact.relationship_status = status
+        contact.last_interaction_at = last_interaction
+        contact.last_outgoing_at = last_outgoing
+        contact.last_incoming_at = last_incoming
+        count += 1
+    await db.commit()
+    return count
 
 
 async def get_messages_from_sender_since(

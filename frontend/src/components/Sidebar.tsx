@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import logo from '../assets/logo.png'
 import {
+  Home,
   MessageSquare,
   Users,
   Building2,
@@ -10,10 +11,12 @@ import {
   Brain,
   RefreshCw,
   Settings,
+  Search,
 } from 'lucide-react'
 import { bulkSync } from '../api/client'
 
 const NAV = [
+  { to: '/home', icon: Home, label: 'Home' },
   { to: '/chats', icon: MessageSquare, label: 'Chats' },
 { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
@@ -22,7 +25,7 @@ const NAV = [
   { to: '/intelligence', icon: Brain, label: 'Intelligence' },
 ]
 
-export default function Sidebar() {
+export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void }) {
   const location = useLocation()
   const [syncing, setSyncing] = useState(false)
 
@@ -52,21 +55,33 @@ export default function Sidebar() {
             ? location.pathname === url.pathname && new URLSearchParams(location.search).get('tab') === url.searchParams.get('tab')
             : location.pathname === url.pathname && !new URLSearchParams(location.search).has('tab')
           return (
-            <NavLink
-              key={to}
-              to={to}
-              title={label}
-              className={
-                `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
-                  isActive
-                    ? 'bg-indigo-500/20 text-indigo-400'
-                    : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
-                }`
-              }
-            >
-              <Icon size={18} />
-              <span className="text-[9px] leading-tight">{label}</span>
-            </NavLink>
+            <React.Fragment key={to}>
+              <NavLink
+                to={to}
+                title={label}
+                className={
+                  `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
+                    isActive
+                      ? 'bg-indigo-500/20 text-indigo-400'
+                      : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
+                  }`
+                }
+              >
+                <Icon size={18} />
+                <span className="text-[9px] leading-tight">{label}</span>
+              </NavLink>
+              {/* Search button — positioned after Chats */}
+              {to === '/chats' && (
+                <button
+                  onClick={onSearchClick}
+                  title="Search (⌘K)"
+                  className="flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors"
+                >
+                  <Search size={18} />
+                  <span className="text-[9px] leading-tight">Search</span>
+                </button>
+              )}
+            </React.Fragment>
           )
         })}
       </nav>

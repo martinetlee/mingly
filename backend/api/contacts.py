@@ -3,11 +3,12 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, delete, desc
+from sqlalchemy import select, delete, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import Contact, ContactPosition, Organization
+from backend.db.models import Contact, ContactPosition, Message, Organization
+from backend.db import crud
 from backend.telegram.client import get_client, ensure_connected
 
 router = APIRouter()
@@ -62,6 +63,11 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
         "linkedin_url": c.linkedin_url,
         "notes": c.notes,
         "is_important": c.is_important,
+        "relationship_status": c.relationship_status,
+        "relationship_status_manual": c.relationship_status_manual,
+        "last_interaction_at": c.last_interaction_at.isoformat() if c.last_interaction_at else None,
+        "last_outgoing_at": c.last_outgoing_at.isoformat() if c.last_outgoing_at else None,
+        "last_incoming_at": c.last_incoming_at.isoformat() if c.last_incoming_at else None,
         "synced_at": c.synced_at,
     }
     if positions is not None:
@@ -371,3 +377,189 @@ async def remove_position(
     await db.delete(pos)
     await db.commit()
     return {"success": True}
+
+
+# --- Relationship Status Endpoints ---
+
+class StatusRequest(BaseModel):
+    status: str
+
+
+@router.post("/{contact_id}/relationship-status")
+async def set_relationship_status(
+    contact_id: int,
+    req: StatusRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    if req.status not in crud.VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(sorted(crud.VALID_STATUSES))}")
+    contact = (await db.execute(select(Contact).where(Contact.id == contact_id))).scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact.relationship_status = req.status
+    contact.relationship_status_manual = True
+    await db.commit()
+    await db.refresh(contact)
+    positions = await _get_positions(db, contact.id)
+    return _contact_dict(contact, positions)
+
+
+@router.post("/{contact_id}/relationship-status/auto")
+async def reset_relationship_status(
+    contact_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    contact = (await db.execute(select(Contact).where(Contact.id == contact_id))).scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    contact.relationship_status_manual = False
+    await db.commit()
+    updated = await crud.refresh_contact_status(db, contact.id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    positions = await _get_positions(db, updated.id)
+    return _contact_dict(updated, positions)
+
+
+@router.post("/refresh-statuses")
+async def refresh_all_statuses(db: AsyncSession = Depends(get_db)):
+    count = await crud.refresh_all_contact_statuses(db)
+    return {"refreshed": count}
+
+
+# --- Resolve (PersonCard) ---
+
+def _person_summary(c: Contact, positions: List[ContactPosition]) -> dict:
+    """Build a person summary dict for the resolve endpoint."""
+    active_positions = [p for p in positions if p.is_active]
+    primary = None
+    if active_positions:
+        p = active_positions[0]
+        primary = {"title": p.title, "organization": p.organization}
+    return {
+        "telegram_id": c.telegram_id,
+        "name": f"{c.first_name or ''} {c.last_name or ''}".strip() or str(c.telegram_id),
+        "username": c.username,
+        "is_important": c.is_important,
+        "contact_id": c.id,
+        "relationship_status": getattr(c, "relationship_status", None),
+        "last_interaction_at": getattr(c, "last_interaction_at", None),
+        "primary_position": primary,
+        "phone": c.phone,
+        "twitter_handle": c.twitter_handle,
+        "linkedin_url": c.linkedin_url,
+        "has_notes": bool(c.notes),
+    }
+
+
+@router.get("/resolve/{telegram_id}")
+async def resolve_person(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Resolve a telegram_id to a person summary for PersonCard."""
+    # Try Contact table first
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    if contact:
+        positions = await _get_positions(db, contact.id)
+        return _person_summary(contact, positions)
+
+    # Fallback: look up sender_name from messages
+    row = (await db.execute(
+        select(Message.sender_name)
+        .where(Message.sender_id == telegram_id, Message.sender_name.isnot(None))
+        .order_by(desc(Message.date))
+        .limit(1)
+    )).first()
+    name = row[0] if row else str(telegram_id)
+    return {
+        "telegram_id": telegram_id,
+        "name": name,
+        "username": None,
+        "is_important": False,
+        "contact_id": None,
+        "relationship_status": None,
+        "last_interaction_at": None,
+        "primary_position": None,
+        "phone": None,
+        "twitter_handle": None,
+        "linkedin_url": None,
+        "has_notes": False,
+    }
+
+
+class BatchResolveRequest(BaseModel):
+    telegram_ids: List[int]
+
+
+@router.post("/resolve-batch")
+async def resolve_persons_batch(
+    data: BatchResolveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch resolve multiple telegram_ids to person summaries."""
+    if not data.telegram_ids:
+        return {}
+    ids = list(set(data.telegram_ids))[:200]  # cap at 200
+
+    # Load contacts
+    result = await db.execute(
+        select(Contact).where(Contact.telegram_id.in_(ids))
+    )
+    contacts = {c.telegram_id: c for c in result.scalars().all()}
+
+    # Batch-load positions for found contacts
+    pos_map: Dict[int, List[ContactPosition]] = {}
+    if contacts:
+        contact_ids = [c.id for c in contacts.values()]
+        pos_result = await db.execute(
+            select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
+        )
+        for p in pos_result.scalars().all():
+            pos_map.setdefault(p.contact_id, []).append(p)
+
+    # For missing IDs, try Message.sender_name fallback
+    missing = [tid for tid in ids if tid not in contacts]
+    name_map: Dict[int, str] = {}
+    if missing:
+        from sqlalchemy import literal_column
+        # Get most recent sender_name for each missing telegram_id
+        subq = (
+            select(
+                Message.sender_id,
+                Message.sender_name,
+                func.row_number().over(
+                    partition_by=Message.sender_id,
+                    order_by=desc(Message.date),
+                ).label("rn"),
+            )
+            .where(Message.sender_id.in_(missing), Message.sender_name.isnot(None))
+            .subquery()
+        )
+        rows = (await db.execute(
+            select(subq.c.sender_id, subq.c.sender_name).where(subq.c.rn == 1)
+        )).all()
+        for sender_id, sender_name in rows:
+            name_map[sender_id] = sender_name
+
+    # Build results
+    out: Dict[int, dict] = {}
+    for tid in ids:
+        if tid in contacts:
+            c = contacts[tid]
+            out[tid] = _person_summary(c, pos_map.get(c.id, []))
+        else:
+            out[tid] = {
+                "telegram_id": tid,
+                "name": name_map.get(tid, str(tid)),
+                "username": None,
+                "is_important": False,
+                "contact_id": None,
+                "relationship_status": None,
+                "last_interaction_at": None,
+                "primary_position": None,
+                "phone": None,
+                "twitter_handle": None,
+                "linkedin_url": None,
+                "has_notes": False,
+            }
+    return out
