@@ -1,11 +1,13 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { Link, useLocation } from 'react-router-dom'
-import { RefreshCw, Search, ExternalLink, Star, RotateCcw } from 'lucide-react'
-import type { Contact, RelationshipStatus } from '../api/types'
-import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, refreshAllStatuses } from '../api/client'
+import { Link } from 'react-router-dom'
+import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X } from 'lucide-react'
+import type { Contact, Message, RelationshipStatus } from '../api/types'
+import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, getMessages, sendMessage, reactToMessage, syncChat } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard from '../components/PersonCard'
+import MessageList from '../components/MessageList'
+import ComposeBar from '../components/ComposeBar'
 
 const STATUS_COLORS: Record<string, string> = {
   new: 'bg-blue-500/20 text-blue-400',
@@ -84,21 +86,30 @@ function ContactCard({
   )
 }
 
+const MSG_LIMIT = 100
+
 export default function Contacts() {
-  const location = useLocation()
   const [contacts, setContacts] = useState<Contact[]>([])
   const [selected, setSelected] = useState<Contact | null>(null)
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [importantOnly, setImportantOnly] = useState(() => {
-    const params = new URLSearchParams(location.search)
-    return params.get('filter') === 'important'
-  })
   const [statusFilter, setStatusFilter] = useState<RelationshipStatus | 'all'>('all')
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // Chat message state
+  const [messages, setMessages] = useState<Message[]>([])
+  const [loadingMessages, setLoadingMessages] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [messageOffset, setMessageOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [replyToMessage, setReplyToMessage] = useState<Message | null>(null)
+  const [syncingChat, setSyncingChat] = useState(false)
+
+  // Info panel state
+  const [showInfo, setShowInfo] = useState(false)
 
   const loadContacts = useCallback(async (query = '') => {
     const data = await getContacts(query)
@@ -123,7 +134,48 @@ export default function Contacts() {
     }
   }
 
-  const handleSelect = (c: Contact) => setSelected(c)
+  // Load messages for selected contact
+  const loadMessages = useCallback(async (contact: Contact) => {
+    setLoadingMessages(true)
+    setMessageOffset(0)
+    try {
+      const data = await getMessages(contact.telegram_id, MSG_LIMIT, 0)
+      setMessages(data)
+      setHasMore(data.length === MSG_LIMIT)
+    } finally {
+      setLoadingMessages(false)
+    }
+  }, [])
+
+  const loadMoreMessages = useCallback(async () => {
+    if (!selected || loadingMore) return
+    setLoadingMore(true)
+    const nextOffset = messageOffset + MSG_LIMIT
+    try {
+      const data = await getMessages(selected.telegram_id, MSG_LIMIT, nextOffset)
+      setMessages((prev) => [...data, ...prev])
+      setMessageOffset(nextOffset)
+      setHasMore(data.length === MSG_LIMIT)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [selected, messageOffset, loadingMore])
+
+  const handleSelect = useCallback((c: Contact) => {
+    if (selected?.id === c.id) return
+    setSelected(c)
+    setMessages([])
+    setHasMore(false)
+    setMessageOffset(0)
+    setReplyToMessage(null)
+  }, [selected])
+
+  // Load messages when contact selection changes
+  useEffect(() => {
+    if (selected) {
+      loadMessages(selected)
+    }
+  }, [selected, loadMessages])
 
   const handleContactChange = (updated: Contact) => {
     setSelected(updated)
@@ -136,6 +188,36 @@ export default function Contacts() {
     const updated = await setContactImportantByTelegram(selected.telegram_id, newVal)
     setSelected(updated)
     setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
+  }
+
+  const handleSend = async (text: string) => {
+    if (!selected) return
+    await sendMessage(selected.telegram_id, text, replyToMessage?.telegram_id)
+    setReplyToMessage(null)
+    await loadMessages(selected)
+  }
+
+  const handleReact = async (msg: Message, emoji: string | null) => {
+    if (!selected) return
+    try {
+      await reactToMessage(selected.telegram_id, msg.telegram_id, emoji)
+      setMessages((prev) =>
+        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, my_reaction: emoji } : m)
+      )
+    } catch {
+      // silently ignore
+    }
+  }
+
+  const handleSyncChat = async () => {
+    if (!selected) return
+    setSyncingChat(true)
+    try {
+      await syncChat(selected.telegram_id)
+      await loadMessages(selected)
+    } finally {
+      setSyncingChat(false)
+    }
   }
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -157,10 +239,8 @@ export default function Contacts() {
   }, [sidebarWidth])
 
   const visibleContacts = useMemo(() =>
-    contacts
-      .filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter)
-      .filter((c) => !importantOnly || c.is_important),
-    [contacts, statusFilter, importantOnly]
+    contacts.filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter),
+    [contacts, statusFilter]
   )
 
   // Keyboard shortcuts
@@ -168,25 +248,26 @@ export default function Contacts() {
     'j': () => {
       const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
       const next = visibleContacts[idx + 1]
-      if (next) setSelected(next)
+      if (next) handleSelect(next)
     },
     'arrowdown': () => {
       const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
       const next = visibleContacts[idx + 1]
-      if (next) setSelected(next)
+      if (next) handleSelect(next)
     },
     'k': () => {
       const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
       const prev = visibleContacts[idx - 1]
-      if (prev) setSelected(prev)
+      if (prev) handleSelect(prev)
     },
     'arrowup': () => {
       const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
       const prev = visibleContacts[idx - 1]
-      if (prev) setSelected(prev)
+      if (prev) handleSelect(prev)
     },
     '/': () => searchInputRef.current?.focus(),
-  }), [selected, visibleContacts])
+    'i': () => setShowInfo((v) => !v),
+  }), [selected, visibleContacts, handleSelect])
 
   useKeyboardShortcuts(contactShortcuts)
 
@@ -230,17 +311,6 @@ export default function Contacts() {
 
         {/* Status filter tabs */}
         <div className="border-b border-slate-700/50 px-3 py-2 flex flex-wrap gap-1">
-          <button
-            onClick={() => setImportantOnly((v) => !v)}
-            className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              importantOnly
-                ? 'bg-amber-500/20 text-amber-400'
-                : 'text-slate-500 hover:text-slate-300'
-            }`}
-          >
-            ★ Important
-          </button>
-          <span className="border-r border-slate-700 mx-0.5" />
           {(['all', 'needs_reply', 'active', 'nurturing', 'stalled', 'cold'] as const).map((s) => (
             <button
               key={s}
@@ -285,12 +355,95 @@ export default function Contacts() {
         </div>
       </div>
 
-      {/* Detail panel */}
-      <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
-        {selected ? (
-          <div className="flex-1 overflow-y-auto px-6 py-6 max-w-2xl">
-            {/* Identity */}
-            <div className="mb-6">
+      {/* Chat area + optional info panel */}
+      <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
+          {selected ? (
+            <>
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
+                    {selected.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-semibold text-gray-100">{selected.name}</h2>
+                    {selected.username && (
+                      <p className="text-xs text-slate-400">@{selected.username}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShowInfo((v) => !v)}
+                    title="Contact info"
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                      showInfo ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
+                    }`}
+                  >
+                    <Info size={13} />
+                    Info
+                  </button>
+                  <button
+                    onClick={handleSyncChat}
+                    disabled={syncingChat}
+                    title="Sync messages"
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={syncingChat ? 'animate-spin' : ''} />
+                    Sync
+                  </button>
+                </div>
+              </div>
+
+              {/* Messages */}
+              {loadingMessages ? (
+                <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
+                  Loading…
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
+                  <p className="text-sm">No messages yet</p>
+                  <p className="text-xs text-slate-600 mt-1">Send a message or sync to load chat history</p>
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col overflow-hidden">
+                  {hasMore && (
+                    <div className="flex justify-center border-b border-slate-700/50 py-2">
+                      <button
+                        onClick={loadMoreMessages}
+                        disabled={loadingMore}
+                        className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                      >
+                        {loadingMore ? 'Loading…' : 'Load older messages'}
+                      </button>
+                    </div>
+                  )}
+                  <MessageList messages={messages} chatType="private" highlightTelegramId={null} onReply={setReplyToMessage} onReact={handleReact} />
+                </div>
+              )}
+
+              {/* Compose */}
+              <ComposeBar onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} />
+            </>
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
+              <p className="text-sm">Select a contact to view chat</p>
+            </div>
+          )}
+        </div>
+
+        {/* Contact info panel */}
+        {showInfo && selected && (
+          <div className="flex w-80 flex-shrink-0 flex-col border-l border-slate-700/50 bg-slate-800 overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
+              <h3 className="text-sm font-semibold text-gray-100">Contact Info</h3>
+              <button onClick={() => setShowInfo(false)} className="text-slate-500 hover:text-slate-300 transition-colors">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="p-4 flex flex-col gap-4">
+              {/* Identity */}
               <PersonCard
                 telegramId={selected.telegram_id}
                 name={selected.name}
@@ -309,7 +462,7 @@ export default function Contacts() {
                 mode="full"
                 showStatus={false}
               />
-              <div className="flex items-center gap-2 mt-2">
+              <div className="flex items-center gap-2">
                 <button
                   onClick={handleToggleImportant}
                   title={selected.is_important ? 'Remove from important' : 'Mark as important'}
@@ -329,56 +482,52 @@ export default function Contacts() {
                   View Telegram profile
                 </Link>
               </div>
-            </div>
 
-            {/* Relationship status */}
-            <div className="mb-6 flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Relationship Status</span>
-                {selected.relationship_status_manual && (
-                  <button
-                    onClick={async () => {
-                      const updated = await resetRelationshipStatus(selected.id)
-                      handleContactChange(updated)
-                    }}
-                    title="Reset to auto-calculated"
-                    className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
-                  >
-                    <RotateCcw size={10} />
-                    Auto
-                  </button>
+              {/* Relationship status */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Status</span>
+                  {selected.relationship_status_manual && (
+                    <button
+                      onClick={async () => {
+                        const updated = await resetRelationshipStatus(selected.id)
+                        handleContactChange(updated)
+                      }}
+                      title="Reset to auto-calculated"
+                      className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+                    >
+                      <RotateCcw size={10} />
+                      Auto
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(['new', 'active', 'nurturing', 'stalled', 'cold', 'needs_reply'] as const).map((s) => (
+                    <button
+                      key={s}
+                      onClick={async () => {
+                        const updated = await setRelationshipStatus(selected.id, s)
+                        handleContactChange(updated)
+                      }}
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                        selected.relationship_status === s
+                          ? STATUS_COLORS[s]
+                          : 'text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600'
+                      }`}
+                    >
+                      {STATUS_LABELS[s]}
+                    </button>
+                  ))}
+                </div>
+                {selected.last_interaction_at && (
+                  <p className="text-xs text-slate-500">
+                    Last interaction: {fmtRelative(selected.last_interaction_at)}
+                  </p>
                 )}
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {(['new', 'active', 'nurturing', 'stalled', 'cold', 'needs_reply'] as const).map((s) => (
-                  <button
-                    key={s}
-                    onClick={async () => {
-                      const updated = await setRelationshipStatus(selected.id, s)
-                      handleContactChange(updated)
-                    }}
-                    className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
-                      selected.relationship_status === s
-                        ? STATUS_COLORS[s]
-                        : 'text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600'
-                    }`}
-                  >
-                    {STATUS_LABELS[s]}
-                  </button>
-                ))}
-              </div>
-              {selected.last_interaction_at && (
-                <p className="text-xs text-slate-500">
-                  Last interaction: {fmtRelative(selected.last_interaction_at)}
-                </p>
-              )}
-            </div>
 
-            <ContactInfoSection contact={selected} onContactChange={handleContactChange} />
-          </div>
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
-            <p className="text-sm">Select a contact to view details</p>
+              <ContactInfoSection contact={selected} onContactChange={handleContactChange} compact />
+            </div>
           </div>
         )}
       </div>
