@@ -519,6 +519,19 @@ export default function Contacts() {
                     </button>
                   ))}
                 </div>
+                {selected.status_source && (
+                  <p className="text-[10px] text-slate-600">
+                    Source: {selected.status_source === 'manual' ? 'Manually set' : 'Auto-calculated'}
+                  </p>
+                )}
+                {selected.status_explanation && (
+                  <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-1">
+                    <p className="text-xs text-slate-400">{selected.status_explanation}</p>
+                    {selected.recommended_action && (
+                      <p className="text-xs text-indigo-400/80">{selected.recommended_action}</p>
+                    )}
+                  </div>
+                )}
                 {selected.last_interaction_at && (
                   <p className="text-xs text-slate-500">
                     Last interaction: {fmtRelative(selected.last_interaction_at)}

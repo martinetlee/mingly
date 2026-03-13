@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
 from backend.db.models import Chat, Message, Contact, ContactPosition, BriefingRun, BriefingEntry
+from backend.db.crud import explain_relationship_status
 
 router = APIRouter()
 
@@ -141,16 +142,27 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         primary = None
         if active_pos:
             primary = {"title": active_pos[0].title, "organization": active_pos[0].organization}
-        attention_contacts.append({
+        status_info = explain_relationship_status(
+            status=getattr(c, "relationship_status", None),
+            is_manual=getattr(c, "relationship_status_manual", False),
+            last_interaction=getattr(c, "last_interaction_at", None),
+            last_outgoing=getattr(c, "last_outgoing_at", None),
+            last_incoming=getattr(c, "last_incoming_at", None),
+            is_important=c.is_important,
+        )
+        contact_data = {
             "id": c.id,
             "telegram_id": c.telegram_id,
             "name": f"{c.first_name or ''} {c.last_name or ''}".strip() or str(c.telegram_id),
             "username": c.username,
             "is_important": c.is_important,
             "relationship_status": getattr(c, "relationship_status", None),
+            "relationship_status_manual": getattr(c, "relationship_status_manual", False),
             "last_interaction_at": getattr(c, "last_interaction_at", None),
             "primary_position": primary,
-        })
+        }
+        contact_data.update(status_info)
+        attention_contacts.append(contact_data)
 
     # --- Latest Briefing ---
     latest_run = (await db.execute(

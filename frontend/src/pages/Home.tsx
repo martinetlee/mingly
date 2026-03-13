@@ -459,30 +459,55 @@ export default function Home() {
               <p className="text-sm text-slate-500">All contacts are in good standing.</p>
             </div>
           ) : (
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-2">
               {data.attention_contacts.map((c) => (
                 <button
                   key={c.id}
                   onClick={() => navigate(`/chats?chatId=${c.telegram_id}`)}
-                  className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-800 transition-colors text-left w-full"
+                  className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 hover:bg-slate-700/50 transition-colors text-left w-full"
                 >
-                  <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
-                    {c.name.charAt(0).toUpperCase()}
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
+                      {c.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-sm font-medium text-gray-200">{c.name}</p>
+                        {c.relationship_status && (
+                          <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            c.relationship_status === 'needs_reply' ? 'bg-red-500/20 text-red-400' :
+                            c.relationship_status === 'stalled' ? 'bg-orange-500/20 text-orange-400' :
+                            c.relationship_status === 'cold' ? 'bg-slate-500/20 text-slate-400' :
+                            c.relationship_status === 'active' ? 'bg-emerald-500/20 text-emerald-400' :
+                            c.relationship_status === 'nurturing' ? 'bg-amber-500/20 text-amber-400' :
+                            'bg-slate-700 text-slate-400'
+                          }`}>
+                            {c.relationship_status.replace('_', ' ')}
+                            {c.status_source === 'manual' && ' (manual)'}
+                          </span>
+                        )}
+                      </div>
+                      {c.primary_position && (
+                        <p className="truncate text-[10px] text-slate-500">
+                          {c.primary_position.title
+                            ? `${c.primary_position.title} @ ${c.primary_position.organization}`
+                            : c.primary_position.organization}
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-gray-200">{c.name}</p>
-                    {c.primary_position && (
-                      <p className="truncate text-[10px] text-slate-500">
-                        {c.primary_position.title
-                          ? `${c.primary_position.title} @ ${c.primary_position.organization}`
-                          : c.primary_position.organization}
-                      </p>
-                    )}
-                  </div>
-                  {c.relationship_status && (
-                    <span className="flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium bg-slate-700 text-slate-400">
-                      {c.relationship_status}
-                    </span>
+                  {(c.attention_reason || c.status_explanation) && (
+                    <div className="mt-2 ml-10 space-y-1">
+                      {c.attention_reason && (
+                        <p className="text-[11px] text-amber-400/80">{c.attention_reason}</p>
+                      )}
+                      {c.status_explanation && (
+                        <p className="text-[11px] text-slate-500">{c.status_explanation}</p>
+                      )}
+                      {c.recommended_action && (
+                        <p className="text-[11px] text-indigo-400/70">{c.recommended_action}</p>
+                      )}
+                    </div>
                   )}
                 </button>
               ))}
