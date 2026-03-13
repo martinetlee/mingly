@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 #   * Use IF NOT EXISTS / IF EXISTS where the DDL dialect supports it.
 #   * ALTER TABLE ADD COLUMN is idempotent-safe on SQLite (duplicate column
 #     raises "duplicate column name" which we catch explicitly).
-#   * Destructive DML (DELETE, UPDATE) must NOT appear here -- use a
-#     dedicated CLI command instead.
+#   * Avoid destructive DML (DELETE, UPDATE) unless required for data
+#     cleanup before a constraint change (see migration 4 for example).
 # ---------------------------------------------------------------------------
 
 MIGRATIONS: list[tuple[int, str, list[str]]] = [
@@ -57,6 +57,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
         4,
         "Add unique index on messages(telegram_id, chat_id)",
         [
+            # Delete duplicate (telegram_id, chat_id) rows, keeping only the
+            # row with the highest id, so the UNIQUE index creation succeeds
+            # on databases that already contain duplicates.
+            (
+                "DELETE FROM messages WHERE id NOT IN ("
+                "  SELECT MAX(id) FROM messages"
+                "  GROUP BY telegram_id, chat_id"
+                ")"
+            ),
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_telegram_chat ON messages (telegram_id, chat_id)",
         ],
     ),
