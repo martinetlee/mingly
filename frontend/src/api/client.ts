@@ -48,9 +48,10 @@ export const unlockVault = async (password: string) => {
   return result
 }
 
-export const resetVault = () => {
+export const resetVault = async () => {
+  const result = await request<{ success: boolean }>('/api/auth/vault/reset', { method: 'POST' })
   clearSessionToken()
-  return request<{ success: boolean }>('/api/auth/vault/reset', { method: 'POST' })
+  return result
 }
 
 // --- Auth ---
