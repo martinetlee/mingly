@@ -8,15 +8,7 @@ function isInputFocused(): boolean {
   const tag = el.tagName
   if (tag === 'SELECT') return true
   if ((el as HTMLElement).isContentEditable) return true
-  if (tag === 'INPUT' || tag === 'TEXTAREA') {
-    // Allow single-key shortcuts to pass through when input/textarea is empty
-    // and has the data-shortcut-passthrough attribute
-    const input = el as HTMLInputElement | HTMLTextAreaElement
-    if ((el as HTMLElement).dataset.shortcutPassthrough !== undefined && input.value === '') {
-      return false
-    }
-    return true
-  }
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return true
   return false
 }
 
@@ -30,11 +22,16 @@ function buildCombo(e: KeyboardEvent): string {
   return parts.join('+')
 }
 
+export function isShortcutsEnabled(): boolean {
+  return localStorage.getItem('shortcuts_enabled') !== 'false'
+}
+
 export function useKeyboardShortcuts(shortcuts: ShortcutMap, enabled = true) {
   useEffect(() => {
     if (!enabled) return
 
     const handler = (e: KeyboardEvent) => {
+      if (!isShortcutsEnabled()) return
       const combo = buildCombo(e)
       const action = shortcuts[combo]
       if (!action) return
