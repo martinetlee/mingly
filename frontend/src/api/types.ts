@@ -127,9 +127,7 @@ export interface PersonSummary {
 }
 
 export interface DashboardStats {
-  total_unread: number
-  messages_today: number
-  active_contacts: number
+  unread_today: number
 }
 
 export interface DashboardNeedsReply {
@@ -307,6 +305,7 @@ export interface MentionGroup {
   reply_has_gap: boolean
   chat: {
     id: number
+    telegram_id: number
     name: string
     type: string
     is_tracked: boolean

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, desc, func, and_
+from sqlalchemy import select, desc, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
@@ -28,33 +28,44 @@ def _chat_dict(c) -> dict:
 
 @router.get("")
 async def get_dashboard(db: AsyncSession = Depends(get_db)):
+    # Get important contact telegram_ids for filtering
+    important_tids_q = select(Contact.telegram_id).where(Contact.is_important == True)  # noqa: E712
+    important_tids = set(
+        (await db.execute(important_tids_q)).scalars().all()
+    )
+
     # --- Stats ---
-    total_unread = (await db.execute(
-        select(func.coalesce(func.sum(Chat.unread_count), 0))
-        .where(Chat.is_hidden == False)  # noqa: E712
-    )).scalar() or 0
-
+    # Unread today: count of unread messages from today in tracked chats or
+    # private chats with important contacts
     cutoff_24h = datetime.utcnow() - timedelta(hours=24)
-    messages_today = (await db.execute(
-        select(func.count()).select_from(Message).where(Message.date >= cutoff_24h)
-    )).scalar() or 0
 
-    # Active contacts = contacts with any message in last 7 days
-    cutoff_7d = datetime.utcnow() - timedelta(days=7)
-    active_contact_ids = (await db.execute(
-        select(func.count(func.distinct(Message.sender_id)))
-        .where(Message.date >= cutoff_7d, Message.sender_id.isnot(None), Message.is_outgoing == False)  # noqa: E712
+    # Build filter for "relevant" chats: tracked OR private chat with important contact
+    relevant_chat_filter = or_(
+        Chat.is_tracked == True,  # noqa: E712
+        and_(
+            Chat.type == "private",
+            Chat.telegram_id.in_(important_tids) if important_tids else False,
+        ),
+    )
+
+    unread_today = (await db.execute(
+        select(func.count()).select_from(Message)
+        .join(Chat, Chat.telegram_id == Message.chat_id)
+        .where(
+            Message.date >= cutoff_24h,
+            Message.is_outgoing == False,  # noqa: E712
+            Chat.is_hidden == False,  # noqa: E712
+            relevant_chat_filter,
+        )
     )).scalar() or 0
 
     stats = {
-        "total_unread": total_unread,
-        "messages_today": messages_today,
-        "active_contacts": active_contact_ids,
+        "unread_today": unread_today,
     }
 
     # --- Needs Reply ---
     # Find chats where the most recent message is incoming (not outgoing)
-    # Use a window function to get the last message per chat
+    # Only from tracked chats or private chats with important contacts
     last_msg_subq = (
         select(
             Message.chat_id,
@@ -85,6 +96,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             last_msg_subq.c.is_outgoing == False,  # noqa: E712
             Chat.is_hidden == False,  # noqa: E712
             Chat.is_briefing == False,  # noqa: E712
+            relevant_chat_filter,
         )
         .order_by(desc(last_msg_subq.c.date))
         .limit(10)
@@ -103,8 +115,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     ]
 
     # --- Attention Contacts ---
-    # Important contacts who haven't been messaged recently (no outgoing in 7d)
-    # Since relationship_status may not exist on the model yet, we use a simpler heuristic
+    # Important contacts
     important_contacts_q = (
         select(Contact)
         .where(Contact.is_important == True)  # noqa: E712
