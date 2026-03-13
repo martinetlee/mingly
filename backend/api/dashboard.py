@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
 from backend.db.models import Chat, Message, Contact, ContactPosition, BriefingRun, BriefingEntry
-from backend.db.crud import explain_relationship_status
+from backend.db.crud import explain_relationship_status, compute_relationship_status
 
 router = APIRouter()
 
@@ -142,12 +142,25 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         primary = None
         if active_pos:
             primary = {"title": active_pos[0].title, "organization": active_pos[0].organization}
+
+        # Recompute relationship status live to avoid stale needs_reply
+        is_manual = getattr(c, "relationship_status_manual", False)
+        if is_manual:
+            live_status = getattr(c, "relationship_status", None)
+            live_last_interaction = getattr(c, "last_interaction_at", None)
+            live_last_outgoing = getattr(c, "last_outgoing_at", None)
+            live_last_incoming = getattr(c, "last_incoming_at", None)
+        else:
+            live_status, live_last_interaction, live_last_outgoing, live_last_incoming = (
+                await compute_relationship_status(db, c)
+            )
+
         status_info = explain_relationship_status(
-            status=getattr(c, "relationship_status", None),
-            is_manual=getattr(c, "relationship_status_manual", False),
-            last_interaction=getattr(c, "last_interaction_at", None),
-            last_outgoing=getattr(c, "last_outgoing_at", None),
-            last_incoming=getattr(c, "last_incoming_at", None),
+            status=live_status,
+            is_manual=is_manual,
+            last_interaction=live_last_interaction,
+            last_outgoing=live_last_outgoing,
+            last_incoming=live_last_incoming,
             is_important=c.is_important,
         )
         contact_data = {
@@ -156,9 +169,9 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             "name": f"{c.first_name or ''} {c.last_name or ''}".strip() or str(c.telegram_id),
             "username": c.username,
             "is_important": c.is_important,
-            "relationship_status": getattr(c, "relationship_status", None),
-            "relationship_status_manual": getattr(c, "relationship_status_manual", False),
-            "last_interaction_at": getattr(c, "last_interaction_at", None),
+            "relationship_status": live_status,
+            "relationship_status_manual": is_manual,
+            "last_interaction_at": live_last_interaction,
             "primary_position": primary,
         }
         contact_data.update(status_info)
