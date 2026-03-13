@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Star } from 'lucide-react'
+import { Star, BadgeCheck, Crown, Bot } from 'lucide-react'
 import type { PersonSummary } from '../api/types'
 import { resolvePerson } from '../api/client'
 import { sanitizeLinkedInUrl } from '../utils/sanitizeUrl'
@@ -23,7 +23,7 @@ export function preloadPersonCache(data: Record<number, PersonSummary>) {
   }
 }
 
-const STATUS_COLORS: Record<string, string> = {
+export const RELATIONSHIP_STATUS_COLORS: Record<string, string> = {
   new: 'bg-blue-500/20 text-blue-400',
   active: 'bg-emerald-500/20 text-emerald-400',
   nurturing: 'bg-amber-500/20 text-amber-400',
@@ -32,7 +32,7 @@ const STATUS_COLORS: Record<string, string> = {
   needs_reply: 'bg-red-500/20 text-red-400',
 }
 
-const STATUS_LABELS: Record<string, string> = {
+export const RELATIONSHIP_STATUS_LABELS: Record<string, string> = {
   new: 'New',
   active: 'Active',
   nurturing: 'Nurturing',
@@ -41,7 +41,22 @@ const STATUS_LABELS: Record<string, string> = {
   needs_reply: 'Needs Reply',
 }
 
-function fmtRelative(iso: string): string {
+const ONLINE_STATUS_LABELS: Record<string, string> = {
+  online: 'Online',
+  recently: 'Last seen recently',
+  offline: 'Offline',
+  last_week: 'Last seen within a week',
+  last_month: 'Last seen within a month',
+  unknown: 'Last seen a long time ago',
+}
+
+const ONLINE_STATUS_COLORS: Record<string, string> = {
+  online: 'text-emerald-400',
+  recently: 'text-slate-400',
+  offline: 'text-slate-500',
+}
+
+export function fmtRelative(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
   const diffMs = now.getTime() - d.getTime()
@@ -56,7 +71,6 @@ function fmtRelative(iso: string): string {
 
 interface PersonCardProps {
   telegramId: number
-  // Optional pre-loaded data (avoids API call if parent already has it)
   name?: string
   username?: string | null
   status?: string | null
@@ -68,12 +82,18 @@ interface PersonCardProps {
   twitterHandle?: string | null
   linkedinUrl?: string | null
   hasNotes?: boolean
-  // Display options
-  mode?: 'compact' | 'full'
+  photoUrl?: string | null
+  isVerified?: boolean
+  isPremium?: boolean
+  isBot?: boolean
+  onlineStatus?: string | null
+  bio?: string | null
+  mode?: 'compact' | 'full' | 'profile' | 'header'
   onClick?: () => void
   showStatus?: boolean
-  // Extra badges/content for context-specific rendering
+  disableLink?: boolean
   extraBadge?: React.ReactNode
+  actions?: React.ReactNode
   className?: string
   muted?: boolean
 }
@@ -93,7 +113,6 @@ function useResolvedPerson(
       setPerson(cached)
       return
     }
-    // Deduplicate in-flight requests
     let req = pendingRequests.get(telegramId)
     if (!req) {
       req = resolvePerson(telegramId)
@@ -105,7 +124,6 @@ function useResolvedPerson(
         setPerson(data)
       })
       .catch(() => {
-        // fallback: just show the ID
         setPerson({
           telegram_id: telegramId,
           name: String(telegramId),
@@ -142,10 +160,18 @@ export default function PersonCard({
   twitterHandle: propTwitter,
   linkedinUrl: propLinkedin,
   hasNotes: propHasNotes,
+  photoUrl,
+  isVerified,
+  isPremium,
+  isBot: propIsBot,
+  onlineStatus,
+  bio,
   mode = 'compact',
   onClick,
   showStatus = true,
+  disableLink = false,
   extraBadge,
+  actions,
   className = '',
   muted = false,
 }: PersonCardProps) {
@@ -168,11 +194,148 @@ export default function PersonCard({
   const initial = name ? name.charAt(0).toUpperCase() : '?'
 
   if (!name && !resolved) {
-    // Still loading
     return (
       <div className={`flex items-center gap-2 px-2 py-1.5 ${className}`}>
         <div className="h-6 w-6 rounded-full bg-slate-700 animate-pulse" />
         <div className="h-3 w-20 rounded bg-slate-700 animate-pulse" />
+      </div>
+    )
+  }
+
+  if (mode === 'header') {
+    return (
+      <div
+        className={`flex items-center gap-3 ${onClick ? 'cursor-pointer' : ''} ${className}`}
+        onClick={onClick}
+      >
+        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
+          {initial}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-sm font-semibold text-gray-100">{name}</h2>
+            {isImportant && (
+              <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" />
+            )}
+            {showStatus && status && (
+              <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${RELATIONSHIP_STATUS_COLORS[status] ?? ''}`}>
+                {RELATIONSHIP_STATUS_LABELS[status] ?? status}
+              </span>
+            )}
+          </div>
+          {username && (
+            <p className="text-xs text-slate-400">@{username}</p>
+          )}
+        </div>
+        {extraBadge && <div className="flex-shrink-0">{extraBadge}</div>}
+        {actions && <div className="flex-shrink-0">{actions}</div>}
+      </div>
+    )
+  }
+
+  if (mode === 'profile') {
+    const avatar = photoUrl ? (
+      <img
+        src={photoUrl}
+        alt={name}
+        className="h-20 w-20 rounded-full object-cover ring-2 ring-slate-700"
+      />
+    ) : (
+      <div className="flex h-20 w-20 items-center justify-center rounded-full bg-slate-700 text-2xl font-semibold text-slate-300 ring-2 ring-slate-600">
+        {initial}
+      </div>
+    )
+
+    return (
+      <div className={className}>
+        <div className="flex items-start gap-5 mb-8">
+          {!disableLink ? (
+            <Link to={`/profile/${telegramId}`}>{avatar}</Link>
+          ) : (
+            avatar
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl font-bold text-gray-100">{name}</h1>
+              {isVerified && (
+                <span title="Verified"><BadgeCheck size={18} className="text-sky-400" /></span>
+              )}
+              {isPremium && (
+                <span title="Premium"><Crown size={16} className="text-amber-400" /></span>
+              )}
+              {propIsBot && (
+                <span title="Bot"><Bot size={16} className="text-violet-400" /></span>
+              )}
+              {isImportant && (
+                <Star size={14} className="flex-shrink-0 fill-amber-400 text-amber-400" />
+              )}
+              {showStatus && status && (
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RELATIONSHIP_STATUS_COLORS[status] ?? ''}`}>
+                  {RELATIONSHIP_STATUS_LABELS[status] ?? status}
+                </span>
+              )}
+              {actions}
+            </div>
+            {username && (
+              <p className="mt-0.5 text-sm text-indigo-400">@{username}</p>
+            )}
+            {onlineStatus && (
+              <p className={`mt-1 text-xs ${ONLINE_STATUS_COLORS[onlineStatus] ?? 'text-slate-500'}`}>
+                {ONLINE_STATUS_LABELS[onlineStatus] ?? onlineStatus}
+              </p>
+            )}
+            {position && (
+              <p className="text-xs text-slate-400 mt-0.5">
+                {position.title ? `${position.title} @ ${position.organization}` : position.organization}
+              </p>
+            )}
+            {lastInteraction && (
+              <p className="text-xs text-slate-500 mt-0.5">
+                Last talked: {fmtRelative(lastInteraction)}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {bio && (
+          <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
+            <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">Bio</h3>
+            <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{bio}</p>
+          </div>
+        )}
+
+        {(phone || twitterHandle || linkedinUrl || hasNotes) && (
+          <div className="flex flex-wrap gap-3 text-xs text-slate-400">
+            {phone && (
+              <span title={phone}>
+                <span className="text-slate-500">Phone:</span> {phone}
+              </span>
+            )}
+            {twitterHandle && (
+              <a
+                href={`https://twitter.com/${twitterHandle.replace('@', '')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-sky-400 transition-colors"
+              >
+                @{twitterHandle.replace('@', '')}
+              </a>
+            )}
+            {linkedinUrl && (
+              <a
+                href={linkedinUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-sky-400 transition-colors"
+              >
+                LinkedIn
+              </a>
+            )}
+            {hasNotes && (
+              <span className="text-slate-500">Has notes</span>
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -201,8 +364,8 @@ export default function PersonCard({
               <Star size={9} className="flex-shrink-0 fill-amber-400 text-amber-400" />
             )}
             {showStatus && status && (
-              <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-medium ${STATUS_COLORS[status] ?? ''}`}>
-                {STATUS_LABELS[status] ?? status}
+              <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-medium ${RELATIONSHIP_STATUS_COLORS[status] ?? ''}`}>
+                {RELATIONSHIP_STATUS_LABELS[status] ?? status}
               </span>
             )}
           </div>
@@ -220,7 +383,7 @@ export default function PersonCard({
       </div>
     )
 
-    if (!onClick) {
+    if (!onClick && !disableLink) {
       return <Link to={profileLink}>{content}</Link>
     }
     return content
@@ -230,27 +393,38 @@ export default function PersonCard({
   return (
     <div className={`${className}`}>
       <div className="flex items-start gap-4 mb-4">
-        <Link to={`/profile/${telegramId}`}>
-          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300 hover:ring-2 hover:ring-indigo-500 transition-all">
+        {!disableLink ? (
+          <Link to={`/profile/${telegramId}`}>
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300 hover:ring-2 hover:ring-indigo-500 transition-all">
+              {initial}
+            </div>
+          </Link>
+        ) : (
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300">
             {initial}
           </div>
-        </Link>
+        )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <Link
-              to={`/profile/${telegramId}`}
-              className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
-            >
-              {name}
-            </Link>
+            {!disableLink ? (
+              <Link
+                to={`/profile/${telegramId}`}
+                className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
+              >
+                {name}
+              </Link>
+            ) : (
+              <span className="text-lg font-bold text-gray-100">{name}</span>
+            )}
             {isImportant && (
               <Star size={14} className="flex-shrink-0 fill-amber-400 text-amber-400" />
             )}
             {showStatus && status && (
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_COLORS[status] ?? ''}`}>
-                {STATUS_LABELS[status] ?? status}
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RELATIONSHIP_STATUS_COLORS[status] ?? ''}`}>
+                {RELATIONSHIP_STATUS_LABELS[status] ?? status}
               </span>
             )}
+            {actions}
           </div>
           {username && (
             <p className="text-sm text-indigo-400">@{username}</p>
@@ -268,7 +442,6 @@ export default function PersonCard({
         </div>
       </div>
 
-      {/* Contact details row */}
       {(phone || twitterHandle || linkedinUrl || hasNotes) && (
         <div className="flex flex-wrap gap-3 text-xs text-slate-400">
           {phone && (

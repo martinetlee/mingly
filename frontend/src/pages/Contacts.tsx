@@ -5,40 +5,9 @@ import type { Contact, Message, RelationshipStatus } from '../api/types'
 import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, getMessages, sendMessage, reactToMessage, syncChat } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import ContactInfoSection from '../components/ContactInfoSection'
-import PersonCard from '../components/PersonCard'
+import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from '../components/PersonCard'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
-
-const STATUS_COLORS: Record<string, string> = {
-  new: 'bg-blue-500/20 text-blue-400',
-  active: 'bg-emerald-500/20 text-emerald-400',
-  nurturing: 'bg-amber-500/20 text-amber-400',
-  stalled: 'bg-orange-500/20 text-orange-400',
-  cold: 'bg-slate-500/20 text-slate-400',
-  needs_reply: 'bg-red-500/20 text-red-400',
-}
-
-const STATUS_LABELS: Record<string, string> = {
-  new: 'New',
-  active: 'Active',
-  nurturing: 'Nurturing',
-  stalled: 'Stalled',
-  cold: 'Cold',
-  needs_reply: 'Needs Reply',
-}
-
-function fmtRelative(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-  if (diffDays === 0) return 'Today'
-  if (diffDays === 1) return 'Yesterday'
-  if (diffDays < 7) return `${diffDays} days ago`
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`
-  if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`
-  return `${Math.floor(diffDays / 365)} years ago`
-}
 
 function ContactCard({
   contact,
@@ -70,8 +39,8 @@ function ContactCard({
             <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" aria-label="Important" />
           )}
           {contact.relationship_status && (
-            <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${STATUS_COLORS[contact.relationship_status] ?? ''}`}>
-              {STATUS_LABELS[contact.relationship_status] ?? contact.relationship_status}
+            <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${RELATIONSHIP_STATUS_COLORS[contact.relationship_status] ?? ''}`}>
+              {RELATIONSHIP_STATUS_LABELS[contact.relationship_status] ?? contact.relationship_status}
             </span>
           )}
         </div>
@@ -319,11 +288,11 @@ export default function Contacts() {
               onClick={() => setStatusFilter(s)}
               className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
                 statusFilter === s
-                  ? s === 'all' ? 'bg-indigo-500/20 text-indigo-400' : STATUS_COLORS[s]
+                  ? s === 'all' ? 'bg-indigo-500/20 text-indigo-400' : RELATIONSHIP_STATUS_COLORS[s]
                   : 'text-slate-500 hover:text-slate-300'
               }`}
             >
-              {s === 'all' ? 'All' : STATUS_LABELS[s]}
+              {s === 'all' ? 'All' : RELATIONSHIP_STATUS_LABELS[s]}
             </button>
           ))}
         </div>
@@ -362,19 +331,18 @@ export default function Contacts() {
         <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
           {selected ? (
             <>
-              {/* Header */}
+              {/* Header -- unified PersonCard */}
               <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-                    {selected.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div>
-                    <h2 className="text-sm font-semibold text-gray-100">{selected.name}</h2>
-                    {selected.username && (
-                      <p className="text-xs text-slate-400">@{selected.username}</p>
-                    )}
-                  </div>
-                </div>
+                <PersonCard
+                  telegramId={selected.telegram_id}
+                  name={selected.name}
+                  username={selected.username}
+                  isImportant={selected.is_important}
+                  status={selected.relationship_status}
+                  mode="header"
+                  showStatus={false}
+                  disableLink
+                />
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => setShowInfo((v) => !v)}
@@ -401,7 +369,7 @@ export default function Contacts() {
               {/* Messages */}
               {loadingMessages ? (
                 <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
-                  Loading…
+                  Loading...
                 </div>
               ) : messages.length === 0 ? (
                 <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
@@ -417,7 +385,7 @@ export default function Contacts() {
                         disabled={loadingMore}
                         className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
                       >
-                        {loadingMore ? 'Loading…' : 'Load older messages'}
+                        {loadingMore ? 'Loading...' : 'Load older messages'}
                       </button>
                     </div>
                   )}
@@ -445,7 +413,7 @@ export default function Contacts() {
               </button>
             </div>
             <div className="p-4 flex flex-col gap-4">
-              {/* Identity */}
+              {/* Identity -- unified PersonCard */}
               <PersonCard
                 telegramId={selected.telegram_id}
                 name={selected.name}
@@ -513,11 +481,11 @@ export default function Contacts() {
                       }}
                       className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
                         selected.relationship_status === s
-                          ? STATUS_COLORS[s]
+                          ? RELATIONSHIP_STATUS_COLORS[s]
                           : 'text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600'
                       }`}
                     >
-                      {STATUS_LABELS[s]}
+                      {RELATIONSHIP_STATUS_LABELS[s]}
                     </button>
                   ))}
                 </div>
