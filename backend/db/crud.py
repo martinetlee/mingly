@@ -740,18 +740,18 @@ VALID_STATUSES = {"new", "active", "nurturing", "stalled", "cold", "needs_reply"
 
 
 def explain_relationship_status(
-    status: str | None,
+    status: Optional[str],
     is_manual: bool,
-    last_interaction: datetime | None,
-    last_outgoing: datetime | None,
-    last_incoming: datetime | None,
+    last_interaction: Optional[datetime],
+    last_outgoing: Optional[datetime],
+    last_incoming: Optional[datetime],
     is_important: bool = False,
 ) -> dict:
     """Return a dict with human-readable explanation, recommended action, and metadata
     about why a contact has its current relationship status."""
     now = datetime.utcnow()
 
-    def _days_ago(dt: datetime | None) -> int | None:
+    def _days_ago(dt: Optional[datetime]) -> Optional[int]:
         if dt is None:
             return None
         return (now - dt).days
