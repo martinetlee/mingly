@@ -109,6 +109,13 @@ export interface Contact {
   last_incoming_at: string | null
   synced_at: string | null
   positions: ContactPosition[]
+  status_explanation?: string
+  recommended_action?: string
+  status_source?: 'auto' | 'manual'
+  attention_reason?: string
+  days_since_interaction?: number | null
+  days_since_outgoing?: number | null
+  days_since_incoming?: number | null
 }
 
 export interface PersonSummary {
@@ -146,8 +153,14 @@ export interface DashboardAttentionContact {
   username: string | null
   is_important: boolean
   relationship_status: string | null
+  relationship_status_manual?: boolean
   last_interaction_at: string | null
   primary_position: { title: string | null; organization: string } | null
+  status_explanation?: string
+  recommended_action?: string
+  status_source?: 'auto' | 'manual'
+  attention_reason?: string
+  days_since_interaction?: number | null
 }
 
 export interface DashboardBriefingEntry {

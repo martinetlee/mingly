@@ -71,6 +71,16 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
         "last_incoming_at": c.last_incoming_at.isoformat() if c.last_incoming_at else None,
         "synced_at": c.synced_at,
     }
+    # Add status explanation
+    status_info = crud.explain_relationship_status(
+        status=c.relationship_status,
+        is_manual=c.relationship_status_manual,
+        last_interaction=c.last_interaction_at,
+        last_outgoing=c.last_outgoing_at,
+        last_incoming=c.last_incoming_at,
+        is_important=c.is_important,
+    )
+    d.update(status_info)
     if positions is not None:
         d["positions"] = [
             {

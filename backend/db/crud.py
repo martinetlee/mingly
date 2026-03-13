@@ -739,6 +739,95 @@ async def get_important_contacts(db: AsyncSession) -> list:
 VALID_STATUSES = {"new", "active", "nurturing", "stalled", "cold", "needs_reply"}
 
 
+def explain_relationship_status(
+    status: Optional[str],
+    is_manual: bool,
+    last_interaction: Optional[datetime],
+    last_outgoing: Optional[datetime],
+    last_incoming: Optional[datetime],
+    is_important: bool = False,
+) -> dict:
+    """Return a dict with human-readable explanation, recommended action, and metadata
+    about why a contact has its current relationship status."""
+    now = datetime.utcnow()
+
+    def _days_ago(dt: Optional[datetime]) -> Optional[int]:
+        if dt is None:
+            return None
+        return (now - dt).days
+
+    days_since_interaction = _days_ago(last_interaction)
+    days_since_outgoing = _days_ago(last_outgoing)
+    days_since_incoming = _days_ago(last_incoming)
+
+    source = "manual" if is_manual else "auto"
+
+    explanation = ""
+    recommended_action = ""
+
+    if status == "new":
+        if not last_interaction:
+            explanation = "No message history found with this contact."
+            recommended_action = "Send an introductory message to start the conversation."
+        elif not last_outgoing:
+            explanation = "They have messaged you, but you have never replied."
+            recommended_action = "Send a first reply to establish the relationship."
+        else:
+            explanation = "This contact was recently added."
+            recommended_action = "Reach out to start building the relationship."
+    elif status == "needs_reply":
+        wait_days = days_since_incoming if days_since_incoming is not None else 0
+        if wait_days == 0:
+            explanation = "They sent a message today that you haven't replied to yet."
+        elif wait_days == 1:
+            explanation = "They sent a message yesterday that you haven't replied to yet."
+        else:
+            explanation = f"They sent a message {wait_days} days ago that you haven't replied to yet."
+        recommended_action = "Reply to their latest message to keep the conversation going."
+    elif status == "active":
+        explanation = f"You exchanged messages within the last week ({days_since_interaction} days ago)."
+        recommended_action = "Relationship is healthy. Continue engaging naturally."
+    elif status == "nurturing":
+        explanation = f"Last interaction was {days_since_interaction} days ago (1-4 weeks)."
+        recommended_action = "Consider reaching out soon to maintain the connection."
+    elif status == "stalled":
+        explanation = f"Last interaction was {days_since_interaction} days ago (1-3 months). The relationship is losing momentum."
+        recommended_action = "Send a check-in message to re-engage before the relationship goes cold."
+    elif status == "cold":
+        explanation = f"Last interaction was {days_since_interaction} days ago (over 3 months). The relationship has gone quiet."
+        recommended_action = "Reach out with a personal note or relevant update to reconnect."
+    else:
+        explanation = "Status has not been determined yet."
+        recommended_action = "Sync messages to compute the relationship status."
+
+    if is_manual:
+        explanation = f"Manually set. {explanation}"
+
+    # Build attention_reason for important contacts
+    attention_reason = ""
+    if is_important:
+        if status == "needs_reply":
+            attention_reason = "Important contact is waiting for your reply."
+        elif status == "stalled":
+            attention_reason = "Important contact relationship is losing momentum."
+        elif status == "cold":
+            attention_reason = "Important contact has gone quiet -- consider reconnecting."
+        elif status == "nurturing":
+            attention_reason = "Important contact may need a check-in soon."
+        else:
+            attention_reason = "Marked as an important contact."
+
+    return {
+        "status_explanation": explanation,
+        "recommended_action": recommended_action,
+        "status_source": source,
+        "attention_reason": attention_reason,
+        "days_since_interaction": days_since_interaction,
+        "days_since_outgoing": days_since_outgoing,
+        "days_since_incoming": days_since_incoming,
+    }
+
+
 async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tuple:
     """Compute relationship status for a contact based on message history."""
     # Find the private chat matching this contact
