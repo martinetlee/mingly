@@ -1,7 +1,7 @@
 import asyncio
 import subprocess
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 
@@ -14,6 +14,7 @@ from backend.secrets import (
     save_secret, delete_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
 )
+from backend.api.dependencies import generate_session_token, clear_session_token, require_session_token
 
 router = APIRouter()
 
@@ -59,13 +60,15 @@ async def init_vault(req: VaultPasswordRequest):
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     initialize_vault(req.password)
-    return {"success": True}
+    token = generate_session_token()
+    return {"success": True, "session_token": token}
 
 
 @router.post("/vault/unlock")
 async def do_unlock_vault(req: VaultPasswordRequest):
     if not unlock_vault_fn(req.password):
         raise HTTPException(status_code=400, detail="Incorrect password")
+    token = generate_session_token()
     # Re-init Telegram if credentials are already stored
     if has_credentials():
         try:
@@ -76,11 +79,12 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         except Exception:
             pass
-    return {"success": True}
+    return {"success": True, "session_token": token}
 
 
-@router.post("/vault/reset")
+@router.post("/vault/reset", dependencies=[Depends(require_session_token)])
 async def do_reset_vault():
+    clear_session_token()
     reset_vault()
     return {"success": True}
 

@@ -1,9 +1,18 @@
 import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import { getSessionToken, setSessionToken, clearSessionToken } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> | undefined),
+  }
+  const token = getSessionToken()
+  if (token) {
+    headers['X-Session-Token'] = token
+  }
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -17,20 +26,33 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const getVaultStatus = () =>
   request<{ status: 'unset' | 'locked' | 'unlocked' }>('/api/auth/vault-status')
 
-export const initVault = (password: string) =>
-  request<{ success: boolean }>('/api/auth/vault/init', {
+export const initVault = async (password: string) => {
+  const result = await request<{ success: boolean; session_token: string }>('/api/auth/vault/init', {
     method: 'POST',
     body: JSON.stringify({ password }),
   })
+  if (result.session_token) {
+    setSessionToken(result.session_token)
+  }
+  return result
+}
 
-export const unlockVault = (password: string) =>
-  request<{ success: boolean }>('/api/auth/vault/unlock', {
+export const unlockVault = async (password: string) => {
+  const result = await request<{ success: boolean; session_token: string }>('/api/auth/vault/unlock', {
     method: 'POST',
     body: JSON.stringify({ password }),
   })
+  if (result.session_token) {
+    setSessionToken(result.session_token)
+  }
+  return result
+}
 
-export const resetVault = () =>
-  request<{ success: boolean }>('/api/auth/vault/reset', { method: 'POST' })
+export const resetVault = async () => {
+  const result = await request<{ success: boolean }>('/api/auth/vault/reset', { method: 'POST' })
+  clearSessionToken()
+  return result
+}
 
 // --- Auth ---
 
@@ -376,7 +398,7 @@ export const updateConversationTitle = (id: number, title: string) =>
   })
 
 export const deleteConversation = (id: number) =>
-  fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+  request<{ success: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
 
 export const appendConversationMessage = (id: number, role: string, content: string) =>
   request<ConversationMessageItem>(`/api/conversations/${id}/messages`, {

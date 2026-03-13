@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type { WSEvent } from '../api/types'
+import { getSessionToken } from '../api/session'
 
 type Handler = (event: WSEvent) => void
 
@@ -10,7 +11,9 @@ export function useWebSocket(onEvent: Handler) {
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws`)
+    const token = getSessionToken()
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws${tokenParam}`)
 
     ws.onmessage = (e) => {
       try {
