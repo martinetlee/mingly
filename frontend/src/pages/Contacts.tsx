@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCw, Search, ExternalLink, Star, RotateCcw } from 'lucide-react'
 import type { Contact, RelationshipStatus } from '../api/types'
 import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, refreshAllStatuses } from '../api/client'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard from '../components/PersonCard'
 
@@ -92,6 +93,7 @@ export default function Contacts() {
   const [statusFilter, setStatusFilter] = useState<RelationshipStatus | 'all'>('all')
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const loadContacts = useCallback(async (query = '') => {
     const data = await getContacts(query)
@@ -149,6 +151,38 @@ export default function Contacts() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
+  const visibleContacts = useMemo(() =>
+    contacts.filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter),
+    [contacts, statusFilter]
+  )
+
+  // Keyboard shortcuts
+  const contactShortcuts = useMemo(() => ({
+    'j': () => {
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const next = visibleContacts[idx + 1]
+      if (next) setSelected(next)
+    },
+    'arrowdown': () => {
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const next = visibleContacts[idx + 1]
+      if (next) setSelected(next)
+    },
+    'k': () => {
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = visibleContacts[idx - 1]
+      if (prev) setSelected(prev)
+    },
+    'arrowup': () => {
+      const idx = selected ? visibleContacts.findIndex((c) => c.id === selected.id) : -1
+      const prev = visibleContacts[idx - 1]
+      if (prev) setSelected(prev)
+    },
+    '/': () => searchInputRef.current?.focus(),
+  }), [selected, visibleContacts])
+
+  useKeyboardShortcuts(contactShortcuts)
+
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* Contact list */}
@@ -177,6 +211,7 @@ export default function Contacts() {
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
+              ref={searchInputRef}
               type="text"
               placeholder="Search contacts..."
               value={search}
@@ -219,8 +254,7 @@ export default function Contacts() {
               </button>
             </div>
           ) : (
-            contacts
-              .filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter)
+            visibleContacts
               .map((c) => (
                 <ContactCard
                   key={c.id}

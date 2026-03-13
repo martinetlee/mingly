@@ -1,9 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
 import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
@@ -153,6 +154,7 @@ export default function Chats() {
   const [hasMoreChats, setHasMoreChats] = useState(false)
   const [loadingMoreChats, setLoadingMoreChats] = useState(false)
   const chatListRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   // Track which chat telegram_ids have been auto-synced to avoid duplicate requests
   const autoSyncedRef = useRef<Set<number>>(new Set())
   // Highlight a specific message (set from URL params when navigating from Mentions/Briefing)
@@ -515,6 +517,38 @@ export default function Chats() {
     }
   }, [sorted, selectedChat])
 
+  // Keyboard shortcuts
+  const chatShortcuts = useMemo(() => ({
+    'j': () => {
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const next = sorted[idx + 1]
+      if (next) handleSelectChat(next)
+    },
+    'arrowdown': () => {
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const next = sorted[idx + 1]
+      if (next) handleSelectChat(next)
+    },
+    'k': () => {
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const prev = sorted[idx - 1]
+      if (prev) handleSelectChat(prev)
+    },
+    'arrowup': () => {
+      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
+      const prev = sorted[idx - 1]
+      if (prev) handleSelectChat(prev)
+    },
+    '/': () => searchInputRef.current?.focus(),
+    'i': () => setShowInfo((v) => !v),
+    'mod+f': () => setShowChatSearch((v) => !v),
+    'enter': () => {
+      if (!selectedChat && sorted.length > 0) handleSelectChat(sorted[0])
+    },
+  }), [selectedChat, sorted, handleSelectChat])
+
+  useKeyboardShortcuts(chatShortcuts)
+
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* Chat list */}
@@ -553,6 +587,7 @@ export default function Chats() {
         )}
         <div className="border-b border-slate-700/50 px-3 py-3 flex flex-col gap-2">
           <input
+            ref={searchInputRef}
             type="text"
             placeholder="Search chats…"
             value={search}

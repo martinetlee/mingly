@@ -464,6 +464,13 @@ export default function Settings() {
   const [briefingTime, setBriefingTime] = useState<string>('09:00')
   const [briefingMaxTokens, setBriefingMaxTokens] = useState<number>(4000)
 
+  // Keyboard shortcuts toggle (localStorage)
+  const [shortcutsEnabled, setShortcutsEnabled] = useState(() => localStorage.getItem('shortcuts_enabled') !== 'false')
+  const handleShortcutsToggle = useCallback((enabled: boolean) => {
+    setShortcutsEnabled(enabled)
+    localStorage.setItem('shortcuts_enabled', String(enabled))
+  }, [])
+
   // Ollama models already downloaded on disk
   const [downloadedModels, setDownloadedModels] = useState<string[]>([])
 
@@ -993,6 +1000,30 @@ export default function Settings() {
                     Higher values allow longer, more detailed summaries but increase generation time. Reasoning models need 8k+ tokens to think before answering.
                   </p>
                 </div>
+              </div>
+            </section>
+
+            {/* ── Keyboard Shortcuts ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Keyboard Shortcuts</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Press <kbd className="rounded border border-slate-600 bg-slate-700 px-1 py-0.5 text-[10px] font-mono">?</kbd> anywhere to see all available shortcuts.
+              </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="flex items-center justify-between gap-3 cursor-pointer">
+                  <div>
+                    <p className="text-sm text-slate-200">Enable keyboard shortcuts</p>
+                    <p className="text-xs text-slate-400 mt-0.5">j/k navigation, /, i, Cmd+1-7, and more</p>
+                  </div>
+                  <button
+                    role="switch"
+                    aria-checked={shortcutsEnabled}
+                    onClick={() => handleShortcutsToggle(!shortcutsEnabled)}
+                    className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors ${shortcutsEnabled ? 'bg-emerald-500' : 'bg-slate-600'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${shortcutsEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </button>
+                </label>
               </div>
             </section>
           </>

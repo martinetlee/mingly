@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useWebSocket } from '../hooks/useWebSocket'
 import ReactMarkdown from 'react-markdown'
@@ -29,7 +29,9 @@ import {
   RotateCcw,
   Star,
 } from 'lucide-react'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import {
+  reactToMessage,
   listConversations,
   createConversation,
   getConversation,
@@ -439,11 +441,20 @@ const TAG_COLORS: Record<string, string> = {
 function MentionCard({
   group,
   onNavigate,
+  selected = false,
+  onToggleExpand,
 }: {
   group: MentionGroup
   onNavigate: (chatId: number, msgId: number) => void
+  selected?: boolean
+  onToggleExpand?: (expanded: boolean) => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const handleToggle = useCallback(() => {
+    const next = !expanded
+    setExpanded(next)
+    onToggleExpand?.(next)
+  }, [expanded, onToggleExpand])
 
   const chatTypeColor = {
     group: 'bg-purple-500/20 text-purple-400',
@@ -465,13 +476,13 @@ function MentionCard({
   const senderName = group.mention_msg.sender_name || 'Unknown'
 
   return (
-    <div className={`rounded-xl border ${trackedBorder} overflow-hidden transition-colors`}>
+    <div className={`rounded-xl border ${trackedBorder} overflow-hidden transition-colors${selected ? ' ring-1 ring-amber-500/50' : ''}`}>
       {/* Header row — always visible, click to expand */}
       <div
         role="button"
         tabIndex={0}
-        onClick={() => setExpanded((v) => !v)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
+        onClick={handleToggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggle() } }}
         className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30 transition-colors select-none"
       >
         {/* Expand chevron */}
@@ -605,6 +616,8 @@ function MentionsTab() {
   const [groups, setGroups] = useState<MentionGroup[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const selectedCardRef = useRef<HTMLDivElement | null>(null)
 
   // Filters
   const [days, setDays] = useState(7)
@@ -666,6 +679,44 @@ function MentionsTab() {
     if (actionFilter === 'not_acted') return !isReplied && !isAcknowledged
     return true
   })
+
+  // Keep selectedIdx in bounds when list changes
+  useEffect(() => {
+    if (visibleGroups.length > 0) setSelectedIdx((i) => Math.min(i, visibleGroups.length - 1))
+  }, [visibleGroups.length])
+
+  // Scroll selected card into view
+  useEffect(() => {
+    selectedCardRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedIdx])
+
+  // Keyboard shortcuts for mentions navigation
+  const mentionShortcuts = useMemo(() => ({
+    'j': () => setSelectedIdx((i) => Math.min(i + 1, visibleGroups.length - 1)),
+    'arrowdown': () => setSelectedIdx((i) => Math.min(i + 1, visibleGroups.length - 1)),
+    'k': () => setSelectedIdx((i) => Math.max(i - 1, 0)),
+    'arrowup': () => setSelectedIdx((i) => Math.max(i - 1, 0)),
+    'a': () => {
+      const g = visibleGroups[selectedIdx]
+      if (!g) return
+      const emoji = g.mention_msg.my_reaction ? null : '👀'
+      reactToMessage(g.chat.telegram_id, g.mention_msg.telegram_id, emoji)
+        .then(() => {
+          setGroups((prev) => prev.map((pg) =>
+            pg.mention_msg.telegram_id === g.mention_msg.telegram_id
+              ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: emoji } }
+              : pg
+          ))
+        })
+        .catch(() => {})
+    },
+    'r': () => {
+      const g = visibleGroups[selectedIdx]
+      if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.telegram_id}`)
+    },
+  }), [visibleGroups, selectedIdx, navigate])
+
+  useKeyboardShortcuts(mentionShortcuts)
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -796,11 +847,14 @@ function MentionsTab() {
         {!loading && !error && visibleGroups.length > 0 && (
           <div className="space-y-2">
             {visibleGroups.map((group, i) => (
-              <MentionCard
-                key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`}
-                group={group}
-                onNavigate={handleNavigate}
-              />
+              <div key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedIdx ? selectedCardRef : null}>
+                <MentionCard
+                  group={group}
+                  onNavigate={handleNavigate}
+                  selected={i === selectedIdx}
+                  onToggleExpand={() => setSelectedIdx(i)}
+                />
+              </div>
             ))}
           </div>
         )}
