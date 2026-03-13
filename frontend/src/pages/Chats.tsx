@@ -262,10 +262,10 @@ export default function Chats() {
     const params = new URLSearchParams(location.search)
     const chatIdParam = params.get('chatId')
     const msgIdParam = params.get('msgId')
-    if (chatIdParam && msgIdParam) {
+    if (chatIdParam) {
       const chatId = parseInt(chatIdParam, 10)
-      const msgId = parseInt(msgIdParam, 10)
-      if (!isNaN(chatId) && !isNaN(msgId)) {
+      const msgId = msgIdParam ? parseInt(msgIdParam, 10) : 0
+      if (!isNaN(chatId)) {
         pendingNavRef.current = { chatId, msgId }
       }
     }
@@ -280,13 +280,15 @@ export default function Chats() {
     pendingNavRef.current = null
     const target = chats.find((c) => c.telegram_id === chatId)
     if (target) {
-      pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
+      if (msgId) {
+        pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
+        setHighlightMsgId(msgId)
+      }
       setSelectedChat(target)
       setMessages([])
       setHasMore(false)
       setMessageOffset(0)
       setShowInfo(false)
-      setHighlightMsgId(msgId)
     }
   }, [chats])
 

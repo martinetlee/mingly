@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MessageSquare, Mail, Users, ArrowRight, FileText } from 'lucide-react'
-import type { DashboardData } from '../api/types'
-import { getDashboard } from '../api/client'
+import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck } from 'lucide-react'
+import type { DashboardData, MentionGroup, MentionMessage } from '../api/types'
+import { getDashboard, getMentions, reactToMessage } from '../api/client'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
 function getGreeting(): string {
   const hour = new Date().getHours()
@@ -25,10 +26,160 @@ function fmtRelative(iso: string): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
+// ---------------------------------------------------------------------------
+// Mention components (simplified from Intelligence page)
+// ---------------------------------------------------------------------------
+
+function MentionMsgRow({ msg, highlighted }: { msg: MentionMessage; highlighted: boolean }) {
+  return (
+    <div className={`rounded-lg px-3 py-2 text-xs leading-relaxed transition-colors ${
+      highlighted ? 'bg-amber-500/10 border border-amber-500/30' : 'bg-slate-700/30'
+    }`}>
+      <div className="flex items-baseline justify-between gap-2 mb-0.5">
+        <span className={`font-medium truncate ${highlighted ? 'text-amber-300' : 'text-slate-300'}`}>
+          {msg.sender_name || 'Unknown'}
+        </span>
+        <span className="shrink-0 text-[10px] text-slate-500">{fmtRelative(msg.date)}</span>
+      </div>
+      {msg.text && <p className="text-slate-400 leading-snug line-clamp-3">{msg.text}</p>}
+      {msg.media_type && !msg.text && (
+        <span className="italic text-slate-500">[{msg.media_type}]</span>
+      )}
+      {!msg.text && !msg.media_type && (
+        <span className="italic text-slate-500">[no text]</span>
+      )}
+    </div>
+  )
+}
+
+function HomeMentionCard({
+  group,
+  onNavigate,
+  selected,
+}: {
+  group: MentionGroup
+  onNavigate: (chatId: number, msgId: number) => void
+  selected: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  const chatTypeColor = {
+    group: 'bg-purple-500/20 text-purple-400',
+    channel: 'bg-amber-500/20 text-amber-400',
+    private: 'bg-indigo-500/20 text-indigo-400',
+  }[group.chat.type] ?? 'bg-slate-500/20 text-slate-400'
+
+  const allMsgs = [
+    ...group.context_before.map((m) => ({ msg: m, highlighted: false })),
+    { msg: group.mention_msg, highlighted: true },
+    ...group.context_after.map((m) => ({ msg: m, highlighted: false })),
+  ]
+
+  const trackedBorder = group.chat.is_tracked
+    ? 'border-violet-500/40 bg-violet-900/10'
+    : 'border-slate-700/60 bg-slate-800/60'
+
+  const mentionText = group.mention_msg.text || ''
+  const senderName = group.mention_msg.sender_name || 'Unknown'
+
+  return (
+    <div className={`rounded-xl border ${trackedBorder} overflow-hidden transition-colors${selected ? ' ring-1 ring-amber-500/50' : ''}`}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
+        className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30 transition-colors select-none"
+      >
+        {expanded ? <ChevronDown size={12} className="shrink-0 text-slate-500" /> : <ChevronRight size={12} className="shrink-0 text-slate-500" />}
+        {group.chat.is_tracked && <Bookmark size={11} className="shrink-0 text-violet-400" />}
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${chatTypeColor}`}>
+          {group.chat.type}
+        </span>
+        <span className="flex-1 min-w-0 truncate text-xs font-semibold text-slate-200">{group.chat.name}</span>
+        {group.replied && (
+          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500/15 text-emerald-400 shrink-0">
+            <CheckCheck size={9} />
+            replied
+          </span>
+        )}
+        {group.mention_msg.my_reaction && !group.replied && (
+          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-400 shrink-0">
+            <span className="text-[10px] leading-none">{group.mention_msg.my_reaction}</span>
+            ack
+          </span>
+        )}
+        <AtSign size={11} className="shrink-0 text-amber-400" />
+        <span className="shrink-0 text-[10px] text-slate-500">{fmtRelative(group.mention_msg.date)}</span>
+      </div>
+
+      {!expanded && (
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.id, group.mention_msg.telegram_id) } }}
+          className="px-3 pb-2.5 cursor-pointer"
+        >
+          <p className="text-xs text-slate-500 truncate">
+            <span className="text-amber-300/70 font-medium">{senderName}: </span>
+            {mentionText || <span className="italic">{group.mention_msg.media_type ? `[${group.mention_msg.media_type}]` : '[no text]'}</span>}
+          </p>
+        </div>
+      )}
+
+      {expanded && (
+        <div className="border-t border-slate-700/50">
+          <div className="px-3 py-2.5 space-y-1.5">
+            {allMsgs.map(({ msg, highlighted }, i) => (
+              <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
+            ))}
+          </div>
+          {group.user_reply_msg && (
+            <div className="px-3 pb-2.5 space-y-1.5">
+              {group.reply_has_gap && (
+                <div className="text-center text-[11px] text-slate-500 py-0.5 select-none">
+                  <span className="rounded bg-slate-700/40 px-2 py-0.5">···</span>
+                </div>
+              )}
+              <MentionMsgRow msg={group.user_reply_msg} highlighted={false} />
+            </div>
+          )}
+          <div className="px-3 pb-3">
+            <button
+              onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+              className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
+            >
+              Jump to mention →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+type HomeTab = 'mentions' | 'needs_reply'
+type MentionFilter = 'not_acted' | 'all' | 'acknowledged' | 'replied'
+
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<HomeTab>('mentions')
+
+  // Mentions state
+  const [mentions, setMentions] = useState<MentionGroup[]>([])
+  const [mentionsLoading, setMentionsLoading] = useState(true)
+  const [mentionFilter, setMentionFilter] = useState<MentionFilter>('not_acted')
+  const [selectedMentionIdx, setSelectedMentionIdx] = useState(0)
+  const selectedMentionRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     getDashboard()
@@ -37,23 +188,82 @@ export default function Home() {
       .finally(() => setLoading(false))
   }, [])
 
-  // Auto-refresh on WebSocket new_message events
+  // Auto-refresh dashboard every 60s
   useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      try {
-        const ev = JSON.parse(e.data)
-        if (ev.type === 'new_message') {
-          getDashboard().then(setData).catch(() => {})
-        }
-      } catch {}
-    }
-    // Try to listen on existing WebSocket — the WS is managed by Layout/App
-    // For now, poll every 60s as a fallback
     const interval = setInterval(() => {
       getDashboard().then(setData).catch(() => {})
     }, 60000)
     return () => clearInterval(interval)
   }, [])
+
+  // Load mentions
+  const fetchMentions = useCallback(async () => {
+    setMentionsLoading(true)
+    try {
+      const data = await getMentions({ days: 7 })
+      setMentions(data)
+    } catch {}
+    setMentionsLoading(false)
+  }, [])
+
+  useEffect(() => {
+    fetchMentions()
+  }, [fetchMentions])
+
+  // Filter mentions client-side
+  const visibleMentions = useMemo(() => mentions.filter((g) => {
+    const isReplied = g.replied
+    const isAcknowledged = !!g.mention_msg.my_reaction && !isReplied
+    if (mentionFilter === 'replied') return isReplied
+    if (mentionFilter === 'acknowledged') return isAcknowledged
+    if (mentionFilter === 'not_acted') return !isReplied && !isAcknowledged
+    return true
+  }), [mentions, mentionFilter])
+
+  // Keep selectedIdx in bounds
+  useEffect(() => {
+    if (visibleMentions.length > 0) setSelectedMentionIdx((i) => Math.min(i, visibleMentions.length - 1))
+  }, [visibleMentions.length])
+
+  // Scroll selected into view
+  useEffect(() => {
+    selectedMentionRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedMentionIdx])
+
+  const handleMentionNavigate = (chatId: number, msgId: number) => {
+    navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
+  }
+
+  // Keyboard shortcuts for mentions
+  const mentionShortcuts = useMemo(() => {
+    if (activeTab !== 'mentions') return {}
+    return {
+      'j': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
+      'arrowdown': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
+      'k': () => setSelectedMentionIdx((i) => Math.max(i - 1, 0)),
+      'arrowup': () => setSelectedMentionIdx((i) => Math.max(i - 1, 0)),
+      'a': () => {
+        const g = visibleMentions[selectedMentionIdx]
+        if (!g) return
+        const emoji = g.mention_msg.my_reaction ? null : '👀'
+        reactToMessage(g.chat.telegram_id, g.mention_msg.telegram_id, emoji)
+          .then(() => {
+            setMentions((prev) => prev.map((pg) =>
+              pg.mention_msg.telegram_id === g.mention_msg.telegram_id
+                ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: emoji } }
+                : pg
+            ))
+          })
+          .catch(() => {})
+      },
+      'r': () => {
+        const g = visibleMentions[selectedMentionIdx]
+        if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.telegram_id}`)
+      },
+    }
+  }, [activeTab, visibleMentions, selectedMentionIdx, navigate])
+
+  useKeyboardShortcuts(mentionShortcuts)
 
   if (loading) {
     return (
@@ -78,78 +288,169 @@ export default function Home() {
         <h1 className="text-2xl font-bold text-gray-100 mb-6">{getGreeting()}</h1>
 
         {/* Stats */}
-        <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="mb-8">
           <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4">
             <div className="flex items-center gap-2 mb-1">
               <Mail size={14} className="text-indigo-400" />
-              <span className="text-xs text-slate-400">Unread</span>
+              <span className="text-xs text-slate-400">Unread Today</span>
             </div>
-            <p className="text-2xl font-bold text-gray-100">{data.stats.total_unread}</p>
-          </div>
-          <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4">
-            <div className="flex items-center gap-2 mb-1">
-              <MessageSquare size={14} className="text-emerald-400" />
-              <span className="text-xs text-slate-400">Messages Today</span>
-            </div>
-            <p className="text-2xl font-bold text-gray-100">{data.stats.messages_today}</p>
-          </div>
-          <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4">
-            <div className="flex items-center gap-2 mb-1">
-              <Users size={14} className="text-amber-400" />
-              <span className="text-xs text-slate-400">Active Contacts</span>
-            </div>
-            <p className="text-2xl font-bold text-gray-100">{data.stats.active_contacts}</p>
+            <p className="text-2xl font-bold text-gray-100">{data.stats.unread_today}</p>
+            <p className="text-[10px] text-slate-500 mt-0.5">From important contacts & tracked chats</p>
           </div>
         </div>
 
-        {/* Needs Reply */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-xs font-medium uppercase tracking-wider text-slate-400">Needs Reply</h2>
-            <Link to="/chats" className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5">
-              View all <ArrowRight size={10} />
-            </Link>
+        {/* Tabs: Mentions / Needs Reply */}
+        <div className="mb-4">
+          <div className="flex border-b border-slate-700/50">
+            <button
+              onClick={() => setActiveTab('mentions')}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+                activeTab === 'mentions'
+                  ? 'border-amber-400 text-amber-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <AtSign size={13} />
+                Mentions
+                {visibleMentions.length > 0 && (
+                  <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+                    {visibleMentions.length}
+                  </span>
+                )}
+              </span>
+            </button>
+            <button
+              onClick={() => setActiveTab('needs_reply')}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+                activeTab === 'needs_reply'
+                  ? 'border-indigo-400 text-indigo-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <Mail size={13} />
+                Needs Reply
+                {data.needs_reply.length > 0 && (
+                  <span className="rounded-full bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">
+                    {data.needs_reply.length}
+                  </span>
+                )}
+              </span>
+            </button>
           </div>
-          {data.needs_reply.length === 0 ? (
-            <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-6 text-center">
-              <p className="text-sm text-slate-500">You're all caught up! No conversations waiting for your reply.</p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {data.needs_reply.map((item) => (
+        </div>
+
+        {/* Mentions tab content */}
+        {activeTab === 'mentions' && (
+          <div className="mb-8">
+            {/* Filter buttons */}
+            <div className="flex items-center gap-1.5 mb-3">
+              {([
+                { label: 'Not acted', value: 'not_acted' as MentionFilter },
+                { label: 'All', value: 'all' as MentionFilter },
+                { label: 'Acknowledged', value: 'acknowledged' as MentionFilter },
+                { label: 'Replied', value: 'replied' as MentionFilter },
+              ]).map((opt) => (
                 <button
-                  key={item.chat.telegram_id}
-                  onClick={() => navigate(`/chats?select=${item.chat.telegram_id}`)}
-                  className="flex items-center gap-3 rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 text-left hover:bg-slate-700/50 transition-colors w-full"
+                  key={opt.value}
+                  onClick={() => setMentionFilter(opt.value)}
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                    mentionFilter === opt.value
+                      ? opt.value === 'not_acted'
+                        ? 'bg-slate-500/30 text-slate-200'
+                        : opt.value === 'acknowledged'
+                          ? 'bg-amber-500/25 text-amber-300'
+                          : opt.value === 'replied'
+                            ? 'bg-emerald-500/25 text-emerald-300'
+                            : 'bg-slate-600 text-slate-200'
+                      : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
+                  }`}
                 >
-                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-                    {item.chat.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-sm font-medium text-gray-200">{item.chat.name}</p>
-                      <span className="flex-shrink-0 text-[10px] text-slate-500">
-                        {fmtRelative(item.last_message.date)}
-                      </span>
-                    </div>
-                    <p className="truncate text-xs text-slate-400 mt-0.5">
-                      {item.last_message.sender_name && (
-                        <span className="text-slate-300">{item.last_message.sender_name}: </span>
-                      )}
-                      {item.last_message.text || <span className="italic">[media]</span>}
-                    </p>
-                  </div>
+                  {opt.label}
                 </button>
               ))}
+              <button
+                onClick={fetchMentions}
+                disabled={mentionsLoading}
+                className="ml-auto text-slate-500 hover:text-slate-300 disabled:opacity-50 transition-colors"
+                title="Refresh mentions"
+              >
+                <RefreshCw size={12} className={mentionsLoading ? 'animate-spin' : ''} />
+              </button>
             </div>
-          )}
-        </div>
 
-        {/* Contacts Needing Attention */}
+            {mentionsLoading ? (
+              <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-8 text-center">
+                <p className="text-sm text-slate-500">Loading mentions...</p>
+              </div>
+            ) : visibleMentions.length === 0 ? (
+              <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-8 text-center">
+                <AtSign size={20} className="mx-auto mb-2 text-amber-400/50" />
+                <p className="text-sm text-slate-500">
+                  {mentionFilter === 'not_acted' ? 'No unacted mentions in the last 7 days' : 'No mentions found'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {visibleMentions.map((group, i) => (
+                  <div key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
+                    <HomeMentionCard
+                      group={group}
+                      onNavigate={handleMentionNavigate}
+                      selected={i === selectedMentionIdx}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Needs Reply tab content */}
+        {activeTab === 'needs_reply' && (
+          <div className="mb-8">
+            {data.needs_reply.length === 0 ? (
+              <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-6 text-center">
+                <p className="text-sm text-slate-500">You're all caught up! No conversations waiting for your reply.</p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {data.needs_reply.map((item) => (
+                  <button
+                    key={item.chat.telegram_id}
+                    onClick={() => navigate(`/chats?chatId=${item.chat.telegram_id}`)}
+                    className="flex items-center gap-3 rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 text-left hover:bg-slate-700/50 transition-colors w-full"
+                  >
+                    <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
+                      {item.chat.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="truncate text-sm font-medium text-gray-200">{item.chat.name}</p>
+                        <span className="flex-shrink-0 text-[10px] text-slate-500">
+                          {fmtRelative(item.last_message.date)}
+                        </span>
+                      </div>
+                      <p className="truncate text-xs text-slate-400 mt-0.5">
+                        {item.last_message.sender_name && (
+                          <span className="text-slate-300">{item.last_message.sender_name}: </span>
+                        )}
+                        {item.last_message.text || <span className="italic">[media]</span>}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Important Contacts */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-xs font-medium uppercase tracking-wider text-slate-400">Important Contacts</h2>
-            <Link to="/contacts" className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5">
+            <Link to="/contacts?filter=important" className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5">
               View all <ArrowRight size={10} />
             </Link>
           </div>
@@ -160,10 +461,10 @@ export default function Home() {
           ) : (
             <div className="flex flex-col gap-1">
               {data.attention_contacts.map((c) => (
-                <Link
+                <button
                   key={c.id}
-                  to={`/profile/${c.telegram_id}`}
-                  className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-800 transition-colors"
+                  onClick={() => navigate(`/chats?chatId=${c.telegram_id}`)}
+                  className="flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-800 transition-colors text-left w-full"
                 >
                   <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
                     {c.name.charAt(0).toUpperCase()}
@@ -183,7 +484,7 @@ export default function Home() {
                       {c.relationship_status}
                     </span>
                   )}
-                </Link>
+                </button>
               ))}
             </div>
           )}

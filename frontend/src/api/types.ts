@@ -127,9 +127,7 @@ export interface PersonSummary {
 }
 
 export interface DashboardStats {
-  total_unread: number
-  messages_today: number
-  active_contacts: number
+  unread_today: number
 }
 
 export interface DashboardNeedsReply {

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { RefreshCw, Search, ExternalLink, Star, RotateCcw } from 'lucide-react'
 import type { Contact, RelationshipStatus } from '../api/types'
 import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, refreshAllStatuses } from '../api/client'
@@ -85,11 +85,16 @@ function ContactCard({
 }
 
 export default function Contacts() {
+  const location = useLocation()
   const [contacts, setContacts] = useState<Contact[]>([])
   const [selected, setSelected] = useState<Contact | null>(null)
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [importantOnly, setImportantOnly] = useState(() => {
+    const params = new URLSearchParams(location.search)
+    return params.get('filter') === 'important'
+  })
   const [statusFilter, setStatusFilter] = useState<RelationshipStatus | 'all'>('all')
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
@@ -152,8 +157,10 @@ export default function Contacts() {
   }, [sidebarWidth])
 
   const visibleContacts = useMemo(() =>
-    contacts.filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter),
-    [contacts, statusFilter]
+    contacts
+      .filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter)
+      .filter((c) => !importantOnly || c.is_important),
+    [contacts, statusFilter, importantOnly]
   )
 
   // Keyboard shortcuts
@@ -223,6 +230,17 @@ export default function Contacts() {
 
         {/* Status filter tabs */}
         <div className="border-b border-slate-700/50 px-3 py-2 flex flex-wrap gap-1">
+          <button
+            onClick={() => setImportantOnly((v) => !v)}
+            className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+              importantOnly
+                ? 'bg-amber-500/20 text-amber-400'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            ★ Important
+          </button>
+          <span className="border-r border-slate-700 mx-0.5" />
           {(['all', 'needs_reply', 'active', 'nurturing', 'stalled', 'cold'] as const).map((s) => (
             <button
               key={s}
