@@ -31,7 +31,7 @@ def test_generate_session_token():
 
 
 def test_clear_session_token():
-    generate_session_token()
+    token = generate_session_token()
     clear_session_token()
     assert get_session_token() is None
 
@@ -67,7 +67,7 @@ async def test_protected_route_rejects_without_token(app):
 @pytest.mark.asyncio
 async def test_protected_route_rejects_wrong_token(app):
     """A protected route should reject an incorrect token."""
-    generate_session_token()
+    token = generate_session_token()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -127,14 +127,17 @@ async def test_vault_unlock_returns_session_token(app):
 @pytest.mark.asyncio
 async def test_vault_reset_clears_session_token(app):
     """POST /api/auth/vault/reset should clear the session token."""
-    generate_session_token()
+    token = generate_session_token()
     assert get_session_token() is not None
 
     with patch("backend.api.auth.reset_vault"):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
-            resp = await client.post("/api/auth/vault/reset")
+            resp = await client.post(
+                "/api/auth/vault/reset",
+                headers={"X-Session-Token": token},
+            )
             assert resp.status_code == 200
             assert get_session_token() is None
 
