@@ -174,6 +174,7 @@ export default function Home() {
 
   // Tab state -- default to Catch Up triage queue
   const [activeTab, setActiveTab] = useState<HomeTab>('catchup')
+  const [catchUpCount, setCatchUpCount] = useState<number | null>(null)
 
   // Mentions state
   const [mentions, setMentions] = useState<MentionGroup[]>([])
@@ -318,9 +319,9 @@ export default function Home() {
               <span className="flex items-center gap-1.5">
                 <ListChecks size={13} />
                 Catch Up
-                {data.needs_reply.length > 0 && (
+                {(catchUpCount ?? data.needs_reply.length) > 0 && (
                   <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
-                    {data.needs_reply.length}
+                    {catchUpCount ?? data.needs_reply.length}
                   </span>
                 )}
               </span>
@@ -367,7 +368,7 @@ export default function Home() {
         {/* Catch Up triage tab content */}
         {activeTab === 'catchup' && (
           <div className="mb-8">
-            <CatchUpQueue needsReply={data.needs_reply} onRefreshDashboard={refreshDashboard} />
+            <CatchUpQueue needsReply={data.needs_reply} onRefreshDashboard={refreshDashboard} onBadgeCount={setCatchUpCount} />
           </div>
         )}
 

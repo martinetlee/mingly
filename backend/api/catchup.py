@@ -41,10 +41,10 @@ def _item_dict(item: CatchUpItem) -> dict:
         "contact_id": item.contact_id,
         "status": item.status,
         "note": item.note,
-        "snoozed_until": item.snoozed_until.isoformat() if item.snoozed_until else None,
-        "handled_at": item.handled_at.isoformat() if item.handled_at else None,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "snoozed_until": item.snoozed_until.isoformat() + "Z" if item.snoozed_until else None,
+        "handled_at": item.handled_at.isoformat() + "Z" if item.handled_at else None,
+        "created_at": item.created_at.isoformat() + "Z" if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() + "Z" if item.updated_at else None,
     }
 
 
