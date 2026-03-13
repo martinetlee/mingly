@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import type { DashboardNeedsReply, CatchUpItem, RelationshipStatus } from '../api/types'
 import {
-  getCatchUpItems,
+  getAllCatchUpItems,
   snoozeCatchUpItem,
   markCatchUpHandled,
   addCatchUpNote,
@@ -284,6 +284,7 @@ function TriageCard({
                   onClick={(e) => {
                     e.stopPropagation()
                     onNote(chatId, noteText)
+                    setNoteText('')
                     setShowNote(false)
                   }}
                   className="rounded-md bg-indigo-500/20 hover:bg-indigo-500/30 px-2.5 py-1 text-[11px] font-medium text-indigo-300 transition-colors"
@@ -325,9 +326,10 @@ function TriageCard({
 interface CatchUpQueueProps {
   needsReply: DashboardNeedsReply[]
   onRefreshDashboard: () => void
+  onBadgeCount?: (count: number) => void
 }
 
-export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUpQueueProps) {
+export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCount }: CatchUpQueueProps) {
   const navigate = useNavigate()
   const [catchUpMeta, setCatchUpMeta] = useState<Record<number, CatchUpItem>>({})
   const [loading, setLoading] = useState(false)
@@ -339,7 +341,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUp
   const fetchMeta = useCallback(async () => {
     setLoading(true)
     try {
-      const items = await getCatchUpItems()
+      const items = await getAllCatchUpItems()
       const map: Record<number, CatchUpItem> = {}
       for (const it of items) {
         map[it.chat_telegram_id] = it
@@ -368,6 +370,11 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUp
     })
   }, [needsReply, catchUpMeta])
 
+  // Notify parent of badge count changes
+  useEffect(() => {
+    onBadgeCount?.(visibleItems.length)
+  }, [visibleItems.length, onBadgeCount])
+
   // Keep selection in bounds
   useEffect(() => {
     if (visibleItems.length > 0) {
@@ -388,7 +395,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUp
   const handleSnooze = async (chatId: number, hours: number) => {
     try {
       const updated = await snoozeCatchUpItem(chatId, hours)
-      setCatchUpMeta((prev) => ({ ...prev, [chatId]: updated }))
+      setCatchUpMeta((prev) => ({ ...prev, [updated.chat_telegram_id]: updated }))
       showFeedback(chatId, `Snoozed for ${hours >= 24 ? `${hours / 24}d` : `${hours}h`}`)
     } catch (err) {
       console.error('Failed to snooze:', err)
@@ -398,7 +405,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUp
   const handleHandled = async (chatId: number) => {
     try {
       const updated = await markCatchUpHandled(chatId)
-      setCatchUpMeta((prev) => ({ ...prev, [chatId]: updated }))
+      setCatchUpMeta((prev) => ({ ...prev, [updated.chat_telegram_id]: updated }))
       showFeedback(chatId, 'Marked as handled')
     } catch (err) {
       console.error('Failed to mark handled:', err)
@@ -408,7 +415,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard }: CatchUp
   const handleNote = async (chatId: number, note: string) => {
     try {
       const updated = await addCatchUpNote(chatId, note)
-      setCatchUpMeta((prev) => ({ ...prev, [chatId]: updated }))
+      setCatchUpMeta((prev) => ({ ...prev, [updated.chat_telegram_id]: updated }))
       showFeedback(chatId, 'Note saved')
     } catch (err) {
       console.error('Failed to add note:', err)
