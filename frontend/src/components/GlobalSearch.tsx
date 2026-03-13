@@ -33,7 +33,7 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
       label: c.name,
       sublabel: c.type,
       icon: 'chat',
-      navigateTo: `/chats?select=${c.telegram_id}`,
+      navigateTo: `/chats?chatId=${c.telegram_id}`,
     })
   }
 
@@ -66,7 +66,7 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
       label: m.text,
       sublabel: `${m.chat_name}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtDate(m.date)}`,
       icon: 'message',
-      navigateTo: `/chats?select=${m.chat_id}&anchor=${m.telegram_id}`,
+      navigateTo: `/chats?chatId=${m.chat_id}&msgId=${m.telegram_id}`,
     })
   }
 
