@@ -50,9 +50,11 @@ function ContactCard({
   onClick: () => void
 }) {
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
-      className={`flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors ${
+      aria-current={selected ? 'true' : undefined}
+      className={`flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-inset ${
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
       }`}
     >
@@ -65,7 +67,7 @@ function ContactCard({
             {contact.name}
           </p>
           {contact.is_important && (
-            <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" />
+            <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" aria-label="Important" />
           )}
           {contact.relationship_status && (
             <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${STATUS_COLORS[contact.relationship_status] ?? ''}`}>
@@ -82,7 +84,7 @@ function ContactCard({
           </p>
         )}
       </div>
-    </div>
+    </button>
   )
 }
 

@@ -14,9 +14,11 @@ function OrgCard({
   onClick: () => void
 }) {
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
-      className={`flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors ${
+      aria-current={selected ? 'true' : undefined}
+      className={`flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-inset ${
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
       }`}
     >
@@ -32,7 +34,7 @@ function OrgCard({
           {org.former_member_count > 0 && `, ${org.former_member_count} former`}
         </p>
       </div>
-    </div>
+    </button>
   )
 }
 
