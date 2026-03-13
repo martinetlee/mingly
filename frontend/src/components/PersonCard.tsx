@@ -321,16 +321,21 @@ export default function PersonCard({
                 @{twitterHandle.replace('@', '')}
               </a>
             )}
-            {linkedinUrl && (
-              <a
-                href={linkedinUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-sky-400 transition-colors"
-              >
-                LinkedIn
-              </a>
-            )}
+            {linkedinUrl && (() => {
+              const safeHref = sanitizeLinkedInUrl(linkedinUrl)
+              return safeHref ? (
+                <a
+                  href={safeHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-sky-400 transition-colors"
+                >
+                  LinkedIn
+                </a>
+              ) : (
+                <span>LinkedIn (invalid URL)</span>
+              )
+            })()}
             {hasNotes && (
               <span className="text-slate-500">Has notes</span>
             )}
