@@ -305,6 +305,7 @@ export interface MentionGroup {
   reply_has_gap: boolean
   chat: {
     id: number
+    telegram_id: number
     name: string
     type: string
     is_tracked: boolean

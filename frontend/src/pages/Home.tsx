@@ -117,8 +117,8 @@ function HomeMentionCard({
         <div
           role="button"
           tabIndex={0}
-          onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.id, group.mention_msg.telegram_id) } }}
+          onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id) } }}
           className="px-3 pb-2.5 cursor-pointer"
         >
           <p className="text-xs text-slate-500 truncate">
@@ -147,7 +147,7 @@ function HomeMentionCard({
           )}
           <div className="px-3 pb-3">
             <button
-              onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+              onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id)}
               className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
             >
               Jump to mention →
@@ -254,7 +254,7 @@ export default function Home() {
                 : pg
             ))
           })
-          .catch(() => {})
+          .catch((err) => console.error('Failed to react to mention:', err))
       },
       'r': () => {
         const g = visibleMentions[selectedMentionIdx]
@@ -394,7 +394,7 @@ export default function Home() {
             ) : (
               <div className="space-y-2">
                 {visibleMentions.map((group, i) => (
-                  <div key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
+                  <div key={`${group.chat.telegram_id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
                     <HomeMentionCard
                       group={group}
                       onNavigate={handleMentionNavigate}

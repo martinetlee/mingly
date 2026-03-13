@@ -553,6 +553,7 @@ async def intelligence_mentions(
             "reply_has_gap": reply_has_gap,
             "chat": {
                 "id": chat.telegram_id,
+                "telegram_id": chat.telegram_id,
                 "name": chat.name,
                 "type": chat.type,
                 "is_tracked": chat.is_tracked,
