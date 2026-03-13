@@ -179,6 +179,14 @@ _DEFAULT_TAGS = [
     ("Finance", "amber"),
     ("Projects", "violet"),
     ("News", "sky"),
+
+    (
+        18,
+        "Create catchup_items table for triage queue",
+        [
+            "CREATE TABLE IF NOT EXISTS catchup_items (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_telegram_id INTEGER NOT NULL UNIQUE, contact_id INTEGER, status TEXT NOT NULL DEFAULT 'pending', note TEXT, snoozed_until DATETIME, handled_at DATETIME, created_at DATETIME, updated_at DATETIME)",
+        ],
+    ),
 ]
 
 

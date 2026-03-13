@@ -132,6 +132,21 @@ class ConversationMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class CatchUpItem(Base):
+    __tablename__ = "catchup_items"
+    __table_args__ = (UniqueConstraint("chat_telegram_id", name="uq_catchup_chat"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    contact_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending, handled, snoozed
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    snoozed_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    handled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class BriefingRun(Base):
     __tablename__ = "briefing_runs"
 

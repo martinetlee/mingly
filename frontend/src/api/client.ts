@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -397,6 +397,44 @@ export const getMentions = (params?: { days?: number; groupName?: string; tagNam
   const q = qs.toString()
   return request<MentionGroup[]>(`/api/intelligence/mentions${q ? `?${q}` : ''}`)
 }
+
+// --- Catch Up ---
+
+export const getCatchUpItems = () =>
+  request<CatchUpItem[]>('/api/catchup/items')
+
+export const getAllCatchUpItems = () =>
+  request<CatchUpItem[]>('/api/catchup/all')
+
+export const snoozeCatchUpItem = (chatTelegramId: number, hours = 24) =>
+  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/snooze`, {
+    method: 'POST',
+    body: JSON.stringify({ hours }),
+  })
+
+export const markCatchUpHandled = (chatTelegramId: number) =>
+  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/handled`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+export const reopenCatchUpItem = (chatTelegramId: number) =>
+  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/reopen`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+export const addCatchUpNote = (chatTelegramId: number, note: string) =>
+  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/note`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  })
+
+export const updateCatchUpRelationship = (chatTelegramId: number, status: string) =>
+  request<{ contact_id: number; relationship_status: string }>(`/api/catchup/${chatTelegramId}/relationship-status`, {
+    method: 'POST',
+    body: JSON.stringify({ status }),
+  })
 
 // --- Dashboard ---
 
