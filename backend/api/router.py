@@ -33,7 +33,7 @@ def create_app() -> FastAPI:
     async def serve_media(file_path: str):
         full_path = (DATA_DIR / file_path).resolve()
         # Containment check: reject any path that escapes DATA_DIR
-        if not str(full_path).startswith(str(DATA_DIR.resolve())):
+        if not full_path.is_relative_to(DATA_DIR.resolve()):
             raise HTTPException(status_code=403)
         if not full_path.exists() or not full_path.is_file():
             raise HTTPException(status_code=404)
