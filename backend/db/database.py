@@ -1,9 +1,11 @@
-from datetime import datetime
+import logging
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
 from backend.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
@@ -20,64 +22,13 @@ async def get_db():
 
 async def init_db():
     from backend.db import models  # noqa: registers models with Base
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # Add columns introduced after initial schema (safe to run repeatedly)
-        for stmt in [
-            "ALTER TABLE chats ADD COLUMN is_hidden BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE chats ADD COLUMN is_briefing BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE messages ADD COLUMN media_path TEXT",
-            # Deduplicate before adding unique constraint
-            "ALTER TABLE chats ADD COLUMN is_tracked BOOLEAN NOT NULL DEFAULT 0",
-            "DELETE FROM messages WHERE id NOT IN (SELECT MIN(id) FROM messages GROUP BY telegram_id, chat_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_telegram_chat ON messages (telegram_id, chat_id)",
-            "ALTER TABLE messages ADD COLUMN text_html TEXT",
-            "ALTER TABLE messages ADD COLUMN reactions_json TEXT",
-            # Tag system
-            "CREATE TABLE IF NOT EXISTS tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, color TEXT NOT NULL DEFAULT 'slate', is_default BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME)",
-            "CREATE TABLE IF NOT EXISTS chat_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, UNIQUE(chat_id, tag_id))",
-            "ALTER TABLE tags ADD COLUMN category TEXT",
-            # Conversation persistence for Intelligence chat
-            "CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, created_at DATETIME, updated_at DATETIME)",
-            "CREATE TABLE IF NOT EXISTS conversation_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at DATETIME)",
-            # Unread message counts
-            "ALTER TABLE chats ADD COLUMN unread_count INTEGER DEFAULT 0",
-            # Former employee support on ContactPosition
-            "ALTER TABLE contact_positions ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
-            "ALTER TABLE contact_positions ADD COLUMN ended_at TEXT",
-            # Reply-to threading in messages
-            "ALTER TABLE messages ADD COLUMN reply_to_telegram_id INTEGER",
-            # User's own reaction to a message (for acknowledged tracking in mentions)
-            "ALTER TABLE messages ADD COLUMN my_reaction TEXT",
-            # Mark telegram profile as important
-            "ALTER TABLE contacts ADD COLUMN is_important BOOLEAN NOT NULL DEFAULT 0",
-            # Briefing history persistence
-            "CREATE TABLE IF NOT EXISTS briefing_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at DATETIME, days INTEGER DEFAULT 1)",
-            "CREATE TABLE IF NOT EXISTS briefing_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE, chat_id INTEGER NOT NULL, chat_name TEXT NOT NULL, category TEXT NOT NULL, summary TEXT NOT NULL)",
-            "ALTER TABLE briefing_entries ADD COLUMN sources_json TEXT",
-            "ALTER TABLE chats ADD COLUMN members_count INTEGER",
-            # Relationship status tracking on contacts
-            "ALTER TABLE contacts ADD COLUMN relationship_status TEXT",
-            "ALTER TABLE contacts ADD COLUMN relationship_status_manual BOOLEAN NOT NULL DEFAULT 0",
-            "ALTER TABLE contacts ADD COLUMN last_interaction_at DATETIME",
-            "ALTER TABLE contacts ADD COLUMN last_outgoing_at DATETIME",
-            "ALTER TABLE contacts ADD COLUMN last_incoming_at DATETIME",
-        ]:
-            try:
-                await conn.execute(__import__('sqlalchemy').text(stmt))
-            except Exception:
-                pass  # column/table already exists
+    from backend.db.migrations.runner import run_migrations
 
-        # Seed default tags
-        import sqlalchemy as _sa
-        defaults = [
-            ("Work", "indigo"), ("Personal", "emerald"), ("Family", "rose"),
-            ("Finance", "amber"), ("Projects", "violet"), ("News", "sky"),
-        ]
-        for tag_name, tag_color in defaults:
-            try:
-                await conn.execute(_sa.text(
-                    "INSERT OR IGNORE INTO tags (name, color, is_default, created_at) VALUES (:n, :c, 1, :d)"
-                ), {"n": tag_name, "c": tag_color, "d": datetime.utcnow()})
-            except Exception:
-                pass
+    async with engine.begin() as conn:
+        # Create any tables that don't exist yet (safe, non-destructive).
+        await conn.run_sync(Base.metadata.create_all)
+
+        # Apply versioned migrations for columns/indexes added after the
+        # initial schema.  Failures are logged and re-raised so the app
+        # never starts with a partially-migrated database.
+        await run_migrations(conn)
