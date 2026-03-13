@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw, Sparkles, Loader2, ChevronDown, ChevronRight, UserMinus } from 'lucide-react'
 import type { OrgSummary, OrgDetail } from '../api/types'
 import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs, generateOrgContext } from '../api/client'
@@ -37,6 +38,7 @@ function OrgCard({
 }
 
 export default function Organizations() {
+  const location = useLocation()
   const [orgs, setOrgs] = useState<OrgSummary[]>([])
   const [selected, setSelected] = useState<OrgDetail | null>(null)
   const [search, setSearch] = useState('')
@@ -52,6 +54,7 @@ export default function Organizations() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(300)
   const dragging = useRef(false)
+  const pendingSelectRef = useRef<number | null>(null)
 
   const loadOrgs = useCallback(async (q = '') => {
     const data = await getOrganizations(q)
@@ -59,7 +62,34 @@ export default function Organizations() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { loadOrgs() }, [loadOrgs])
+  // Parse URL param for deep-link selection: ?select=<orgId>
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const selectParam = params.get('select')
+    if (selectParam) {
+      const orgId = parseInt(selectParam, 10)
+      if (!isNaN(orgId)) {
+        pendingSelectRef.current = orgId
+      }
+    }
+    loadOrgs()
+  }, [loadOrgs, location.search])
+
+  // When orgs load, auto-select the org from URL params if pending
+  useEffect(() => {
+    if (orgs.length === 0 || pendingSelectRef.current === null) return
+    const orgId = pendingSelectRef.current
+    pendingSelectRef.current = null
+    const target = orgs.find((o) => o.id === orgId)
+    if (target) {
+      getOrganization(target.id).then((detail) => {
+        setSelected(detail)
+        setEditingContext(false)
+        setEditingName(false)
+        setShowFormerMembers(false)
+      })
+    }
+  }, [orgs])
 
   useEffect(() => {
     const timer = setTimeout(() => loadOrgs(search), 200)
