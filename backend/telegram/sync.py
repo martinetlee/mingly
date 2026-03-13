@@ -62,6 +62,38 @@ def _media_type(msg) -> Optional[str]:
     return None
 
 
+_SAFE_URL_SCHEMES = frozenset(["http", "https", "ftp", "ftps", "mailto", "tel"])
+
+
+def _safe_href(url: str) -> str:
+    """Return the URL only if its scheme is in the allowlist, otherwise '#'.
+
+    Also allows relative paths (starting with '/') for in-app navigation.
+    """
+    from urllib.parse import urlparse
+    stripped = url.strip()
+    # Allow relative paths for in-app links (e.g. /profile/123)
+    if stripped.startswith("/"):
+        return url
+    try:
+        parsed = urlparse(stripped)
+        if parsed.scheme.lower() in _SAFE_URL_SCHEMES:
+            return url
+    except Exception:
+        pass
+    return "#"
+
+
+def _sanitize_hrefs(html: str) -> str:
+    """Replace any href with an unsafe scheme with '#'."""
+    import re
+    def _check(m):
+        url = m.group(1)
+        safe = _safe_href(url)
+        return f'href="{safe}"'
+    return re.sub(r'href="([^"]*)"', _check, html)
+
+
 def _text_nodes(html: str, fn) -> str:
     """Apply fn to every text node (content between HTML tags)."""
     import re
@@ -79,12 +111,12 @@ def _markdown_pass(html: str) -> str:
     def _links(text: str) -> str:
         text = re.sub(
             r'\[\[([^\]]+)\]\]\s*\(([^)]+)\)',
-            lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener noreferrer">[{m.group(1)}]</a>',
+            lambda m: f'<a href="{_safe_href(m.group(2))}" target="_blank" rel="noopener noreferrer">[{m.group(1)}]</a>',
             text,
         )
         text = re.sub(
             r'\[([^\]]+)\]\s*\(([^)]+)\)',
-            lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener noreferrer">{m.group(1)}</a>',
+            lambda m: f'<a href="{_safe_href(m.group(2))}" target="_blank" rel="noopener noreferrer">{m.group(1)}</a>',
             text,
         )
         return text
@@ -128,7 +160,8 @@ def _entities_to_html(text: str, entities) -> Optional[str]:
                 r'href="/profile/\1" data-mention="true"',
                 result,
             )
-            return _markdown_pass(result)
+            result = _markdown_pass(result)
+            return _sanitize_hrefs(result)
         except Exception:
             pass
 

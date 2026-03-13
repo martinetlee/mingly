@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, chats, compose, contacts, conversations, dashboard, organizations, scan, search, settings, llm, tags, intelligence, profiles
+from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, organizations, scan, search, settings, llm, tags, intelligence, profiles
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
     app.include_router(tags.router, prefix="/api", tags=["tags"], dependencies=protected)
     app.include_router(intelligence.router, prefix="/api", tags=["intelligence"], dependencies=protected)
     app.include_router(profiles.router, prefix="/api/profiles", tags=["profiles"], dependencies=protected)
+    app.include_router(catchup.router, prefix="/api/catchup", tags=["catchup"], dependencies=protected)
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
     app.include_router(search.router, prefix="/api/search", tags=["search"], dependencies=protected)
 
@@ -38,7 +39,7 @@ def create_app() -> FastAPI:
     async def serve_media(file_path: str, _token: str = Depends(require_session_token)):
         full_path = (DATA_DIR / file_path).resolve()
         # Containment check: reject any path that escapes DATA_DIR
-        if not str(full_path).startswith(str(DATA_DIR.resolve())):
+        if not full_path.is_relative_to(DATA_DIR.resolve()):
             raise HTTPException(status_code=403)
         if not full_path.exists() or not full_path.is_file():
             raise HTTPException(status_code=404)

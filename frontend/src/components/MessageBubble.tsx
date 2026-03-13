@@ -2,6 +2,7 @@ import { useRef, useState, useCallback } from 'react'
 import { Reply } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
+import ImageLightbox from './ImageLightbox'
 
 interface Props {
   message: Message
@@ -27,7 +28,14 @@ function escapeHtml(text: string): string {
 }
 
 function safeHref(url: string): string {
-  return /^https?:\/\//i.test(url) ? url : '#'
+  const trimmed = url.trim()
+  if (trimmed.startsWith('/')) return url
+  return /^https?:\/\//i.test(trimmed) ? url : '#'
+}
+
+/** Sanitize all href attributes in an HTML string to block dangerous schemes. */
+function sanitizeHrefs(html: string): string {
+  return html.replace(/href="([^"]*)"/g, (_, url) => `href="${safeHref(url)}"`)
 }
 
 function simpleMarkdownToHtml(text: string): string {
@@ -77,7 +85,7 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   return (
     <span
       className={`formatted-text ${isOut ? 'formatted-out' : 'formatted-in'}`}
-      dangerouslySetInnerHTML={{ __html: processMentions(html) }}
+      dangerouslySetInnerHTML={{ __html: sanitizeHrefs(processMentions(html)) }}
       onClick={handleClick}
     />
   )
@@ -120,6 +128,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const hasPhoto = message.media_url && message.media_type === 'photo'
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const pickerRef = useRef<HTMLDivElement>(null)
   const reply = message.reply_to_preview
 
@@ -213,12 +222,21 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             </p>
           )}
           {hasPhoto && (
-            <img
-              src={message.media_url!}
-              alt="photo"
-              className={`block object-cover ${isOut ? 'ml-auto' : 'mr-auto'}`}
-              style={{ maxWidth: 320, maxHeight: 320 }}
-            />
+            <>
+              <img
+                src={message.media_url!}
+                alt="photo"
+                className={`block cursor-pointer object-cover ${isOut ? 'ml-auto' : 'mr-auto'} hover:opacity-90 transition-opacity`}
+                style={{ maxWidth: 320, maxHeight: 320 }}
+                onClick={() => setLightboxOpen(true)}
+              />
+              {lightboxOpen && (
+                <ImageLightbox
+                  src={message.media_url!}
+                  onClose={() => setLightboxOpen(false)}
+                />
+              )}
+            </>
           )}
           {message.media_type && !hasPhoto && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>

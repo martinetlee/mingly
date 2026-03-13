@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Plus, Building2, Pencil, Twitter, Linkedin, Phone, StickyNote, X, UserMinus, RotateCcw } from 'lucide-react'
 import type { Contact, ContactPosition } from '../api/types'
 import { updateContact, addPosition, removePosition, updatePosition } from '../api/client'
+import { sanitizeUrl } from '../utils/sanitizeUrl'
 import ComboInput from './ComboInput'
 
 // ---------------------------------------------------------------------------
@@ -54,14 +55,21 @@ export function EditableField({
       <span className="w-16 text-[10px] text-slate-500 uppercase tracking-wider flex-shrink-0">{label}</span>
       {value ? (
         isUrl ? (
-          <a
-            href={value.startsWith('http') ? value : `https://${value}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex-1 text-xs text-indigo-400 hover:text-indigo-300 truncate transition-colors"
-          >
-            {value}
-          </a>
+          (() => {
+            const safeHref = sanitizeUrl(value)
+            return safeHref ? (
+              <a
+                href={safeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 text-xs text-indigo-400 hover:text-indigo-300 truncate transition-colors"
+              >
+                {value}
+              </a>
+            ) : (
+              <span className="flex-1 text-xs text-gray-200 truncate">{value}</span>
+            )
+          })()
         ) : (
           <span className="flex-1 text-xs text-gray-200 truncate">{value}</span>
         )

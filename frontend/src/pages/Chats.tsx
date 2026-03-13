@@ -35,8 +35,6 @@ function ChatItem({
   onHide: () => void
   onBriefing: () => void
 }) {
-  const [hovered, setHovered] = useState(false)
-
   const typeColor = {
     private: 'bg-indigo-500/20 text-indigo-400',
     group: 'bg-purple-500/20 text-purple-400',
@@ -45,72 +43,76 @@ function ChatItem({
 
   return (
     <div
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className={`flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors ${
+      className={`group flex items-center gap-3 px-3 py-2.5 transition-colors ${
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
       }`}
     >
-      {/* Avatar */}
-      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-        {chat.name.charAt(0).toUpperCase()}
-      </div>
+      {/* Row select button */}
+      <button
+        type="button"
+        onClick={onClick}
+        aria-current={selected ? 'true' : undefined}
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:rounded"
+      >
+        {/* Avatar */}
+        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
+          {chat.name.charAt(0).toUpperCase()}
+        </div>
 
-      {/* Name + preview */}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
-            {chat.name}
-          </p>
-          <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
-            {chat.type}
-          </span>
-          {chat.last_message?.date && (
-            <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
-              {fmtDate(chat.last_message.date)}
+        {/* Name + preview */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
+              {chat.name}
+            </p>
+            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
+              {chat.type}
             </span>
+            {chat.last_message?.date && (
+              <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
+                {fmtDate(chat.last_message.date)}
+              </span>
+            )}
+          </div>
+          {chat.last_message && (
+            <p className="truncate text-xs text-slate-500 mt-0.5">
+              {chat.last_message.sender_name && (
+                <span className="text-slate-400">{chat.last_message.sender_name}: </span>
+              )}
+              {chat.last_message.text || '[media]'}
+            </p>
           )}
         </div>
-        {chat.last_message && (
-          <p className="truncate text-xs text-slate-500 mt-0.5">
-            {chat.last_message.sender_name && (
-              <span className="text-slate-400">{chat.last_message.sender_name}: </span>
-            )}
-            {chat.last_message.text || '[media]'}
-          </p>
-        )}
-      </div>
+      </button>
 
-      {/* Actions */}
+      {/* Actions - always in DOM for keyboard/screen-reader access */}
       <div className="flex flex-shrink-0 items-center gap-0.5">
-        {hovered && (
-          <>
-            <button
-              onClick={(e) => { e.stopPropagation(); onBriefing() }}
-              title="Add to briefing"
-              className="rounded p-1 text-slate-500 hover:text-purple-400 transition-colors"
-            >
-              <FileText size={14} />
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); onHide() }}
-              title="Hide this chat"
-              className="rounded p-1 text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              <EyeOff size={14} />
-            </button>
-          </>
-        )}
-        {!hovered && (chat.unread_count ?? 0) > 0 && (
-          <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white">
+        {(chat.unread_count ?? 0) > 0 && (
+          <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white" aria-label={`${chat.unread_count} unread`}>
             {(chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count}
           </span>
         )}
         <button
-          onClick={(e) => { e.stopPropagation(); onToggleTrack() }}
+          onClick={onBriefing}
+          title="Add to briefing"
+          aria-label="Add to briefing"
+          className="rounded p-1 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 hover:text-purple-400 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:outline-none"
+        >
+          <FileText size={14} />
+        </button>
+        <button
+          onClick={onHide}
+          title="Hide this chat"
+          aria-label="Hide this chat"
+          className="rounded p-1 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 hover:text-slate-300 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:outline-none"
+        >
+          <EyeOff size={14} />
+        </button>
+        <button
+          onClick={onToggleTrack}
           title={chat.is_tracked ? 'Stop tracking' : 'Track this chat'}
-          className={`rounded p-1 transition-colors ${
+          aria-label={chat.is_tracked ? 'Stop tracking' : 'Track this chat'}
+          className={`rounded p-1 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
             chat.is_tracked
               ? 'text-indigo-400 hover:text-indigo-300'
               : 'text-slate-600 hover:text-slate-400'

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Star } from 'lucide-react'
 import type { PersonSummary } from '../api/types'
 import { resolvePerson } from '../api/client'
+import { sanitizeLinkedInUrl } from '../utils/sanitizeUrl'
 
 // Module-level cache for resolved person data (session lifetime)
 const personCache = new Map<number, PersonSummary>()
@@ -285,16 +286,21 @@ export default function PersonCard({
               @{twitterHandle.replace('@', '')}
             </a>
           )}
-          {linkedinUrl && (
-            <a
-              href={linkedinUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-sky-400 transition-colors"
-            >
-              LinkedIn
-            </a>
-          )}
+          {linkedinUrl && (() => {
+            const safeHref = sanitizeLinkedInUrl(linkedinUrl)
+            return safeHref ? (
+              <a
+                href={safeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-sky-400 transition-colors"
+              >
+                LinkedIn
+              </a>
+            ) : (
+              <span>LinkedIn (invalid URL)</span>
+            )
+          })()}
           {hasNotes && (
             <span className="text-slate-500">Has notes</span>
           )}

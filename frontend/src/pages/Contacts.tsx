@@ -50,9 +50,11 @@ function ContactCard({
   onClick: () => void
 }) {
   return (
-    <div
+    <button
+      type="button"
       onClick={onClick}
-      className={`flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors ${
+      aria-current={selected ? 'true' : undefined}
+      className={`flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-inset ${
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
       }`}
     >
@@ -65,7 +67,7 @@ function ContactCard({
             {contact.name}
           </p>
           {contact.is_important && (
-            <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" />
+            <Star size={11} className="flex-shrink-0 fill-amber-400 text-amber-400" aria-label="Important" />
           )}
           {contact.relationship_status && (
             <span className={`flex-shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${STATUS_COLORS[contact.relationship_status] ?? ''}`}>
@@ -82,7 +84,7 @@ function ContactCard({
           </p>
         )}
       </div>
-    </div>
+    </button>
   )
 }
 
@@ -519,6 +521,19 @@ export default function Contacts() {
                     </button>
                   ))}
                 </div>
+                {selected.status_source && (
+                  <p className="text-[10px] text-slate-600">
+                    Source: {selected.status_source === 'manual' ? 'Manually set' : 'Auto-calculated'}
+                  </p>
+                )}
+                {selected.status_explanation && (
+                  <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-1">
+                    <p className="text-xs text-slate-400">{selected.status_explanation}</p>
+                    {selected.recommended_action && (
+                      <p className="text-xs text-indigo-400/80">{selected.recommended_action}</p>
+                    )}
+                  </div>
+                )}
                 {selected.last_interaction_at && (
                   <p className="text-xs text-slate-500">
                     Last interaction: {fmtRelative(selected.last_interaction_at)}

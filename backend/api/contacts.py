@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.database import get_db
 from backend.db.models import Contact, ContactPosition, Message, Organization
 from backend.db import crud
+from backend.api.validators import validate_linkedin_url
 from backend.telegram.client import get_client, ensure_connected
 
 router = APIRouter()
@@ -70,6 +71,16 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
         "last_incoming_at": c.last_incoming_at.isoformat() if c.last_incoming_at else None,
         "synced_at": c.synced_at,
     }
+    # Add status explanation
+    status_info = crud.explain_relationship_status(
+        status=c.relationship_status,
+        is_manual=c.relationship_status_manual,
+        last_interaction=c.last_interaction_at,
+        last_outgoing=c.last_outgoing_at,
+        last_incoming=c.last_incoming_at,
+        is_important=c.is_important,
+    )
+    d.update(status_info)
     if positions is not None:
         d["positions"] = [
             {
@@ -254,7 +265,14 @@ async def update_contact(
     if data.twitter_handle is not None:
         contact.twitter_handle = data.twitter_handle.strip() or None
     if data.linkedin_url is not None:
-        contact.linkedin_url = data.linkedin_url.strip() or None
+        raw = data.linkedin_url.strip()
+        if raw:
+            try:
+                contact.linkedin_url = validate_linkedin_url(raw)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        else:
+            contact.linkedin_url = None
     if data.phone is not None:
         contact.phone = data.phone.strip() or None
     if data.notes is not None:
