@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -32,6 +33,16 @@ router = APIRouter()
 _OLLAMA_BIN = DATA_DIR / "bin" / "ollama"
 # Ollama home — models and config kept inside the app's data dir
 _OLLAMA_HOME = DATA_DIR / "ollama"
+
+# ---------------------------------------------------------------------------
+# Pinned Ollama version and trusted SHA-256 checksums
+# ---------------------------------------------------------------------------
+_OLLAMA_VERSION = "v0.17.7"
+_OLLAMA_SHA256: dict[str, str] = {
+    "ollama-darwin.tgz": "a87a5d78825f91aee334020c868fba6c470da4e2bf21578d2ae1e36bb184ef35",
+    "ollama-linux-amd64.tar.zst": "51ca1e0e9f66fa2493ced77debe8d9b9336ffc06271e6dcdde8b9f42b6c80a1d",
+    "ollama-linux-arm64.tar.zst": "b39fff6bf90a799816794ef94695a978fee82912edc93ce6e3d85323f342ecb7",
+}
 
 # In-process job tracking (pull + install share the same dict)
 _jobs: dict[int, dict] = {}
@@ -191,18 +202,42 @@ def _find_ollama_binary() -> Optional[str]:
     return None
 
 
-def _ollama_asset() -> tuple[str, str]:
-    """Return (download_url, archive_format) for this platform.
+def _ollama_asset() -> tuple[str, str, str]:
+    """Return (download_url, archive_format, asset_name) for this platform.
     archive_format is 'tgz' or 'tar.zst'.
     """
     machine = platform.machine().lower()
-    base = "https://github.com/ollama/ollama/releases/latest/download"
+    base = f"https://github.com/ollama/ollama/releases/download/{_OLLAMA_VERSION}"
     if sys.platform == "darwin":
-        return f"{base}/ollama-darwin.tgz", "tgz"
+        name = "ollama-darwin.tgz"
+        return f"{base}/{name}", "tgz", name
     elif sys.platform.startswith("linux"):
         suffix = "arm64" if ("arm" in machine or "aarch64" in machine) else "amd64"
-        return f"{base}/ollama-linux-{suffix}.tar.zst", "tar.zst"
+        name = f"ollama-linux-{suffix}.tar.zst"
+        return f"{base}/{name}", "tar.zst", name
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+
+def _verify_checksum(path: Path, asset_name: str) -> None:
+    """Verify the SHA-256 digest of a downloaded archive against the pinned value.
+    Raises RuntimeError if the digest does not match or the asset is unknown."""
+    expected = _OLLAMA_SHA256.get(asset_name)
+    if expected is None:
+        raise RuntimeError(
+            f"No trusted checksum for asset {asset_name!r}. "
+            "Update _OLLAMA_SHA256 before installing on this platform."
+        )
+    sha256 = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            sha256.update(chunk)
+    actual = sha256.hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"Checksum mismatch for {asset_name}: "
+            f"expected {expected}, got {actual}. "
+            "The downloaded file may be corrupted or tampered with."
+        )
 
 
 def _extract_ollama_binary(archive_path: Path, dest: Path, fmt: str = "tgz") -> None:
@@ -264,7 +299,7 @@ async def install_ollama():
         return {"status": "already_installed", "path": str(_OLLAMA_BIN)}
 
     try:
-        url, fmt = _ollama_asset()
+        url, fmt, asset_name = _ollama_asset()
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -287,6 +322,12 @@ async def install_ollama():
                             downloaded += len(chunk)
                             _jobs[job_id]["downloaded"] = downloaded
 
+            # Verify download integrity before extraction (fail closed)
+            _jobs[job_id]["status"] = "verifying"
+            await asyncio.get_event_loop().run_in_executor(
+                None, _verify_checksum, archive_tmp, asset_name
+            )
+
             _jobs[job_id]["status"] = "extracting"
             # Run extraction in a thread so we don't block the event loop
             await asyncio.get_event_loop().run_in_executor(
@@ -297,6 +338,9 @@ async def install_ollama():
             _jobs[job_id]["path"] = str(_OLLAMA_BIN)
         except Exception as e:
             archive_tmp.unlink(missing_ok=True)
+            # If binary was partially written during a failed verification,
+            # remove it so the system never runs an unverified binary.
+            _OLLAMA_BIN.unlink(missing_ok=True)
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"] = str(e)
 
