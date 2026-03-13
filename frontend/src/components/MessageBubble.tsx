@@ -27,7 +27,14 @@ function escapeHtml(text: string): string {
 }
 
 function safeHref(url: string): string {
-  return /^https?:\/\//i.test(url) ? url : '#'
+  const trimmed = url.trim()
+  if (trimmed.startsWith('/')) return url
+  return /^https?:\/\//i.test(trimmed) ? url : '#'
+}
+
+/** Sanitize all href attributes in an HTML string to block dangerous schemes. */
+function sanitizeHrefs(html: string): string {
+  return html.replace(/href="([^"]*)"/g, (_, url) => `href="${safeHref(url)}"`)
 }
 
 function simpleMarkdownToHtml(text: string): string {
@@ -77,7 +84,7 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   return (
     <span
       className={`formatted-text ${isOut ? 'formatted-out' : 'formatted-in'}`}
-      dangerouslySetInnerHTML={{ __html: processMentions(html) }}
+      dangerouslySetInnerHTML={{ __html: sanitizeHrefs(processMentions(html)) }}
       onClick={handleClick}
     />
   )
