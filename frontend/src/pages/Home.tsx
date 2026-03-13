@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck } from 'lucide-react'
+import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck, ListChecks } from 'lucide-react'
 import type { DashboardData, MentionGroup, MentionMessage } from '../api/types'
 import { getDashboard, getMentions, reactToMessage } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import CatchUpQueue from '../components/CatchUpQueue'
 
 function getGreeting(): string {
   const hour = new Date().getHours()
@@ -163,7 +164,7 @@ function HomeMentionCard({
 // Main
 // ---------------------------------------------------------------------------
 
-type HomeTab = 'mentions' | 'needs_reply'
+type HomeTab = 'catchup' | 'mentions' | 'needs_reply'
 type MentionFilter = 'not_acted' | 'all' | 'acknowledged' | 'replied'
 
 export default function Home() {
@@ -171,8 +172,9 @@ export default function Home() {
   const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
 
-  // Tab state
-  const [activeTab, setActiveTab] = useState<HomeTab>('mentions')
+  // Tab state -- default to Catch Up triage queue
+  const [activeTab, setActiveTab] = useState<HomeTab>('catchup')
+  const [catchUpCount, setCatchUpCount] = useState<number | null>(null)
 
   // Mentions state
   const [mentions, setMentions] = useState<MentionGroup[]>([])
@@ -180,6 +182,10 @@ export default function Home() {
   const [mentionFilter, setMentionFilter] = useState<MentionFilter>('not_acted')
   const [selectedMentionIdx, setSelectedMentionIdx] = useState(0)
   const selectedMentionRef = useRef<HTMLDivElement | null>(null)
+
+  const refreshDashboard = useCallback(() => {
+    getDashboard().then(setData).catch(() => {})
+  }, [])
 
   useEffect(() => {
     getDashboard()
@@ -299,9 +305,27 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Tabs: Mentions / Needs Reply */}
+        {/* Tabs: Catch Up / Mentions / Needs Reply */}
         <div className="mb-4">
           <div className="flex border-b border-slate-700/50">
+            <button
+              onClick={() => setActiveTab('catchup')}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+                activeTab === 'catchup'
+                  ? 'border-emerald-400 text-emerald-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              <span className="flex items-center gap-1.5">
+                <ListChecks size={13} />
+                Catch Up
+                {(catchUpCount ?? data.needs_reply.length) > 0 && (
+                  <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+                    {catchUpCount ?? data.needs_reply.length}
+                  </span>
+                )}
+              </span>
+            </button>
             <button
               onClick={() => setActiveTab('mentions')}
               className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
@@ -340,6 +364,13 @@ export default function Home() {
             </button>
           </div>
         </div>
+
+        {/* Catch Up triage tab content */}
+        {activeTab === 'catchup' && (
+          <div className="mb-8">
+            <CatchUpQueue needsReply={data.needs_reply} onRefreshDashboard={refreshDashboard} onBadgeCount={setCatchUpCount} />
+          </div>
+        )}
 
         {/* Mentions tab content */}
         {activeTab === 'mentions' && (

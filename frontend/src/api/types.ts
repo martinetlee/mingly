@@ -355,6 +355,18 @@ export interface BriefingRun {
   entries: BriefingHistoryEntry[]
 }
 
+export interface CatchUpItem {
+  id: number
+  chat_telegram_id: number
+  contact_id: number | null
+  status: 'pending' | 'handled' | 'snoozed'
+  note: string | null
+  snoozed_until: string | null
+  handled_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
