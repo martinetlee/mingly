@@ -1,10 +1,18 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getSessionToken } from '../api/session'
 import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
 // API helpers (self-contained so we can handle SSE streaming)
 // ---------------------------------------------------------------------------
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...extra }
+  const token = getSessionToken()
+  if (token) h['X-Session-Token'] = token
+  return h
+}
 
 async function apiFetch<T>(
   method: string,
@@ -14,7 +22,7 @@ async function apiFetch<T>(
 ): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: authHeaders(body ? { 'Content-Type': 'application/json' } : undefined),
     body: body ? JSON.stringify(body) : undefined,
     signal,
   })
@@ -29,7 +37,7 @@ async function* streamSSE(
   url: string,
   signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
-  const res = await fetch(url, { signal })
+  const res = await fetch(url, { headers: authHeaders(), signal })
   if (!res.ok || !res.body) throw new Error('Stream unavailable')
   const reader = res.body.getReader()
   const dec = new TextDecoder()

@@ -52,6 +52,7 @@ import {
   setBriefing,
 } from '../api/client'
 import type { Chat, ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
+import { getSessionToken } from '../api/session'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,9 +102,12 @@ async function* streamChat(
 ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
   // Send only the conversation_id + new message; backend loads full history from DB.
   // This ensures context is always the full persisted conversation, isolated per chat.
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = getSessionToken()
+  if (token) headers['X-Session-Token'] = token
   const resp = await fetch('/api/intelligence/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ conversation_id: conversationId, message }),
     signal,
   })
@@ -868,7 +872,10 @@ function MentionsTab() {
 // ---------------------------------------------------------------------------
 
 async function* streamBriefing(days: number, signal: AbortSignal): AsyncGenerator<Record<string, unknown>> {
-  const res = await fetch(`/api/intelligence/briefing?days=${days}`, { signal })
+  const headers: Record<string, string> = {}
+  const bToken = getSessionToken()
+  if (bToken) headers['X-Session-Token'] = bToken
+  const res = await fetch(`/api/intelligence/briefing?days=${days}`, { headers, signal })
   if (!res.ok || !res.body) throw new Error('Briefing stream unavailable')
   const reader = res.body.getReader()
   const dec = new TextDecoder()
@@ -905,8 +912,12 @@ async function* streamRegenerateBriefingEntry(
   entryId: number,
   signal: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
+  const regenHeaders: Record<string, string> = {}
+  const rToken = getSessionToken()
+  if (rToken) regenHeaders['X-Session-Token'] = rToken
   const res = await fetch(`/api/intelligence/briefing/history/${runId}/entries/${entryId}/regenerate`, {
     method: 'POST',
+    headers: regenHeaders,
     signal,
   })
   if (!res.ok || !res.body) throw new Error('Regeneration stream unavailable')

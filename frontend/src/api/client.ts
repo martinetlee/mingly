@@ -397,7 +397,7 @@ export const updateConversationTitle = (id: number, title: string) =>
   })
 
 export const deleteConversation = (id: number) =>
-  fetch(`/api/conversations/${id}`, { method: 'DELETE' })
+  request<{ success: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
 
 export const appendConversationMessage = (id: number, role: string, content: string) =>
   request<ConversationMessageItem>(`/api/conversations/${id}/messages`, {

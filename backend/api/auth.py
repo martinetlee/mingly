@@ -1,7 +1,7 @@
 import asyncio
 import subprocess
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
 
@@ -14,7 +14,7 @@ from backend.secrets import (
     save_secret, delete_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
 )
-from backend.api.dependencies import generate_session_token, clear_session_token
+from backend.api.dependencies import generate_session_token, clear_session_token, require_session_token
 
 router = APIRouter()
 
@@ -82,7 +82,7 @@ async def do_unlock_vault(req: VaultPasswordRequest):
     return {"success": True, "session_token": token}
 
 
-@router.post("/vault/reset")
+@router.post("/vault/reset", dependencies=[Depends(require_session_token)])
 async def do_reset_vault():
     clear_session_token()
     reset_vault()
