@@ -1,24 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { ArrowLeft, Bot, Crown, BadgeCheck, Globe, Phone, AtSign, MessageSquare, Star } from 'lucide-react'
+import { ArrowLeft, Globe, Phone, AtSign, MessageSquare, Star } from 'lucide-react'
 import type { TelegramProfile, Contact } from '../api/types'
 import { getProfile, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
 import ContactInfoSection from '../components/ContactInfoSection'
-
-const STATUS_LABELS: Record<string, string> = {
-  online: 'Online',
-  recently: 'Last seen recently',
-  offline: 'Offline',
-  last_week: 'Last seen within a week',
-  last_month: 'Last seen within a month',
-  unknown: 'Last seen a long time ago',
-}
-
-const STATUS_COLORS: Record<string, string> = {
-  online: 'text-emerald-400',
-  recently: 'text-slate-400',
-  offline: 'text-slate-500',
-}
+import PersonCard from '../components/PersonCard'
 
 export default function Profile() {
   const { userId } = useParams<{ userId: string }>()
@@ -95,6 +81,7 @@ export default function Profile() {
 
   const bioText = profile.bio || profile.about
   const isImportant = contact?.is_important ?? false
+  const activePosition = contact?.positions?.filter((p) => p.is_active !== false)?.[0] ?? null
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -108,73 +95,49 @@ export default function Profile() {
           Back
         </button>
 
-        {/* Profile header */}
-        <div className="flex items-start gap-5 mb-8">
-          {profile.photo_url ? (
-            <img
-              src={profile.photo_url}
-              alt={displayName}
-              className="h-20 w-20 rounded-full object-cover ring-2 ring-slate-700"
-            />
-          ) : (
-            <div className="flex h-20 w-20 items-center justify-center rounded-full bg-slate-700 text-2xl font-semibold text-slate-300 ring-2 ring-slate-600">
-              {displayName.charAt(0).toUpperCase()}
-            </div>
-          )}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-bold text-gray-100">{displayName}</h1>
-              {profile.is_verified && (
-                <span title="Verified"><BadgeCheck size={18} className="text-sky-400" /></span>
-              )}
-              {profile.is_premium && (
-                <span title="Premium"><Crown size={16} className="text-amber-400" /></span>
-              )}
-              {profile.is_bot && (
-                <span title="Bot"><Bot size={16} className="text-violet-400" /></span>
-              )}
-              {/* Important toggle — only for user profiles */}
-              {profile.type === 'user' && (
-                <button
-                  onClick={handleToggleImportant}
-                  disabled={togglingImportant}
-                  title={isImportant ? 'Remove from important' : 'Mark as important'}
-                  className={`rounded-full p-1 transition-colors ${
-                    isImportant
-                      ? 'text-amber-400 hover:text-amber-300'
-                      : 'text-slate-600 hover:text-amber-400'
-                  }`}
-                >
-                  <Star
-                    size={18}
-                    className={isImportant ? 'fill-amber-400' : ''}
-                  />
-                </button>
-              )}
-            </div>
-            {profile.username && (
-              <p className="mt-0.5 text-sm text-indigo-400">@{profile.username}</p>
-            )}
-            {profile.status && (
-              <p className={`mt-1 text-xs ${STATUS_COLORS[profile.status] ?? 'text-slate-500'}`}>
-                {STATUS_LABELS[profile.status] ?? profile.status}
-              </p>
-            )}
-            {profile.type !== 'user' && profile.members_count != null && (
-              <p className="mt-1 text-xs text-slate-400">{profile.members_count.toLocaleString()} members</p>
-            )}
-          </div>
-        </div>
-
-        {/* Bio / About */}
-        {bioText && (
-          <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
-            <h3 className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
-              {profile.type === 'user' ? 'Bio' : 'About'}
-            </h3>
-            <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{bioText}</p>
-          </div>
-        )}
+        {/* Profile header -- unified PersonCard */}
+        <PersonCard
+          telegramId={profile.id}
+          name={displayName}
+          username={profile.username}
+          photoUrl={profile.photo_url}
+          isVerified={profile.is_verified}
+          isPremium={profile.is_premium}
+          isBot={profile.is_bot}
+          onlineStatus={profile.status}
+          bio={bioText}
+          isImportant={isImportant}
+          status={contact?.relationship_status}
+          position={activePosition ? { title: activePosition.title, organization: activePosition.organization } : null}
+          lastInteraction={contact?.last_interaction_at}
+          phone={contact?.phone ?? profile.phone}
+          twitterHandle={contact?.twitter_handle}
+          linkedinUrl={contact?.linkedin_url}
+          hasNotes={!!contact?.notes}
+          contactId={contact?.id}
+          mode="profile"
+          disableLink
+          showStatus={!!contact}
+          actions={
+            profile.type === 'user' ? (
+              <button
+                onClick={handleToggleImportant}
+                disabled={togglingImportant}
+                title={isImportant ? 'Remove from important' : 'Mark as important'}
+                className={`rounded-full p-1 transition-colors ${
+                  isImportant
+                    ? 'text-amber-400 hover:text-amber-300'
+                    : 'text-slate-600 hover:text-amber-400'
+                }`}
+              >
+                <Star
+                  size={18}
+                  className={isImportant ? 'fill-amber-400' : ''}
+                />
+              </button>
+            ) : undefined
+          }
+        />
 
         {/* Details */}
         <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
@@ -190,6 +153,13 @@ export default function Profile() {
             )}
           </div>
         </div>
+
+        {/* Non-user entity: members count */}
+        {profile.type !== 'user' && profile.members_count != null && (
+          <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
+            <p className="text-xs text-slate-400">{profile.members_count.toLocaleString()} members</p>
+          </div>
+        )}
 
         {/* Contact extra info (twitter, linkedin, notes, positions) */}
         {contact && (

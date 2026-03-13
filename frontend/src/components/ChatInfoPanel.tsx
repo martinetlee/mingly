@@ -4,7 +4,7 @@ import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus 
 import type { Chat, ChatMember, Contact, Tag, TagSuggestion } from '../api/types'
 import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact } from '../api/client'
 import ContactInfoSection from './ContactInfoSection'
-import PersonCard from './PersonCard'
+import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from './PersonCard'
 
 const TAG_COLORS: Record<string, string> = {
   indigo:  'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
@@ -52,6 +52,8 @@ function PrivateContactSection({ chat }: { chat: Chat }) {
     }
   }
 
+  const activePosition = contact?.positions?.filter((p) => p.is_active !== false)?.[0] ?? null
+
   return (
     <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-3">
       <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400 uppercase tracking-wider">
@@ -72,6 +74,27 @@ function PrivateContactSection({ chat }: { chat: Chat }) {
         </button>
       ) : (
         <>
+          {/* Relationship status and recency */}
+          {(contact.relationship_status || contact.last_interaction_at) && (
+            <div className="flex items-center gap-2 text-xs">
+              {contact.relationship_status && (
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RELATIONSHIP_STATUS_COLORS[contact.relationship_status] ?? ''}`}>
+                  {RELATIONSHIP_STATUS_LABELS[contact.relationship_status] ?? contact.relationship_status}
+                </span>
+              )}
+              {contact.last_interaction_at && (
+                <span className="text-slate-500">Last: {fmtRelative(contact.last_interaction_at)}</span>
+              )}
+            </div>
+          )}
+
+          {/* Position */}
+          {activePosition && (
+            <p className="text-xs text-slate-400">
+              {activePosition.title ? `${activePosition.title} @ ${activePosition.organization}` : activePosition.organization}
+            </p>
+          )}
+
           <Link
             to={`/profile/${chat.telegram_id}`}
             className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors self-start"
@@ -188,14 +211,26 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
         </button>
       </div>
 
-      {/* Chat identity */}
-      <div className="flex flex-col items-center gap-2 px-4 py-5 border-b border-slate-700/50">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300">
-          {chat.name.charAt(0).toUpperCase()}
+      {/* Chat identity -- PersonCard for private chats, simple display for groups/channels */}
+      {chat.type === 'private' ? (
+        <div className="px-4 py-5 border-b border-slate-700/50">
+          <PersonCard
+            telegramId={chat.telegram_id}
+            name={chat.name}
+            username={chat.username}
+            mode="full"
+            showStatus
+          />
         </div>
-        <p className="text-sm font-semibold text-gray-100 text-center leading-snug">{chat.name}</p>
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${typeColor}`}>{chat.type}</span>
-      </div>
+      ) : (
+        <div className="flex flex-col items-center gap-2 px-4 py-5 border-b border-slate-700/50">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300">
+            {chat.name.charAt(0).toUpperCase()}
+          </div>
+          <p className="text-sm font-semibold text-gray-100 text-center leading-snug">{chat.name}</p>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${typeColor}`}>{chat.type}</span>
+        </div>
+      )}
 
       {/* Tags section */}
       <div className="px-4 py-4 flex flex-col gap-3">
@@ -211,7 +246,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
             className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-violet-400 hover:bg-violet-500/10 disabled:opacity-50 transition-colors"
           >
             <Sparkles size={11} />
-            {suggesting ? 'Thinking…' : 'Suggest'}
+            {suggesting ? 'Thinking...' : 'Suggest'}
           </button>
         </div>
 
@@ -343,7 +378,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
               value={newTagName}
               onChange={(e) => setNewTagName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleCreateAndAdd(); if (e.key === 'Escape') setShowNewTag(false) }}
-              placeholder="Tag name…"
+              placeholder="Tag name..."
               className="w-full rounded bg-slate-700 border border-slate-600 px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
             />
             <div className="flex gap-1.5">
