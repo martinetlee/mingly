@@ -7,6 +7,7 @@
  */
 
 let _sessionToken: string | null = null
+let _onSessionExpired: (() => void) | null = null
 
 export function setSessionToken(token: string): void {
   _sessionToken = token
@@ -18,4 +19,13 @@ export function getSessionToken(): string | null {
 
 export function clearSessionToken(): void {
   _sessionToken = null
+}
+
+export function onSessionExpired(cb: () => void): void {
+  _onSessionExpired = cb
+}
+
+export function notifySessionExpired(): void {
+  _sessionToken = null
+  _onSessionExpired?.()
 }

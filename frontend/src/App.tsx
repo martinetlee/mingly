@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { getVaultStatus, getAuthStatus } from './api/client'
+import { onSessionExpired } from './api/session'
 import Layout from './components/Layout'
 import Onboarding from './pages/Onboarding'
 import Unlock from './pages/Unlock'
@@ -29,6 +30,10 @@ export default function App() {
         )
       })
       .catch(() => setState('vault-unset'))
+  }, [])
+
+  useEffect(() => {
+    onSessionExpired(() => setState('vault-locked'))
   }, [])
 
   const handleVaultUnlocked = () => {

@@ -1,5 +1,5 @@
 import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
-import { getSessionToken, setSessionToken, clearSessionToken } from './session'
+import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -14,6 +14,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
     headers,
   })
+  if (res.status === 401 && !path.includes('/api/auth/')) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || res.statusText)
