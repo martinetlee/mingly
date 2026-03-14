@@ -164,7 +164,7 @@ function HomeMentionCard({
 // Main
 // ---------------------------------------------------------------------------
 
-type HomeTab = 'catchup' | 'mentions' | 'needs_reply'
+type HomeTab = 'catchup' | 'mentions'
 type MentionFilter = 'not_acted' | 'all' | 'acknowledged' | 'replied'
 
 export default function Home() {
@@ -305,7 +305,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Tabs: Catch Up / Mentions / Needs Reply */}
+        {/* Tabs: Catch Up / Mentions */}
         <div className="mb-4">
           <div className="flex border-b border-slate-700/50">
             <button
@@ -340,24 +340,6 @@ export default function Home() {
                 {visibleMentions.length > 0 && (
                   <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
                     {visibleMentions.length}
-                  </span>
-                )}
-              </span>
-            </button>
-            <button
-              onClick={() => setActiveTab('needs_reply')}
-              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
-                activeTab === 'needs_reply'
-                  ? 'border-indigo-400 text-indigo-400'
-                  : 'border-transparent text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              <span className="flex items-center gap-1.5">
-                <Mail size={13} />
-                Needs Reply
-                {data.needs_reply.length > 0 && (
-                  <span className="rounded-full bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">
-                    {data.needs_reply.length}
                   </span>
                 )}
               </span>
@@ -432,45 +414,6 @@ export default function Home() {
                       selected={i === selectedMentionIdx}
                     />
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Needs Reply tab content */}
-        {activeTab === 'needs_reply' && (
-          <div className="mb-8">
-            {data.needs_reply.length === 0 ? (
-              <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-6 text-center">
-                <p className="text-sm text-slate-500">You're all caught up! No conversations waiting for your reply.</p>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {data.needs_reply.map((item) => (
-                  <button
-                    key={item.chat.telegram_id}
-                    onClick={() => navigate(`/chats?chatId=${item.chat.telegram_id}`)}
-                    className="flex items-center gap-3 rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 text-left hover:bg-slate-700/50 transition-colors w-full"
-                  >
-                    <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-                      {item.chat.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="truncate text-sm font-medium text-gray-200">{item.chat.name}</p>
-                        <span className="flex-shrink-0 text-[10px] text-slate-500">
-                          {fmtRelative(item.last_message.date)}
-                        </span>
-                      </div>
-                      <p className="truncate text-xs text-slate-400 mt-0.5">
-                        {item.last_message.sender_name && (
-                          <span className="text-slate-300">{item.last_message.sender_name}: </span>
-                        )}
-                        {item.last_message.text || <span className="italic">[media]</span>}
-                      </p>
-                    </div>
-                  </button>
                 ))}
               </div>
             )}
