@@ -11,13 +11,14 @@ import {
   MessageSquare,
   AlarmClock,
 } from 'lucide-react'
-import type { DashboardNeedsReply, CatchUpItem, RelationshipStatus } from '../api/types'
+import type { DashboardNeedsReply, CatchUpItem, CatchUpContext, RelationshipStatus } from '../api/types'
 import {
   getAllCatchUpItems,
   snoozeCatchUpItem,
   markCatchUpHandled,
   addCatchUpNote,
   updateCatchUpRelationship,
+  getCatchUpContext,
 } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
@@ -63,6 +64,7 @@ const SNOOZE_OPTIONS = [
 interface TriageCardProps {
   item: DashboardNeedsReply
   catchUpMeta: CatchUpItem | null
+  context: CatchUpContext | null
   selected: boolean
   onSnooze: (chatId: number, hours: number) => void
   onHandled: (chatId: number) => void
@@ -74,6 +76,7 @@ interface TriageCardProps {
 function TriageCard({
   item,
   catchUpMeta,
+  context,
   selected,
   onSnooze,
   onHandled,
@@ -141,20 +144,66 @@ function TriageCard({
       {expanded && (
         <div className="border-t border-slate-700/50 px-4 py-3 space-y-3">
           {/* Context summary */}
-          <div className="rounded-lg bg-slate-700/30 px-3 py-2">
-            <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Why this is here</p>
-            <p className="text-xs text-slate-400">
-              {item.chat.type === 'private'
-                ? 'This person sent you a message and is waiting for your reply.'
-                : 'Someone in this chat sent a message that needs your attention.'}
-              {item.last_message.sender_name && (
-                <span>
-                  {' '}Last message from <span className="text-slate-300 font-medium">{item.last_message.sender_name}</span>{' '}
-                  {fmtRelative(item.last_message.date)}.
-                </span>
-              )}
-            </p>
+          <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-2">
+            <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Summary</p>
+            {context ? (
+              <>
+                <p className="text-xs text-slate-400">{context.summary}</p>
+                {context.summary_messages.length > 0 && (
+                  <div className="space-y-1 mt-1.5">
+                    {context.summary_messages.slice(0, 3).map((m, i) => (
+                      <div key={i} className="rounded-md bg-slate-800/60 px-2.5 py-1.5 text-xs">
+                        <div className="flex items-baseline justify-between gap-2 mb-0.5">
+                          <span className="font-medium text-slate-300 truncate">
+                            {m.sender_name || 'Unknown'}
+                          </span>
+                          {m.date && (
+                            <span className="shrink-0 text-[10px] text-slate-500">
+                              {fmtRelative(m.date)}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-slate-400 line-clamp-2">
+                          {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-slate-500">Loading context...</p>
+            )}
           </div>
+
+          {/* Last 3 messages */}
+          {context && context.recent_messages.length > 0 && (
+            <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-1.5">
+              <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Recent messages</p>
+              {context.recent_messages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`rounded-md px-2.5 py-1.5 text-xs ${
+                    m.is_outgoing ? 'bg-indigo-500/10 border border-indigo-500/20' : 'bg-slate-800/60'
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between gap-2 mb-0.5">
+                    <span className={`font-medium truncate ${m.is_outgoing ? 'text-indigo-300' : 'text-slate-300'}`}>
+                      {m.is_outgoing ? 'You' : m.sender_name || 'Unknown'}
+                    </span>
+                    {m.date && (
+                      <span className="shrink-0 text-[10px] text-slate-500">
+                        {fmtRelative(m.date)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-400 line-clamp-2">
+                    {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Primary actions row */}
           <div className="flex flex-wrap gap-1.5">
@@ -332,6 +381,7 @@ interface CatchUpQueueProps {
 export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCount }: CatchUpQueueProps) {
   const navigate = useNavigate()
   const [catchUpMeta, setCatchUpMeta] = useState<Record<number, CatchUpItem>>({})
+  const [contextMap, setContextMap] = useState<Record<number, CatchUpContext>>({})
   const [loading, setLoading] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [actionFeedback, setActionFeedback] = useState<{ chatId: number; msg: string } | null>(null)
@@ -369,6 +419,23 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
       return true
     })
   }, [needsReply, catchUpMeta])
+
+  // Fetch context for visible items
+  useEffect(() => {
+    for (const item of visibleItems) {
+      const chatId = item.chat.telegram_id
+      if (!contextMap[chatId]) {
+        getCatchUpContext(chatId)
+          .then((ctx) => {
+            setContextMap((prev) => ({ ...prev, [chatId]: ctx }))
+          })
+          .catch(() => {
+            // ignore errors for individual context fetches
+          })
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleItems])
 
   // Notify parent of badge count changes
   useEffect(() => {
@@ -505,6 +572,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
             <TriageCard
               item={item}
               catchUpMeta={catchUpMeta[item.chat.telegram_id] || null}
+              context={contextMap[item.chat.telegram_id] || null}
               selected={i === selectedIdx}
               onSnooze={handleSnooze}
               onHandled={handleHandled}

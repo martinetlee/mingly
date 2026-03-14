@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck, ListChecks } from 'lucide-react'
+import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck, ListChecks, Users } from 'lucide-react'
 import type { DashboardData, MentionGroup, MentionMessage } from '../api/types'
 import { getDashboard, getMentions, reactToMessage } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
@@ -166,6 +166,7 @@ function HomeMentionCard({
 
 type HomeTab = 'catchup' | 'mentions' | 'needs_reply'
 type MentionFilter = 'not_acted' | 'all' | 'acknowledged' | 'replied'
+type ContactsSubTab = 'needs_checkin' | 'all'
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -175,6 +176,9 @@ export default function Home() {
   // Tab state -- default to Catch Up triage queue
   const [activeTab, setActiveTab] = useState<HomeTab>('catchup')
   const [catchUpCount, setCatchUpCount] = useState<number | null>(null)
+
+  // Important contacts sub-tab state
+  const [contactsSubTab, setContactsSubTab] = useState<ContactsSubTab>('needs_checkin')
 
   // Mentions state
   const [mentions, setMentions] = useState<MentionGroup[]>([])
@@ -480,70 +484,127 @@ export default function Home() {
         {/* Important Contacts */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-xs font-medium uppercase tracking-wider text-slate-400">Important Contacts</h2>
+            <h2 className="text-xs font-medium uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <Users size={12} />
+              Important Contacts
+            </h2>
             <Link to="/contacts?filter=important" className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5">
               View all <ArrowRight size={10} />
             </Link>
           </div>
-          {data.attention_contacts.length === 0 ? (
-            <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-6 text-center">
-              <p className="text-sm text-slate-500">All contacts are in good standing.</p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {data.attention_contacts.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => navigate(`/chats?chatId=${c.telegram_id}`)}
-                  className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 hover:bg-slate-700/50 transition-colors text-left w-full"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
-                      {c.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="truncate text-sm font-medium text-gray-200">{c.name}</p>
-                        {c.relationship_status && (
-                          <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                            c.relationship_status === 'needs_reply' ? 'bg-red-500/20 text-red-400' :
-                            c.relationship_status === 'stalled' ? 'bg-orange-500/20 text-orange-400' :
-                            c.relationship_status === 'cold' ? 'bg-slate-500/20 text-slate-400' :
-                            c.relationship_status === 'active' ? 'bg-emerald-500/20 text-emerald-400' :
-                            c.relationship_status === 'nurturing' ? 'bg-amber-500/20 text-amber-400' :
-                            'bg-slate-700 text-slate-400'
-                          }`}>
-                            {c.relationship_status.replace('_', ' ')}
-                            {c.status_source === 'manual' && ' (manual)'}
-                          </span>
+
+          {/* Sub-tabs for Important Contacts */}
+          <div className="flex gap-1.5 mb-3">
+            <button
+              onClick={() => setContactsSubTab('needs_checkin')}
+              className={`rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
+                contactsSubTab === 'needs_checkin'
+                  ? 'bg-rose-500/20 text-rose-400'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
+              }`}
+            >
+              Needs Check-in
+              {(() => {
+                const count = data.attention_contacts.filter(
+                  (c) => c.relationship_status === 'needs_reply' || c.relationship_status === 'stalled'
+                ).length
+                return count > 0 ? (
+                  <span className="ml-1 rounded-full bg-rose-500/20 px-1.5 py-0.5 text-[9px] font-medium text-rose-400">
+                    {count}
+                  </span>
+                ) : null
+              })()}
+            </button>
+            <button
+              onClick={() => setContactsSubTab('all')}
+              className={`rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
+                contactsSubTab === 'all'
+                  ? 'bg-slate-500/20 text-slate-200'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
+              }`}
+            >
+              All Contacts
+              <span className="ml-1 rounded-full bg-slate-600/40 px-1.5 py-0.5 text-[9px] font-medium text-slate-400">
+                {data.attention_contacts.length}
+              </span>
+            </button>
+          </div>
+
+          {(() => {
+            const contactsToShow = contactsSubTab === 'needs_checkin'
+              ? data.attention_contacts.filter(
+                  (c) => c.relationship_status === 'needs_reply' || c.relationship_status === 'stalled'
+                )
+              : data.attention_contacts
+
+            if (contactsToShow.length === 0) {
+              return (
+                <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-6 text-center">
+                  <p className="text-sm text-slate-500">
+                    {contactsSubTab === 'needs_checkin'
+                      ? 'No contacts need your check-in right now.'
+                      : 'All contacts are in good standing.'}
+                  </p>
+                </div>
+              )
+            }
+
+            return (
+              <div className="flex flex-col gap-2">
+                {contactsToShow.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => navigate(`/chats?chatId=${c.telegram_id}`)}
+                    className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 hover:bg-slate-700/50 transition-colors text-left w-full"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
+                        {c.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="truncate text-sm font-medium text-gray-200">{c.name}</p>
+                          {c.relationship_status && (
+                            <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                              c.relationship_status === 'needs_reply' ? 'bg-red-500/20 text-red-400' :
+                              c.relationship_status === 'stalled' ? 'bg-orange-500/20 text-orange-400' :
+                              c.relationship_status === 'cold' ? 'bg-slate-500/20 text-slate-400' :
+                              c.relationship_status === 'active' ? 'bg-emerald-500/20 text-emerald-400' :
+                              c.relationship_status === 'nurturing' ? 'bg-amber-500/20 text-amber-400' :
+                              'bg-slate-700 text-slate-400'
+                            }`}>
+                              {c.relationship_status.replace('_', ' ')}
+                              {c.status_source === 'manual' && ' (manual)'}
+                            </span>
+                          )}
+                        </div>
+                        {c.primary_position && (
+                          <p className="truncate text-[10px] text-slate-500">
+                            {c.primary_position.title
+                              ? `${c.primary_position.title} @ ${c.primary_position.organization}`
+                              : c.primary_position.organization}
+                          </p>
                         )}
                       </div>
-                      {c.primary_position && (
-                        <p className="truncate text-[10px] text-slate-500">
-                          {c.primary_position.title
-                            ? `${c.primary_position.title} @ ${c.primary_position.organization}`
-                            : c.primary_position.organization}
-                        </p>
-                      )}
                     </div>
-                  </div>
-                  {(c.attention_reason || c.status_explanation) && (
-                    <div className="mt-2 ml-10 space-y-1">
-                      {c.attention_reason && (
-                        <p className="text-[11px] text-amber-400/80">{c.attention_reason}</p>
-                      )}
-                      {c.status_explanation && (
-                        <p className="text-[11px] text-slate-500">{c.status_explanation}</p>
-                      )}
-                      {c.recommended_action && (
-                        <p className="text-[11px] text-indigo-400/70">{c.recommended_action}</p>
-                      )}
-                    </div>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+                    {(c.attention_reason || c.status_explanation) && (
+                      <div className="mt-2 ml-10 space-y-1">
+                        {c.attention_reason && (
+                          <p className="text-[11px] text-amber-400/80">{c.attention_reason}</p>
+                        )}
+                        {c.status_explanation && (
+                          <p className="text-[11px] text-slate-500">{c.status_explanation}</p>
+                        )}
+                        {c.recommended_action && (
+                          <p className="text-[11px] text-indigo-400/70">{c.recommended_action}</p>
+                        )}
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )
+          })()}
         </div>
 
         {/* Latest Briefing */}

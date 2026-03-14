@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -461,6 +461,9 @@ export const updateCatchUpRelationship = (chatTelegramId: number, status: string
     method: 'POST',
     body: JSON.stringify({ status }),
   })
+
+export const getCatchUpContext = (chatTelegramId: number) =>
+  request<CatchUpContext>(`/api/catchup/${chatTelegramId}/context`)
 
 // --- Dashboard ---
 
