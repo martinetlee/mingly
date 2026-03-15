@@ -11,6 +11,7 @@ from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handle
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
+from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
 
 app = create_app()
 
@@ -29,6 +30,8 @@ async def on_startup():
             pass  # unknown provider etc — skip silently
     # Start the background briefing scheduler (runs regardless of Telegram auth)
     start_briefing_scheduler()
+    # Start the catch-up summary scheduler
+    start_catchup_summary_scheduler()
 
     if not has_credentials():
         return

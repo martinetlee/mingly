@@ -11,13 +11,15 @@ import {
   MessageSquare,
   AlarmClock,
 } from 'lucide-react'
-import type { DashboardNeedsReply, CatchUpItem, RelationshipStatus } from '../api/types'
+import type { DashboardNeedsReply, CatchUpItem, CatchUpContext, RelationshipStatus } from '../api/types'
 import {
   getAllCatchUpItems,
   snoozeCatchUpItem,
   markCatchUpHandled,
   addCatchUpNote,
   updateCatchUpRelationship,
+  getCatchUpContext,
+  triggerCatchUpSummaries,
 } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
@@ -63,6 +65,7 @@ const SNOOZE_OPTIONS = [
 interface TriageCardProps {
   item: DashboardNeedsReply
   catchUpMeta: CatchUpItem | null
+  context: CatchUpContext | null
   selected: boolean
   onSnooze: (chatId: number, hours: number) => void
   onHandled: (chatId: number) => void
@@ -74,6 +77,7 @@ interface TriageCardProps {
 function TriageCard({
   item,
   catchUpMeta,
+  context,
   selected,
   onSnooze,
   onHandled,
@@ -141,20 +145,78 @@ function TriageCard({
       {expanded && (
         <div className="border-t border-slate-700/50 px-4 py-3 space-y-3">
           {/* Context summary */}
-          <div className="rounded-lg bg-slate-700/30 px-3 py-2">
-            <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Why this is here</p>
-            <p className="text-xs text-slate-400">
-              {item.chat.type === 'private'
-                ? 'This person sent you a message and is waiting for your reply.'
-                : 'Someone in this chat sent a message that needs your attention.'}
-              {item.last_message.sender_name && (
-                <span>
-                  {' '}Last message from <span className="text-slate-300 font-medium">{item.last_message.sender_name}</span>{' '}
-                  {fmtRelative(item.last_message.date)}.
+          <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] text-slate-500 uppercase tracking-wider">Summary</p>
+              {context?.generated_at && (
+                <span className="text-[10px] text-slate-600">
+                  Generated {fmtRelative(context.generated_at)}
                 </span>
               )}
-            </p>
+            </div>
+            {context ? (
+              <>
+                <p className="text-xs text-slate-400">{context.summary}</p>
+                {context.new_messages_since_summary > 0 && (
+                  <p className="text-[11px] font-medium text-indigo-400">
+                    +{context.new_messages_since_summary} new message{context.new_messages_since_summary !== 1 ? 's' : ''} since this summary
+                  </p>
+                )}
+                {context.summary_messages.length > 0 && (
+                  <div className="space-y-1 mt-1.5">
+                    {context.summary_messages.slice(0, 3).map((m, i) => (
+                      <div key={i} className="rounded-md bg-slate-800/60 px-2.5 py-1.5 text-xs">
+                        <div className="flex items-baseline justify-between gap-2 mb-0.5">
+                          <span className="font-medium text-slate-300 truncate">
+                            {m.sender_name || 'Unknown'}
+                          </span>
+                          {m.date && (
+                            <span className="shrink-0 text-[10px] text-slate-500">
+                              {fmtRelative(m.date)}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-slate-400 line-clamp-2">
+                          {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-slate-500">Loading context...</p>
+            )}
           </div>
+
+          {/* Last 3 messages */}
+          {context && context.recent_messages.length > 0 && (
+            <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-1.5">
+              <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Recent messages</p>
+              {context.recent_messages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`rounded-md px-2.5 py-1.5 text-xs ${
+                    m.is_outgoing ? 'bg-indigo-500/10 border border-indigo-500/20' : 'bg-slate-800/60'
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between gap-2 mb-0.5">
+                    <span className={`font-medium truncate ${m.is_outgoing ? 'text-indigo-300' : 'text-slate-300'}`}>
+                      {m.is_outgoing ? 'You' : m.sender_name || 'Unknown'}
+                    </span>
+                    {m.date && (
+                      <span className="shrink-0 text-[10px] text-slate-500">
+                        {fmtRelative(m.date)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-400 line-clamp-2">
+                    {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Primary actions row */}
           <div className="flex flex-wrap gap-1.5">
@@ -332,7 +394,9 @@ interface CatchUpQueueProps {
 export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCount }: CatchUpQueueProps) {
   const navigate = useNavigate()
   const [catchUpMeta, setCatchUpMeta] = useState<Record<number, CatchUpItem>>({})
+  const [contextMap, setContextMap] = useState<Record<number, CatchUpContext>>({})
   const [loading, setLoading] = useState(false)
+  const [generating, setGenerating] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [actionFeedback, setActionFeedback] = useState<{ chatId: number; msg: string } | null>(null)
   const selectedRef = useRef<HTMLDivElement | null>(null)
@@ -369,6 +433,35 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
       return true
     })
   }, [needsReply, catchUpMeta])
+
+  // Fetch stored context for visible items
+  const fetchContexts = useCallback(() => {
+    for (const item of visibleItems) {
+      const chatId = item.chat.telegram_id
+      getCatchUpContext(chatId)
+        .then((ctx) => {
+          setContextMap((prev) => ({ ...prev, [chatId]: ctx }))
+        })
+        .catch(() => {})
+    }
+  }, [visibleItems])
+
+  useEffect(() => {
+    fetchContexts()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleItems])
+
+  const handleGenerateSummaries = async () => {
+    setGenerating(true)
+    try {
+      await triggerCatchUpSummaries()
+      // Re-fetch contexts after generation
+      fetchContexts()
+    } catch {
+      // ignore
+    }
+    setGenerating(false)
+  }
 
   // Notify parent of badge count changes
   useEffect(() => {
@@ -481,17 +574,29 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
             j/k to navigate, r to reply, h to handle
           </span>
         </div>
-        <button
-          onClick={() => {
-            fetchMeta()
-            onRefreshDashboard()
-          }}
-          disabled={loading}
-          className="text-slate-500 hover:text-slate-300 disabled:opacity-50 transition-colors"
-          title="Refresh"
-        >
-          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleGenerateSummaries}
+            disabled={generating}
+            className="flex items-center gap-1 rounded-md bg-indigo-500/15 hover:bg-indigo-500/25 px-2 py-1 text-[10px] font-medium text-indigo-300 disabled:opacity-50 transition-colors"
+            title="Regenerate all summaries now"
+          >
+            <RefreshCw size={10} className={generating ? 'animate-spin' : ''} />
+            {generating ? 'Generating...' : 'Refresh summaries'}
+          </button>
+          <button
+            onClick={() => {
+              fetchMeta()
+              fetchContexts()
+              onRefreshDashboard()
+            }}
+            disabled={loading}
+            className="text-slate-500 hover:text-slate-300 disabled:opacity-50 transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* Triage cards */}
@@ -505,6 +610,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
             <TriageCard
               item={item}
               catchUpMeta={catchUpMeta[item.chat.telegram_id] || null}
+              context={contextMap[item.chat.telegram_id] || null}
               selected={i === selectedIdx}
               onSnooze={handleSnooze}
               onHandled={handleHandled}

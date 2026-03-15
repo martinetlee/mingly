@@ -147,6 +147,20 @@ class CatchUpItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CatchUpSummary(Base):
+    __tablename__ = "catchup_summaries"
+    __table_args__ = (UniqueConstraint("chat_telegram_id", name="uq_catchup_summary_chat"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recent_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    total_messages_at_generation: Mapped[int] = mapped_column(Integer, default=0)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class BriefingRun(Base):
     __tablename__ = "briefing_runs"
 

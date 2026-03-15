@@ -367,6 +367,23 @@ export interface CatchUpItem {
   updated_at: string | null
 }
 
+export interface CatchUpContextMessage {
+  sender_name: string | null
+  text: string | null
+  date: string | null
+  is_outgoing: boolean
+  media_type: string | null
+}
+
+export interface CatchUpContext {
+  summary: string
+  summary_messages: CatchUpContextMessage[]
+  recent_messages: CatchUpContextMessage[]
+  last_activity_at: string | null
+  generated_at: string | null
+  new_messages_since_summary: number
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }

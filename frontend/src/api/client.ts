@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -460,6 +460,21 @@ export const updateCatchUpRelationship = (chatTelegramId: number, status: string
   request<{ contact_id: number; relationship_status: string }>(`/api/catchup/${chatTelegramId}/relationship-status`, {
     method: 'POST',
     body: JSON.stringify({ status }),
+  })
+
+export const getCatchUpContext = (chatTelegramId: number) =>
+  request<CatchUpContext>(`/api/catchup/${chatTelegramId}/context`)
+
+export const triggerCatchUpSummaries = () =>
+  request<{ success: boolean; summaries_generated: number }>('/api/catchup/generate-summaries', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+export const setCatchUpSummaryInterval = (interval_minutes: number) =>
+  request<{ success: boolean; interval_minutes: number }>('/api/settings/prefs/catchup-summary-interval', {
+    method: 'POST',
+    body: JSON.stringify({ interval_minutes }),
   })
 
 // --- Dashboard ---

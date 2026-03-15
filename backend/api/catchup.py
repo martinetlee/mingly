@@ -1,14 +1,15 @@
 """Catch Up triage API -- snooze, remind-later, mark-handled, add note."""
 
+import json
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc, and_, or_
+from sqlalchemy import select, desc, asc, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import CatchUpItem, Contact
+from backend.db.models import CatchUpItem, CatchUpSummary, Contact, Message
 from backend.db import crud
 
 router = APIRouter()
@@ -182,3 +183,55 @@ async def update_relationship_from_catchup(
         "contact_id": contact.id,
         "relationship_status": contact.relationship_status,
     }
+
+
+@router.get("/{chat_telegram_id}/context")
+async def get_catchup_context(
+    chat_telegram_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return stored catch-up context for a chat. If a pre-computed summary
+    exists, serve it along with the count of new messages since the summary
+    was generated. Falls back to a minimal response if no summary exists yet."""
+
+    summary_row = (await db.execute(
+        select(CatchUpSummary).where(
+            CatchUpSummary.chat_telegram_id == chat_telegram_id
+        )
+    )).scalar_one_or_none()
+
+    if not summary_row:
+        return {
+            "summary": "Summary not yet generated. Click refresh to generate now.",
+            "summary_messages": [],
+            "recent_messages": [],
+            "last_activity_at": None,
+            "generated_at": None,
+            "new_messages_since_summary": 0,
+        }
+
+    # Count current total messages to determine how many are new
+    total_now_q = (
+        select(func.count(Message.id))
+        .where(Message.chat_id == chat_telegram_id)
+    )
+    total_now = (await db.execute(total_now_q)).scalar_one()
+    new_messages = max(0, total_now - summary_row.total_messages_at_generation)
+
+    return {
+        "summary": summary_row.summary,
+        "summary_messages": json.loads(summary_row.summary_messages_json) if summary_row.summary_messages_json else [],
+        "recent_messages": json.loads(summary_row.recent_messages_json) if summary_row.recent_messages_json else [],
+        "last_activity_at": summary_row.last_activity_at.isoformat() + "Z" if summary_row.last_activity_at else None,
+        "generated_at": summary_row.generated_at.isoformat() + "Z" if summary_row.generated_at else None,
+        "new_messages_since_summary": new_messages,
+    }
+
+
+@router.post("/generate-summaries")
+async def trigger_generate_summaries():
+    """Manually trigger catch-up summary generation for all active items."""
+    from backend.catchup_summary_scheduler import generate_all_summaries
+
+    count = await generate_all_summaries()
+    return {"success": True, "summaries_generated": count}
