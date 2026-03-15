@@ -29,3 +29,16 @@ export function notifySessionExpired(): void {
   _sessionToken = null
   _onSessionExpired?.()
 }
+
+/**
+ * Append the session token as a query parameter to a media URL.
+ *
+ * Browser <img> / <video> tags cannot send custom headers, so the backend
+ * media endpoint also accepts the token via ``?token=``.  This helper keeps
+ * the detail in one place.
+ */
+export function authenticatedMediaUrl(url: string): string {
+  if (!_sessionToken) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(_sessionToken)}`
+}

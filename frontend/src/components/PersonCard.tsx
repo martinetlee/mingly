@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Star, BadgeCheck, Crown, Bot } from 'lucide-react'
 import type { PersonSummary } from '../api/types'
 import { resolvePerson } from '../api/client'
+import { authenticatedMediaUrl } from '../api/session'
 import { sanitizeLinkedInUrl } from '../utils/sanitizeUrl'
 
 // Module-level cache for resolved person data (session lifetime)
@@ -236,7 +237,7 @@ export default function PersonCard({
   if (mode === 'profile') {
     const avatar = photoUrl ? (
       <img
-        src={photoUrl}
+        src={authenticatedMediaUrl(photoUrl)}
         alt={name}
         className="h-20 w-20 rounded-full object-cover ring-2 ring-slate-700"
       />
