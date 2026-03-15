@@ -95,12 +95,28 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
     return d
 
 
-async def _get_positions(db: AsyncSession, contact_id: int) -> List[ContactPosition]:
-    result = await db.execute(
-        select(ContactPosition)
-        .where(ContactPosition.contact_id == contact_id)
-        .order_by(ContactPosition.organization)
-    )
+async def _get_positions(db: AsyncSession, contact_id: int = None, telegram_id: int = None) -> List[ContactPosition]:
+    """Fetch positions by telegram_id (preferred) or contact_id (legacy lookup via Contact)."""
+    if telegram_id is not None:
+        result = await db.execute(
+            select(ContactPosition)
+            .where(ContactPosition.telegram_id == telegram_id)
+            .order_by(ContactPosition.organization)
+        )
+    elif contact_id is not None:
+        # Legacy: resolve contact_id to telegram_id first
+        contact = (await db.execute(
+            select(Contact.telegram_id).where(Contact.id == contact_id)
+        )).scalar_one_or_none()
+        if not contact:
+            return []
+        result = await db.execute(
+            select(ContactPosition)
+            .where(ContactPosition.telegram_id == contact)
+            .order_by(ContactPosition.organization)
+        )
+    else:
+        return []
     return list(result.scalars().all())
 
 
@@ -168,20 +184,20 @@ async def list_contacts(
     result = await db.execute(q)
     contacts = list(result.scalars().all())
 
-    # Batch-load positions
+    # Batch-load positions by telegram_id
     if contacts:
-        contact_ids = [c.id for c in contacts]
+        telegram_ids = [c.telegram_id for c in contacts]
         pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
+            select(ContactPosition).where(ContactPosition.telegram_id.in_(telegram_ids))
         )
         all_positions = list(pos_result.scalars().all())
         pos_map: Dict[int, List[ContactPosition]] = {}
         for p in all_positions:
-            pos_map.setdefault(p.contact_id, []).append(p)
+            pos_map.setdefault(p.telegram_id, []).append(p)
     else:
         pos_map = {}
 
-    return [_contact_dict(c, pos_map.get(c.id, [])) for c in contacts]
+    return [_contact_dict(c, pos_map.get(c.telegram_id, [])) for c in contacts]
 
 
 @router.get("/by-telegram/{telegram_id}")
@@ -191,7 +207,7 @@ async def get_contact_by_telegram(telegram_id: int, db: AsyncSession = Depends(g
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    positions = await _get_positions(db, contact.id)
+    positions = await _get_positions(db, telegram_id=contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -213,7 +229,7 @@ async def set_contact_important_by_telegram(
     contact.is_important = data.is_important
     await db.commit()
     await db.refresh(contact)
-    positions = await _get_positions(db, contact.id)
+    positions = await _get_positions(db, telegram_id=contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -226,7 +242,7 @@ async def create_contact(
         select(Contact).where(Contact.telegram_id == data.telegram_id)
     )).scalar_one_or_none()
     if existing:
-        positions = await _get_positions(db, existing.id)
+        positions = await _get_positions(db, telegram_id=existing.telegram_id)
         return _contact_dict(existing, positions)
     contact = Contact(
         telegram_id=data.telegram_id,
@@ -247,7 +263,7 @@ async def get_contact(contact_id: int, db: AsyncSession = Depends(get_db)):
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    positions = await _get_positions(db, contact.id)
+    positions = await _get_positions(db, telegram_id=contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -281,7 +297,7 @@ async def update_contact(
         contact.is_important = data.is_important
     await db.commit()
     await db.refresh(contact)
-    positions = await _get_positions(db, contact.id)
+    positions = await _get_positions(db, telegram_id=contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -293,11 +309,8 @@ async def add_position(
     data: PositionCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    contact = (await db.execute(
-        select(Contact).where(Contact.id == contact_id)
-    )).scalar_one_or_none()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found")
+    """Add a position. contact_id here is the Telegram ID of the person."""
+    telegram_id = contact_id  # route param is the telegram_id
     org_name = data.organization.strip()
     # Auto-create Organization if it doesn't exist
     existing_org = (await db.execute(
@@ -314,7 +327,7 @@ async def add_position(
             pass  # invalid date → leave as None
 
     pos = ContactPosition(
-        contact_id=contact_id,
+        telegram_id=telegram_id,
         organization=org_name,
         title=data.title.strip() if data.title else None,
         is_active=data.is_active,
@@ -343,10 +356,12 @@ async def update_position(
     data: PositionUpdate,
     db: AsyncSession = Depends(get_db),
 ):
+    """Update a position. contact_id here is the Telegram ID of the person."""
+    telegram_id = contact_id
     pos = (await db.execute(
         select(ContactPosition).where(
             ContactPosition.id == position_id,
-            ContactPosition.contact_id == contact_id,
+            ContactPosition.telegram_id == telegram_id,
         )
     )).scalar_one_or_none()
     if not pos:
@@ -384,10 +399,12 @@ async def remove_position(
     position_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    """Remove a position. contact_id here is the Telegram ID of the person."""
+    telegram_id = contact_id
     pos = (await db.execute(
         select(ContactPosition).where(
             ContactPosition.id == position_id,
-            ContactPosition.contact_id == contact_id,
+            ContactPosition.telegram_id == telegram_id,
         )
     )).scalar_one_or_none()
     if not pos:
@@ -395,6 +412,25 @@ async def remove_position(
     await db.delete(pos)
     await db.commit()
     return {"success": True}
+
+
+@router.get("/{contact_id}/positions")
+async def get_positions_for_telegram_id(
+    contact_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all positions for a telegram_id. contact_id param is actually telegram_id."""
+    positions = await _get_positions(db, telegram_id=contact_id)
+    return [
+        {
+            "id": p.id,
+            "organization": p.organization,
+            "title": p.title,
+            "is_active": p.is_active,
+            "ended_at": p.ended_at.isoformat() if p.ended_at else None,
+        }
+        for p in positions
+    ]
 
 
 # --- Relationship Status Endpoints ---
@@ -418,7 +454,7 @@ async def set_relationship_status(
     contact.relationship_status_manual = True
     await db.commit()
     await db.refresh(contact)
-    positions = await _get_positions(db, contact.id)
+    positions = await _get_positions(db, telegram_id=contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -435,7 +471,7 @@ async def reset_relationship_status(
     updated = await crud.refresh_contact_status(db, contact.id)
     if not updated:
         raise HTTPException(status_code=404, detail="Contact not found")
-    positions = await _get_positions(db, updated.id)
+    positions = await _get_positions(db, telegram_id=updated.telegram_id)
     return _contact_dict(updated, positions)
 
 
@@ -478,7 +514,7 @@ async def resolve_person(telegram_id: int, db: AsyncSession = Depends(get_db)):
         select(Contact).where(Contact.telegram_id == telegram_id)
     )).scalar_one_or_none()
     if contact:
-        positions = await _get_positions(db, contact.id)
+        positions = await _get_positions(db, telegram_id=contact.telegram_id)
         return _person_summary(contact, positions)
 
     # Fallback: look up sender_name from messages
@@ -525,15 +561,15 @@ async def resolve_persons_batch(
     )
     contacts = {c.telegram_id: c for c in result.scalars().all()}
 
-    # Batch-load positions for found contacts
+    # Batch-load positions by telegram_id
     pos_map: Dict[int, List[ContactPosition]] = {}
     if contacts:
-        contact_ids = [c.id for c in contacts.values()]
+        tids = [c.telegram_id for c in contacts.values()]
         pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
+            select(ContactPosition).where(ContactPosition.telegram_id.in_(tids))
         )
         for p in pos_result.scalars().all():
-            pos_map.setdefault(p.contact_id, []).append(p)
+            pos_map.setdefault(p.telegram_id, []).append(p)
 
     # For missing IDs, try Message.sender_name fallback
     missing = [tid for tid in ids if tid not in contacts]
@@ -564,7 +600,7 @@ async def resolve_persons_batch(
     for tid in ids:
         if tid in contacts:
             c = contacts[tid]
-            out[tid] = _person_summary(c, pos_map.get(c.id, []))
+            out[tid] = _person_summary(c, pos_map.get(c.telegram_id, []))
         else:
             out[tid] = {
                 "telegram_id": tid,

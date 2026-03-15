@@ -359,7 +359,14 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession):
         yield _sse("error", {"message": "No LLM configured. Set up an AI model in Settings."})
         return
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages_in
+    # Inject organizational awareness into system prompt
+    from backend.org_context import get_user_orgs_system_context
+    system_content = SYSTEM_PROMPT
+    org_ctx = get_user_orgs_system_context()
+    if org_ctx:
+        system_content += "\n\n" + org_ctx
+
+    messages = [{"role": "system", "content": system_content}] + messages_in
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for _ in range(8):  # max tool-call rounds
@@ -809,6 +816,7 @@ async def _summarize_chat(
     messages_text: str,
     max_tokens: int = 4000,
     cancel: Optional[asyncio.Event] = None,
+    org_context: Optional[str] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """Async generator: yields ('token'|'reasoning', data) then ('result', (summary, ids))."""
     prompt_override = get_briefing_prompt_override()
@@ -821,7 +829,10 @@ async def _summarize_chat(
         else:
             system = category_overrides.get("briefing") or DEFAULT_BRIEFING_CHAT_PROMPT
 
-    user_msg = f"Chat: {chat_name}\n\nMessages:\n{messages_text}"
+    user_msg = f"Chat: {chat_name}\n\n"
+    if org_context:
+        user_msg += f"{org_context}\n\n"
+    user_msg += f"Messages:\n{messages_text}"
     content_acc = ""
     reasoning_acc = ""
     token_count = 0
@@ -913,10 +924,14 @@ async def _summarize_important_contact(
     messages_text: str,
     max_tokens: int = 4000,
     cancel: Optional[asyncio.Event] = None,
+    org_context: Optional[str] = None,
 ) -> AsyncGenerator[Tuple[str, Any], None]:
     """Async generator: yields ('token'|'reasoning', data) then ('result', (summary, ids))."""
     system = DEFAULT_IMPORTANT_CONTACT_PROMPT
-    user_msg = f"Person: {contact_name}\n\nMessages:\n{messages_text}"
+    user_msg = f"Person: {contact_name}\n\n"
+    if org_context:
+        user_msg += f"{org_context}\n\n"
+    user_msg += f"Messages:\n{messages_text}"
     content_acc = ""
     reasoning_acc = ""
     token_count = 0
@@ -1088,10 +1103,16 @@ async def intelligence_briefing(
                         continue
 
                     messages_text = "\n".join(lines[-150:])
+                    # Resolve org context for senders in this chat
+                    from backend.org_context import get_org_context_for_senders
+                    chat_senders = list({m[0].sender_name for m in msgs if m[0].sender_name and not m[0].is_outgoing})
+                    chat_org_ctx = await get_org_context_for_senders(db, chat_senders) if chat_senders else None
+
                     summary, source_ids = "", []
                     async for event_type, data in _summarize_chat(
                         client, base_url, model, chat.name, category, messages_text,
                         max_tokens=get_briefing_max_tokens(), cancel=cancel,
+                        org_context=chat_org_ctx,
                     ):
                         if event_type == "token":
                             yield _sse("thinking", {"chat_name": chat.name, "tokens": data})
@@ -1169,10 +1190,15 @@ async def intelligence_briefing(
                         continue
 
                     messages_text = "\n".join(lines[-80:])
+                    # Resolve org context for this contact
+                    from backend.org_context import get_org_context_for_contact
+                    contact_org_ctx = await get_org_context_for_contact(db, contact_name)
+
                     summary, source_ids = "", []
                     async for event_type, data in _summarize_important_contact(
                         ic_client, base_url, model, contact_name, messages_text,
                         max_tokens=get_briefing_max_tokens(), cancel=cancel,
+                        org_context=contact_org_ctx,
                     ):
                         if event_type == "token":
                             yield _sse("thinking", {"chat_name": contact_name, "tokens": data})
@@ -1341,6 +1367,11 @@ async def regenerate_briefing_entry(
                         summary = "No text messages in this period."
                     else:
                         messages_text = "\n".join(lines[-150:])
+                        # Resolve org context for senders
+                        from backend.org_context import get_org_context_for_senders as _get_org_ctx
+                        _senders = list({m[0].sender_name for m in msgs if m[0].sender_name and not m[0].is_outgoing})
+                        _org_ctx = await _get_org_ctx(db, _senders) if _senders else None
+
                         source_ids: list[int] = []
                         async with httpx.AsyncClient(timeout=180.0) as client:
                             async for event_type, data in _summarize_chat(
@@ -1352,6 +1383,7 @@ async def regenerate_briefing_entry(
                                 messages_text,
                                 max_tokens=get_briefing_max_tokens(),
                                 cancel=cancel,
+                                org_context=_org_ctx,
                             ):
                                 if event_type == "token":
                                     yield _sse("thinking", {"entry_id": entry.id, "tokens": data, "chat_name": entry.chat_name})
@@ -1385,6 +1417,10 @@ async def regenerate_briefing_entry(
                         summary = "No text messages in this period."
                     else:
                         messages_text = "\n".join(lines[-80:])
+                        # Resolve org context for this contact
+                        from backend.org_context import get_org_context_for_contact as _get_contact_ctx
+                        _contact_org_ctx = await _get_contact_ctx(db, entry.chat_name)
+
                         source_ids: list[int] = []
                         async with httpx.AsyncClient(timeout=180.0) as client:
                             async for event_type, data in _summarize_important_contact(
@@ -1395,6 +1431,7 @@ async def regenerate_briefing_entry(
                                 messages_text,
                                 max_tokens=get_briefing_max_tokens(),
                                 cancel=cancel,
+                                org_context=_contact_org_ctx,
                             ):
                                 if event_type == "token":
                                     yield _sse("thinking", {"entry_id": entry.id, "tokens": data, "chat_name": entry.chat_name})

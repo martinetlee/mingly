@@ -127,7 +127,7 @@ export default function ContactInfoSection({ contact, onContactChange, compact }
   const handleAddPosition = async () => {
     if (!newOrg.trim()) return
     const pos = await addPosition(
-      contact.id,
+      contact.telegram_id,
       newOrg.trim(),
       newTitle.trim() || undefined,
       !newIsFormer,
@@ -142,12 +142,12 @@ export default function ContactInfoSection({ contact, onContactChange, compact }
   }
 
   const handleRemovePosition = async (posId: number) => {
-    await removePosition(contact.id, posId)
+    await removePosition(contact.telegram_id, posId)
     onContactChange({ ...contact, positions: contact.positions.filter((p) => p.id !== posId) })
   }
 
   const handleMarkFormer = async (posId: number, endedAt: string) => {
-    const updatedPos = await updatePosition(contact.id, posId, {
+    const updatedPos = await updatePosition(contact.telegram_id, posId, {
       is_active: false,
       ended_at: endedAt || null,
     })
@@ -158,7 +158,7 @@ export default function ContactInfoSection({ contact, onContactChange, compact }
   }
 
   const handleReactivate = async (posId: number) => {
-    const updatedPos = await updatePosition(contact.id, posId, {
+    const updatedPos = await updatePosition(contact.telegram_id, posId, {
       is_active: true,
       ended_at: null,
     })

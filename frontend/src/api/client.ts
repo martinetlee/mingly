@@ -255,29 +255,32 @@ export const setContactImportantByTelegram = (telegramId: number, is_important: 
   })
 
 export const addPosition = (
-  contactId: number,
+  telegramId: number,
   organization: string,
   title?: string,
   is_active = true,
   ended_at?: string,
 ) =>
-  request<ContactPosition>(`/api/contacts/${contactId}/positions`, {
+  request<ContactPosition>(`/api/contacts/${telegramId}/positions`, {
     method: 'POST',
     body: JSON.stringify({ organization, title: title || null, is_active, ended_at: ended_at || null }),
   })
 
 export const updatePosition = (
-  contactId: number,
+  telegramId: number,
   positionId: number,
   data: { title?: string; is_active?: boolean; ended_at?: string | null },
 ) =>
-  request<ContactPosition>(`/api/contacts/${contactId}/positions/${positionId}`, {
+  request<ContactPosition>(`/api/contacts/${telegramId}/positions/${positionId}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   })
 
-export const removePosition = (contactId: number, positionId: number) =>
-  request<{ success: boolean }>(`/api/contacts/${contactId}/positions/${positionId}`, { method: 'DELETE' })
+export const removePosition = (telegramId: number, positionId: number) =>
+  request<{ success: boolean }>(`/api/contacts/${telegramId}/positions/${positionId}`, { method: 'DELETE' })
+
+export const getPositions = (telegramId: number) =>
+  request<ContactPosition[]>(`/api/contacts/${telegramId}/positions`)
 
 export const setRelationshipStatus = (contactId: number, status: string) =>
   request<Contact>(`/api/contacts/${contactId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
@@ -475,6 +478,17 @@ export const setCatchUpSummaryInterval = (interval_minutes: number) =>
   request<{ success: boolean; interval_minutes: number }>('/api/settings/prefs/catchup-summary-interval', {
     method: 'POST',
     body: JSON.stringify({ interval_minutes }),
+  })
+
+// --- User Organizations ---
+
+export const getUserOrganizations = () =>
+  request<{ organizations: string[] }>('/api/settings/prefs/user-organizations')
+
+export const setUserOrganizations = (organizations: string[]) =>
+  request<{ success: boolean; organizations: string[] }>('/api/settings/prefs/user-organizations', {
+    method: 'PUT',
+    body: JSON.stringify({ organizations }),
   })
 
 // --- Dashboard ---

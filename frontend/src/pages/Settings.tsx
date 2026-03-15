@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
 import { getSessionToken } from '../api/session'
 import type { Tag } from '../api/types'
 
@@ -475,6 +475,11 @@ export default function Settings() {
   // Catch-up summary interval
   const [catchUpInterval, setCatchUpInterval] = useState<number>(30)
 
+  // User organizations
+  const [allOrgs, setAllOrgs] = useState<string[]>([])
+  const [userOrgs, setUserOrgs] = useState<string[]>([])
+  const [orgSaving, setOrgSaving] = useState(false)
+
   // Keyboard shortcuts toggle (localStorage)
   const [shortcutsEnabled, setShortcutsEnabled] = useState(() => localStorage.getItem('shortcuts_enabled') !== 'false')
   const handleShortcutsToggle = useCallback((enabled: boolean) => {
@@ -528,6 +533,14 @@ export default function Settings() {
         if (prefs.briefing_max_tokens) setBriefingMaxTokens(Number(prefs.briefing_max_tokens))
         if (prefs.catchup_summary_interval_minutes) setCatchUpInterval(Number(prefs.catchup_summary_interval_minutes))
       })
+      .catch(() => {})
+
+    // Load user organizations
+    getOrganizations()
+      .then((orgs) => setAllOrgs(orgs.map((o) => o.name)))
+      .catch(() => {})
+    getUserOrganizations()
+      .then(({ organizations }) => setUserOrgs(organizations))
       .catch(() => {})
 
     // Check Ollama status on mount
@@ -1050,6 +1063,57 @@ export default function Settings() {
                   Summaries are generated for all active catch-up items at this interval.
                   Shorter intervals mean fresher summaries but use more resources.
                 </p>
+              </div>
+            </section>
+
+            {/* ── Your Organizations ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Your Organizations</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Select which organizations you belong to. This helps AI features identify your colleagues in conversations.
+              </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4 space-y-3">
+                {allOrgs.length === 0 ? (
+                  <p className="text-xs text-slate-500">No organizations found. Add organizations in the Orgs page first.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {allOrgs.map((org) => {
+                      const selected = userOrgs.includes(org)
+                      return (
+                        <button
+                          key={org}
+                          disabled={orgSaving}
+                          onClick={async () => {
+                            const next = selected
+                              ? userOrgs.filter((o) => o !== org)
+                              : [...userOrgs, org]
+                            setUserOrgs(next)
+                            setOrgSaving(true)
+                            try {
+                              await setUserOrganizations(next)
+                            } catch {
+                              setUserOrgs(userOrgs) // revert
+                            } finally {
+                              setOrgSaving(false)
+                            }
+                          }}
+                          className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                            selected
+                              ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                              : 'bg-slate-700 text-slate-400 border border-slate-600 hover:border-slate-500'
+                          }`}
+                        >
+                          {org}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {userOrgs.length > 0 && (
+                  <p className="text-xs text-slate-500">
+                    Selected: {userOrgs.join(', ')}
+                  </p>
+                )}
               </div>
             </section>
 

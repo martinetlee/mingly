@@ -46,14 +46,19 @@ Given the chat name and recent messages since the user's last activity, write a 
 
 Focus on:
 - Key topics discussed or decisions made
-- Any requests, questions, or action items directed at the user
+- Any requests, questions, or action items directed at the user or user's organization
 - Important updates or news shared
 
+When mentioning people, we should make it clear which organization they belong to in this way: "John(AAA Corp) informs...".
 Be direct. No filler. Write from a second-person perspective (e.g. "They asked you to...",
 "The team discussed..."). Do not start with "Summary:" or similar labels."""
 
 
-async def _llm_summarize(chat_name: str, messages: list[dict]) -> str | None:
+async def _llm_summarize(
+    chat_name: str,
+    messages: list[dict],
+    org_context: str | None = None,
+) -> str | None:
     """Use LLM to generate a summary. Returns summary string or None."""
     registry = get_registry()
     provider = registry.get_any()
@@ -76,6 +81,8 @@ async def _llm_summarize(chat_name: str, messages: list[dict]) -> str | None:
         return None
 
     parts = [f"Chat: {chat_name}\n"]
+    if org_context:
+        parts.append(org_context)
     if context_lines:
         parts.append("Messages before your last activity (for context):\n" + "\n".join(context_lines))
     if new_lines:
@@ -227,7 +234,12 @@ async def generate_summary_for_chat(db, chat_telegram_id: int) -> dict:
     )).scalar_one_or_none()
     chat_name = chat_row or f"Chat {chat_telegram_id}"
 
-    summary_text = await _llm_summarize(chat_name, summary_messages) if summary_messages else None
+    # Resolve organizational context for senders
+    from backend.org_context import get_org_context_for_senders
+    sender_names = list({m["sender_name"] for m in summary_messages if m.get("sender_name")})
+    org_context = await get_org_context_for_senders(db, sender_names) if sender_names else None
+
+    summary_text = await _llm_summarize(chat_name, summary_messages, org_context=org_context) if summary_messages else None
 
     if not summary_text:
         # Fallback to rule-based summary

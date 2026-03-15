@@ -83,15 +83,15 @@ async def global_search(
     )
     contact_rows = (await db.execute(contact_q)).scalars().all()
 
-    # Batch-load positions for contacts
+    # Batch-load positions by telegram_id
     pos_map = {}
     if contact_rows:
-        contact_ids = [c.id for c in contact_rows]
+        telegram_ids = [c.telegram_id for c in contact_rows]
         pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
+            select(ContactPosition).where(ContactPosition.telegram_id.in_(telegram_ids))
         )
         for p in pos_result.scalars().all():
-            pos_map.setdefault(p.contact_id, []).append(p)
+            pos_map.setdefault(p.telegram_id, []).append(p)
 
     contacts = [
         {
@@ -115,7 +115,7 @@ async def global_search(
                     "is_active": p.is_active,
                     "ended_at": p.ended_at.isoformat() if p.ended_at else None,
                 }
-                for p in pos_map.get(c.id, [])
+                for p in pos_map.get(c.telegram_id, [])
             ],
         }
         for c in contact_rows

@@ -127,19 +127,19 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     )
     important_contacts = (await db.execute(important_contacts_q)).scalars().all()
 
-    # Batch-load positions
+    # Batch-load positions by telegram_id
     pos_map = {}
     if important_contacts:
-        contact_ids = [c.id for c in important_contacts]
+        telegram_ids = [c.telegram_id for c in important_contacts]
         pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.contact_id.in_(contact_ids))
+            select(ContactPosition).where(ContactPosition.telegram_id.in_(telegram_ids))
         )
         for p in pos_result.scalars().all():
-            pos_map.setdefault(p.contact_id, []).append(p)
+            pos_map.setdefault(p.telegram_id, []).append(p)
 
     attention_contacts = []
     for c in important_contacts:
-        positions = pos_map.get(c.id, [])
+        positions = pos_map.get(c.telegram_id, [])
         active_pos = [p for p in positions if p.is_active]
         primary = None
         if active_pos:

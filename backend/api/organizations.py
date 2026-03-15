@@ -27,21 +27,29 @@ class OrgUpdate(BaseModel):
 async def _org_detail(db: AsyncSession, org: Organization) -> dict:
     """Build full org dict with members and recent group messages."""
     # Members: contacts who have a position at this org (split into current and former)
+    # Left join Contact so positions without a Contact record still appear
     pos_result = await db.execute(
         select(ContactPosition, Contact)
-        .join(Contact, ContactPosition.contact_id == Contact.id)
+        .outerjoin(Contact, ContactPosition.telegram_id == Contact.telegram_id)
         .where(ContactPosition.organization == org.name)
         .order_by(Contact.first_name)
     )
     members = []
     former_members = []
     for pos, contact in pos_result.all():
-        name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or str(contact.telegram_id)
+        if contact:
+            name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or str(pos.telegram_id)
+            username = contact.username
+            contact_id = contact.id
+        else:
+            name = str(pos.telegram_id)
+            username = None
+            contact_id = None
         entry = {
-            "contact_id": contact.id,
-            "telegram_id": contact.telegram_id,
+            "contact_id": contact_id,
+            "telegram_id": pos.telegram_id,
             "name": name,
-            "username": contact.username,
+            "username": username,
             "title": pos.title,
             "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
         }

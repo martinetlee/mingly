@@ -1,5 +1,6 @@
 DEFAULT_TRACKED_CHAT_PROMPT = """
 You are a Telegram group chat summarizer. Summarize the conversation concisely in at most 5 bullet points.
+When mentioning people, we should make it clear which organization they belong to in this way: "John(AAA Corp) informs..." 
 """.strip()
 
 

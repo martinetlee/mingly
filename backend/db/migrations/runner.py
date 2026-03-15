@@ -169,17 +169,6 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE contacts ADD COLUMN last_incoming_at DATETIME",
         ],
     ),
-]
-
-# Seed data applied once (tracked as migration version 0).
-_DEFAULT_TAGS = [
-    ("Work", "indigo"),
-    ("Personal", "emerald"),
-    ("Family", "rose"),
-    ("Finance", "amber"),
-    ("Projects", "violet"),
-    ("News", "sky"),
-
     (
         18,
         "Create catchup_items table for triage queue",
@@ -194,6 +183,40 @@ _DEFAULT_TAGS = [
             "CREATE TABLE IF NOT EXISTS catchup_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_telegram_id INTEGER NOT NULL UNIQUE, summary TEXT NOT NULL, summary_messages_json TEXT, recent_messages_json TEXT, last_activity_at DATETIME, total_messages_at_generation INTEGER DEFAULT 0, generated_at DATETIME)",
         ],
     ),
+    (
+        20,
+        "Migrate contact_positions from contact_id to telegram_id",
+        [
+            # Add telegram_id column
+            "ALTER TABLE contact_positions ADD COLUMN telegram_id INTEGER",
+            # Populate from contacts table
+            "UPDATE contact_positions SET telegram_id = (SELECT telegram_id FROM contacts WHERE contacts.id = contact_positions.contact_id)",
+            # Remove rows that couldn't be resolved (orphaned)
+            "DELETE FROM contact_positions WHERE telegram_id IS NULL",
+        ],
+    ),
+    (
+        21,
+        "Rebuild contact_positions table: drop contact_id FK, make telegram_id NOT NULL with new unique constraint",
+        [
+            # SQLite doesn't support DROP COLUMN/CONSTRAINT, so recreate the table
+            "CREATE TABLE contact_positions_new (id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, organization VARCHAR NOT NULL, title VARCHAR, is_active INTEGER NOT NULL DEFAULT 1, ended_at TEXT, created_at DATETIME NOT NULL DEFAULT (datetime('now')), UNIQUE(telegram_id, organization))",
+            "INSERT INTO contact_positions_new (id, telegram_id, organization, title, is_active, ended_at, created_at) SELECT id, telegram_id, organization, title, is_active, ended_at, created_at FROM contact_positions WHERE telegram_id IS NOT NULL",
+            "DROP TABLE contact_positions",
+            "ALTER TABLE contact_positions_new RENAME TO contact_positions",
+            "CREATE INDEX ix_contact_positions_telegram_id ON contact_positions (telegram_id)",
+        ],
+    ),
+]
+
+# Seed data applied once (tracked as migration version 0).
+_DEFAULT_TAGS = [
+    ("Work", "indigo"),
+    ("Personal", "emerald"),
+    ("Family", "rose"),
+    ("Finance", "amber"),
+    ("Projects", "violet"),
+    ("News", "sky"),
 ]
 
 

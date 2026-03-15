@@ -261,3 +261,27 @@ async def set_briefing_last_run():
     prefs["briefing_last_run"] = datetime.now().isoformat()
     _save_prefs(prefs)
     return {"success": True, "briefing_last_run": prefs["briefing_last_run"]}
+
+
+# ---------------------------------------------------------------------------
+# User organizations
+# ---------------------------------------------------------------------------
+
+class UserOrganizationsRequest(BaseModel):
+    organizations: list[str]
+
+
+@router.get("/prefs/user-organizations")
+async def get_user_organizations():
+    """Return the list of organization names the user belongs to."""
+    prefs = _load_prefs()
+    return {"organizations": prefs.get("user_organizations", [])}
+
+
+@router.put("/prefs/user-organizations")
+async def set_user_organizations(req: UserOrganizationsRequest):
+    """Set which organizations the user belongs to."""
+    prefs = _load_prefs()
+    prefs["user_organizations"] = req.organizations
+    _save_prefs(prefs)
+    return {"success": True, "organizations": req.organizations}

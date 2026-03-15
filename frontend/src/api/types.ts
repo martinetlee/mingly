@@ -82,6 +82,7 @@ export interface Message {
 
 export interface ContactPosition {
   id: number
+  telegram_id?: number
   organization: string
   title: string | null
   is_active: boolean

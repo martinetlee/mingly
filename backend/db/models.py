@@ -93,10 +93,10 @@ class Contact(Base):
 
 class ContactPosition(Base):
     __tablename__ = "contact_positions"
-    __table_args__ = (UniqueConstraint("contact_id", "organization", name="uq_contact_org"),)
+    __table_args__ = (UniqueConstraint("telegram_id", "organization", name="uq_telegram_org"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    contact_id: Mapped[int] = mapped_column(Integer, ForeignKey("contacts.id"), nullable=False)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     organization: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # True = current, False = former
