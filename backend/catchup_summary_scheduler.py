@@ -3,7 +3,6 @@ Background scheduler that periodically generates catch-up summaries
 for all chats that need attention, storing results in the DB so the
 frontend can read them instantly without on-demand computation.
 """
-
 from __future__ import annotations
 
 import asyncio
