@@ -74,6 +74,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             func.substr(Message.text, 1, 200).label("text"),
             Message.date,
             Message.is_outgoing,
+            Message.my_reaction,
             func.row_number().over(
                 partition_by=Message.chat_id,
                 order_by=desc(Message.date),
@@ -95,6 +96,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         ))
         .where(
             last_msg_subq.c.is_outgoing == False,  # noqa: E712
+            last_msg_subq.c.my_reaction == None,  # noqa: E711 — exclude reacted messages
             Chat.is_hidden == False,  # noqa: E712
             Chat.is_briefing == False,  # noqa: E712
             relevant_chat_filter,

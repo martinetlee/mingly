@@ -860,9 +860,23 @@ async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tup
     if not last_outgoing:
         return ("new", last_interaction, None, last_incoming)
 
-    # They messaged more recently than we replied
+    # They messaged more recently than we replied — but not if we reacted
     if last_incoming and last_incoming > last_outgoing:
-        return ("needs_reply", last_interaction, last_outgoing, last_incoming)
+        # Check if we reacted to the latest incoming message
+        last_incoming_msg = (await db.execute(
+            select(Message)
+            .where(
+                Message.chat_id == contact.telegram_id,
+                Message.is_outgoing == False,  # noqa: E712
+            )
+            .order_by(desc(Message.date))
+            .limit(1)
+        )).scalar_one_or_none()
+        if last_incoming_msg and last_incoming_msg.my_reaction:
+            # Reacted — treat as acknowledged, not needs_reply
+            pass
+        else:
+            return ("needs_reply", last_interaction, last_outgoing, last_incoming)
 
     # Time-based status
     from datetime import datetime
