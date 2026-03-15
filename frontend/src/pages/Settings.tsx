@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, getTags, createTag, updateTag, deleteTag } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, getTags, createTag, updateTag, deleteTag } from '../api/client'
 import { getSessionToken } from '../api/session'
 import type { Tag } from '../api/types'
 
@@ -472,6 +472,9 @@ export default function Settings() {
   const [briefingTime, setBriefingTime] = useState<string>('09:00')
   const [briefingMaxTokens, setBriefingMaxTokens] = useState<number>(4000)
 
+  // Catch-up summary interval
+  const [catchUpInterval, setCatchUpInterval] = useState<number>(30)
+
   // Keyboard shortcuts toggle (localStorage)
   const [shortcutsEnabled, setShortcutsEnabled] = useState(() => localStorage.getItem('shortcuts_enabled') !== 'false')
   const handleShortcutsToggle = useCallback((enabled: boolean) => {
@@ -523,6 +526,7 @@ export default function Settings() {
         if (prefs.briefing_schedule) setBriefingSchedule(prefs.briefing_schedule as 'daily' | 'weekly')
         if (prefs.briefing_time) setBriefingTime(prefs.briefing_time)
         if (prefs.briefing_max_tokens) setBriefingMaxTokens(Number(prefs.briefing_max_tokens))
+        if (prefs.catchup_summary_interval_minutes) setCatchUpInterval(Number(prefs.catchup_summary_interval_minutes))
       })
       .catch(() => {})
 
@@ -760,6 +764,12 @@ export default function Settings() {
     const clamped = Math.max(256, Math.min(32000, raw))
     setBriefingMaxTokens(clamped)
     apiSetBriefingMaxTokens(clamped).catch(() => {})
+  }
+
+  const handleCatchUpIntervalChange = async (e: ChangeEvent<HTMLSelectElement>) => {
+    const val = parseInt(e.target.value, 10)
+    setCatchUpInterval(val)
+    apiSetCatchUpSummaryInterval(val).catch(() => {})
   }
 
   // ── Derived ────────────────────────────────────────────────────────────
@@ -1008,6 +1018,38 @@ export default function Settings() {
                     Higher values allow longer, more detailed summaries but increase generation time. Reasoning models need 8k+ tokens to think before answering.
                   </p>
                 </div>
+              </div>
+            </section>
+
+            {/* ── Catch-Up Summary Interval ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Catch-Up Summary Schedule</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                How often the background job regenerates catch-up card summaries.
+                You can also manually trigger a refresh from the Catch Up tab.
+              </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                  Summary refresh interval
+                </label>
+                <select
+                  value={catchUpInterval}
+                  onChange={handleCatchUpIntervalChange}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value={5}>Every 5 minutes</option>
+                  <option value={15}>Every 15 minutes</option>
+                  <option value={30}>Every 30 minutes (default)</option>
+                  <option value={60}>Every hour</option>
+                  <option value={120}>Every 2 hours</option>
+                  <option value={360}>Every 6 hours</option>
+                  <option value={720}>Every 12 hours</option>
+                  <option value={1440}>Once a day</option>
+                </select>
+                <p className="mt-2 text-xs text-slate-500">
+                  Summaries are generated for all active catch-up items at this interval.
+                  Shorter intervals mean fresher summaries but use more resources.
+                </p>
               </div>
             </section>
 

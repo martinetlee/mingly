@@ -465,6 +465,18 @@ export const updateCatchUpRelationship = (chatTelegramId: number, status: string
 export const getCatchUpContext = (chatTelegramId: number) =>
   request<CatchUpContext>(`/api/catchup/${chatTelegramId}/context`)
 
+export const triggerCatchUpSummaries = () =>
+  request<{ success: boolean; summaries_generated: number }>('/api/catchup/generate-summaries', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+
+export const setCatchUpSummaryInterval = (interval_minutes: number) =>
+  request<{ success: boolean; interval_minutes: number }>('/api/settings/prefs/catchup-summary-interval', {
+    method: 'POST',
+    body: JSON.stringify({ interval_minutes }),
+  })
+
 // --- Dashboard ---
 
 export const getDashboard = () =>

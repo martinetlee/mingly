@@ -237,6 +237,22 @@ async def set_briefing_prompts(req: BriefingPromptsRequest):
     }
 
 
+class CatchUpSummaryIntervalRequest(BaseModel):
+    interval_minutes: int
+
+
+@router.post("/prefs/catchup-summary-interval")
+async def set_catchup_summary_interval(req: CatchUpSummaryIntervalRequest):
+    """Set the interval (in minutes) for the catch-up summary cronjob (5-1440)."""
+    from fastapi import HTTPException
+    if not (5 <= req.interval_minutes <= 1440):
+        raise HTTPException(status_code=400, detail="Interval must be between 5 and 1440 minutes")
+    prefs = _load_prefs()
+    prefs["catchup_summary_interval_minutes"] = req.interval_minutes
+    _save_prefs(prefs)
+    return {"success": True, "interval_minutes": req.interval_minutes}
+
+
 @router.post("/prefs/briefing-last-run")
 async def set_briefing_last_run():
     """Mark that the briefing was just run (stores current UTC ISO timestamp)."""

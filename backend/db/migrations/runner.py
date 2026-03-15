@@ -187,6 +187,13 @@ _DEFAULT_TAGS = [
             "CREATE TABLE IF NOT EXISTS catchup_items (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_telegram_id INTEGER NOT NULL UNIQUE, contact_id INTEGER, status TEXT NOT NULL DEFAULT 'pending', note TEXT, snoozed_until DATETIME, handled_at DATETIME, created_at DATETIME, updated_at DATETIME)",
         ],
     ),
+    (
+        19,
+        "Create catchup_summaries table for cronjob-generated summaries",
+        [
+            "CREATE TABLE IF NOT EXISTS catchup_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_telegram_id INTEGER NOT NULL UNIQUE, summary TEXT NOT NULL, summary_messages_json TEXT, recent_messages_json TEXT, last_activity_at DATETIME, total_messages_at_generation INTEGER DEFAULT 0, generated_at DATETIME)",
+        ],
+    ),
 ]
 
 

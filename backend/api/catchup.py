@@ -1,14 +1,15 @@
 """Catch Up triage API -- snooze, remind-later, mark-handled, add note."""
 
+import json
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc, asc, and_, or_
+from sqlalchemy import select, desc, asc, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import CatchUpItem, Contact, Message
+from backend.db.models import CatchUpItem, CatchUpSummary, Contact, Message
 from backend.db import crud
 
 router = APIRouter()
@@ -184,137 +185,53 @@ async def update_relationship_from_catchup(
     }
 
 
-def _msg_dict(msg: Message) -> dict:
-    return {
-        "sender_name": msg.sender_name,
-        "text": (msg.text[:200] if msg.text else None),
-        "date": msg.date.isoformat() + "Z" if msg.date else None,
-        "is_outgoing": msg.is_outgoing,
-        "media_type": msg.media_type,
-    }
-
-
-# Short messages that look like chit-chat / filler
-_CHITCHAT_WORDS = {
-    "hi", "hey", "hello", "haha", "lol", "ok", "okay", "thanks", "thank you",
-    "ty", "np", "sure", "yes", "no", "yeah", "yep", "nope", "cool", "nice",
-    "great", "k", "kk", "hehe", "hmm", "ah", "oh", "wow",
-}
-
-
-def _is_chitchat(text: str | None) -> bool:
-    if not text:
-        return True
-    stripped = text.strip().lower().rstrip("!?.,:;")
-    # Very short messages or single-word filler
-    if stripped in _CHITCHAT_WORDS:
-        return True
-    # Emoji-only messages (no alphanumeric)
-    if not any(c.isalnum() for c in stripped):
-        return True
-    return False
-
-
 @router.get("/{chat_telegram_id}/context")
 async def get_catchup_context(
     chat_telegram_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return context for a catch-up card: messages since user's last activity
-    (last outgoing message or last reaction), filtering out chit-chat,
-    plus the last 3 messages from the chat."""
+    """Return stored catch-up context for a chat. If a pre-computed summary
+    exists, serve it along with the count of new messages since the summary
+    was generated. Falls back to a minimal response if no summary exists yet."""
 
-    # 1. Find the user's last outgoing message or last reaction in this chat
-    last_outgoing_q = (
-        select(Message.date)
-        .where(
-            Message.chat_id == chat_telegram_id,
-            Message.is_outgoing == True,  # noqa: E712
+    summary_row = (await db.execute(
+        select(CatchUpSummary).where(
+            CatchUpSummary.chat_telegram_id == chat_telegram_id
         )
-        .order_by(desc(Message.date))
-        .limit(1)
-    )
-    last_outgoing_row = (await db.execute(last_outgoing_q)).scalar_one_or_none()
+    )).scalar_one_or_none()
 
-    last_reaction_q = (
-        select(Message.date)
-        .where(
-            Message.chat_id == chat_telegram_id,
-            Message.my_reaction != None,  # noqa: E711
-        )
-        .order_by(desc(Message.date))
-        .limit(1)
-    )
-    last_reaction_row = (await db.execute(last_reaction_q)).scalar_one_or_none()
+    if not summary_row:
+        return {
+            "summary": "Summary not yet generated. Click refresh to generate now.",
+            "summary_messages": [],
+            "recent_messages": [],
+            "last_activity_at": None,
+            "generated_at": None,
+            "new_messages_since_summary": 0,
+        }
 
-    # Pick the most recent of the two
-    anchor_date = None
-    if last_outgoing_row and last_reaction_row:
-        anchor_date = max(last_outgoing_row, last_reaction_row)
-    elif last_outgoing_row:
-        anchor_date = last_outgoing_row
-    elif last_reaction_row:
-        anchor_date = last_reaction_row
-
-    # 2. Get messages after anchor (incoming only), filter chit-chat
-    summary_messages: list[dict] = []
-    if anchor_date:
-        after_msgs_q = (
-            select(Message)
-            .where(
-                Message.chat_id == chat_telegram_id,
-                Message.date > anchor_date,
-                Message.is_outgoing == False,  # noqa: E712
-            )
-            .order_by(asc(Message.date))
-            .limit(20)
-        )
-        after_msgs = (await db.execute(after_msgs_q)).scalars().all()
-
-        for m in after_msgs:
-            if not _is_chitchat(m.text):
-                summary_messages.append(_msg_dict(m))
-    else:
-        # No anchor -- show recent incoming messages
-        recent_incoming_q = (
-            select(Message)
-            .where(
-                Message.chat_id == chat_telegram_id,
-                Message.is_outgoing == False,  # noqa: E712
-            )
-            .order_by(desc(Message.date))
-            .limit(5)
-        )
-        recent_incoming = (await db.execute(recent_incoming_q)).scalars().all()
-        for m in reversed(recent_incoming):
-            if not _is_chitchat(m.text):
-                summary_messages.append(_msg_dict(m))
-
-    # 3. Get last 3 messages from the chat (any direction)
-    last_3_q = (
-        select(Message)
+    # Count current total messages to determine how many are new
+    total_now_q = (
+        select(func.count(Message.id))
         .where(Message.chat_id == chat_telegram_id)
-        .order_by(desc(Message.date))
-        .limit(3)
     )
-    last_3 = (await db.execute(last_3_q)).scalars().all()
-    recent_messages = [_msg_dict(m) for m in reversed(last_3)]
-
-    # 4. Build a text summary from the non-chitchat messages
-    summary_text = ""
-    if summary_messages:
-        count = len(summary_messages)
-        senders = list({m["sender_name"] for m in summary_messages if m["sender_name"]})
-        sender_str = ", ".join(senders[:3]) if senders else "Someone"
-        summary_text = f"{count} message{'s' if count != 1 else ''} from {sender_str} since your last activity."
-    elif anchor_date:
-        summary_text = "Only casual messages since your last activity."
-    else:
-        summary_text = "New conversation awaiting your first reply."
+    total_now = (await db.execute(total_now_q)).scalar_one()
+    new_messages = max(0, total_now - summary_row.total_messages_at_generation)
 
     return {
-        "summary": summary_text,
-        "summary_messages": summary_messages[:5],  # cap at 5 most relevant
-        "recent_messages": recent_messages,
-        "last_activity_at": anchor_date.isoformat() + "Z" if anchor_date else None,
+        "summary": summary_row.summary,
+        "summary_messages": json.loads(summary_row.summary_messages_json) if summary_row.summary_messages_json else [],
+        "recent_messages": json.loads(summary_row.recent_messages_json) if summary_row.recent_messages_json else [],
+        "last_activity_at": summary_row.last_activity_at.isoformat() + "Z" if summary_row.last_activity_at else None,
+        "generated_at": summary_row.generated_at.isoformat() + "Z" if summary_row.generated_at else None,
+        "new_messages_since_summary": new_messages,
     }
+
+
+@router.post("/generate-summaries")
+async def trigger_generate_summaries():
+    """Manually trigger catch-up summary generation for all active items."""
+    from backend.catchup_summary_scheduler import generate_all_summaries
+
+    count = await generate_all_summaries()
+    return {"success": True, "summaries_generated": count}

@@ -380,6 +380,8 @@ export interface CatchUpContext {
   summary_messages: CatchUpContextMessage[]
   recent_messages: CatchUpContextMessage[]
   last_activity_at: string | null
+  generated_at: string | null
+  new_messages_since_summary: number
 }
 
 export type WSEvent =
