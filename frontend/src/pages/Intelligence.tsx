@@ -52,7 +52,7 @@ import {
   setBriefing,
 } from '../api/client'
 import type { Chat, ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
-import { getSessionToken } from '../api/session'
+import { getSessionToken, authenticatedMediaUrl } from '../api/session'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -409,7 +409,7 @@ function MentionMsgRow({
       )}
       {hasPhoto && (
         <img
-          src={msg.media_url!}
+          src={authenticatedMediaUrl(msg.media_url!)}
           alt="photo"
           className="mt-1 rounded-md object-cover"
           style={{ maxWidth: 220, maxHeight: 180 }}
