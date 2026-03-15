@@ -10,10 +10,14 @@ export function useWebSocket(onEvent: Handler) {
   onEventRef.current = onEvent
 
   const connect = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const token = getSessionToken()
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws${tokenParam}`)
+    // Don't attempt to connect without a valid session token —
+    // this avoids a tight reconnect loop that floods the server
+    // with unauthenticated WebSocket attempts after session expiry.
+    if (!token) return
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws?token=${encodeURIComponent(token)}`)
 
     ws.onmessage = (e) => {
       try {
@@ -25,8 +29,12 @@ export function useWebSocket(onEvent: Handler) {
     }
 
     ws.onclose = () => {
-      // Reconnect after 3s
-      setTimeout(connect, 3000)
+      // Only reconnect if we still have a valid session token.
+      // If the session expired the app will navigate to the unlock
+      // screen and this component will unmount.
+      if (getSessionToken()) {
+        setTimeout(connect, 3000)
+      }
     }
 
     wsRef.current = ws

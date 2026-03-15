@@ -1,7 +1,8 @@
 import sys
 from pathlib import Path
+from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,7 +37,20 @@ def create_app() -> FastAPI:
     app.include_router(search.router, prefix="/api/search", tags=["search"], dependencies=protected)
 
     @app.get("/api/media/{file_path:path}")
-    async def serve_media(file_path: str, _token: str = Depends(require_session_token)):
+    async def serve_media(
+        file_path: str,
+        token: Optional[str] = Query(None),
+        x_session_token: Optional[str] = Header(None),
+    ):
+        """Serve media files with auth via header OR query parameter.
+
+        Browser <img> tags cannot send custom headers, so this endpoint
+        also accepts the session token as a ``?token=`` query parameter.
+        """
+        session_token = get_session_token()
+        provided = x_session_token or token
+        if session_token is None or provided != session_token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
         full_path = (DATA_DIR / file_path).resolve()
         # Containment check: reject any path that escapes DATA_DIR
         if not full_path.is_relative_to(DATA_DIR.resolve()):

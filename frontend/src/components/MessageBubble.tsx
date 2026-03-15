@@ -2,6 +2,7 @@ import { useRef, useState, useCallback } from 'react'
 import { Reply } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
+import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
 
 interface Props {
@@ -224,7 +225,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           {hasPhoto && (
             <>
               <img
-                src={message.media_url!}
+                src={authenticatedMediaUrl(message.media_url!)}
                 alt="photo"
                 className={`block cursor-pointer object-cover ${isOut ? 'ml-auto' : 'mr-auto'} hover:opacity-90 transition-opacity`}
                 style={{ maxWidth: 320, maxHeight: 320 }}
@@ -232,7 +233,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               />
               {lightboxOpen && (
                 <ImageLightbox
-                  src={message.media_url!}
+                  src={authenticatedMediaUrl(message.media_url!)}
                   onClose={() => setLightboxOpen(false)}
                 />
               )}
