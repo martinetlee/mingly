@@ -231,7 +231,10 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
             )
             if chat.is_hidden or chat.is_briefing:
                 continue
-            await sync_messages(dialog.id, limit=messages_per_chat)
+            try:
+                await sync_messages(dialog.id, limit=messages_per_chat)
+            except ValueError:
+                continue
             synced += 1
 
     return synced

@@ -158,7 +158,10 @@ async def toggle_monitor(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     if req.monitored:
-        await sync_messages(telegram_id)
+        try:
+            await sync_messages(telegram_id)
+        except ValueError:
+            pass  # Entity not resolvable; monitoring is still toggled
     return {"telegram_id": telegram_id, "is_monitored": chat.is_monitored}
 
 
@@ -222,7 +225,10 @@ async def get_messages(
     if offset == 0:
         chat = await crud.get_chat_by_telegram_id(db, telegram_id)
         if chat and chat.last_synced_at is None and not chat.is_hidden and not chat.is_briefing:
-            await sync_messages(telegram_id, limit=100)
+            try:
+                await sync_messages(telegram_id, limit=100)
+            except ValueError:
+                pass  # Entity not resolvable; return whatever messages are in DB
 
     rows = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
     return [_serialize_msg(row) for row in reversed(rows)]
@@ -294,7 +300,13 @@ async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depen
     chat = await crud.get_chat_by_telegram_id(db, telegram_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    await sync_messages(telegram_id, limit=min(limit, 200))
+    try:
+        await sync_messages(telegram_id, limit=min(limit, 200))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({e})",
+        )
     return {"status": "ok"}
 
 

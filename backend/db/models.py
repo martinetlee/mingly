@@ -157,6 +157,7 @@ class CatchUpSummary(Base):
     summary_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     recent_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    action_needed: Mapped[bool] = mapped_column(Boolean, default=False)
     total_messages_at_generation: Mapped[int] = mapped_column(Integer, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

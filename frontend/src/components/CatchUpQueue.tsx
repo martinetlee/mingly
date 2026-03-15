@@ -124,7 +124,12 @@ function TriageCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="truncate text-sm font-medium text-gray-200">{item.chat.name}</p>
+            <p className="truncate text-sm font-medium text-gray-200 flex items-center gap-1.5">
+              {item.chat.name}
+              {item.chat.type === 'group' && (
+                <Users size={12} className="shrink-0 text-slate-500" />
+              )}
+            </p>
             <span className="flex-shrink-0 text-[10px] text-slate-500">
               {fmtRelative(item.last_message.date)}
             </span>
@@ -188,35 +193,6 @@ function TriageCard({
               <p className="text-xs text-slate-500">Loading context...</p>
             )}
           </div>
-
-          {/* Last 3 messages */}
-          {context && context.recent_messages.length > 0 && (
-            <div className="rounded-lg bg-slate-700/30 px-3 py-2 space-y-1.5">
-              <p className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Recent messages</p>
-              {context.recent_messages.map((m, i) => (
-                <div
-                  key={i}
-                  className={`rounded-md px-2.5 py-1.5 text-xs ${
-                    m.is_outgoing ? 'bg-indigo-500/10 border border-indigo-500/20' : 'bg-slate-800/60'
-                  }`}
-                >
-                  <div className="flex items-baseline justify-between gap-2 mb-0.5">
-                    <span className={`font-medium truncate ${m.is_outgoing ? 'text-indigo-300' : 'text-slate-300'}`}>
-                      {m.is_outgoing ? 'You' : m.sender_name || 'Unknown'}
-                    </span>
-                    {m.date && (
-                      <span className="shrink-0 text-[10px] text-slate-500">
-                        {fmtRelative(m.date)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-slate-400 line-clamp-2">
-                    {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
-                  </p>
-                </div>
-              ))}
-            </div>
-          )}
 
           {/* Primary actions row */}
           <div className="flex flex-wrap gap-1.5">
@@ -454,7 +430,8 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
   const handleGenerateSummaries = async () => {
     setGenerating(true)
     try {
-      await triggerCatchUpSummaries()
+      const chatIds = visibleItems.map((item) => item.chat.telegram_id)
+      await triggerCatchUpSummaries(chatIds)
       // Re-fetch contexts after generation
       fetchContexts()
     } catch {

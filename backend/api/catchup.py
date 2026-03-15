@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -228,10 +229,16 @@ async def get_catchup_context(
     }
 
 
+class GenerateSummariesRequest(BaseModel):
+    chat_ids: Optional[List[int]] = None
+
+
 @router.post("/generate-summaries")
-async def trigger_generate_summaries():
-    """Manually trigger catch-up summary generation for all active items."""
+async def trigger_generate_summaries(req: GenerateSummariesRequest = GenerateSummariesRequest()):
+    """Manually trigger catch-up summary generation. If chat_ids are provided,
+    generate summaries for those specific chats; otherwise fall back to all
+    chats with active catch-up items."""
     from backend.catchup_summary_scheduler import generate_all_summaries
 
-    count = await generate_all_summaries()
+    count = await generate_all_summaries(chat_ids=req.chat_ids)
     return {"success": True, "summaries_generated": count}
