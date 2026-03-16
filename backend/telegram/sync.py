@@ -1,14 +1,19 @@
 import json
+import logging
 import subprocess
 from html import escape as html_escape
 from pathlib import Path
 from typing import Optional
 from telethon import events
 from telethon.tl.types import User, Channel
+from sqlalchemy import select
 
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db import crud
+from backend.db.models import Chat
+
+logger = logging.getLogger(__name__)
 from backend.telegram.client import get_client
 from backend.ws.manager import ws_manager
 
@@ -222,6 +227,50 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                 unread_count=dialog.unread_count,
                 members_count=getattr(entity, "participants_count", None),
             )
+
+
+async def resolve_numeric_names() -> int:
+    """Resolve chats that still have numeric telegram IDs as their name.
+
+    Fetches the full entity from Telegram to get the real name.
+    Returns the number of chats updated.
+    """
+    client = get_client()
+    if not client:
+        return 0
+
+    updated = 0
+    async with AsyncSessionLocal() as db:
+        # Find private chats where name looks like a bare number
+        # SQLite doesn't support regexp natively, so fetch and filter in Python
+        all_private = (await db.execute(
+            select(Chat).where(Chat.type == "private")
+        )).scalars().all()
+        rows = [c for c in all_private if c.name and c.name.isdigit()]
+
+        for chat in rows:
+            try:
+                entity = await client.get_entity(chat.telegram_id)
+                first = getattr(entity, "first_name", None) or ""
+                last = getattr(entity, "last_name", None) or ""
+                name = f"{first} {last}".strip()
+                username = getattr(entity, "username", None)
+                if not name:
+                    name = username or str(chat.telegram_id)
+                if name != chat.name:
+                    chat.name = name
+                    if username:
+                        chat.username = username
+                    updated += 1
+            except Exception:
+                # Entity not resolvable (deleted account, etc.) — skip
+                continue
+
+        if updated:
+            await db.commit()
+
+    logger.info("Resolved %d numeric chat names", updated)
+    return updated
 
 
 async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:

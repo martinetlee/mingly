@@ -9,7 +9,7 @@ from backend.telegram.client import (
     get_client, send_code, sign_in, sign_in_2fa, persist_session,
     get_me, disconnect, has_credentials, init_client,
 )
-from backend.telegram.sync import sync_dialogs, register_event_handlers, bulk_sync
+from backend.telegram.sync import sync_dialogs, register_event_handlers, bulk_sync, resolve_numeric_names
 from backend.secrets import (
     save_secret, delete_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
@@ -17,6 +17,12 @@ from backend.secrets import (
 from backend.api.dependencies import generate_session_token, clear_session_token, require_session_token
 
 router = APIRouter()
+
+
+async def _background_full_sync() -> None:
+    """Sync all dialogs then resolve any remaining numeric names."""
+    await sync_dialogs()
+    await resolve_numeric_names()
 
 
 class PhoneRequest(BaseModel):
@@ -77,7 +83,7 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 await sync_dialogs(limit=200)
                 await register_event_handlers()
                 # Background: sync remaining dialogs + messages
-                asyncio.create_task(sync_dialogs())
+                asyncio.create_task(_background_full_sync())
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         except Exception:
             pass

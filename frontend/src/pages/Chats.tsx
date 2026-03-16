@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -324,10 +324,22 @@ export default function Chats() {
       setMessageOffset(0)
       setShowInfo(false)
     } else if (!retryNavRef.current) {
-      // Chat not found — may have just been created via ensureChat.
-      // Re-fetch the chat list once.
+      // Chat not found in paginated list — fetch it directly by telegram_id.
+      // This handles chats beyond the first page (CHAT_PAGE=50).
       retryNavRef.current = true
-      loadChats()
+      ensureChat(chatId)
+        .then((chat) => {
+          // Prepend the fetched chat so the next effect cycle finds it
+          setChats((prev) => {
+            if (prev.some((c) => c.telegram_id === chat.telegram_id)) return prev
+            return [chat, ...prev]
+          })
+        })
+        .catch(() => {
+          // Could not fetch — give up
+          pendingNavRef.current = null
+          retryNavRef.current = false
+        })
     } else {
       // Already retried, chat still not found — give up
       pendingNavRef.current = null
