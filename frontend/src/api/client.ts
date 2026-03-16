@@ -134,6 +134,33 @@ export const markChatRead = (telegram_id: number) =>
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')
 
+export const getArchivedChats = () =>
+  request<Chat[]>('/api/chats/archived')
+
+export const setPinned = (telegram_id: number, pinned: boolean) =>
+  request<{ telegram_id: number; is_pinned: boolean }>(`/api/chats/${telegram_id}/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ pinned }),
+  })
+
+export const setArchived = (telegram_id: number, archived: boolean) =>
+  request<{ telegram_id: number; is_archived: boolean }>(`/api/chats/${telegram_id}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ archived }),
+  })
+
+export const setMuted = (telegram_id: number, muted: boolean, duration?: string) =>
+  request<{ telegram_id: number; is_muted: boolean; muted_until: string | null }>(`/api/chats/${telegram_id}/mute`, {
+    method: 'POST',
+    body: JSON.stringify({ muted, duration }),
+  })
+
+export const setMarkedUnread = (telegram_id: number, marked_unread: boolean) =>
+  request<{ telegram_id: number; is_marked_unread: boolean }>(`/api/chats/${telegram_id}/mark-unread`, {
+    method: 'POST',
+    body: JSON.stringify({ marked_unread }),
+  })
+
 export const setHidden = (telegram_id: number, hidden: boolean) =>
   request<{ telegram_id: number; is_hidden: boolean }>(`/api/chats/${telegram_id}/hide`, {
     method: 'POST',
