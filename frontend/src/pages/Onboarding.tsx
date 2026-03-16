@@ -50,14 +50,14 @@ function SecretField({ label, hint, value, onChange, type = 'text', placeholder 
 
   return (
     <div className="mb-4">
-      <label className="mb-1 block text-xs font-medium text-gray-600">{label}</label>
+      <label className="mb-1 block text-xs font-medium text-slate-400">{label}</label>
       <div className="flex gap-2">
         <input
           type={type}
           value={value}
           onChange={(e) => { onChange(e.target.value); setResolved(false); setResolveError('') }}
           placeholder={placeholder}
-          className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 font-mono"
+          className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 font-mono"
           spellCheck={false}
           autoComplete="off"
         />
@@ -65,15 +65,15 @@ function SecretField({ label, hint, value, onChange, type = 'text', placeholder 
           <button
             onClick={handleResolve}
             disabled={resolving}
-            className="shrink-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-blue-100 disabled:opacity-50"
+            className="shrink-0 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs font-medium text-indigo-400 hover:bg-indigo-500/20 disabled:opacity-50 transition"
           >
             {resolving ? '…' : resolved ? '✓' : 'Resolve'}
           </button>
         )}
       </div>
-      {resolveError && <p className="mt-1 text-xs text-red-500">{resolveError}</p>}
-      {resolved && <p className="mt-1 text-xs text-green-600">Resolved from 1Password</p>}
-      <p className="mt-1 text-xs text-gray-400">{hint}</p>
+      {resolveError && <p className="mt-1 text-xs text-red-400">{resolveError}</p>}
+      {resolved && <p className="mt-1 text-xs text-emerald-400">Resolved from 1Password</p>}
+      <p className="mt-1 text-xs text-slate-600">{hint}</p>
     </div>
   )
 }
@@ -203,74 +203,87 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
 
   if (step === null) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gray-50">
-        <div className="text-gray-400 text-sm">Loading…</div>
+      <div className="flex h-screen items-center justify-center bg-slate-950">
+        <div className="text-slate-500 text-sm">Loading…</div>
       </div>
     )
   }
 
   return (
-    <div className="flex h-screen items-center justify-center bg-gray-50">
-      <div className="w-full max-w-sm">
-        {/* Logo */}
+    <div className="flex h-screen items-center justify-center bg-slate-950 overflow-hidden relative">
+      {/* Ambient glow */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -top-32 left-1/2 -translate-x-1/2 h-96 w-96 rounded-full bg-indigo-600/20 blur-3xl" />
+        <div className="absolute -bottom-32 left-1/2 -translate-x-1/2 h-96 w-96 rounded-full bg-purple-600/15 blur-3xl" />
+      </div>
+
+      <div className="relative w-full max-w-sm px-4">
+        {/* Logo + title */}
         <div className="mb-8 text-center">
-          <img src={logo} alt="Mingly" className="mx-auto mb-3 h-12 w-12 object-contain" />
-          <h1 className="text-2xl font-semibold text-gray-900">Mingly</h1>
-          <p className="mt-1 text-sm text-gray-500">Your Telegram, intelligently organised</p>
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 ring-1 ring-indigo-500/30">
+            <img src={logo} alt="Mingly" className="h-10 w-10 object-contain" />
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Mingly</h1>
+          <p className="mt-1.5 text-sm text-slate-400">Your Telegram, intelligently organised</p>
         </div>
 
         {/* Step indicators */}
         <div className="mb-6 flex items-center justify-center gap-2">
-          {indicatorSteps.map((s, i) => (
+          {indicatorSteps.map((s) => (
             <div key={s} className="flex items-center gap-2">
               <div className={`h-2 w-2 rounded-full transition-colors ${
-                step === s ? 'bg-blue-500' :
+                step === s ? 'bg-indigo-500' :
                 stepOrder.indexOf(step) > stepOrder.indexOf(s)
-                  ? 'bg-blue-200' : 'bg-gray-200'
+                  ? 'bg-indigo-500/40' : 'bg-slate-700'
               }`} />
             </div>
           ))}
         </div>
 
         {/* Card */}
-        <div className="rounded-2xl bg-white p-8 shadow-sm border border-gray-100">
+        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-7 shadow-2xl backdrop-blur-sm">
 
           {/* Step 0: Set master password */}
           {step === 'set-password' && (
             <>
-              <h2 className="mb-1 text-base font-medium text-gray-900">Protect your data</h2>
-              <p className="mb-5 text-sm text-gray-500">
+              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Protect your data</h2>
+              <p className="mb-5 text-xs text-slate-500">
                 Set a master password to encrypt your credentials locally. You'll enter this each time you open Mingly.
               </p>
 
               <div className="mb-4">
-                <label className="mb-1 block text-xs font-medium text-gray-600">Master password</label>
+                <label className="mb-1 block text-xs font-medium text-slate-400">Master password</label>
                 <input
                   type="password"
                   value={masterPwd}
                   onChange={(e) => { setMasterPwd(e.target.value); setPwdError('') }}
                   placeholder="At least 6 characters"
                   autoFocus
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
                 />
               </div>
               <div className="mb-4">
-                <label className="mb-1 block text-xs font-medium text-gray-600">Confirm password</label>
+                <label className="mb-1 block text-xs font-medium text-slate-400">Confirm password</label>
                 <input
                   type="password"
                   value={masterPwdConfirm}
                   onChange={(e) => { setMasterPwdConfirm(e.target.value); setPwdError('') }}
                   onKeyDown={(e) => e.key === 'Enter' && handleSetPassword()}
                   placeholder="Repeat password"
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
                 />
               </div>
 
-              {pwdError && <p className="mb-3 text-sm text-red-500">{pwdError}</p>}
+              {pwdError && (
+                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+                  {pwdError}
+                </p>
+              )}
               <button
                 onClick={handleSetPassword}
                 disabled={!masterPwd || !masterPwdConfirm || pwdLoading}
-                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {pwdLoading ? 'Setting up…' : 'Continue'}
               </button>
@@ -280,10 +293,10 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
           {/* Step 1: Telegram API credentials */}
           {step === 'credentials' && (
             <>
-              <h2 className="mb-1 text-base font-medium text-gray-900">Connect to Telegram</h2>
-              <p className="mb-5 text-sm text-gray-500">
+              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Connect to Telegram</h2>
+              <p className="mb-5 text-xs text-slate-500">
                 Get your free API credentials at{' '}
-                <span className="font-mono text-blue-500">my.telegram.org</span>{' '}
+                <span className="font-mono text-indigo-400">my.telegram.org</span>{' '}
                 → API development tools.
               </p>
 
@@ -303,16 +316,21 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 placeholder="a1b2c3… or op://vault/item/field"
               />
 
-              {credError && <p className="mb-3 text-sm text-red-500">{credError}</p>}
+              {credError && (
+                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+                  {credError}
+                </p>
+              )}
               <button
                 onClick={handleSaveCredentials}
                 disabled={!apiId.trim() || !apiHash.trim() || credLoading || is1PasswordRef(apiId) || is1PasswordRef(apiHash)}
-                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {credLoading ? 'Saving…' : 'Continue'}
               </button>
               {(is1PasswordRef(apiId) || is1PasswordRef(apiHash)) && (
-                <p className="mt-2 text-center text-xs text-amber-500">
+                <p className="mt-2 text-center text-xs text-amber-400">
                   Resolve all 1Password references before continuing
                 </p>
               )}
@@ -322,8 +340,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
           {/* Step 2: Phone number */}
           {step === 'phone' && (
             <>
-              <h2 className="mb-1 text-base font-medium text-gray-900">Sign in with Telegram</h2>
-              <p className="mb-5 text-sm text-gray-500">Enter your phone number with country code</p>
+              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Sign in with Telegram</h2>
+              <p className="mb-5 text-xs text-slate-500">Enter your phone number with country code</p>
               <input
                 type="tel"
                 value={phone}
@@ -331,19 +349,24 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 onKeyDown={(e) => e.key === 'Enter' && handleSendCode()}
                 placeholder="+1 234 567 8900"
                 autoFocus
-                className="mb-4 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
               />
-              {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
+              {error && (
+                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+                  {error}
+                </p>
+              )}
               <button
                 onClick={handleSendCode}
                 disabled={!phone.trim() || loading}
-                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {loading ? 'Sending…' : 'Send Code'}
               </button>
               <button
                 onClick={() => setStep('credentials')}
-                className="mt-2 w-full text-sm text-gray-400 hover:text-gray-600"
+                className="mt-3 w-full text-xs text-slate-600 transition hover:text-slate-400"
               >
                 ← Change API credentials
               </button>
@@ -353,9 +376,9 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
           {/* Step 3: OTP */}
           {step === 'code' && (
             <>
-              <h2 className="mb-1 text-base font-medium text-gray-900">Enter the code</h2>
-              <p className="mb-5 text-sm text-gray-500">
-                We sent a code to <strong>{phone}</strong> via Telegram
+              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Enter the code</h2>
+              <p className="mb-5 text-xs text-slate-500">
+                We sent a code to <span className="text-slate-300 font-medium">{phone}</span> via Telegram
               </p>
               <input
                 type="text"
@@ -366,19 +389,24 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 placeholder="12345"
                 autoFocus
                 maxLength={6}
-                className="mb-4 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm tracking-widest outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 tracking-widest outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
               />
-              {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
+              {error && (
+                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+                  {error}
+                </p>
+              )}
               <button
                 onClick={handleVerifyCode}
                 disabled={!code.trim() || loading}
-                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {loading ? 'Verifying…' : 'Verify Code'}
               </button>
               <button
                 onClick={() => { setStep('phone'); setCode(''); setError('') }}
-                className="mt-2 w-full text-sm text-gray-400 hover:text-gray-600"
+                className="mt-3 w-full text-xs text-slate-600 transition hover:text-slate-400"
               >
                 ← Change number
               </button>
@@ -388,8 +416,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
           {/* Step 4: 2FA (conditional) */}
           {step === 'twofa' && (
             <>
-              <h2 className="mb-1 text-base font-medium text-gray-900">Two-step verification</h2>
-              <p className="mb-5 text-sm text-gray-500">Enter your Telegram 2FA password</p>
+              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Two-step verification</h2>
+              <p className="mb-5 text-xs text-slate-500">Enter your Telegram 2FA password</p>
               <input
                 type="password"
                 value={password}
@@ -397,13 +425,18 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 onKeyDown={(e) => e.key === 'Enter' && handleVerify2FA()}
                 placeholder="Password"
                 autoFocus
-                className="mb-4 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
               />
-              {error && <p className="mb-3 text-sm text-red-500">{error}</p>}
+              {error && (
+                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
+                  {error}
+                </p>
+              )}
               <button
                 onClick={handleVerify2FA}
                 disabled={!password || loading}
-                className="w-full rounded-lg bg-blue-500 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {loading ? 'Signing in…' : 'Sign In'}
               </button>
@@ -413,16 +446,16 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
           {/* Done */}
           {step === 'done' && (
             <div className="py-4 text-center">
-              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-green-100 text-green-500 text-lg">
+              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 text-lg ring-1 ring-emerald-500/30">
                 ✓
               </div>
-              <p className="text-sm font-medium text-gray-900">Signed in successfully</p>
-              <p className="mt-1 text-xs text-gray-400">Loading your chats…</p>
+              <p className="text-sm font-medium text-slate-200">Signed in successfully</p>
+              <p className="mt-1 text-xs text-slate-500">Loading your chats…</p>
             </div>
           )}
         </div>
 
-        <p className="mt-4 text-center text-xs text-gray-400">
+        <p className="mt-4 text-center text-xs text-slate-600">
           Your session and credentials are encrypted with your master password
         </p>
       </div>
