@@ -437,3 +437,61 @@ async def register_event_handlers() -> None:
                 body_text = (saved.text or "")[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
                 _send_native_notification(chat.name, body)
+
+    @client.on(events.UserUpdate)
+    async def on_user_update(event):
+        """Handle typing indicators and online status changes."""
+        if event.typing:
+            # User is typing — broadcast to frontend
+            user_id = event.user_id
+            # Resolve user name for display
+            try:
+                entity = await client.get_entity(user_id)
+                user_name = _sender_name(entity) or str(user_id)
+            except Exception:
+                user_name = str(user_id)
+            await ws_manager.broadcast({
+                "type": "user_typing",
+                "user_id": user_id,
+                "chat_id": event.chat_id or user_id,
+                "user_name": user_name,
+            })
+        elif hasattr(event, "online") or hasattr(event, "status"):
+            # Online status change
+            user_id = event.user_id
+            status_info = _extract_user_status(event)
+            if status_info:
+                await ws_manager.broadcast({
+                    "type": "user_status",
+                    "user_id": user_id,
+                    **status_info,
+                })
+
+
+def _extract_user_status(event) -> Optional[dict]:
+    """Extract online/offline/last-seen info from a UserUpdate event."""
+    from telethon.tl.types import (
+        UserStatusOnline,
+        UserStatusOffline,
+        UserStatusRecently,
+        UserStatusLastWeek,
+        UserStatusLastMonth,
+    )
+    status = getattr(event, "status", None)
+    if status is None and hasattr(event, "online"):
+        if event.online:
+            return {"status": "online"}
+        else:
+            return {"status": "offline"}
+    if isinstance(status, UserStatusOnline):
+        return {"status": "online"}
+    if isinstance(status, UserStatusOffline):
+        last_seen = status.was_online.isoformat() if status.was_online else None
+        return {"status": "offline", "last_seen": last_seen}
+    if isinstance(status, UserStatusRecently):
+        return {"status": "recently"}
+    if isinstance(status, UserStatusLastWeek):
+        return {"status": "last_week"}
+    if isinstance(status, UserStatusLastMonth):
+        return {"status": "last_month"}
+    return None

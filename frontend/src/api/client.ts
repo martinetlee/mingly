@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -163,6 +163,12 @@ export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
+
+export const getUserPresence = (telegram_id: number) =>
+  request<UserPresence>(`/api/chats/${telegram_id}/presence`)
+
+export const sendTypingAction = (telegram_id: number) =>
+  request<{ success: boolean }>(`/api/chats/${telegram_id}/typing`, { method: 'POST' })
 
 // --- Tags ---
 

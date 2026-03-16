@@ -7,12 +7,14 @@ interface Props {
   disabled?: boolean
   replyTo?: Message | null
   onCancelReply?: () => void
+  onTyping?: () => void
 }
 
-export default function ComposeBar({ onSend, disabled, replyTo, onCancelReply }: Props) {
+export default function ComposeBar({ onSend, disabled, replyTo, onCancelReply, onTyping }: Props) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const lastTypingSentRef = useRef(0)
 
   useEffect(() => {
     if (!sending) {
@@ -55,6 +57,12 @@ export default function ComposeBar({ onSend, disabled, replyTo, onCancelReply }:
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    // Throttle typing indicator to at most once every 3 seconds
+    const now = Date.now()
+    if (onTyping && now - lastTypingSentRef.current > 3000) {
+      lastTypingSentRef.current = now
+      onTyping()
+    }
   }
 
   const replyPreview = replyTo

@@ -14,7 +14,7 @@ from backend.config import DATA_DIR
 from backend.db.database import get_db
 from backend.db import crud
 from backend.telegram.client import get_client, ensure_connected
-from backend.telegram.sync import sync_messages, bulk_sync, _chat_type
+from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract_user_status
 
 router = APIRouter()
 
@@ -384,3 +384,65 @@ async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession 
     role_order = {"creator": 0, "admin": 1, "member": 2}
     members.sort(key=lambda m: (role_order.get(m["role"], 2), m["name"].lower()))
     return members
+
+
+@router.get("/{telegram_id}/presence")
+async def get_user_presence(telegram_id: int):
+    """Get online/last-seen status for a private chat user via Telethon."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.users import GetFullUserRequest
+        from telethon.tl.types import (
+            UserStatusOnline,
+            UserStatusOffline,
+            UserStatusRecently,
+            UserStatusLastWeek,
+            UserStatusLastMonth,
+        )
+
+        full = await client(GetFullUserRequest(telegram_id))
+        user = full.users[0] if full.users else None
+        if not user:
+            return {"status": "unknown"}
+
+        user_status = getattr(user, "status", None)
+        if isinstance(user_status, UserStatusOnline):
+            return {"status": "online"}
+        if isinstance(user_status, UserStatusOffline):
+            last_seen = user_status.was_online.isoformat() if user_status.was_online else None
+            return {"status": "offline", "last_seen": last_seen}
+        if isinstance(user_status, UserStatusRecently):
+            return {"status": "recently"}
+        if isinstance(user_status, UserStatusLastWeek):
+            return {"status": "last_week"}
+        if isinstance(user_status, UserStatusLastMonth):
+            return {"status": "last_month"}
+        return {"status": "unknown"}
+    except Exception as e:
+        return {"status": "unknown", "error": str(e)}
+
+
+@router.post("/{telegram_id}/typing")
+async def send_typing_action(telegram_id: int):
+    """Send a typing indicator to the given chat via Telethon."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.messages import SetTypingRequest
+        from telethon.tl.types import SendMessageTypingAction
+
+        await client(SetTypingRequest(
+            peer=telegram_id,
+            action=SendMessageTypingAction(),
+        ))
+        return {"success": True}
+    except Exception as e:
+        # Non-critical — don't fail the request
+        return {"success": False, "error": str(e)}
