@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -172,6 +172,35 @@ export default function Chats() {
   const [chatSearchResults, setChatSearchResults] = useState<Message[]>([])
   const [searchingChat, setSearchingChat] = useState(false)
   const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Important-contact star for 1-1 chats
+  const [isImportant, setIsImportant] = useState(false)
+  const [togglingImportant, setTogglingImportant] = useState(false)
+
+  // Fetch importance status when selected chat changes (private chats only)
+  useEffect(() => {
+    if (!selectedChat || selectedChat.type !== 'private') {
+      setIsImportant(false)
+      return
+    }
+    getContactByTelegram(selectedChat.telegram_id)
+      .then((c) => setIsImportant(c.is_important))
+      .catch(() => setIsImportant(false))
+  }, [selectedChat?.telegram_id, selectedChat?.type])
+
+  const handleToggleImportant = useCallback(async () => {
+    if (!selectedChat || togglingImportant) return
+    const newVal = !isImportant
+    setTogglingImportant(true)
+    try {
+      const updated = await setContactImportantByTelegram(selectedChat.telegram_id, newVal)
+      setIsImportant(updated.is_important)
+    } catch {
+      // ignore
+    } finally {
+      setTogglingImportant(false)
+    }
+  }, [selectedChat, isImportant, togglingImportant])
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -686,9 +715,25 @@ export default function Chats() {
             <>
               {/* Header */}
               <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
-                <div>
-                  <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                  <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                <div className="flex items-center gap-2">
+                  <div>
+                    <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
+                    <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                  </div>
+                  {selectedChat.type === 'private' && (
+                    <button
+                      onClick={handleToggleImportant}
+                      disabled={togglingImportant}
+                      title={isImportant ? 'Remove from important' : 'Mark as important'}
+                      className={`rounded-full p-1 transition-colors ${
+                        isImportant
+                          ? 'text-amber-400 hover:text-amber-300'
+                          : 'text-slate-600 hover:text-amber-400'
+                      }`}
+                    >
+                      <Star size={16} className={isImportant ? 'fill-amber-400' : ''} />
+                    </button>
+                  )}
                 </div>
                 <div className="flex items-center gap-1">
                   <button

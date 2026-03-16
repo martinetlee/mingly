@@ -174,6 +174,7 @@ async def auth_verify_code(req: CodeRequest):
         await persist_session()
         await sync_dialogs()
         await register_event_handlers()
+        asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         me = await get_me()
         return {
             "success": True,
@@ -196,6 +197,7 @@ async def auth_verify_2fa(req: PasswordRequest):
         await persist_session()
         await sync_dialogs()
         await register_event_handlers()
+        asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         me = await get_me()
         return {
             "success": True,
