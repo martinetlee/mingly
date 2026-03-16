@@ -7,7 +7,6 @@ import {
   Users,
   Building2,
   Radio,
-  FileText,
   Brain,
   RefreshCw,
   Settings,
@@ -21,7 +20,6 @@ const NAV = [
 { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
-  { to: '/intelligence?tab=briefing', icon: FileText, label: 'Briefing' },
   { to: '/intelligence', icon: Brain, label: 'Intelligence' },
 ]
 
