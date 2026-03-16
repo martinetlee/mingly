@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -130,6 +130,9 @@ export const getChatMembers = (telegram_id: number, limit = 100) =>
 
 export const markChatRead = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
+
+export const getPinnedMessage = (telegram_id: number) =>
+  request<PinnedMessage | null>(`/api/chats/${telegram_id}/pinned`)
 
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')

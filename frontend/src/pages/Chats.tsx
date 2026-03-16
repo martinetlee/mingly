@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2 } from 'lucide-react'
-import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Pin } from 'lucide-react'
+import type { Chat, Folder, Message, PinnedMessage, WSEvent } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getPinnedMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -173,11 +173,27 @@ export default function Chats() {
   const [searchingChat, setSearchingChat] = useState(false)
   const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Pinned message for the selected chat
+  const [pinnedMessage, setPinnedMessage] = useState<PinnedMessage | null>(null)
+  // Unread count snapshot for the selected chat (used for unread separator)
+  const [selectedChatUnread, setSelectedChatUnread] = useState(0)
+
   // Important-contact star for 1-1 chats
   const [isImportant, setIsImportant] = useState(false)
   const [togglingImportant, setTogglingImportant] = useState(false)
   // True while we're resolving a pendingNav chat (loading indicator in right pane)
   const [navigatingToChat, setNavigatingToChat] = useState(false)
+
+  // Fetch pinned message when selected chat changes
+  useEffect(() => {
+    if (!selectedChat) {
+      setPinnedMessage(null)
+      return
+    }
+    getPinnedMessage(selectedChat.telegram_id)
+      .then((msg) => setPinnedMessage(msg))
+      .catch(() => setPinnedMessage(null))
+  }, [selectedChat?.telegram_id])
 
   // Fetch importance status when selected chat changes (private chats only)
   useEffect(() => {
@@ -441,6 +457,8 @@ export default function Chats() {
 
   const handleSelectChat = (chat: Chat) => {
     if (selectedChat?.telegram_id === chat.telegram_id) return
+    // Capture unread count before clearing so MessageList can show the separator
+    setSelectedChatUnread(chat.unread_count ?? 0)
     setSelectedChat(chat)
     setMessages([])
     setHasMore(false)
@@ -847,6 +865,30 @@ export default function Chats() {
                 </div>
               )}
 
+              {/* Pinned message banner */}
+              {pinnedMessage && (
+                <div className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2">
+                  <Pin size={14} className="text-slate-400 flex-shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    {pinnedMessage.sender_name && (
+                      <span className="text-[11px] font-medium text-purple-400 mr-1.5">
+                        {pinnedMessage.sender_name}
+                      </span>
+                    )}
+                    <span className="text-xs text-slate-400 truncate">
+                      {pinnedMessage.text ? pinnedMessage.text.slice(0, 120) : '[media]'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setPinnedMessage(null)}
+                    className="flex-shrink-0 text-slate-500 hover:text-slate-300 transition-colors"
+                    title="Dismiss pinned message"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+
               {/* Messages */}
               {loadingMessages ? (
                 <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
@@ -865,7 +907,7 @@ export default function Chats() {
                       </button>
                     </div>
                   )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} />
+                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} unreadCount={selectedChatUnread} />
                 </div>
               )}
 

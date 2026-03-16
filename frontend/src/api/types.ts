@@ -78,6 +78,15 @@ export interface Message {
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
+  delivery_state?: 'sending' | 'sent' | 'delivered' | 'read'
+  is_edited?: boolean
+}
+
+export interface PinnedMessage {
+  telegram_id: number
+  sender_name: string | null
+  text: string | null
+  date: string
 }
 
 export interface ContactPosition {

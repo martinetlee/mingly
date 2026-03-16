@@ -89,6 +89,8 @@ def _serialize_msg(row) -> dict:
         "reply_to_telegram_id": m.reply_to_telegram_id,
         "reply_to_preview": reply_preview,
         "my_reaction": m.my_reaction,
+        "delivery_state": m.delivery_state or "sent",
+        "is_edited": m.is_edited,
     }
 
 
@@ -320,6 +322,20 @@ async def react_to_message(
         raise HTTPException(status_code=404, detail="Message not found")
 
     return {"success": True, "my_reaction": msg.my_reaction}
+
+
+@router.get("/{telegram_id}/pinned")
+async def get_pinned_message(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Get the pinned message for a chat."""
+    msg = await crud.get_pinned_message(db, telegram_id)
+    if not msg:
+        return None
+    return {
+        "telegram_id": msg.telegram_id,
+        "sender_name": msg.sender_name,
+        "text": msg.text,
+        "date": msg.date,
+    }
 
 
 @router.post("/{telegram_id}/sync")
