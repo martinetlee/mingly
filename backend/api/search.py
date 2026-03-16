@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, func, asc
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.functions.contacts import SearchRequest as TgSearchRequest, GetContactsRequest
 from telethon.tl.types import User, Channel, Chat as TgChat
@@ -53,11 +53,20 @@ async def global_search(
         for r in msg_rows
     ]
 
-    # Chats — non-hidden
+    # Chats — non-hidden, sorted by most recent message
+    last_msg = (
+        select(
+            Message.chat_id,
+            func.max(Message.date).label("last_date"),
+        )
+        .group_by(Message.chat_id)
+        .subquery("last_msg")
+    )
     chat_q = (
         select(Chat)
         .where(Chat.is_hidden == False, Chat.name.ilike(pattern))  # noqa: E712
-        .order_by(Chat.name)
+        .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
+        .order_by(desc(last_msg.c.last_date), Chat.name)
         .limit(limit)
     )
     chat_rows = (await db.execute(chat_q)).scalars().all()

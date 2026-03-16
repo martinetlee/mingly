@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2 } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
 import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -176,6 +176,8 @@ export default function Chats() {
   // Important-contact star for 1-1 chats
   const [isImportant, setIsImportant] = useState(false)
   const [togglingImportant, setTogglingImportant] = useState(false)
+  // True while we're resolving a pendingNav chat (loading indicator in right pane)
+  const [navigatingToChat, setNavigatingToChat] = useState(false)
 
   // Fetch importance status when selected chat changes (private chats only)
   useEffect(() => {
@@ -298,6 +300,7 @@ export default function Chats() {
       const msgId = msgIdParam ? parseInt(msgIdParam, 10) : 0
       if (!isNaN(chatId)) {
         pendingNavRef.current = { chatId, msgId }
+        setNavigatingToChat(true)
       }
     }
     loadChats()
@@ -314,6 +317,7 @@ export default function Chats() {
     if (target) {
       pendingNavRef.current = null
       retryNavRef.current = false
+      setNavigatingToChat(false)
       if (msgId) {
         pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
         setHighlightMsgId(msgId)
@@ -339,11 +343,13 @@ export default function Chats() {
           // Could not fetch — give up
           pendingNavRef.current = null
           retryNavRef.current = false
+          setNavigatingToChat(false)
         })
     } else {
       // Already retried, chat still not found — give up
       pendingNavRef.current = null
       retryNavRef.current = false
+      setNavigatingToChat(false)
     }
   }, [chats, loadChats])
 
@@ -868,7 +874,14 @@ export default function Chats() {
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
-              <p className="text-sm">Select a chat to start</p>
+              {navigatingToChat ? (
+                <>
+                  <Loader2 size={20} className="animate-spin text-slate-400 mb-2" />
+                  <p className="text-sm text-slate-400">Loading chat…</p>
+                </>
+              ) : (
+                <p className="text-sm">Select a chat to start</p>
+              )}
             </div>
           )}
         </div>
