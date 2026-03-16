@@ -1,6 +1,7 @@
 import json
 import logging
 import subprocess
+from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
 from typing import Optional
@@ -11,7 +12,7 @@ from sqlalchemy import select
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db import crud
-from backend.db.models import Chat
+from backend.db.models import Chat, CatchUpItem
 
 logger = logging.getLogger(__name__)
 from backend.telegram.client import get_client
@@ -403,6 +404,20 @@ async def register_event_handlers() -> None:
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
             )
+
+            # Auto-reopen handled catch-up items on new incoming messages
+            if not saved.is_outgoing:
+                catchup_item = (await db.execute(
+                    select(CatchUpItem).where(
+                        CatchUpItem.chat_telegram_id == event.chat_id,
+                        CatchUpItem.status == "handled",
+                    )
+                )).scalar_one_or_none()
+                if catchup_item:
+                    catchup_item.status = "pending"
+                    catchup_item.handled_at = None
+                    catchup_item.updated_at = datetime.utcnow()
+                    await db.commit()
 
         await ws_manager.broadcast({
             "type": "new_message",

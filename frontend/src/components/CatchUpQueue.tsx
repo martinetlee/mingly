@@ -10,12 +10,14 @@ import {
   Users,
   MessageSquare,
   AlarmClock,
+  RotateCcw,
 } from 'lucide-react'
 import type { DashboardNeedsReply, CatchUpItem, CatchUpContext, RelationshipStatus } from '../api/types'
 import {
   getAllCatchUpItems,
   snoozeCatchUpItem,
   markCatchUpHandled,
+  reopenCatchUpItem,
   addCatchUpNote,
   updateCatchUpRelationship,
   getCatchUpContext,
@@ -375,6 +377,7 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
   const [generating, setGenerating] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [actionFeedback, setActionFeedback] = useState<{ chatId: number; msg: string } | null>(null)
+  const [showHandled, setShowHandled] = useState(false)
   const selectedRef = useRef<HTMLDivElement | null>(null)
 
   // Load catch-up metadata
@@ -407,6 +410,14 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
         return new Date(meta.snoozed_until) <= new Date()
       }
       return true
+    })
+  }, [needsReply, catchUpMeta])
+
+  // Items that have been marked as handled
+  const handledItems = useMemo(() => {
+    return needsReply.filter((item) => {
+      const meta = catchUpMeta[item.chat.telegram_id]
+      return meta?.status === 'handled'
     })
   }, [needsReply, catchUpMeta])
 
@@ -489,6 +500,16 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
       showFeedback(chatId, 'Note saved')
     } catch (err) {
       console.error('Failed to add note:', err)
+    }
+  }
+
+  const handleReopen = async (chatId: number) => {
+    try {
+      const updated = await reopenCatchUpItem(chatId)
+      setCatchUpMeta((prev) => ({ ...prev, [updated.chat_telegram_id]: updated }))
+      showFeedback(chatId, 'Reopened')
+    } catch (err) {
+      console.error('Failed to reopen:', err)
     }
   }
 
@@ -604,6 +625,52 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
           </div>
         ))}
       </div>
+
+      {/* Recently handled */}
+      {handledItems.length > 0 && (
+        <div className="mt-4">
+          <button
+            onClick={() => setShowHandled((v) => !v)}
+            className="flex items-center gap-1.5 text-[11px] text-slate-500 hover:text-slate-400 transition-colors"
+          >
+            {showHandled ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            {handledItems.length} handled
+          </button>
+          {showHandled && (
+            <div className="mt-2 space-y-1">
+              {handledItems.map((item) => {
+                const meta = catchUpMeta[item.chat.telegram_id]
+                return (
+                  <div
+                    key={item.chat.telegram_id}
+                    className="flex items-center gap-3 rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2"
+                  >
+                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700/50 text-xs font-medium text-slate-400">
+                      {item.chat.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-slate-400">{item.chat.name}</p>
+                      {meta?.handled_at && (
+                        <p className="text-[10px] text-slate-600">
+                          Handled {fmtRelative(meta.handled_at)}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => handleReopen(item.chat.telegram_id)}
+                      title="Reopen"
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-colors"
+                    >
+                      <RotateCcw size={11} />
+                      Reopen
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
