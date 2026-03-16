@@ -364,6 +364,15 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
         if "reply_to_telegram_id" in kwargs and kwargs["reply_to_telegram_id"] is not None and msg.reply_to_telegram_id is None:
             msg.reply_to_telegram_id = kwargs["reply_to_telegram_id"]
             updated = True
+        if kwargs.get("media_filename") and not msg.media_filename:
+            msg.media_filename = kwargs["media_filename"]
+            updated = True
+        if kwargs.get("media_size") and not msg.media_size:
+            msg.media_size = kwargs["media_size"]
+            updated = True
+        if kwargs.get("grouped_id") and not msg.grouped_id:
+            msg.grouped_id = kwargs["grouped_id"]
+            updated = True
         if updated:
             await db.commit()
             await db.refresh(msg)

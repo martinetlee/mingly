@@ -5,6 +5,8 @@ import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
+import DocumentCard from './DocumentCard'
+import GifPlayer from './GifPlayer'
 
 interface Props {
   message: Message
@@ -132,6 +134,8 @@ function EmojiPicker({
 export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
+  const hasGif = message.media_url && message.media_type === 'gif'
+  const hasDocument = message.media_type === 'document'
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
@@ -258,7 +262,18 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               )}
             </>
           )}
-          {message.media_type && !hasPhoto && !message.text && (
+          {hasGif && (
+            <GifPlayer mediaUrl={message.media_url!} isOut={isOut} />
+          )}
+          {hasDocument && (
+            <DocumentCard
+              filename={message.media_filename ?? null}
+              fileSize={message.media_size ?? null}
+              mediaUrl={message.media_url ?? null}
+              isOut={isOut}
+            />
+          )}
+          {message.media_type && !hasPhoto && !hasGif && !hasDocument && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
               [{message.media_type}]
             </span>

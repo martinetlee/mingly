@@ -207,6 +207,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX ix_contact_positions_telegram_id ON contact_positions (telegram_id)",
         ],
     ),
+    (
+        22,
+        "Add media_filename, media_size, and grouped_id columns to messages",
+        [
+            "ALTER TABLE messages ADD COLUMN media_filename TEXT",
+            "ALTER TABLE messages ADD COLUMN media_size INTEGER",
+            "ALTER TABLE messages ADD COLUMN grouped_id INTEGER",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

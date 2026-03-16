@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../api/types'
 import MessageBubble from './MessageBubble'
+import MediaAlbumGrid from './MediaAlbumGrid'
 
 interface Props {
   messages: Message[]
@@ -8,6 +9,37 @@ interface Props {
   highlightTelegramId?: number | null
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
+}
+
+/**
+ * Group consecutive messages that share the same grouped_id into album clusters.
+ * Returns an array of items: either a single message or an album group.
+ */
+function groupMessages(messages: Message[]): Array<{ type: 'single'; message: Message } | { type: 'album'; messages: Message[]; groupedId: number }> {
+  const result: Array<{ type: 'single'; message: Message } | { type: 'album'; messages: Message[]; groupedId: number }> = []
+  let i = 0
+
+  while (i < messages.length) {
+    const msg = messages[i]
+    if (msg.grouped_id) {
+      // Collect all consecutive messages with the same grouped_id
+      const albumMessages: Message[] = [msg]
+      let j = i + 1
+      while (j < messages.length && messages[j].grouped_id === msg.grouped_id) {
+        albumMessages.push(messages[j])
+        j++
+      }
+      if (albumMessages.length > 1) {
+        result.push({ type: 'album', messages: albumMessages, groupedId: msg.grouped_id })
+        i = j
+        continue
+      }
+    }
+    result.push({ type: 'single', message: msg })
+    i++
+  }
+
+  return result
 }
 
 export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact }: Props) {
@@ -41,12 +73,57 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
     )
   }
 
+  const grouped = groupMessages(messages)
+
   return (
     <div className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
-      {messages.map((msg, i) => {
-        const prev = messages[i - 1]
+      {grouped.map((item, idx) => {
+        if (item.type === 'album') {
+          const firstMsg = item.messages[0]
+          const isOut = firstMsg.is_outgoing
+          const isHighlighted = item.messages.some(
+            (m) => highlightTelegramId != null && m.telegram_id === highlightTelegramId && !dimHighlight
+          )
+          const hasHighlightRef = item.messages.some(
+            (m) => highlightTelegramId === m.telegram_id
+          )
+          // Collect text from all album messages (captions)
+          const captionMsg = item.messages.find((m) => m.text)
+
+          return (
+            <div
+              key={`album-${item.groupedId}`}
+              ref={hasHighlightRef ? highlightRef : undefined}
+              className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 ${
+                isHighlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''
+              }`}
+            >
+              <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
+                <div
+                  className={`rounded-2xl text-sm leading-relaxed overflow-hidden ${
+                    isOut
+                      ? 'rounded-br-sm bg-indigo-600 text-white'
+                      : 'rounded-bl-sm bg-slate-700 text-gray-100 border border-slate-600'
+                  }`}
+                >
+                  <MediaAlbumGrid messages={item.messages} isOut={isOut} />
+                  {captionMsg?.text && (
+                    <p className="px-3 py-2 text-sm">{captionMsg.text}</p>
+                  )}
+                </div>
+                <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+                  {new Date(firstMsg.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+            </div>
+          )
+        }
+
+        const msg = item.message
+        const prevItem = idx > 0 ? grouped[idx - 1] : null
+        const prevMsg = prevItem?.type === 'single' ? prevItem.message : prevItem?.type === 'album' ? prevItem.messages[prevItem.messages.length - 1] : undefined
         const showSender =
-          isGroup && !msg.is_outgoing && msg.sender_name !== prev?.sender_name
+          isGroup && !msg.is_outgoing && msg.sender_name !== prevMsg?.sender_name
         const isHighlighted = highlightTelegramId != null && msg.telegram_id === highlightTelegramId && !dimHighlight
 
         return (

@@ -60,11 +60,49 @@ def _media_type(msg) -> Optional[str]:
     if getattr(msg, "sticker", None):
         return "sticker"
     if getattr(msg, "document", None):
+        doc = msg.document
+        # Check if document is an animated GIF
+        if doc and hasattr(doc, "mime_type") and doc.mime_type == "image/gif":
+            return "gif"
+        # Check for video GIF (mp4 sent as GIF in Telegram)
+        if doc and hasattr(doc, "attributes"):
+            for attr in doc.attributes:
+                if hasattr(attr, "round_message"):
+                    continue
+                if type(attr).__name__ == "DocumentAttributeAnimated":
+                    return "gif"
         return "document"
     if getattr(msg, "video", None):
         return "video"
     if getattr(msg, "audio", None):
         return "audio"
+    if getattr(msg, "gif", None):
+        return "gif"
+    return None
+
+
+def _media_filename(msg) -> Optional[str]:
+    """Extract filename from a document message."""
+    doc = getattr(msg, "document", None)
+    if not doc:
+        return None
+    if hasattr(doc, "attributes"):
+        for attr in doc.attributes:
+            if hasattr(attr, "file_name") and attr.file_name:
+                return attr.file_name
+    return None
+
+
+def _media_size(msg) -> Optional[int]:
+    """Extract file size from media message."""
+    doc = getattr(msg, "document", None)
+    if doc and hasattr(doc, "size"):
+        return doc.size
+    photo = getattr(msg, "photo", None)
+    if photo and hasattr(photo, "sizes"):
+        sizes = [s for s in photo.sizes if hasattr(s, "size")]
+        if sizes:
+            return max(s.size for s in sizes)
     return None
 
 
@@ -365,6 +403,9 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                media_filename=_media_filename(msg),
+                media_size=_media_size(msg),
+                grouped_id=getattr(msg, "grouped_id", None),
             )
 
         await crud.update_chat_sync(db, chat_telegram_id)
@@ -403,6 +444,9 @@ async def register_event_handlers() -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                media_filename=_media_filename(msg),
+                media_size=_media_size(msg),
+                grouped_id=getattr(msg, "grouped_id", None),
             )
 
             # Auto-reopen handled catch-up items on new incoming messages

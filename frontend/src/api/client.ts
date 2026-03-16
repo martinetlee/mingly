@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -127,6 +127,9 @@ export const syncChat = (telegram_id: number, limit?: number) =>
 
 export const getChatMembers = (telegram_id: number, limit = 100) =>
   request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
+
+export const getSharedMedia = (telegram_id: number, mediaFilter: 'media' | 'files' | 'links' = 'media', limit = 50, offset = 0) =>
+  request<SharedMediaItem[]>(`/api/chats/${telegram_id}/shared-media?media_filter=${mediaFilter}&limit=${limit}&offset=${offset}`)
 
 export const markChatRead = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })

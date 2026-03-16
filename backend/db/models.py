@@ -46,6 +46,9 @@ class Message(Base):
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     reply_to_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_filename: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    grouped_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
