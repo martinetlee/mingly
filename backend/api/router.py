@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, organizations, scan, search, settings, llm, tags, intelligence, profiles
+from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, organizations, search, settings, llm, tags, intelligence, profiles
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -26,7 +26,6 @@ def create_app() -> FastAPI:
     app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"], dependencies=protected)
     app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"], dependencies=protected)
     app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"], dependencies=protected)
-    app.include_router(scan.router, prefix="/api/scan", tags=["scan"], dependencies=protected)
     app.include_router(settings.router, prefix="/api/settings", tags=["settings"], dependencies=protected)
     app.include_router(llm.router, prefix="/api/llm", tags=["llm"], dependencies=protected)
     app.include_router(tags.router, prefix="/api", tags=["tags"], dependencies=protected)

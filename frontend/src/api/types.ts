@@ -215,6 +215,17 @@ export interface TelegramSearchResult {
   username: string | null
 }
 
+export interface Prefs {
+  notif_pref?: string
+  briefing_schedule?: string
+  briefing_time?: string
+  briefing_day?: string
+  briefing_max_tokens?: number
+  briefing_last_run?: string
+  catchup_summary_interval_minutes?: number
+  [key: string]: unknown
+}
+
 export interface OrgMember {
   contact_id: number
   telegram_id: number

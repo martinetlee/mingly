@@ -19,10 +19,6 @@ from backend.telegram.sync import sync_messages, bulk_sync, _chat_type
 router = APIRouter()
 
 
-class MonitorRequest(BaseModel):
-    monitored: bool
-
-
 class HideRequest(BaseModel):
     hidden: bool
 
@@ -194,23 +190,6 @@ async def list_tracked_chats(db: AsyncSession = Depends(get_db)):
 @router.get("/briefing")
 async def list_briefing_chats(db: AsyncSession = Depends(get_db)):
     return [_chat_dict(c) for c in await crud.get_briefing_chats(db)]
-
-
-@router.post("/{telegram_id}/monitor")
-async def toggle_monitor(
-    telegram_id: int,
-    req: MonitorRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    chat = await crud.set_monitored(db, telegram_id, req.monitored)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    if req.monitored:
-        try:
-            await sync_messages(telegram_id)
-        except ValueError:
-            pass  # Entity not resolvable; monitoring is still toggled
-    return {"telegram_id": telegram_id, "is_monitored": chat.is_monitored}
 
 
 @router.post("/{telegram_id}/hide")

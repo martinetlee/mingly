@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { RefreshCw, Bookmark, X, Info, Radio } from 'lucide-react'
+import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
 import type { Chat, Message, WSEvent } from '../api/types'
 import { getTrackedChats, getMessages, setTracked, syncChat, sendMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'

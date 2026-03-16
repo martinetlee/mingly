@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -109,12 +109,6 @@ export const bulkSync = () =>
 
 export const getFolders = () =>
   request<Folder[]>('/api/chats/folders')
-
-export const setMonitored = (telegram_id: number, monitored: boolean) =>
-  request<{ telegram_id: number; is_monitored: boolean }>(`/api/chats/${telegram_id}/monitor`, {
-    method: 'POST',
-    body: JSON.stringify({ monitored }),
-  })
 
 export const getMessages = (telegram_id: number, limit = 50, offset = 0, anchorTelegramId?: number) => {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
@@ -288,17 +282,8 @@ export const setRelationshipStatus = (contactId: number, status: string) =>
 export const resetRelationshipStatus = (contactId: number) =>
   request<Contact>(`/api/contacts/${contactId}/relationship-status/auto`, { method: 'POST' })
 
-export const refreshAllStatuses = () =>
-  request<{ refreshed: number }>('/api/contacts/refresh-statuses', { method: 'POST' })
-
 export const resolvePerson = (telegramId: number) =>
   request<PersonSummary>(`/api/contacts/resolve/${telegramId}`)
-
-export const resolvePersonsBatch = (telegramIds: number[]) =>
-  request<Record<number, PersonSummary>>('/api/contacts/resolve-batch', {
-    method: 'POST',
-    body: JSON.stringify({ telegram_ids: telegramIds }),
-  })
 
 // --- Profiles ---
 
@@ -308,7 +293,7 @@ export const getProfile = (userId: number | string) =>
 // --- Settings / Prefs ---
 
 export const getPrefs = () =>
-  request<{ notif_pref: string }>('/api/settings/prefs')
+  request<Prefs>('/api/settings/prefs')
 
 export const setNotifPref = (pref: 'all' | 'tracked' | 'off') =>
   request<{ success: boolean; pref: string }>('/api/settings/prefs/notifications', {
@@ -345,15 +330,6 @@ export const setBriefingMaxTokens = (max_tokens: number) =>
     body: JSON.stringify({ max_tokens }),
   })
 
-export const getBriefingPrompt = () =>
-  request<{ prompt: string; is_custom: boolean }>('/api/settings/prefs/briefing-prompt')
-
-export const setBriefingPrompt = (prompt: string) =>
-  request<{ success: boolean; is_custom: boolean }>('/api/settings/prefs/briefing-prompt', {
-    method: 'POST',
-    body: JSON.stringify({ prompt }),
-  })
-
 export const getBriefingPrompts = () =>
   request<{
     tracked: { default: string; custom: string; effective: string; is_custom: boolean }
@@ -372,11 +348,6 @@ export const getBriefingHistory = () =>
 export const deleteBriefingRun = (run_id: number) =>
   request<{ success: boolean }>(`/api/intelligence/briefing/history/${run_id}`, {
     method: 'DELETE',
-  })
-
-export const regenerateBriefingEntry = (run_id: number, entry_id: number) =>
-  request<BriefingHistoryEntry>(`/api/intelligence/briefing/history/${run_id}/entries/${entry_id}/regenerate`, {
-    method: 'POST',
   })
 
 // --- Compose ---

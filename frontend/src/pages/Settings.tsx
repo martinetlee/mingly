@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
-import { getSessionToken } from '../api/session'
+import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,10 @@ async function apiFetch<T>(
     body: body ? JSON.stringify(body) : undefined,
     signal,
   })
+  if (res.status === 401) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? res.statusText)
@@ -38,6 +42,10 @@ async function* streamSSE(
   signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
   const res = await fetch(url, { headers: authHeaders(), signal })
+  if (res.status === 401) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!res.ok || !res.body) throw new Error('Stream unavailable')
   const reader = res.body.getReader()
   const dec = new TextDecoder()
@@ -526,7 +534,7 @@ export default function Settings() {
 
     // Load saved preferences from backend
     getPrefs()
-      .then((prefs: Record<string, string>) => {
+      .then((prefs) => {
         if (prefs.notif_pref) setNotifPref(prefs.notif_pref as NotifPref)
         if (prefs.briefing_schedule) setBriefingSchedule(prefs.briefing_schedule as 'daily' | 'weekly')
         if (prefs.briefing_time) setBriefingTime(prefs.briefing_time)

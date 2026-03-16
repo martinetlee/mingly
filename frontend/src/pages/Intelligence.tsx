@@ -52,7 +52,7 @@ import {
   setBriefing,
 } from '../api/client'
 import type { Chat, ConversationSummary, MentionGroup, MentionMessage, BriefingHistoryEntry, BriefingSummary, BriefingRun, BriefingSource, WSEvent } from '../api/types'
-import { getSessionToken, authenticatedMediaUrl } from '../api/session'
+import { getSessionToken, authenticatedMediaUrl, notifySessionExpired } from '../api/session'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,6 +112,10 @@ async function* streamChat(
     signal,
   })
 
+  if (resp.status === 401) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!resp.ok || !resp.body) {
     throw new Error('Failed to connect to intelligence API')
   }
@@ -876,6 +880,10 @@ async function* streamBriefing(days: number, signal: AbortSignal): AsyncGenerato
   const bToken = getSessionToken()
   if (bToken) headers['X-Session-Token'] = bToken
   const res = await fetch(`/api/intelligence/briefing?days=${days}`, { headers, signal })
+  if (res.status === 401) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!res.ok || !res.body) throw new Error('Briefing stream unavailable')
   const reader = res.body.getReader()
   const dec = new TextDecoder()
@@ -920,6 +928,10 @@ async function* streamRegenerateBriefingEntry(
     headers: regenHeaders,
     signal,
   })
+  if (res.status === 401) {
+    notifySessionExpired()
+    throw new Error('Session expired')
+  }
   if (!res.ok || !res.body) throw new Error('Regeneration stream unavailable')
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -1445,10 +1457,10 @@ function BriefingTab() {
   useEffect(() => {
     loadHistory()
     getBriefingChats().then(setBriefingChats).catch(() => {})
-    getPrefs().then((prefs: Record<string, string>) => {
+    getPrefs().then((prefs) => {
       const sched = (prefs.briefing_schedule as 'daily' | 'weekly') ?? 'daily'
-      const btime = prefs.briefing_time ?? '09:00'
-      const bday  = prefs.briefing_day  ?? 'monday'
+      const btime = (prefs.briefing_time as string) ?? '09:00'
+      const bday  = (prefs.briefing_day as string)  ?? 'monday'
       setSchedule(sched)
       setBriefingTimeState(btime)
       setBriefingDayState(bday)
