@@ -54,6 +54,8 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
             <MessageBubble
               message={msg}
               showSender={showSender}
+              showAvatar={showSender}
+              isGroupChat={isGroup}
               highlighted={isHighlighted}
               onReply={onReply}
               onReact={onReact}

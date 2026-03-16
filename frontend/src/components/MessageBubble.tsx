@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
+import SenderAvatar from './SenderAvatar'
 
 interface Props {
   message: Message
@@ -11,6 +12,10 @@ interface Props {
   highlighted?: boolean
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
+  /** Show avatar on this message (first in a sender group) */
+  showAvatar?: boolean
+  /** Whether this is a group/channel chat (controls avatar indent) */
+  isGroupChat?: boolean
 }
 
 // Common quick-reaction emojis (mirrors Telegram's default set)
@@ -124,7 +129,7 @@ function EmojiPicker({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
   const [hovered, setHovered] = useState(false)
@@ -137,6 +142,8 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     setShowPicker(false)
     onReact?.(message, emoji)
   }
+
+  const showAvatarColumn = isGroupChat && !isOut
 
   return (
     <div
@@ -170,6 +177,18 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             >
               <Reply size={14} />
             </button>
+          )}
+        </div>
+      )}
+
+      {/* Avatar column for incoming messages in group chats */}
+      {showAvatarColumn && (
+        <div className="w-7 flex-shrink-0 mr-2 self-end">
+          {showAvatar ? (
+            <SenderAvatar senderId={message.sender_id} senderName={message.sender_name} size={28} />
+          ) : (
+            /* Transparent spacer to keep messages aligned */
+            <div className="w-7" />
           )}
         </div>
       )}
