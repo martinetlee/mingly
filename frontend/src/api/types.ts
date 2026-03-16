@@ -403,6 +403,43 @@ export interface CatchUpContext {
   new_messages_since_summary: number
 }
 
+export interface AdminPermissions {
+  change_info: boolean
+  post_messages: boolean
+  edit_messages: boolean
+  delete_messages: boolean
+  ban_users: boolean
+  invite_users: boolean
+  pin_messages: boolean
+  manage_call: boolean
+  anonymous: boolean
+  add_admins: boolean
+}
+
+export interface InviteLink {
+  link: string
+  title: string | null
+  expire_date: string | null
+  usage_limit: number | null
+  usage: number
+  request_needed: boolean
+  revoked: boolean
+}
+
+export interface GroupSettings {
+  title: string
+  about: string
+}
+
+export interface AdminActionLog {
+  id: number
+  chat_telegram_id: number
+  action: string
+  target_user_id: number | null
+  details: string | null
+  created_at: string | null
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }

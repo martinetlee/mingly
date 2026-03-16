@@ -207,6 +207,21 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX ix_contact_positions_telegram_id ON contact_positions (telegram_id)",
         ],
     ),
+    (
+        22,
+        "Create admin_action_log table for group/channel admin actions",
+        [
+            "CREATE TABLE IF NOT EXISTS admin_action_log ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  chat_telegram_id INTEGER NOT NULL,"
+            "  action TEXT NOT NULL,"
+            "  target_user_id INTEGER,"
+            "  details TEXT,"
+            "  created_at DATETIME NOT NULL"
+            ")",
+            "CREATE INDEX IF NOT EXISTS ix_admin_action_log_chat ON admin_action_log (chat_telegram_id, created_at)",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).
