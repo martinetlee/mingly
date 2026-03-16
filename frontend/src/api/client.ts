@@ -477,3 +477,29 @@ export const telegramSearch = (query: string, limit = 20) =>
 
 export const ensureChat = (telegramId: number) =>
   request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
+
+// --- Create Chats ---
+
+export const startPrivateChat = (telegramId: number) =>
+  request<Chat>('/api/chats/create/private', {
+    method: 'POST',
+    body: JSON.stringify({ telegram_id: telegramId }),
+  })
+
+export const createGroup = (name: string, memberIds: number[]) =>
+  request<Chat>('/api/chats/create/group', {
+    method: 'POST',
+    body: JSON.stringify({ name, member_ids: memberIds }),
+  })
+
+export const createChannel = (name: string, about: string = '', isPublic: boolean = false) =>
+  request<Chat>('/api/chats/create/channel', {
+    method: 'POST',
+    body: JSON.stringify({ name, about, is_public: isPublic }),
+  })
+
+export const joinViaInviteLink = (link: string) =>
+  request<Chat>('/api/chats/join', {
+    method: 'POST',
+    body: JSON.stringify({ link }),
+  })
