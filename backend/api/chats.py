@@ -89,6 +89,8 @@ def _serialize_msg(row) -> dict:
         "reply_to_telegram_id": m.reply_to_telegram_id,
         "reply_to_preview": reply_preview,
         "my_reaction": m.my_reaction,
+        "topic_id": m.topic_id if hasattr(m, 'topic_id') else None,
+        "is_pinned": m.is_pinned if hasattr(m, 'is_pinned') else False,
     }
 
 
@@ -107,6 +109,8 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         "is_hidden": c.is_hidden,
         "is_briefing": c.is_briefing,
         "is_tracked": c.is_tracked,
+        "is_forum": c.is_forum if hasattr(c, 'is_forum') else False,
+        "slow_mode_seconds": c.slow_mode_seconds if hasattr(c, 'slow_mode_seconds') else 0,
         "unread_count": c.unread_count or 0,
         "last_synced_at": c.last_synced_at,
     }
@@ -384,3 +388,243 @@ async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession 
     role_order = {"creator": 0, "admin": 1, "member": 2}
     members.sort(key=lambda m: (role_order.get(m["role"], 2), m["name"].lower()))
     return members
+
+
+# ---------------------------------------------------------------------------
+# Forum topics
+# ---------------------------------------------------------------------------
+
+@router.get("/{telegram_id}/topics")
+async def list_topics(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """List forum topics for a supergroup with forum mode enabled."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.channels import GetForumTopicsRequest
+        result = await client(GetForumTopicsRequest(
+            channel=telegram_id,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=100,
+            q=None,
+        ))
+        topics = []
+        for topic in result.topics:
+            topics.append({
+                "id": topic.id,
+                "title": topic.title,
+                "icon_color": getattr(topic, "icon_color", None),
+                "icon_emoji_id": getattr(topic, "icon_emoji_id", None),
+                "date": topic.date.replace(tzinfo=None).isoformat() if topic.date else None,
+                "is_closed": getattr(topic, "closed", False) or False,
+                "is_pinned": getattr(topic, "pinned", False) or False,
+            })
+        return topics
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot fetch topics: {e}")
+
+
+class CreateTopicRequest(BaseModel):
+    title: str
+
+
+@router.post("/{telegram_id}/topics")
+async def create_topic(telegram_id: int, req: CreateTopicRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new forum topic in a supergroup."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.channels import CreateForumTopicRequest
+        result = await client(CreateForumTopicRequest(
+            channel=telegram_id,
+            title=req.title,
+            random_id=int(datetime.utcnow().timestamp() * 1000),
+        ))
+        # The result contains the created topic updates
+        updates = getattr(result, "updates", [])
+        topic_id = None
+        for upd in updates:
+            msg = getattr(upd, "message", None)
+            if msg:
+                topic_id = getattr(msg, "id", None)
+                break
+        return {"success": True, "topic_id": topic_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot create topic: {e}")
+
+
+class TopicStateRequest(BaseModel):
+    closed: bool
+
+
+@router.post("/{telegram_id}/topics/{topic_id}/state")
+async def set_topic_state(telegram_id: int, topic_id: int, req: TopicStateRequest, db: AsyncSession = Depends(get_db)):
+    """Close or reopen a forum topic."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.channels import EditForumTopicRequest
+        await client(EditForumTopicRequest(
+            channel=telegram_id,
+            topic_id=topic_id,
+            closed=req.closed,
+        ))
+        return {"success": True, "topic_id": topic_id, "closed": req.closed}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot update topic state: {e}")
+
+
+@router.get("/{telegram_id}/topics/{topic_id}/messages")
+async def get_topic_messages(
+    telegram_id: int,
+    topic_id: int,
+    limit: int = 100,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get messages for a specific forum topic."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    rows = await crud.get_topic_messages(db, telegram_id, topic_id, limit=limit, offset=offset)
+    return [_serialize_msg(row) for row in reversed(rows)]
+
+
+# ---------------------------------------------------------------------------
+# Slow mode
+# ---------------------------------------------------------------------------
+
+class SlowModeRequest(BaseModel):
+    seconds: int  # 0 to disable, valid values: 0, 10, 30, 60, 300, 900, 3600
+
+
+@router.post("/{telegram_id}/slow-mode")
+async def set_slow_mode(telegram_id: int, req: SlowModeRequest, db: AsyncSession = Depends(get_db)):
+    """Set slow mode delay for a group/supergroup."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.channels import ToggleSlowModeRequest
+        await client(ToggleSlowModeRequest(
+            channel=telegram_id,
+            seconds=req.seconds,
+        ))
+        # Update local DB
+        chat.slow_mode_seconds = req.seconds
+        await db.commit()
+        return {"success": True, "slow_mode_seconds": req.seconds}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot set slow mode: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Pin/unpin messages
+# ---------------------------------------------------------------------------
+
+class PinRequest(BaseModel):
+    pinned: bool
+    notify: bool = False
+
+
+@router.post("/{telegram_id}/messages/{msg_telegram_id}/pin")
+async def pin_message(
+    telegram_id: int,
+    msg_telegram_id: int,
+    req: PinRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Pin or unpin a message in a chat."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        if req.pinned:
+            await client.pin_message(telegram_id, msg_telegram_id, notify=req.notify)
+        else:
+            await client.unpin_message(telegram_id, msg_telegram_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot {'pin' if req.pinned else 'unpin'} message: {e}")
+
+    # Update local DB
+    msg = await crud.set_message_pinned(db, telegram_id, msg_telegram_id, req.pinned)
+    return {"success": True, "is_pinned": req.pinned}
+
+
+@router.get("/{telegram_id}/pinned")
+async def get_pinned_messages(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Get all pinned messages in a chat."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    rows = await crud.get_pinned_messages(db, telegram_id)
+    return [_serialize_msg(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Channel post stats
+# ---------------------------------------------------------------------------
+
+@router.get("/{telegram_id}/post-stats")
+async def get_post_stats(telegram_id: int, limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """Get stats for recent channel posts (views, forwards, replies)."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if chat.type != "channel":
+        raise HTTPException(status_code=400, detail="Post stats are only available for channels")
+
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    posts = []
+    try:
+        async for msg in client.iter_messages(telegram_id, limit=limit):
+            if not msg.text and not msg.media:
+                continue
+            posts.append({
+                "telegram_id": msg.id,
+                "text": (msg.text or "")[:200],
+                "date": msg.date.replace(tzinfo=None).isoformat() if msg.date else None,
+                "views": getattr(msg, "views", None) or 0,
+                "forwards": getattr(msg, "forwards", None) or 0,
+                "replies_count": getattr(msg.replies, "replies", 0) if getattr(msg, "replies", None) else 0,
+            })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot fetch post stats: {e}")
+
+    return posts

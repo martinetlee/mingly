@@ -18,6 +18,8 @@ class Chat(Base):
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     is_briefing: Mapped[bool] = mapped_column(Boolean, default=False)
     is_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_forum: Mapped[bool] = mapped_column(Boolean, default=False)
+    slow_mode_seconds: Mapped[int] = mapped_column(Integer, default=0)
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
     members_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
@@ -46,6 +48,8 @@ class Message(Base):
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     reply_to_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

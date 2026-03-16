@@ -4,6 +4,7 @@ import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus 
 import type { Chat, ChatMember, Contact, Tag, TagSuggestion } from '../api/types'
 import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact } from '../api/client'
 import ContactInfoSection from './ContactInfoSection'
+import ModerationPanel from './ModerationPanel'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from './PersonCard'
 
 const TAG_COLORS: Record<string, string> = {
@@ -412,6 +413,11 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
       {/* Contact section (private chats only) */}
       {chat.type === 'private' && (
         <PrivateContactSection chat={chat} />
+      )}
+
+      {/* Moderation controls (groups/channels) */}
+      {chat.type !== 'private' && (
+        <ModerationPanel chat={chat} />
       )}
 
       {/* Members section (groups/channels only) */}

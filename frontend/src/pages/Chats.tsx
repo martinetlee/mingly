@@ -1,13 +1,14 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2 } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getTopicMessages, pinMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
+import ForumTopicsPanel from '../components/ForumTopicsPanel'
 
 function fmtDate(iso: string): string {
   const d = new Date(iso)
@@ -68,6 +69,11 @@ function ChatItem({
             <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
               {chat.type}
             </span>
+            {chat.is_forum && (
+              <span className="flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">
+                <MessageSquare size={9} className="inline" />
+              </span>
+            )}
             {chat.last_message?.date && (
               <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
                 {fmtDate(chat.last_message.date)}
@@ -172,6 +178,10 @@ export default function Chats() {
   const [chatSearchResults, setChatSearchResults] = useState<Message[]>([])
   const [searchingChat, setSearchingChat] = useState(false)
   const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Forum topic state
+  const [selectedTopicId, setSelectedTopicId] = useState<number | null>(null)
+  const [selectedTopicTitle, setSelectedTopicTitle] = useState<string | null>(null)
 
   // Important-contact star for 1-1 chats
   const [isImportant, setIsImportant] = useState(false)
@@ -451,6 +461,8 @@ export default function Chats() {
     setShowChatSearch(false)
     setChatSearch('')
     setChatSearchResults([])
+    setSelectedTopicId(null)
+    setSelectedTopicTitle(null)
     // Mark as read: clear badge locally and persist to backend
     if ((chat.unread_count ?? 0) > 0) {
       setChats((prev) =>
@@ -519,6 +531,40 @@ export default function Chats() {
     await sendMessage(selectedChat.telegram_id, text, replyToMessage?.telegram_id)
     setReplyToMessage(null)
     await loadMessages(selectedChat)
+  }
+
+  const handleSelectTopic = useCallback(async (topicId: number | null, topicTitle: string | null) => {
+    setSelectedTopicId(topicId)
+    setSelectedTopicTitle(topicTitle)
+    if (!selectedChat) return
+    setLoadingMessages(true)
+    try {
+      if (topicId !== null) {
+        const data = await getTopicMessages(selectedChat.telegram_id, topicId, LIMIT, 0)
+        setMessages(data)
+        setHasMore(data.length === LIMIT)
+      } else {
+        const data = await getMessages(selectedChat.telegram_id, LIMIT, 0)
+        setMessages(data)
+        setHasMore(data.length === LIMIT)
+      }
+      setMessageOffset(0)
+    } finally {
+      setLoadingMessages(false)
+    }
+  }, [selectedChat, LIMIT])
+
+  const handlePinMessage = async (msg: Message) => {
+    if (!selectedChat) return
+    const newPinned = !msg.is_pinned
+    try {
+      await pinMessage(selectedChat.telegram_id, msg.telegram_id, newPinned)
+      setMessages((prev) =>
+        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, is_pinned: newPinned } : m)
+      )
+    } catch {
+      // silently ignore
+    }
   }
 
   const handleReact = async (msg: Message, emoji: string | null) => {
@@ -748,7 +794,18 @@ export default function Chats() {
                 <div className="flex items-center gap-2">
                   <div>
                     <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                    <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                      {selectedChat.is_forum && (
+                        <span className="rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">forum</span>
+                      )}
+                      {selectedTopicTitle && (
+                        <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-500/20 text-indigo-400">
+                          <MessageSquare size={9} />
+                          {selectedTopicTitle}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {selectedChat.type === 'private' && (
                     <button
@@ -845,6 +902,15 @@ export default function Chats() {
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* Forum topics panel */}
+              {selectedChat.is_forum && (
+                <ForumTopicsPanel
+                  telegramId={selectedChat.telegram_id}
+                  onSelectTopic={handleSelectTopic}
+                  selectedTopicId={selectedTopicId}
+                />
               )}
 
               {/* Messages */}

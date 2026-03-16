@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -163,6 +163,50 @@ export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
+
+// --- Forum Topics ---
+
+export const getForumTopics = (telegram_id: number) =>
+  request<ForumTopic[]>(`/api/chats/${telegram_id}/topics`)
+
+export const createForumTopic = (telegram_id: number, title: string) =>
+  request<{ success: boolean; topic_id: number | null }>(`/api/chats/${telegram_id}/topics`, {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  })
+
+export const setTopicState = (telegram_id: number, topic_id: number, closed: boolean) =>
+  request<{ success: boolean; topic_id: number; closed: boolean }>(`/api/chats/${telegram_id}/topics/${topic_id}/state`, {
+    method: 'POST',
+    body: JSON.stringify({ closed }),
+  })
+
+export const getTopicMessages = (telegram_id: number, topic_id: number, limit = 100, offset = 0) =>
+  request<Message[]>(`/api/chats/${telegram_id}/topics/${topic_id}/messages?limit=${limit}&offset=${offset}`)
+
+// --- Slow Mode ---
+
+export const setSlowMode = (telegram_id: number, seconds: number) =>
+  request<{ success: boolean; slow_mode_seconds: number }>(`/api/chats/${telegram_id}/slow-mode`, {
+    method: 'POST',
+    body: JSON.stringify({ seconds }),
+  })
+
+// --- Pin/Unpin Messages ---
+
+export const pinMessage = (telegram_id: number, msg_telegram_id: number, pinned: boolean, notify = false) =>
+  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_telegram_id}/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ pinned, notify }),
+  })
+
+export const getPinnedMessages = (telegram_id: number) =>
+  request<Message[]>(`/api/chats/${telegram_id}/pinned`)
+
+// --- Channel Post Stats ---
+
+export const getPostStats = (telegram_id: number, limit = 20) =>
+  request<ChannelPostStats[]>(`/api/chats/${telegram_id}/post-stats?limit=${limit}`)
 
 // --- Tags ---
 
