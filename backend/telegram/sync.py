@@ -190,21 +190,35 @@ def _extract_reactions(msg) -> Optional[str]:
     return json.dumps(out) if out else None
 
 
-async def sync_dialogs() -> None:
-    """Fetch all dialogs and upsert into the chats table."""
+async def sync_dialogs(limit: Optional[int] = None) -> None:
+    """Fetch dialogs and upsert into the chats table.
+
+    Args:
+        limit: Max dialogs to fetch. None = all dialogs.
+               Dialogs are returned most-recent-first by Telegram.
+    """
     client = get_client()
     if not client:
         return
 
     async with AsyncSessionLocal() as db:
-        async for dialog in client.iter_dialogs(limit=200):
+        async for dialog in client.iter_dialogs(limit=limit):
             entity = dialog.entity
+            username = getattr(entity, "username", None)
+            # dialog.name can be empty for old/inactive users → fall back
+            name = dialog.name
+            if not name or name == str(dialog.id):
+                name = (
+                    username
+                    or getattr(entity, "title", None)
+                    or str(dialog.id)
+                )
             await crud.upsert_chat(
                 db,
                 telegram_id=dialog.id,
-                name=dialog.name or str(dialog.id),
+                name=name,
                 chat_type=_chat_type(entity),
-                username=getattr(entity, "username", None),
+                username=username,
                 unread_count=dialog.unread_count,
                 members_count=getattr(entity, "participants_count", None),
             )

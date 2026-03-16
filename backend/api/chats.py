@@ -14,7 +14,7 @@ from backend.config import DATA_DIR
 from backend.db.database import get_db
 from backend.db import crud
 from backend.telegram.client import get_client, ensure_connected
-from backend.telegram.sync import sync_messages, bulk_sync
+from backend.telegram.sync import sync_messages, bulk_sync, _chat_type
 
 router = APIRouter()
 
@@ -97,10 +97,14 @@ def _serialize_msg(row) -> dict:
 
 
 def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
+    # Use username as display name when name is just a numeric telegram ID
+    name = c.name
+    if name and name.isdigit() and c.username:
+        name = c.username
     d = {
         "id": c.id,
         "telegram_id": c.telegram_id,
-        "name": c.name,
+        "name": name,
         "type": c.type,
         "username": c.username,
         "is_monitored": c.is_monitored,
@@ -125,6 +129,49 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
 async def bulk_sync_chats():
     synced = await bulk_sync(n_chats=50, messages_per_chat=30)
     return {"synced": synced}
+
+
+@router.post("/{telegram_id}/ensure")
+async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Ensure a chat exists locally and has synced messages.
+
+    If the chat isn't in the DB, fetch it from Telegram and upsert it.
+    If messages haven't been synced yet, sync them.
+    Returns the chat dict.
+    """
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+
+    if not chat:
+        # Chat not in local DB — fetch from Telegram and create it
+        client = get_client()
+        if not client:
+            raise HTTPException(status_code=503, detail="Telegram client not available")
+        await ensure_connected()
+        try:
+            entity = await client.get_entity(telegram_id)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Telegram entity: {e}")
+
+        chat = await crud.upsert_chat(
+            db,
+            telegram_id=telegram_id,
+            name=getattr(entity, "title", None)
+                or f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
+                or str(telegram_id),
+            chat_type=_chat_type(entity),
+            username=getattr(entity, "username", None),
+        )
+
+    # Sync messages if not synced yet
+    if chat.last_synced_at is None:
+        try:
+            await sync_messages(telegram_id, limit=50)
+        except ValueError:
+            pass  # Entity not resolvable; return chat without messages
+
+    # Re-fetch to get updated last_synced_at
+    await db.refresh(chat)
+    return _chat_dict(chat)
 
 
 @router.get("")

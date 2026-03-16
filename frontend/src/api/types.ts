@@ -208,6 +208,13 @@ export interface GlobalSearchResults {
   organizations: SearchOrgResult[]
 }
 
+export interface TelegramSearchResult {
+  telegram_id: number
+  name: string
+  type: 'private' | 'group' | 'channel'
+  username: string | null
+}
+
 export interface OrgMember {
   contact_id: number
   telegram_id: number

@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile } from './types'
+import type { AuthStatus, BriefingHistoryEntry, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -500,3 +500,9 @@ export const getDashboard = () =>
 
 export const globalSearch = (query: string, limit = 20) =>
   request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+
+export const telegramSearch = (query: string, limit = 20) =>
+  request<{ telegram_dialogs: TelegramSearchResult[] }>(`/api/search/telegram?q=${encodeURIComponent(query)}&limit=${limit}`)
+
+export const ensureChat = (telegramId: number) =>
+  request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })

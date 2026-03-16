@@ -74,8 +74,10 @@ async def do_unlock_vault(req: VaultPasswordRequest):
         try:
             authenticated = await init_client()
             if authenticated:
-                await sync_dialogs()
+                await sync_dialogs(limit=200)
                 await register_event_handlers()
+                # Background: sync remaining dialogs + messages
+                asyncio.create_task(sync_dialogs())
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         except Exception:
             pass
@@ -172,8 +174,9 @@ async def auth_verify_code(req: CodeRequest):
     try:
         await sign_in(req.phone, req.code, req.phone_code_hash)
         await persist_session()
-        await sync_dialogs()
+        await sync_dialogs(limit=200)
         await register_event_handlers()
+        asyncio.create_task(sync_dialogs())
         asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         me = await get_me()
         return {
@@ -195,8 +198,9 @@ async def auth_verify_2fa(req: PasswordRequest):
     try:
         await sign_in_2fa(req.password)
         await persist_session()
-        await sync_dialogs()
+        await sync_dialogs(limit=200)
         await register_event_handlers()
+        asyncio.create_task(sync_dialogs())
         asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         me = await get_me()
         return {

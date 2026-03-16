@@ -305,12 +305,15 @@ export default function Chats() {
   }, [loadChats, loadFolders, location.search])
 
   // When chats load, auto-select the chat from URL params if pending
+  const retryNavRef = useRef(false)
   useEffect(() => {
-    if (chats.length === 0 || !pendingNavRef.current) return
+    if (!pendingNavRef.current) return
+    if (chats.length === 0 && !retryNavRef.current) return
     const { chatId, msgId } = pendingNavRef.current
-    pendingNavRef.current = null
     const target = chats.find((c) => c.telegram_id === chatId)
     if (target) {
+      pendingNavRef.current = null
+      retryNavRef.current = false
       if (msgId) {
         pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
         setHighlightMsgId(msgId)
@@ -320,8 +323,17 @@ export default function Chats() {
       setHasMore(false)
       setMessageOffset(0)
       setShowInfo(false)
+    } else if (!retryNavRef.current) {
+      // Chat not found — may have just been created via ensureChat.
+      // Re-fetch the chat list once.
+      retryNavRef.current = true
+      loadChats()
+    } else {
+      // Already retried, chat still not found — give up
+      pendingNavRef.current = null
+      retryNavRef.current = false
     }
-  }, [chats])
+  }, [chats, loadChats])
 
   useEffect(() => {
     if (selectedChat) {

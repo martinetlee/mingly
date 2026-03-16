@@ -1,8 +1,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, MessageSquare, Users, Building2, FileText, X } from 'lucide-react'
-import type { GlobalSearchResults } from '../api/types'
-import { globalSearch } from '../api/client'
+import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2 } from 'lucide-react'
+import type { GlobalSearchResults, TelegramSearchResult } from '../api/types'
+import { globalSearch, telegramSearch, ensureChat } from '../api/client'
 
 function fmtDate(iso: string): string {
   const d = new Date(iso)
@@ -15,12 +15,13 @@ function fmtDate(iso: string): string {
 }
 
 interface ResultItem {
-  type: 'chat' | 'contact' | 'organization' | 'message'
+  type: 'chat' | 'contact' | 'organization' | 'message' | 'telegram'
   id: string
   label: string
   sublabel?: string
-  icon: 'chat' | 'contact' | 'org' | 'message'
+  icon: 'chat' | 'contact' | 'org' | 'message' | 'telegram'
   navigateTo: string
+  telegramId?: number
 }
 
 function flattenResults(results: GlobalSearchResults): ResultItem[] {
@@ -73,11 +74,24 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
   return items
 }
 
+function telegramResultsToItems(results: TelegramSearchResult[]): ResultItem[] {
+  return results.map((t) => ({
+    type: 'telegram' as const,
+    id: `tg-${t.telegram_id}`,
+    label: t.name,
+    sublabel: t.username ? `@${t.username}` : t.type,
+    icon: 'telegram' as const,
+    navigateTo: `/chats?chatId=${t.telegram_id}`,
+    telegramId: t.telegram_id,
+  }))
+}
+
 const ICON_MAP = {
   chat: MessageSquare,
   contact: Users,
   org: Building2,
   message: FileText,
+  telegram: Globe,
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -85,25 +99,32 @@ const CATEGORY_LABELS: Record<string, string> = {
   contact: 'Contacts',
   organization: 'Organizations',
   message: 'Messages',
+  telegram: 'Telegram',
 }
 
 export default function GlobalSearch({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<GlobalSearchResults | null>(null)
+  const [telegramResults, setTelegramResults] = useState<TelegramSearchResult[]>([])
   const [loading, setLoading] = useState(false)
+  const [telegramLoading, setTelegramLoading] = useState(false)
+  const [ensuring, setEnsuring] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
 
-  // Debounced search
+  // Debounced search — local + Telegram in parallel
   useEffect(() => {
     if (!open) return
     if (query.length < 2) {
       setResults(null)
+      setTelegramResults([])
       return
     }
     setLoading(true)
+    setTelegramLoading(true)
+
     const timer = setTimeout(() => {
       globalSearch(query)
         .then((data) => {
@@ -112,6 +133,11 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
         })
         .catch(() => setResults(null))
         .finally(() => setLoading(false))
+
+      telegramSearch(query)
+        .then((data) => setTelegramResults(data.telegram_dialogs))
+        .catch(() => setTelegramResults([]))
+        .finally(() => setTelegramLoading(false))
     }, 300)
     return () => clearTimeout(timer)
   }, [query, open])
@@ -121,15 +147,38 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
     if (open) {
       setQuery('')
       setResults(null)
+      setTelegramResults([])
       setSelectedIdx(0)
+      setEnsuring(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [open])
 
-  const items = results ? flattenResults(results) : []
+  // Build unified items list: local results + Telegram results (deduped)
+  const localItems = results ? flattenResults(results) : []
+  const tgItems = telegramResultsToItems(telegramResults)
+  // Deduplicate: skip Telegram results whose telegram_id already appears in local chats/contacts
+  const localTgIds = new Set<number>()
+  if (results) {
+    for (const c of results.chats) localTgIds.add(c.telegram_id)
+    for (const c of results.contacts) localTgIds.add(c.telegram_id)
+  }
+  const dedupedTgItems = tgItems.filter((t) => !t.telegramId || !localTgIds.has(t.telegramId))
+  const items = [...localItems, ...dedupedTgItems]
 
   const handleSelect = useCallback(
-    (item: ResultItem) => {
+    async (item: ResultItem) => {
+      if (item.type === 'telegram' && item.telegramId) {
+        // Ensure the chat exists locally before navigating
+        setEnsuring(true)
+        try {
+          await ensureChat(item.telegramId)
+        } catch {
+          // Still navigate — the Chats page may handle it
+        } finally {
+          setEnsuring(false)
+        }
+      }
       onClose()
       navigate(item.navigateTo)
     },
@@ -172,6 +221,7 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
     grouped.set(item.type, list)
   }
 
+  const allDone = !loading && !telegramLoading
   let globalIdx = 0
 
   return (
@@ -213,45 +263,63 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               Type to search across chats, contacts, and messages
             </div>
-          ) : loading ? (
+          ) : loading && items.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               Searching...
             </div>
-          ) : items.length === 0 ? (
+          ) : ensuring ? (
+            <div className="px-4 py-8 text-center text-sm text-slate-400 flex items-center justify-center gap-2">
+              <Loader2 size={14} className="animate-spin" />
+              Syncing chat...
+            </div>
+          ) : items.length === 0 && allDone ? (
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               No results found for &ldquo;{query}&rdquo;
             </div>
           ) : (
-            Array.from(grouped.entries()).map(([type, groupItems]) => (
-              <div key={type}>
-                <div className="sticky top-0 bg-slate-800/95 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-slate-500 backdrop-blur-sm">
-                  {CATEGORY_LABELS[type] ?? type} ({groupItems.length})
-                </div>
-                {groupItems.map((item) => {
-                  const idx = globalIdx++
-                  const Icon = ICON_MAP[item.icon]
-                  return (
-                    <button
-                      key={item.id}
-                      data-idx={idx}
-                      onClick={() => handleSelect(item)}
-                      onMouseEnter={() => setSelectedIdx(idx)}
-                      className={`flex w-full items-center gap-3 px-4 py-2 text-left transition-colors ${
-                        selectedIdx === idx ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
-                      }`}
-                    >
-                      <Icon size={14} className="flex-shrink-0 text-slate-500" />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm text-gray-200">{item.label}</p>
-                        {item.sublabel && (
-                          <p className="truncate text-[11px] text-slate-500">{item.sublabel}</p>
+            <>
+              {Array.from(grouped.entries()).map(([type, groupItems]) => (
+                <div key={type}>
+                  <div className="sticky top-0 bg-slate-800/95 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-slate-500 backdrop-blur-sm">
+                    {CATEGORY_LABELS[type] ?? type} ({groupItems.length})
+                  </div>
+                  {groupItems.map((item) => {
+                    const idx = globalIdx++
+                    const Icon = ICON_MAP[item.icon]
+                    return (
+                      <button
+                        key={item.id}
+                        data-idx={idx}
+                        onClick={() => handleSelect(item)}
+                        onMouseEnter={() => setSelectedIdx(idx)}
+                        className={`flex w-full items-center gap-3 px-4 py-2 text-left transition-colors ${
+                          selectedIdx === idx ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
+                        }`}
+                      >
+                        <Icon size={14} className={`flex-shrink-0 ${item.type === 'telegram' ? 'text-indigo-400' : 'text-slate-500'}`} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-gray-200">{item.label}</p>
+                          {item.sublabel && (
+                            <p className="truncate text-[11px] text-slate-500">{item.sublabel}</p>
+                          )}
+                        </div>
+                        {item.type === 'telegram' && (
+                          <span className="flex-shrink-0 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] text-indigo-400">
+                            not synced
+                          </span>
                         )}
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-            ))
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
+              {telegramLoading && (
+                <div className="flex items-center gap-2 px-4 py-2 text-[11px] text-slate-500">
+                  <Loader2 size={12} className="animate-spin" />
+                  Searching Telegram...
+                </div>
+              )}
+            </>
           )}
         </div>
 

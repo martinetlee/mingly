@@ -1,9 +1,18 @@
+from __future__ import annotations
+
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, desc, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from telethon.tl.functions.contacts import SearchRequest as TgSearchRequest, GetContactsRequest
+from telethon.tl.types import User, Channel, Chat as TgChat
 
 from backend.db.database import get_db
 from backend.db.models import Chat, Message, Contact, ContactPosition, Organization
+from backend.telegram.client import get_client, ensure_connected
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -147,3 +156,82 @@ async def global_search(
         "contacts": contacts,
         "organizations": organizations,
     }
+
+
+def _tg_chat_type(entity) -> str:
+    """Derive chat type string from a Telethon entity."""
+    if isinstance(entity, User):
+        return "private"
+    if isinstance(entity, Channel) and entity.megagroup:
+        return "group"
+    if isinstance(entity, Channel):
+        return "channel"
+    return "group"
+
+
+@router.get("/telegram")
+async def telegram_search(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(default=20, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """Search Telegram dialogs that aren't synced locally yet."""
+    client = get_client()
+    if not client:
+        return {"telegram_dialogs": []}
+
+    try:
+        await ensure_connected()
+    except Exception:
+        return {"telegram_dialogs": []}
+
+    seen_ids: set[int] = set()
+    dialogs: list[dict] = []
+
+    def _add(tid: int, name: str, chat_type: str, username: str | None) -> None:
+        if tid in seen_ids:
+            return
+        seen_ids.add(tid)
+        dialogs.append({
+            "telegram_id": tid,
+            "name": name,
+            "type": chat_type,
+            "username": username,
+        })
+
+    # 1) Search user's own contacts by name (client-side filter)
+    q_lower = q.lower()
+    try:
+        contacts_result = await client(GetContactsRequest(hash=0))
+        for user in contacts_result.users:
+            name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            if not name:
+                continue
+            if q_lower in name.lower() or (user.username and q_lower in user.username.lower()):
+                _add(user.id, name, "private", getattr(user, "username", None))
+    except Exception as e:
+        logger.warning("Telegram contacts search failed: %s", e)
+
+    # 2) Search Telegram's global directory for users and chats
+    try:
+        result = await client(TgSearchRequest(q=q, limit=limit))
+        for user in result.users:
+            name = f"{user.first_name or ''} {user.last_name or ''}".strip() or str(user.id)
+            _add(user.id, name, "private", getattr(user, "username", None))
+        for chat in result.chats:
+            _add(
+                chat.id,
+                getattr(chat, "title", None) or str(chat.id),
+                _tg_chat_type(chat),
+                getattr(chat, "username", None),
+            )
+    except Exception as e:
+        logger.warning("Telegram global search failed: %s", e)
+
+    if not dialogs:
+        return {"telegram_dialogs": []}
+
+    # Trim to limit
+    dialogs = dialogs[:limit]
+
+    return {"telegram_dialogs": dialogs}
