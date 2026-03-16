@@ -678,7 +678,7 @@ export default function Chats() {
           className="flex-1 overflow-y-auto"
           onScroll={(e) => {
             const el = e.currentTarget
-            if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
               loadMoreChats()
             }
           }}

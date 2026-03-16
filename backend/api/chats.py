@@ -187,7 +187,8 @@ async def list_hidden_chats(db: AsyncSession = Depends(get_db)):
 
 @router.get("/tracked")
 async def list_tracked_chats(db: AsyncSession = Depends(get_db)):
-    return [_chat_dict(c) for c in await crud.get_tracked_chats(db)]
+    rows = await crud.get_tracked_chats(db)
+    return [_chat_dict(chat, last_text, last_sender, last_date) for chat, last_text, last_sender, last_date in rows]
 
 
 @router.get("/briefing")

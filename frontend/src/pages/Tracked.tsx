@@ -1,11 +1,22 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
+import { RefreshCw, Bookmark, X, Info, Radio } from 'lucide-react'
 import type { Chat, Message, WSEvent } from '../api/types'
 import { getTrackedChats, getMessages, setTracked, syncChat, sendMessage } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
+
+function fmtDate(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffDays = Math.floor(diffMs / 86400000)
+  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
 
 const LIMIT = 100
 
@@ -161,10 +172,26 @@ export default function Tracked() {
                   {chat.name.charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p title={chat.name} className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
-                    {chat.name}
-                  </p>
-                  <span className="text-[10px] text-slate-500">{chat.type}</span>
+                  <div className="flex items-center gap-1.5">
+                    <p title={chat.name} className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
+                      {chat.name}
+                    </p>
+                    {chat.last_message?.date && (
+                      <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
+                        {fmtDate(chat.last_message.date)}
+                      </span>
+                    )}
+                  </div>
+                  {chat.last_message ? (
+                    <p className="truncate text-xs text-slate-500 mt-0.5">
+                      {chat.last_message.sender_name && (
+                        <span className="text-slate-400">{chat.last_message.sender_name}: </span>
+                      )}
+                      {chat.last_message.text || '[media]'}
+                    </p>
+                  ) : (
+                    <span className="text-[10px] text-slate-500">{chat.type}</span>
+                  )}
                 </div>
                 {(chat.unread_count ?? 0) > 0 && (
                   <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white group-hover:hidden">

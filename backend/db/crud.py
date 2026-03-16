@@ -53,18 +53,37 @@ async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by:
 
 
 async def get_tracked_chats(db: AsyncSession) -> list:
+    row_num = func.row_number().over(
+        partition_by=Message.chat_id,
+        order_by=desc(Message.date),
+    ).label("rn")
+    ranked = (
+        select(
+            Message.chat_id,
+            Message.text.label("last_text"),
+            Message.sender_name.label("last_sender"),
+            Message.date.label("last_date"),
+            row_num,
+        )
+        .subquery()
+    )
     last_msg = (
-        select(Message.chat_id, func.max(Message.date).label("last_date"))
-        .group_by(Message.chat_id)
+        select(
+            ranked.c.chat_id,
+            ranked.c.last_text,
+            ranked.c.last_sender,
+            ranked.c.last_date,
+        )
+        .where(ranked.c.rn == 1)
         .subquery()
     )
     result = await db.execute(
-        select(Chat)
+        select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
         .where(Chat.is_tracked == True)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
         .order_by(desc(last_msg.c.last_date), Chat.name)
     )
-    return list(result.scalars().all())
+    return list(result.all())
 
 
 async def set_tracked(db: AsyncSession, telegram_id: int, tracked: bool) -> Optional[Chat]:
