@@ -142,7 +142,7 @@ function TriageCard({
           </p>
         </div>
         {catchUpMeta?.note && (
-          <StickyNote size={12} className="shrink-0 text-amber-400/60" title="Has note" />
+          <span title="Has note"><StickyNote size={12} className="shrink-0 text-amber-400/60" /></span>
         )}
       </div>
 

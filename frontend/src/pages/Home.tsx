@@ -246,7 +246,7 @@ export default function Home() {
 
   // Keyboard shortcuts for mentions
   const mentionShortcuts = useMemo(() => {
-    if (activeTab !== 'mentions') return {}
+    if (activeTab !== 'mentions') return {} as Record<string, () => void>
     return {
       'j': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
       'arrowdown': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
