@@ -59,12 +59,16 @@ def _media_type(msg) -> Optional[str]:
         return "photo"
     if getattr(msg, "sticker", None):
         return "sticker"
-    if getattr(msg, "document", None):
-        return "document"
+    if getattr(msg, "video_note", None):
+        return "video_note"
+    if getattr(msg, "voice", None):
+        return "voice"
     if getattr(msg, "video", None):
         return "video"
     if getattr(msg, "audio", None):
         return "audio"
+    if getattr(msg, "document", None):
+        return "document"
     return None
 
 

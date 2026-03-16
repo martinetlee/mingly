@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, organizations, search, settings, llm, tags, intelligence, profiles
+from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, media, organizations, search, settings, llm, tags, intelligence, profiles
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(catchup.router, prefix="/api/catchup", tags=["catchup"], dependencies=protected)
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
     app.include_router(search.router, prefix="/api/search", tags=["search"], dependencies=protected)
+    app.include_router(media.router, prefix="/api/media-download", tags=["media"], dependencies=protected)
 
     @app.get("/api/media/{file_path:path}")
     async def serve_media(

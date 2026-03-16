@@ -477,3 +477,10 @@ export const telegramSearch = (query: string, limit = 20) =>
 
 export const ensureChat = (telegramId: number) =>
   request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
+
+// --- Media Download ---
+
+export const downloadMedia = (chatTelegramId: number, msgTelegramId: number) =>
+  request<{ media_url: string; media_type: string }>(`/api/media-download/${chatTelegramId}/${msgTelegramId}`, {
+    method: 'POST',
+  })
