@@ -1022,3 +1022,35 @@ async def get_messages_around(
     after_msgs = list(after_result.scalars().all())
 
     return {"before": before_msgs, "after": after_msgs}
+
+
+async def update_message_text(
+    db: AsyncSession, chat_id: int, telegram_id: int, text: str
+) -> None:
+    """Update the text of a message in the local DB after an edit."""
+    result = await db.execute(
+        select(Message).where(
+            Message.telegram_id == telegram_id,
+            Message.chat_id == chat_id,
+        ).limit(1)
+    )
+    msg = result.scalars().first()
+    if msg:
+        msg.text = text
+        msg.text_html = None  # clear cached HTML; will be re-rendered
+        await db.commit()
+
+
+async def delete_messages_by_telegram_ids(
+    db: AsyncSession, chat_id: int, telegram_ids: list[int]
+) -> None:
+    """Delete messages from the local DB by their Telegram IDs."""
+    from sqlalchemy import delete as sa_delete
+
+    await db.execute(
+        sa_delete(Message).where(
+            Message.chat_id == chat_id,
+            Message.telegram_id.in_(telegram_ids),
+        )
+    )
+    await db.commit()

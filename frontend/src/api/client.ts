@@ -358,6 +358,24 @@ export const sendMessage = (chat_id: number, text: string, reply_to_id?: number)
     body: JSON.stringify({ chat_id, text, reply_to_id }),
   })
 
+export const editMessage = (chat_id: number, message_id: number, text: string) =>
+  request<{ success: boolean }>('/api/compose/edit', {
+    method: 'POST',
+    body: JSON.stringify({ chat_id, message_id, text }),
+  })
+
+export const deleteMessages = (chat_id: number, message_ids: number[], revoke = false) =>
+  request<{ success: boolean }>('/api/compose/delete', {
+    method: 'POST',
+    body: JSON.stringify({ chat_id, message_ids, revoke }),
+  })
+
+export const forwardMessages = (from_chat_id: number, message_ids: number[], to_chat_id: number) =>
+  request<{ success: boolean }>('/api/compose/forward', {
+    method: 'POST',
+    body: JSON.stringify({ from_chat_id, message_ids, to_chat_id }),
+  })
+
 // --- Conversations ---
 
 export const listConversations = () =>
