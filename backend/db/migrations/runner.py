@@ -207,6 +207,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX ix_contact_positions_telegram_id ON contact_positions (telegram_id)",
         ],
     ),
+    (
+        22,
+        "Add delivery_state, is_edited columns to messages and pinned_message_id to chats",
+        [
+            "ALTER TABLE messages ADD COLUMN delivery_state TEXT DEFAULT 'sent'",
+            "ALTER TABLE messages ADD COLUMN is_edited BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN pinned_message_id INTEGER",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

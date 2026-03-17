@@ -351,6 +351,14 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             media_path = await _download_photo(client, msg)
             text_html = _entities_to_html(msg.text or "", msg.entities)
             reactions_json = _extract_reactions(msg)
+            # Determine delivery state for outgoing messages
+            delivery_state = "sent"
+            if msg.out:
+                # Check if the message has been read by the recipient
+                # Telethon doesn't expose per-message read state directly;
+                # we mark as 'sent' and let the read-state endpoint update later
+                delivery_state = "sent"
+
             await crud.save_message(
                 db,
                 telegram_id=msg.id,
@@ -365,7 +373,18 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                delivery_state=delivery_state,
+                is_edited=bool(msg.edit_date),
             )
+
+        # Fetch and store pinned message id for the chat
+        try:
+            full_chat = await client.get_entity(chat_telegram_id)
+            pinned_msg_id = getattr(full_chat, "pinned_msg_id", None)
+            if pinned_msg_id:
+                await crud.set_chat_pinned_message(db, chat_telegram_id, pinned_msg_id)
+        except Exception:
+            pass
 
         await crud.update_chat_sync(db, chat_telegram_id)
 
@@ -403,6 +422,8 @@ async def register_event_handlers() -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                delivery_state="sending" if msg.out else "sent",
+                is_edited=bool(msg.edit_date),
             )
 
             # Auto-reopen handled catch-up items on new incoming messages
