@@ -26,6 +26,8 @@ export interface Chat {
   is_hidden: boolean
   is_briefing: boolean
   is_tracked: boolean
+  is_forum?: boolean
+  slow_mode_seconds?: number
   is_pinned: boolean
   is_archived: boolean
   is_muted: boolean
@@ -83,6 +85,8 @@ export interface Message {
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
+  topic_id?: number | null
+  is_pinned?: boolean
   media_filename?: string | null
   media_size?: number | null
   grouped_id?: number | null
@@ -430,6 +434,25 @@ export interface CatchUpContext {
   last_activity_at: string | null
   generated_at: string | null
   new_messages_since_summary: number
+}
+
+export interface ForumTopic {
+  id: number
+  title: string
+  icon_color: number | null
+  icon_emoji_id: string | null
+  date: string | null
+  is_closed: boolean
+  is_pinned: boolean
+}
+
+export interface ChannelPostStats {
+  telegram_id: number
+  text: string
+  date: string | null
+  views: number
+  forwards: number
+  replies_count: number
 }
 
 export interface AdminPermissions {

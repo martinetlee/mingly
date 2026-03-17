@@ -251,6 +251,16 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN grouped_id INTEGER",
         ],
     ),
+    (
+        26,
+        "Add forum topic support: is_forum and slow_mode_seconds on chats, topic_id and is_pinned on messages",
+        [
+            "ALTER TABLE chats ADD COLUMN is_forum BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN topic_id INTEGER",
+            "ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT 0",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

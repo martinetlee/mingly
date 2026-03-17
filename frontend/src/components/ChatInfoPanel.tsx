@@ -5,6 +5,7 @@ import type { Chat, ChatMember, Contact, SharedMediaItem, Tag, TagSuggestion, Ad
 import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog } from '../api/client'
 import { authenticatedMediaUrl } from '../api/session'
 import ContactInfoSection from './ContactInfoSection'
+import ModerationPanel from './ModerationPanel'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from './PersonCard'
 
 const TAG_COLORS: Record<string, string> = {
@@ -244,6 +245,12 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
               </a>
             ))
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const DEFAULT_PERMISSIONS: AdminPermissions = {
   change_info: false,
   post_messages: false,
@@ -1014,6 +1021,11 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
       {/* Contact section (private chats only) */}
       {chat.type === 'private' && (
         <PrivateContactSection chat={chat} />
+      )}
+
+      {/* Moderation controls (groups/channels) */}
+      {chat.type !== 'private' && (
+        <ModerationPanel chat={chat} />
       )}
 
       {/* Members section (groups/channels only) */}

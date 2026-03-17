@@ -265,6 +265,8 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                 username=username,
                 unread_count=dialog.unread_count,
                 members_count=getattr(entity, "participants_count", None),
+                is_forum=getattr(entity, "forum", False) or False,
+                slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
             )
 
 
@@ -330,6 +332,8 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
                 username=getattr(entity, "username", None),
                 unread_count=dialog.unread_count,
                 members_count=getattr(entity, "participants_count", None),
+                is_forum=getattr(entity, "forum", False) or False,
+                slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
             )
             if chat.is_hidden or chat.is_briefing:
                 continue
@@ -389,6 +393,11 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             media_path = await _download_photo(client, msg)
             text_html = _entities_to_html(msg.text or "", msg.entities)
             reactions_json = _extract_reactions(msg)
+            # Extract forum topic id from reply_to header
+            topic_id = None
+            reply_to = getattr(msg, "reply_to", None)
+            if reply_to and getattr(reply_to, "forum_topic", False):
+                topic_id = getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
             # Determine delivery state for outgoing messages
             delivery_state = "sent"
             if msg.out:
@@ -411,6 +420,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                topic_id=topic_id,
+                is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
                 media_size=_media_size(msg),
                 grouped_id=getattr(msg, "grouped_id", None),
@@ -449,6 +460,11 @@ async def register_event_handlers() -> None:
             media_path = await _download_photo(client, msg)
             text_html = _entities_to_html(msg.text or "", msg.entities)
             reactions_json = _extract_reactions(msg)
+            # Extract forum topic id from reply_to header
+            topic_id = None
+            reply_to = getattr(msg, "reply_to", None)
+            if reply_to and getattr(reply_to, "forum_topic", False):
+                topic_id = getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
             saved = await crud.save_message(
                 db,
                 telegram_id=msg.id,
@@ -463,6 +479,8 @@ async def register_event_handlers() -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                topic_id=topic_id,
+                is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
                 media_size=_media_size(msg),
                 grouped_id=getattr(msg, "grouped_id", None),
