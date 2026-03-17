@@ -364,6 +364,57 @@ export const sendMessage = (chat_id: number, text: string, reply_to_id?: number)
     body: JSON.stringify({ chat_id, text, reply_to_id }),
   })
 
+export function sendFiles(
+  chatId: number,
+  files: File[],
+  text?: string,
+  replyToId?: number,
+  onProgress?: (fraction: number) => void,
+): { promise: Promise<{ success: boolean; message_ids: number[] }>; abort: () => void } {
+  const xhr = new XMLHttpRequest()
+  const promise = new Promise<{ success: boolean; message_ids: number[] }>((resolve, reject) => {
+    const formData = new FormData()
+    formData.append('chat_id', String(chatId))
+    if (text) formData.append('text', text)
+    if (replyToId != null) formData.append('reply_to_id', String(replyToId))
+    for (const file of files) {
+      formData.append('files', file)
+    }
+
+    xhr.open('POST', '/api/compose/send-files')
+    const token = getSessionToken()
+    if (token) {
+      xhr.setRequestHeader('X-Session-Token', token)
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(e.loaded / e.total)
+      }
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText))
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText)
+          reject(new Error(err.detail || xhr.statusText))
+        } catch {
+          reject(new Error(xhr.statusText))
+        }
+      }
+    }
+
+    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.onabort = () => reject(new Error('Upload cancelled'))
+
+    xhr.send(formData)
+  })
+
+  return { promise, abort: () => xhr.abort() }
+}
+
 // --- Conversations ---
 
 export const listConversations = () =>
@@ -483,3 +534,29 @@ export const telegramSearch = (query: string, limit = 20) =>
 
 export const ensureChat = (telegramId: number) =>
   request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
+
+// --- Create Chats ---
+
+export const startPrivateChat = (telegramId: number) =>
+  request<Chat>('/api/chats/create/private', {
+    method: 'POST',
+    body: JSON.stringify({ telegram_id: telegramId }),
+  })
+
+export const createGroup = (name: string, memberIds: number[]) =>
+  request<Chat>('/api/chats/create/group', {
+    method: 'POST',
+    body: JSON.stringify({ name, member_ids: memberIds }),
+  })
+
+export const createChannel = (name: string, about: string = '', isPublic: boolean = false) =>
+  request<Chat>('/api/chats/create/channel', {
+    method: 'POST',
+    body: JSON.stringify({ name, about, is_public: isPublic }),
+  })
+
+export const joinViaInviteLink = (link: string) =>
+  request<Chat>('/api/chats/join', {
+    method: 'POST',
+    body: JSON.stringify({ link }),
+  })

@@ -1,13 +1,14 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2 } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Plus } from 'lucide-react'
 import type { Chat, Folder, Message, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getUserPresence, sendTypingAction } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getUserPresence, sendTypingAction } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
+import NewChatDialog from '../components/NewChatDialog'
 
 function fmtDate(iso: string): string {
   const d = new Date(iso)
@@ -166,6 +167,7 @@ export default function Chats() {
   const pendingAnchorRef = useRef<number | null>(null)
   // Reply-to state
   const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   // In-chat search state
   const [showChatSearch, setShowChatSearch] = useState(false)
   const [chatSearch, setChatSearch] = useState('')
@@ -183,6 +185,8 @@ export default function Chats() {
   const [togglingImportant, setTogglingImportant] = useState(false)
   // True while we're resolving a pendingNav chat (loading indicator in right pane)
   const [navigatingToChat, setNavigatingToChat] = useState(false)
+  // New Chat dialog
+  const [showNewChat, setShowNewChat] = useState(false)
 
   // Fetch presence status when selected chat changes (private chats only)
   useEffect(() => {
@@ -234,6 +238,23 @@ export default function Chats() {
       setTogglingImportant(false)
     }
   }, [selectedChat, isImportant, togglingImportant])
+
+  const handleChatCreated = useCallback((chat: Chat) => {
+    setShowNewChat(false)
+    // Add the new chat to the list if not already present
+    setChats((prev) => {
+      if (prev.some((c) => c.telegram_id === chat.telegram_id)) return prev
+      return [chat, ...prev]
+    })
+    // Select the newly created chat
+    setSelectedChat(chat)
+    setMessages([])
+    setHasMore(false)
+    setMessageOffset(0)
+    setShowInfo(false)
+    setHighlightMsgId(null)
+    setReplyToMessage(null)
+  }, [])
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -574,6 +595,25 @@ export default function Chats() {
     await loadMessages(selectedChat)
   }
 
+  const handleSendFiles = async (files: File[], text: string) => {
+    if (!selectedChat) return
+    setUploadProgress(0)
+    try {
+      const { promise } = sendFiles(
+        selectedChat.telegram_id,
+        files,
+        text || undefined,
+        replyToMessage?.telegram_id,
+        (fraction) => setUploadProgress(fraction),
+      )
+      await promise
+      setReplyToMessage(null)
+      await loadMessages(selectedChat)
+    } finally {
+      setUploadProgress(null)
+    }
+  }
+
   const handleReact = async (msg: Message, emoji: string | null) => {
     if (!selectedChat) return
     try {
@@ -658,6 +698,7 @@ export default function Chats() {
     '/': () => searchInputRef.current?.focus(),
     'i': () => setShowInfo((v) => !v),
     'mod+f': () => setShowChatSearch((v) => !v),
+    'n': () => setShowNewChat(true),
     'enter': () => {
       if (!selectedChat && sorted.length > 0) handleSelectChat(sorted[0])
     },
@@ -702,14 +743,23 @@ export default function Chats() {
           </div>
         )}
         <div className="border-b border-slate-700/50 px-3 py-3 flex flex-col gap-2">
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder="Search chats…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
-          />
+          <div className="flex gap-2">
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search chats…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
+            />
+            <button
+              onClick={() => setShowNewChat(true)}
+              title="New conversation"
+              className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
           <div className="flex rounded-lg border border-slate-700 overflow-hidden text-[11px]">
             {(['recent', 'unread', 'alpha'] as const).map((s) => (
               <button
@@ -962,7 +1012,7 @@ export default function Chats() {
               })()}
 
               {/* Compose */}
-              <ComposeBar onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} onTyping={handleTyping} />
+              <ComposeBar onSend={handleSend} onSendFiles={handleSendFiles} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} onTyping={handleTyping} uploadProgress={uploadProgress} />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
@@ -983,6 +1033,13 @@ export default function Chats() {
           <ChatInfoPanel chat={selectedChat} onClose={() => setShowInfo(false)} />
         )}
       </div>
+
+      {/* New Chat Dialog */}
+      <NewChatDialog
+        open={showNewChat}
+        onClose={() => setShowNewChat(false)}
+        onChatCreated={handleChatCreated}
+      />
     </div>
   )
 }
