@@ -1,10 +1,12 @@
 import { useRef, useState, useCallback } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
+import DocumentCard from './DocumentCard'
+import GifPlayer from './GifPlayer'
 
 interface Props {
   message: Message
@@ -100,6 +102,22 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   )
 }
 
+/** Delivery state indicator for outgoing messages */
+function DeliveryIndicator({ state }: { state?: string }) {
+  switch (state) {
+    case 'sending':
+      return <Loader2 size={12} className="text-indigo-300/60 animate-spin" />
+    case 'sent':
+      return <Check size={12} className="text-indigo-300/60" />
+    case 'delivered':
+      return <CheckCheck size={12} className="text-indigo-300/60" />
+    case 'read':
+      return <CheckCheck size={12} className="text-sky-400" />
+    default:
+      return <Check size={12} className="text-indigo-300/60" />
+  }
+}
+
 /** Floating emoji picker shown on hover */
 function EmojiPicker({
   isOut,
@@ -190,6 +208,8 @@ function ContextMenu({
 export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
+  const hasGif = message.media_url && message.media_type === 'gif'
+  const hasDocument = message.media_type === 'document'
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
   const [showContextMenu, setShowContextMenu] = useState(false)
@@ -347,7 +367,18 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               )}
             </>
           )}
-          {message.media_type && !hasPhoto && !message.text && (
+          {hasGif && (
+            <GifPlayer mediaUrl={message.media_url!} isOut={isOut} />
+          )}
+          {hasDocument && (
+            <DocumentCard
+              filename={message.media_filename ?? null}
+              fileSize={message.media_size ?? null}
+              mediaUrl={message.media_url ?? null}
+              isOut={isOut}
+            />
+          )}
+          {message.media_type && !hasPhoto && !hasGif && !hasDocument && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
               [{message.media_type}]
             </span>
@@ -386,8 +417,12 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           </div>
         ) : null}
 
-        <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+        <span className={`mt-0.5 flex items-center gap-1 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+          {message.is_edited && (
+            <span className="italic text-slate-500/70">edited</span>
+          )}
           {formatTime(message.date)}
+          {isOut && <DeliveryIndicator state={message.delivery_state} />}
         </span>
       </div>
 
