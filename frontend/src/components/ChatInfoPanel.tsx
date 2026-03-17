@@ -245,6 +245,12 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
               </a>
             ))
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const DEFAULT_PERMISSIONS: AdminPermissions = {
   change_info: false,
   post_messages: false,
