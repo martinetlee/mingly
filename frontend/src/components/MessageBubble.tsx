@@ -269,7 +269,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             <VideoPlayer
               chatTelegramId={message.chat_id}
               msgTelegramId={message.telegram_id}
-              mediaUrl={message.media_url ? `/api/media/${message.media_url}` : null}
+              mediaUrl={message.media_url || null}
               isVideoNote={hasVideoNote}
               isOut={isOut}
             />
@@ -278,7 +278,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             <AudioPlayer
               chatTelegramId={message.chat_id}
               msgTelegramId={message.telegram_id}
-              mediaUrl={message.media_url ? `/api/media/${message.media_url}` : null}
+              mediaUrl={message.media_url || null}
               mediaType={hasVoice ? 'voice' : 'audio'}
               isOut={isOut}
             />
