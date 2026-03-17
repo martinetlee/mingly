@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -131,8 +131,38 @@ export const getChatMembers = (telegram_id: number, limit = 100) =>
 export const markChatRead = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
 
+export const getPinnedMessage = (telegram_id: number) =>
+  request<PinnedMessage | null>(`/api/chats/${telegram_id}/pinned`)
+
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')
+
+export const getArchivedChats = () =>
+  request<Chat[]>('/api/chats/archived')
+
+export const setPinned = (telegram_id: number, pinned: boolean) =>
+  request<{ telegram_id: number; is_pinned: boolean }>(`/api/chats/${telegram_id}/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ pinned }),
+  })
+
+export const setArchived = (telegram_id: number, archived: boolean) =>
+  request<{ telegram_id: number; is_archived: boolean }>(`/api/chats/${telegram_id}/archive`, {
+    method: 'POST',
+    body: JSON.stringify({ archived }),
+  })
+
+export const setMuted = (telegram_id: number, muted: boolean, duration?: string) =>
+  request<{ telegram_id: number; is_muted: boolean; muted_until: string | null }>(`/api/chats/${telegram_id}/mute`, {
+    method: 'POST',
+    body: JSON.stringify({ muted, duration }),
+  })
+
+export const setMarkedUnread = (telegram_id: number, marked_unread: boolean) =>
+  request<{ telegram_id: number; is_marked_unread: boolean }>(`/api/chats/${telegram_id}/mark-unread`, {
+    method: 'POST',
+    body: JSON.stringify({ marked_unread }),
+  })
 
 export const setHidden = (telegram_id: number, hidden: boolean) =>
   request<{ telegram_id: number; is_hidden: boolean }>(`/api/chats/${telegram_id}/hide`, {
@@ -163,6 +193,12 @@ export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
+
+export const getUserPresence = (telegram_id: number) =>
+  request<UserPresence>(`/api/chats/${telegram_id}/presence`)
+
+export const sendTypingAction = (telegram_id: number) =>
+  request<{ success: boolean }>(`/api/chats/${telegram_id}/typing`, { method: 'POST' })
 
 // --- Tags ---
 
@@ -358,6 +394,57 @@ export const sendMessage = (chat_id: number, text: string, reply_to_id?: number)
     body: JSON.stringify({ chat_id, text, reply_to_id }),
   })
 
+export function sendFiles(
+  chatId: number,
+  files: File[],
+  text?: string,
+  replyToId?: number,
+  onProgress?: (fraction: number) => void,
+): { promise: Promise<{ success: boolean; message_ids: number[] }>; abort: () => void } {
+  const xhr = new XMLHttpRequest()
+  const promise = new Promise<{ success: boolean; message_ids: number[] }>((resolve, reject) => {
+    const formData = new FormData()
+    formData.append('chat_id', String(chatId))
+    if (text) formData.append('text', text)
+    if (replyToId != null) formData.append('reply_to_id', String(replyToId))
+    for (const file of files) {
+      formData.append('files', file)
+    }
+
+    xhr.open('POST', '/api/compose/send-files')
+    const token = getSessionToken()
+    if (token) {
+      xhr.setRequestHeader('X-Session-Token', token)
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(e.loaded / e.total)
+      }
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText))
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText)
+          reject(new Error(err.detail || xhr.statusText))
+        } catch {
+          reject(new Error(xhr.statusText))
+        }
+      }
+    }
+
+    xhr.onerror = () => reject(new Error('Network error'))
+    xhr.onabort = () => reject(new Error('Upload cancelled'))
+
+    xhr.send(formData)
+  })
+
+  return { promise, abort: () => xhr.abort() }
+}
+
 // --- Conversations ---
 
 export const listConversations = () =>
@@ -536,3 +623,29 @@ export const updateGroupSettings = (telegramId: number, settings: { title?: stri
 
 export const getAdminActionLog = (telegramId: number, limit = 50) =>
   request<AdminActionLog[]>(`/api/admin/${telegramId}/action-log?limit=${limit}`)
+
+// --- Create Chats ---
+
+export const startPrivateChat = (telegramId: number) =>
+  request<Chat>('/api/chats/create/private', {
+    method: 'POST',
+    body: JSON.stringify({ telegram_id: telegramId }),
+  })
+
+export const createGroup = (name: string, memberIds: number[]) =>
+  request<Chat>('/api/chats/create/group', {
+    method: 'POST',
+    body: JSON.stringify({ name, member_ids: memberIds }),
+  })
+
+export const createChannel = (name: string, about: string = '', isPublic: boolean = false) =>
+  request<Chat>('/api/chats/create/channel', {
+    method: 'POST',
+    body: JSON.stringify({ name, about, is_public: isPublic }),
+  })
+
+export const joinViaInviteLink = (link: string) =>
+  request<Chat>('/api/chats/join', {
+    method: 'POST',
+    body: JSON.stringify({ link }),
+  })

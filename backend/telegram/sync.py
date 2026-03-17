@@ -351,6 +351,14 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             media_path = await _download_photo(client, msg)
             text_html = _entities_to_html(msg.text or "", msg.entities)
             reactions_json = _extract_reactions(msg)
+            # Determine delivery state for outgoing messages
+            delivery_state = "sent"
+            if msg.out:
+                # Check if the message has been read by the recipient
+                # Telethon doesn't expose per-message read state directly;
+                # we mark as 'sent' and let the read-state endpoint update later
+                delivery_state = "sent"
+
             await crud.save_message(
                 db,
                 telegram_id=msg.id,
@@ -365,7 +373,18 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                delivery_state=delivery_state,
+                is_edited=bool(msg.edit_date),
             )
+
+        # Fetch and store pinned message id for the chat
+        try:
+            full_chat = await client.get_entity(chat_telegram_id)
+            pinned_msg_id = getattr(full_chat, "pinned_msg_id", None)
+            if pinned_msg_id:
+                await crud.set_chat_pinned_message(db, chat_telegram_id, pinned_msg_id)
+        except Exception:
+            pass
 
         await crud.update_chat_sync(db, chat_telegram_id)
 
@@ -403,6 +422,8 @@ async def register_event_handlers() -> None:
                 media_type=_media_type(msg),
                 media_path=media_path,
                 reply_to_telegram_id=msg.reply_to_msg_id,
+                delivery_state="sending" if msg.out else "sent",
+                is_edited=bool(msg.edit_date),
             )
 
             # Auto-reopen handled catch-up items on new incoming messages
@@ -437,3 +458,61 @@ async def register_event_handlers() -> None:
                 body_text = (saved.text or "")[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
                 _send_native_notification(chat.name, body)
+
+    @client.on(events.UserUpdate)
+    async def on_user_update(event):
+        """Handle typing indicators and online status changes."""
+        if event.typing:
+            # User is typing — broadcast to frontend
+            user_id = event.user_id
+            # Resolve user name for display
+            try:
+                entity = await client.get_entity(user_id)
+                user_name = _sender_name(entity) or str(user_id)
+            except Exception:
+                user_name = str(user_id)
+            await ws_manager.broadcast({
+                "type": "user_typing",
+                "user_id": user_id,
+                "chat_id": event.chat_id or user_id,
+                "user_name": user_name,
+            })
+        elif hasattr(event, "online") or hasattr(event, "status"):
+            # Online status change
+            user_id = event.user_id
+            status_info = _extract_user_status(event)
+            if status_info:
+                await ws_manager.broadcast({
+                    "type": "user_status",
+                    "user_id": user_id,
+                    **status_info,
+                })
+
+
+def _extract_user_status(event) -> Optional[dict]:
+    """Extract online/offline/last-seen info from a UserUpdate event."""
+    from telethon.tl.types import (
+        UserStatusOnline,
+        UserStatusOffline,
+        UserStatusRecently,
+        UserStatusLastWeek,
+        UserStatusLastMonth,
+    )
+    status = getattr(event, "status", None)
+    if status is None and hasattr(event, "online"):
+        if event.online:
+            return {"status": "online"}
+        else:
+            return {"status": "offline"}
+    if isinstance(status, UserStatusOnline):
+        return {"status": "online"}
+    if isinstance(status, UserStatusOffline):
+        last_seen = status.was_online.isoformat() if status.was_online else None
+        return {"status": "offline", "last_seen": last_seen}
+    if isinstance(status, UserStatusRecently):
+        return {"status": "recently"}
+    if isinstance(status, UserStatusLastWeek):
+        return {"status": "last_week"}
+    if isinstance(status, UserStatusLastMonth):
+        return {"status": "last_month"}
+    return None
