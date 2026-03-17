@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback } from 'react'
-import { Reply } from 'lucide-react'
+import { Reply, Check, CheckCheck, Clock, Loader2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -97,6 +97,22 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
       onClick={handleClick}
     />
   )
+}
+
+/** Delivery state indicator for outgoing messages */
+function DeliveryIndicator({ state }: { state?: string }) {
+  switch (state) {
+    case 'sending':
+      return <Loader2 size={12} className="text-indigo-300/60 animate-spin" />
+    case 'sent':
+      return <Check size={12} className="text-indigo-300/60" />
+    case 'delivered':
+      return <CheckCheck size={12} className="text-indigo-300/60" />
+    case 'read':
+      return <CheckCheck size={12} className="text-sky-400" />
+    default:
+      return <Check size={12} className="text-indigo-300/60" />
+  }
 }
 
 /** Floating emoji picker shown on hover */
@@ -312,8 +328,12 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           </div>
         ) : null}
 
-        <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+        <span className={`mt-0.5 flex items-center gap-1 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+          {message.is_edited && (
+            <span className="italic text-slate-500/70">edited</span>
+          )}
           {formatTime(message.date)}
+          {isOut && <DeliveryIndicator state={message.delivery_state} />}
         </span>
       </div>
 

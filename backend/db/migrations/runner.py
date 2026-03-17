@@ -209,6 +209,41 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
     ),
     (
         22,
+        "Add delivery_state, is_edited columns to messages and pinned_message_id to chats",
+        [
+            "ALTER TABLE messages ADD COLUMN delivery_state TEXT DEFAULT 'sent'",
+            "ALTER TABLE messages ADD COLUMN is_edited BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN pinned_message_id INTEGER",
+        ],
+    ),
+    (
+        23,
+        "Add pin, archive, mute, and mark-unread columns to chats",
+        [
+            "ALTER TABLE chats ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_archived BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_muted BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN muted_until DATETIME",
+            "ALTER TABLE chats ADD COLUMN is_marked_unread BOOLEAN NOT NULL DEFAULT 0",
+        ],
+    ),
+    (
+        24,
+        "Create admin_action_log table for group/channel admin actions",
+        [
+            "CREATE TABLE IF NOT EXISTS admin_action_log ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  chat_telegram_id INTEGER NOT NULL,"
+            "  action TEXT NOT NULL,"
+            "  target_user_id INTEGER,"
+            "  details TEXT,"
+            "  created_at DATETIME NOT NULL"
+            ")",
+            "CREATE INDEX IF NOT EXISTS ix_admin_action_log_chat ON admin_action_log (chat_telegram_id, created_at)",
+        ],
+    ),
+    (
+        25,
         "Add media_filename, media_size, and grouped_id columns to messages",
         [
             "ALTER TABLE messages ADD COLUMN media_filename TEXT",

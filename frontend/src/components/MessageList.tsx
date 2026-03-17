@@ -8,7 +8,9 @@ interface Props {
   chatType: string
   highlightTelegramId?: number | null
   onReply?: (msg: Message) => void
-  onReact?: (msg: Message, emoji: string | null) => void
+  onReact?: (msg: Message, emoji: string | null)  => void
+  /** Number of unread messages from the end of the list */
+  unreadCount?: number
 }
 
 /**
@@ -42,12 +44,32 @@ function groupMessages(messages: Message[]): Array<{ type: 'single'; message: Me
   return result
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact }: Props) {
+/** Separator line between read and unread messages */
+function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
+  return (
+    <div ref={innerRef} className="flex items-center gap-3 my-2 px-2">
+      <div className="flex-1 border-t border-indigo-500/50" />
+      <span className="flex-shrink-0 text-[11px] font-medium text-indigo-400">
+        Unread messages
+      </span>
+      <div className="flex-1 border-t border-indigo-500/50" />
+    </div>
+  )
+}
+
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, unreadCount }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
   const highlightRef = useRef<HTMLDivElement>(null)
+  const unreadRef = useRef<HTMLDivElement>(null)
   const isGroup = chatType === 'group' || chatType === 'channel'
   const [dimHighlight, setDimHighlight] = useState(false)
+
+  // Compute index where unread separator should appear
+  // unreadCount = N means the last N messages are unread
+  const unreadSeparatorIndex = (unreadCount && unreadCount > 0 && unreadCount < messages.length)
+    ? messages.length - unreadCount
+    : null
 
   useEffect(() => {
     const prevCount = prevCountRef.current
@@ -59,6 +81,11 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
       setDimHighlight(false)
       const t = setTimeout(() => setDimHighlight(true), 3000)
       return () => clearTimeout(t)
+    }
+    // Jump to unread separator on initial load if present
+    if (prevCount === 0 && unreadRef.current) {
+      unreadRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
+      return
     }
     // Instant jump on initial load; smooth scroll only when new messages arrive
     const behavior = prevCount === 0 ? 'instant' : 'smooth'
@@ -127,16 +154,21 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
         const isHighlighted = highlightTelegramId != null && msg.telegram_id === highlightTelegramId && !dimHighlight
 
         return (
-          <div key={msg.id} ref={highlightTelegramId === msg.telegram_id ? highlightRef : undefined}>
-            <MessageBubble
-              message={msg}
-              showSender={showSender}
-              showAvatar={showSender}
-              isGroupChat={isGroup}
-              highlighted={isHighlighted}
-              onReply={onReply}
-              onReact={onReact}
-            />
+          <div key={msg.id}>
+            {unreadSeparatorIndex === idx && (
+              <UnreadSeparator innerRef={unreadRef} />
+            )}
+            <div ref={highlightTelegramId === msg.telegram_id ? highlightRef : undefined}>
+              <MessageBubble
+                message={msg}
+                showSender={showSender}
+                showAvatar={showSender}
+                isGroupChat={isGroup}
+                highlighted={isHighlighted}
+                onReply={onReply}
+                onReact={onReact}
+              />
+            </div>
           </div>
         )
       })}
