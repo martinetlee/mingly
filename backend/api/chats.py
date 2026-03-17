@@ -1,5 +1,6 @@
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import utils
 from telethon.tl.functions.messages import GetDialogFiltersRequest
 from telethon.tl.types import DialogFilter
+
+logger = logging.getLogger(__name__)
 
 from backend.config import DATA_DIR
 from backend.db.database import get_db
@@ -29,6 +32,23 @@ class BriefingRequest(BaseModel):
 
 class TrackRequest(BaseModel):
     tracked: bool
+
+
+class PinRequest(BaseModel):
+    pinned: bool
+
+
+class ArchiveRequest(BaseModel):
+    archived: bool
+
+
+class MuteRequest(BaseModel):
+    muted: bool
+    duration: Optional[str] = None  # "1h", "8h", "1d", "forever", or None
+
+
+class MarkUnreadRequest(BaseModel):
+    marked_unread: bool
 
 
 @router.get("/folders")
@@ -109,6 +129,11 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         "is_hidden": c.is_hidden,
         "is_briefing": c.is_briefing,
         "is_tracked": c.is_tracked,
+        "is_pinned": c.is_pinned,
+        "is_archived": c.is_archived,
+        "is_muted": c.is_muted,
+        "muted_until": c.muted_until.isoformat() if c.muted_until else None,
+        "is_marked_unread": c.is_marked_unread,
         "unread_count": c.unread_count or 0,
         "last_synced_at": c.last_synced_at,
     }
@@ -236,6 +261,129 @@ async def mark_chat_read(telegram_id: int, db: AsyncSession = Depends(get_db)):
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return {"success": True}
+
+
+@router.post("/{telegram_id}/mark-unread")
+async def mark_chat_unread(
+    telegram_id: int,
+    req: MarkUnreadRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    chat = await crud.set_marked_unread(db, telegram_id, req.marked_unread)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"telegram_id": telegram_id, "is_marked_unread": chat.is_marked_unread}
+
+
+@router.post("/{telegram_id}/pin")
+async def toggle_pin(
+    telegram_id: int,
+    req: PinRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    chat = await crud.set_pinned(db, telegram_id, req.pinned)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Sync to Telegram (best-effort)
+    client = get_client()
+    if client:
+        try:
+            await ensure_connected()
+            from telethon.tl.functions.messages import ToggleDialogPinRequest
+            from telethon.tl.types import InputDialogPeer, InputPeerUser, InputPeerChat, InputPeerChannel
+            entity = await client.get_input_entity(telegram_id)
+            await client(ToggleDialogPinRequest(
+                peer=InputDialogPeer(peer=entity),
+                pinned=req.pinned,
+            ))
+        except Exception as e:
+            logger.warning("Failed to sync pin to Telegram: %s", e)
+
+    return {"telegram_id": telegram_id, "is_pinned": chat.is_pinned}
+
+
+@router.post("/{telegram_id}/archive")
+async def toggle_archive(
+    telegram_id: int,
+    req: ArchiveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    chat = await crud.set_archived(db, telegram_id, req.archived)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Sync to Telegram (best-effort)
+    client = get_client()
+    if client:
+        try:
+            await ensure_connected()
+            from telethon.tl.functions.folders import EditPeerFoldersRequest
+            from telethon.tl.types import InputFolderPeer
+            entity = await client.get_input_entity(telegram_id)
+            folder_id = 1 if req.archived else 0  # 1 = Archive folder
+            await client(EditPeerFoldersRequest(
+                folder_peers=[InputFolderPeer(peer=entity, folder_id=folder_id)]
+            ))
+        except Exception as e:
+            logger.warning("Failed to sync archive to Telegram: %s", e)
+
+    return {"telegram_id": telegram_id, "is_archived": chat.is_archived}
+
+
+@router.get("/archived")
+async def list_archived_chats(db: AsyncSession = Depends(get_db)):
+    return [_chat_dict(c) for c in await crud.get_archived_chats(db)]
+
+
+@router.post("/{telegram_id}/mute")
+async def toggle_mute(
+    telegram_id: int,
+    req: MuteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    muted_until = None
+    if req.muted and req.duration:
+        duration_map = {
+            "1h": timedelta(hours=1),
+            "8h": timedelta(hours=8),
+            "1d": timedelta(days=1),
+        }
+        delta = duration_map.get(req.duration)
+        if delta:
+            muted_until = datetime.utcnow() + delta
+        # "forever" leaves muted_until as None (muted indefinitely)
+
+    chat = await crud.set_muted(db, telegram_id, req.muted, muted_until)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Sync to Telegram (best-effort)
+    client = get_client()
+    if client:
+        try:
+            await ensure_connected()
+            from telethon.tl.functions.account import UpdateNotifySettingsRequest
+            from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
+            entity = await client.get_input_entity(telegram_id)
+            if req.muted:
+                # Mute: set mute_until to a far future date or the specific time
+                mute_until_ts = int((muted_until or datetime(2038, 1, 1)).timestamp())
+                settings = InputPeerNotifySettings(mute_until=mute_until_ts)
+            else:
+                settings = InputPeerNotifySettings(mute_until=0)
+            await client(UpdateNotifySettingsRequest(
+                peer=InputNotifyPeer(peer=entity),
+                settings=settings,
+            ))
+        except Exception as e:
+            logger.warning("Failed to sync mute to Telegram: %s", e)
+
+    return {
+        "telegram_id": telegram_id,
+        "is_muted": chat.is_muted,
+        "muted_until": chat.muted_until.isoformat() if chat.muted_until else None,
+    }
 
 
 @router.get("/{telegram_id}/messages")

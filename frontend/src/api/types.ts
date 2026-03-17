@@ -26,6 +26,11 @@ export interface Chat {
   is_hidden: boolean
   is_briefing: boolean
   is_tracked: boolean
+  is_pinned: boolean
+  is_archived: boolean
+  is_muted: boolean
+  muted_until: string | null
+  is_marked_unread: boolean
   unread_count?: number
   last_synced_at: string | null
   last_message?: {

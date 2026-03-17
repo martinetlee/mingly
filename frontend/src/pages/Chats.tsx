@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Pin, Plus } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus } from 'lucide-react'
 import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getPinnedMessage, getUserPresence, sendTypingAction } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -21,6 +21,101 @@ function fmtDate(iso: string): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
+function ChatContextMenu({
+  chat,
+  position,
+  onClose,
+  onPin,
+  onArchive,
+  onMute,
+  onMarkUnread,
+  onHide,
+  onBriefing,
+  onToggleTrack,
+}: {
+  chat: Chat
+  position: { x: number; y: number }
+  onClose: () => void
+  onPin: () => void
+  onArchive: () => void
+  onMute: (duration?: string) => void
+  onMarkUnread: () => void
+  onHide: () => void
+  onBriefing: () => void
+  onToggleTrack: () => void
+}) {
+  const [showMuteOptions, setShowMuteOptions] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onClose])
+
+  const menuStyle: React.CSSProperties = {
+    position: 'fixed',
+    left: position.x,
+    top: position.y,
+    zIndex: 50,
+  }
+
+  const itemClass = "flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-600 transition-colors text-left"
+
+  return (
+    <div ref={menuRef} style={menuStyle} className="min-w-[180px] rounded-lg border border-slate-600 bg-slate-700 py-1 shadow-xl">
+      <button onClick={onPin} className={itemClass}>
+        <Pin size={13} className={chat.is_pinned ? 'text-indigo-400' : ''} />
+        {chat.is_pinned ? 'Unpin' : 'Pin to top'}
+      </button>
+      <button onClick={onArchive} className={itemClass}>
+        <Archive size={13} />
+        {chat.is_archived ? 'Unarchive' : 'Archive'}
+      </button>
+      {!showMuteOptions ? (
+        <button onClick={() => chat.is_muted ? onMute() : setShowMuteOptions(true)} className={itemClass}>
+          {chat.is_muted ? <Bell size={13} /> : <BellOff size={13} />}
+          {chat.is_muted ? 'Unmute' : 'Mute...'}
+        </button>
+      ) : (
+        <div className="border-t border-b border-slate-600 py-0.5">
+          <p className="px-3 py-1 text-[10px] text-slate-500 font-medium">Mute for:</p>
+          {[
+            { label: '1 hour', value: '1h' },
+            { label: '8 hours', value: '8h' },
+            { label: '1 day', value: '1d' },
+            { label: 'Forever', value: 'forever' },
+          ].map((opt) => (
+            <button key={opt.value} onClick={() => onMute(opt.value)} className={itemClass}>
+              <BellOff size={13} />
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <button onClick={onMarkUnread} className={itemClass}>
+        <MailOpen size={13} />
+        {chat.is_marked_unread ? 'Mark as read' : 'Mark as unread'}
+      </button>
+      <div className="my-0.5 border-t border-slate-600" />
+      <button onClick={onToggleTrack} className={itemClass}>
+        <Radio size={13} className={chat.is_tracked ? 'text-indigo-400' : ''} />
+        {chat.is_tracked ? 'Stop tracking' : 'Track'}
+      </button>
+      <button onClick={onBriefing} className={itemClass}>
+        <FileText size={13} />
+        Add to briefing
+      </button>
+      <button onClick={onHide} className={itemClass}>
+        <EyeOff size={13} />
+        Hide
+      </button>
+    </div>
+  )
+}
+
 function ChatItem({
   chat,
   selected,
@@ -28,6 +123,7 @@ function ChatItem({
   onToggleTrack,
   onHide,
   onBriefing,
+  onContextMenu,
 }: {
   chat: Chat
   selected: boolean
@@ -35,6 +131,7 @@ function ChatItem({
   onToggleTrack: () => void
   onHide: () => void
   onBriefing: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }) {
   const typeColor = {
     private: 'bg-indigo-500/20 text-indigo-400',
@@ -44,6 +141,7 @@ function ChatItem({
 
   return (
     <div
+      onContextMenu={(e) => { e.preventDefault(); onContextMenu(e) }}
       className={`group flex items-center gap-3 px-3 py-2.5 transition-colors ${
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
       }`}
@@ -63,12 +161,14 @@ function ChatItem({
         {/* Name + preview */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
+            {chat.is_pinned && <Pin size={11} className="flex-shrink-0 text-indigo-400" />}
             <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
               {chat.name}
             </p>
             <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
               {chat.type}
             </span>
+            {chat.is_muted && <BellOff size={11} className="flex-shrink-0 text-slate-500" />}
             {chat.last_message?.date && (
               <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
                 {fmtDate(chat.last_message.date)}
@@ -88,26 +188,20 @@ function ChatItem({
 
       {/* Actions - always in DOM for keyboard/screen-reader access */}
       <div className="flex flex-shrink-0 items-center gap-0.5">
-        {(chat.unread_count ?? 0) > 0 && (
-          <span className="min-w-[18px] rounded-full bg-indigo-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white" aria-label={`${chat.unread_count} unread`}>
-            {(chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count}
+        {((chat.unread_count ?? 0) > 0 || chat.is_marked_unread) && (
+          <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white ${chat.is_muted ? 'bg-slate-500' : 'bg-indigo-500'}`} aria-label={`${chat.unread_count ?? 0} unread`}>
+            {(chat.unread_count ?? 0) > 0
+              ? (chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count
+              : '\u2022'}
           </span>
         )}
         <button
-          onClick={onBriefing}
-          title="Add to briefing"
-          aria-label="Add to briefing"
-          className="rounded p-1 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 hover:text-purple-400 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:outline-none"
-        >
-          <FileText size={14} />
-        </button>
-        <button
-          onClick={onHide}
-          title="Hide this chat"
-          aria-label="Hide this chat"
+          onClick={(e) => { e.stopPropagation(); onContextMenu(e) }}
+          title="More actions"
+          aria-label="More actions"
           className="rounded p-1 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 hover:text-slate-300 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:outline-none"
         >
-          <EyeOff size={14} />
+          <MoreVertical size={14} />
         </button>
         <button
           onClick={onToggleTrack}
@@ -189,6 +283,11 @@ export default function Chats() {
   const [togglingImportant, setTogglingImportant] = useState(false)
   // True while we're resolving a pendingNav chat (loading indicator in right pane)
   const [navigatingToChat, setNavigatingToChat] = useState(false)
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{ chat: Chat; x: number; y: number } | null>(null)
+  // Archived chats panel
+  const [showArchived, setShowArchived] = useState(false)
+  const [archivedChats, setArchivedChats] = useState<Chat[]>([])
   // New Chat dialog
   const [showNewChat, setShowNewChat] = useState(false)
 
@@ -581,6 +680,66 @@ export default function Chats() {
     setChats((prev) => [...prev, { ...chat, is_hidden: false }])
   }
 
+  const handlePinChat = async (chat: Chat) => {
+    const pinned = !chat.is_pinned
+    await setPinned(chat.telegram_id, pinned)
+    setChats((prev) =>
+      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_pinned: pinned } : c))
+    )
+    if (selectedChat?.telegram_id === chat.telegram_id) {
+      setSelectedChat((c) => c ? { ...c, is_pinned: pinned } : c)
+    }
+    setContextMenu(null)
+  }
+
+  const handleArchiveChat = async (chat: Chat) => {
+    const archived = !chat.is_archived
+    await setArchived(chat.telegram_id, archived)
+    if (archived) {
+      setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+      if (selectedChat?.telegram_id === chat.telegram_id) {
+        setSelectedChat(null)
+        setMessages([])
+      }
+    } else {
+      setArchivedChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+      setChats((prev) => [...prev, { ...chat, is_archived: false }])
+    }
+    setContextMenu(null)
+  }
+
+  const handleMuteChat = async (chat: Chat, duration?: string) => {
+    const muted = !chat.is_muted || !!duration
+    await setMuted(chat.telegram_id, muted, duration)
+    const muted_until = muted && duration && duration !== 'forever'
+      ? new Date(Date.now() + ({ '1h': 3600000, '8h': 28800000, '1d': 86400000 }[duration] ?? 0)).toISOString()
+      : null
+    setChats((prev) =>
+      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_muted: muted, muted_until } : c))
+    )
+    if (selectedChat?.telegram_id === chat.telegram_id) {
+      setSelectedChat((c) => c ? { ...c, is_muted: muted, muted_until } : c)
+    }
+    setContextMenu(null)
+  }
+
+  const handleMarkUnread = async (chat: Chat) => {
+    const markedUnread = !chat.is_marked_unread
+    await setMarkedUnread(chat.telegram_id, markedUnread)
+    setChats((prev) =>
+      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_marked_unread: markedUnread } : c))
+    )
+    setContextMenu(null)
+  }
+
+  const handleToggleArchivedPanel = async () => {
+    if (!showArchived) {
+      const data = await getArchivedChats()
+      setArchivedChats(data)
+    }
+    setShowArchived((v) => !v)
+  }
+
   const handleToggleHiddenPanel = async () => {
     if (!showHidden) {
       const data = await getHiddenChats()
@@ -662,8 +821,11 @@ export default function Chats() {
     c.name.toLowerCase().includes(search.toLowerCase())
   )
 
-  // Apply client-side sort to guarantee correct order
+  // Apply client-side sort to guarantee correct order (pinned first)
   const sorted = [...filtered].sort((a, b) => {
+    // Pinned chats always come first
+    if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1
+
     if (sortBy === 'unread') {
       const ua = a.unread_count ?? 0
       const ub = b.unread_count ?? 0
@@ -815,11 +977,46 @@ export default function Chats() {
                 onToggleTrack={() => handleTrackChat(chat)}
                 onHide={() => handleHideChat(chat)}
                 onBriefing={() => handleBriefingChat(chat)}
+                onContextMenu={(e) => setContextMenu({ chat, x: e.clientX, y: e.clientY })}
               />
             ))
           )}
           {loadingMoreChats && (
             <p className="px-4 py-3 text-center text-xs text-slate-500">Loading…</p>
+          )}
+        </div>
+
+        {/* Archived chats panel */}
+        <div className="border-t border-slate-700/50">
+          <button
+            onClick={handleToggleArchivedPanel}
+            className="flex w-full items-center gap-1.5 px-3 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+          >
+            <Archive size={12} />
+            {showArchived ? 'Hide archived chats' : 'Show archived chats'}
+          </button>
+          {showArchived && (
+            <div className="max-h-48 overflow-y-auto border-t border-slate-700/50 bg-slate-900/50">
+              {archivedChats.length === 0 ? (
+                <p className="px-4 py-3 text-center text-xs text-slate-500">No archived chats</p>
+              ) : (
+                archivedChats.map((chat) => (
+                  <div key={chat.telegram_id} className="flex items-center gap-2 px-3 py-2">
+                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-400">
+                      {chat.name.charAt(0).toUpperCase()}
+                    </div>
+                    <p title={chat.name} className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
+                    <button
+                      onClick={() => handleArchiveChat(chat)}
+                      title="Unarchive"
+                      className="flex-shrink-0 rounded p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                    >
+                      <Archive size={12} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
           )}
         </div>
 
@@ -856,6 +1053,22 @@ export default function Chats() {
             </div>
           )}
         </div>
+
+        {/* Context menu */}
+        {contextMenu && (
+          <ChatContextMenu
+            chat={contextMenu.chat}
+            position={{ x: contextMenu.x, y: contextMenu.y }}
+            onClose={() => setContextMenu(null)}
+            onPin={() => handlePinChat(contextMenu.chat)}
+            onArchive={() => handleArchiveChat(contextMenu.chat)}
+            onMute={(duration) => handleMuteChat(contextMenu.chat, duration)}
+            onMarkUnread={() => handleMarkUnread(contextMenu.chat)}
+            onHide={() => { handleHideChat(contextMenu.chat); setContextMenu(null) }}
+            onBriefing={() => { handleBriefingChat(contextMenu.chat); setContextMenu(null) }}
+            onToggleTrack={() => { handleTrackChat(contextMenu.chat); setContextMenu(null) }}
+          />
+        )}
       </div>
 
       {/* Message area + optional info panel */}

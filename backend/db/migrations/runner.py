@@ -216,6 +216,17 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE chats ADD COLUMN pinned_message_id INTEGER",
         ],
     ),
+    (
+        23,
+        "Add pin, archive, mute, and mark-unread columns to chats",
+        [
+            "ALTER TABLE chats ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_archived BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_muted BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN muted_until DATETIME",
+            "ALTER TABLE chats ADD COLUMN is_marked_unread BOOLEAN NOT NULL DEFAULT 0",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

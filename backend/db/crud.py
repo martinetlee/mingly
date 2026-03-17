@@ -37,16 +37,16 @@ async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by:
 
     query = (
         select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
-        .where(Chat.is_hidden == False, Chat.is_briefing == False)  # noqa: E712
+        .where(Chat.is_hidden == False, Chat.is_briefing == False, Chat.is_archived == False)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
     )
 
     if sort_by == "unread":
-        query = query.order_by(desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
     elif sort_by == "alpha":
-        query = query.order_by(asc(Chat.name))
+        query = query.order_by(desc(Chat.is_pinned), asc(Chat.name))
     else:  # recent
-        query = query.order_by(desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(last_msg.c.last_date), Chat.name)
 
     result = await db.execute(query.limit(limit).offset(offset))
     return list(result.all())
@@ -186,11 +186,66 @@ async def mark_chat_read(db: AsyncSession, telegram_id: int) -> Optional[Chat]:
     return chat
 
 
+async def set_pinned(db: AsyncSession, telegram_id: int, pinned: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_pinned = pinned
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
 async def set_chat_pinned_message(db: AsyncSession, telegram_id: int, pinned_message_id: int) -> Optional[Chat]:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if not chat:
         return None
     chat.pinned_message_id = pinned_message_id
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def set_archived(db: AsyncSession, telegram_id: int, archived: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_archived = archived
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def get_archived_chats(db: AsyncSession) -> list:
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.is_archived == True)  # noqa: E712
+        .order_by(Chat.name)
+    )
+    return list(result.scalars().all())
+
+
+async def set_muted(
+    db: AsyncSession,
+    telegram_id: int,
+    muted: bool,
+    muted_until: Optional[datetime] = None,
+) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_muted = muted
+    chat.muted_until = muted_until if muted else None
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def set_marked_unread(db: AsyncSession, telegram_id: int, marked_unread: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_marked_unread = marked_unread
     await db.commit()
     await db.refresh(chat)
     return chat
