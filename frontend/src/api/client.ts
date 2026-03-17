@@ -1,4 +1,4 @@
-import type { AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -564,6 +564,65 @@ export const telegramSearch = (query: string, limit = 20) =>
 
 export const ensureChat = (telegramId: number) =>
   request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
+
+// --- Admin ---
+
+export const promoteAdmin = (telegramId: number, userId: number, permissions: AdminPermissions) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId, permissions }),
+  })
+
+export const demoteAdmin = (telegramId: number, userId: number) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/demote`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  })
+
+export const banMember = (telegramId: number, userId: number) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/ban`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  })
+
+export const restrictMember = (telegramId: number, userId: number, restrictions: Record<string, boolean | number | null>) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/restrict`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId, ...restrictions }),
+  })
+
+export const approveMember = (telegramId: number, userId: number) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  })
+
+export const getInviteLinks = (telegramId: number) =>
+  request<InviteLink[]>(`/api/admin/${telegramId}/invite-links`)
+
+export const createInviteLink = (telegramId: number, options?: { expire_date?: number; usage_limit?: number; title?: string; request_needed?: boolean }) =>
+  request<InviteLink>(`/api/admin/${telegramId}/invite-links`, {
+    method: 'POST',
+    body: JSON.stringify(options ?? {}),
+  })
+
+export const revokeInviteLink = (telegramId: number, link: string) =>
+  request<{ success: boolean }>(`/api/admin/${telegramId}/invite-links/revoke`, {
+    method: 'POST',
+    body: JSON.stringify({ link }),
+  })
+
+export const getGroupSettings = (telegramId: number) =>
+  request<GroupSettings>(`/api/admin/${telegramId}/settings`)
+
+export const updateGroupSettings = (telegramId: number, settings: { title?: string; about?: string }) =>
+  request<{ success: boolean; updated: string[] }>(`/api/admin/${telegramId}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+
+export const getAdminActionLog = (telegramId: number, limit = 50) =>
+  request<AdminActionLog[]>(`/api/admin/${telegramId}/action-log?limit=${limit}`)
 
 // --- Create Chats ---
 
