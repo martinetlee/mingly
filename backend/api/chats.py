@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -384,3 +384,196 @@ async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession 
     role_order = {"creator": 0, "admin": 1, "member": 2}
     members.sort(key=lambda m: (role_order.get(m["role"], 2), m["name"].lower()))
     return members
+
+
+# ---------------------------------------------------------------------------
+# Create new chats / groups / channels and join via invite link
+# ---------------------------------------------------------------------------
+
+
+class StartPrivateChatRequest(BaseModel):
+    telegram_id: int
+
+
+class CreateGroupRequest(BaseModel):
+    name: str
+    member_ids: List[int]
+
+
+class CreateChannelRequest(BaseModel):
+    name: str
+    about: str = ""
+    is_public: bool = False
+
+
+class JoinInviteLinkRequest(BaseModel):
+    link: str
+
+
+@router.post("/create/private")
+async def start_private_chat(
+    req: StartPrivateChatRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Start or open a private chat with a user by their Telegram ID."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        entity = await client.get_entity(req.telegram_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Could not find user: {e}")
+
+    telegram_id = entity.id
+    name = (
+        getattr(entity, "title", None)
+        or f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
+        or str(telegram_id)
+    )
+    chat = await crud.upsert_chat(
+        db,
+        telegram_id=telegram_id,
+        name=name,
+        chat_type=_chat_type(entity),
+        username=getattr(entity, "username", None),
+    )
+    return _chat_dict(chat)
+
+
+@router.post("/create/group")
+async def create_group(
+    req: CreateGroupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new Telegram group with the given members."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    if not req.member_ids:
+        raise HTTPException(status_code=400, detail="At least one member is required")
+
+    try:
+        from telethon.tl.functions.messages import CreateChatRequest
+
+        users = []
+        for uid in req.member_ids:
+            try:
+                user = await client.get_entity(uid)
+                users.append(user)
+            except Exception:
+                pass  # skip unresolvable users
+        if not users:
+            raise HTTPException(status_code=400, detail="No valid users could be resolved")
+
+        result = await client(CreateChatRequest(
+            users=users,
+            title=req.name,
+        ))
+
+        # Extract the created chat from the result
+        created_chat = result.chats[0]
+        telegram_id = created_chat.id
+        chat = await crud.upsert_chat(
+            db,
+            telegram_id=telegram_id,
+            name=req.name,
+            chat_type="group",
+        )
+        return _chat_dict(chat)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create group: {e}")
+
+
+@router.post("/create/channel")
+async def create_channel(
+    req: CreateChannelRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new Telegram channel."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    try:
+        from telethon.tl.functions.channels import CreateChannelRequest as TLCreateChannel
+
+        result = await client(TLCreateChannel(
+            title=req.name,
+            about=req.about,
+            megagroup=False,
+            broadcast=True,
+        ))
+
+        created_channel = result.chats[0]
+        telegram_id = created_channel.id
+        chat = await crud.upsert_chat(
+            db,
+            telegram_id=telegram_id,
+            name=req.name,
+            chat_type="channel",
+        )
+        return _chat_dict(chat)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create channel: {e}")
+
+
+@router.post("/join")
+async def join_via_invite_link(
+    req: JoinInviteLinkRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Join a chat/group/channel via an invite link (t.me/joinchat/... or t.me/+...)."""
+    client = get_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    await ensure_connected()
+
+    link = req.link.strip()
+    if not link:
+        raise HTTPException(status_code=400, detail="Link is required")
+
+    try:
+        from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+
+        # Extract the hash from the invite link
+        invite_hash = None
+        for prefix in ["https://t.me/joinchat/", "https://t.me/+", "t.me/joinchat/", "t.me/+"]:
+            if link.startswith(prefix):
+                invite_hash = link[len(prefix):]
+                break
+
+        if invite_hash:
+            # Private invite link — join via hash
+            result = await client(ImportChatInviteRequest(hash=invite_hash))
+            joined_chat = result.chats[0]
+        else:
+            # Try as a public username (e.g. https://t.me/channel_name or @channel_name)
+            username = link.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").lstrip("@")
+            if not username:
+                raise HTTPException(status_code=400, detail="Invalid invite link format")
+            from telethon.tl.functions.channels import JoinChannelRequest
+            entity = await client.get_entity(username)
+            result = await client(JoinChannelRequest(entity))
+            joined_chat = result.chats[0] if result.chats else entity
+
+        telegram_id = joined_chat.id
+        name = getattr(joined_chat, "title", None) or str(telegram_id)
+        chat = await crud.upsert_chat(
+            db,
+            telegram_id=telegram_id,
+            name=name,
+            chat_type=_chat_type(joined_chat),
+            username=getattr(joined_chat, "username", None),
+        )
+        return _chat_dict(chat)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to join: {e}")
