@@ -83,6 +83,9 @@ export interface Message {
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
+  media_filename?: string | null
+  media_size?: number | null
+  grouped_id?: number | null
   delivery_state?: 'sending' | 'sent' | 'delivered' | 'read'
   is_edited?: boolean
 }
@@ -275,6 +278,18 @@ export interface OrgDetail {
   members: OrgMember[]
   former_members: OrgMember[]
   related_chats: OrgRelatedChat[]
+}
+
+export interface SharedMediaItem {
+  id: number
+  telegram_id: number
+  date: string | null
+  sender_name: string | null
+  media_type: string | null
+  media_url: string | null
+  media_filename: string | null
+  media_size: number | null
+  text: string | null
 }
 
 export interface ChatMember {

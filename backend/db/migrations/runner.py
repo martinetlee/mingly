@@ -242,6 +242,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_admin_action_log_chat ON admin_action_log (chat_telegram_id, created_at)",
         ],
     ),
+    (
+        25,
+        "Add media_filename, media_size, and grouped_id columns to messages",
+        [
+            "ALTER TABLE messages ADD COLUMN media_filename TEXT",
+            "ALTER TABLE messages ADD COLUMN media_size INTEGER",
+            "ALTER TABLE messages ADD COLUMN grouped_id INTEGER",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

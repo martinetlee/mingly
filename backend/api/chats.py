@@ -109,6 +109,9 @@ def _serialize_msg(row) -> dict:
         "reply_to_telegram_id": m.reply_to_telegram_id,
         "reply_to_preview": reply_preview,
         "my_reaction": m.my_reaction,
+        "media_filename": m.media_filename,
+        "media_size": m.media_size,
+        "grouped_id": m.grouped_id,
         "delivery_state": m.delivery_state or "sent",
         "is_edited": m.is_edited,
     }
@@ -499,6 +502,67 @@ async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depen
             detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({e})",
         )
     return {"status": "ok"}
+
+
+@router.get("/{telegram_id}/shared-media")
+async def get_shared_media(
+    telegram_id: int,
+    media_filter: str = "media",
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """List shared media items for a chat.
+
+    media_filter values:
+    - 'media': photos, videos, GIFs
+    - 'files': documents
+    - 'links': messages containing URLs
+    """
+    from backend.db.models import Message
+    from sqlalchemy import select, desc, or_
+
+    query = select(Message).where(Message.chat_id == telegram_id)
+
+    if media_filter == "media":
+        query = query.where(
+            or_(
+                Message.media_type == "photo",
+                Message.media_type == "video",
+                Message.media_type == "gif",
+            )
+        )
+    elif media_filter == "files":
+        query = query.where(Message.media_type == "document")
+    elif media_filter == "links":
+        query = query.where(
+            Message.text.isnot(None),
+            or_(
+                Message.text.contains("http://"),
+                Message.text.contains("https://"),
+            ),
+        )
+    else:
+        return []
+
+    query = query.order_by(desc(Message.date)).limit(limit).offset(offset)
+    result = await db.execute(query)
+    messages = result.scalars().all()
+
+    items = []
+    for m in messages:
+        items.append({
+            "id": m.id,
+            "telegram_id": m.telegram_id,
+            "date": m.date.isoformat() if m.date else None,
+            "sender_name": m.sender_name,
+            "media_type": m.media_type,
+            "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
+            "media_filename": m.media_filename,
+            "media_size": m.media_size,
+            "text": m.text,
+        })
+    return items
 
 
 @router.get("/{telegram_id}/members")
