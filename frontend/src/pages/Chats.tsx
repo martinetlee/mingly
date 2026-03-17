@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Plus } from 'lucide-react'
-import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
+import type { Chat, Folder, Message, UserPresence, WSEvent } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, getUserPresence, sendTypingAction } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -175,6 +175,11 @@ export default function Chats() {
   const [searchingChat, setSearchingChat] = useState(false)
   const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Typing indicator state: map of chat_id -> { userName, expiresAt }
+  const [typingUsers, setTypingUsers] = useState<Record<number, { userName: string; expiresAt: number }>>({})
+  // Online/last-seen presence for the selected private chat
+  const [presence, setPresence] = useState<UserPresence | null>(null)
+
   // Important-contact star for 1-1 chats
   const [isImportant, setIsImportant] = useState(false)
   const [togglingImportant, setTogglingImportant] = useState(false)
@@ -182,6 +187,32 @@ export default function Chats() {
   const [navigatingToChat, setNavigatingToChat] = useState(false)
   // New Chat dialog
   const [showNewChat, setShowNewChat] = useState(false)
+
+  // Fetch presence status when selected chat changes (private chats only)
+  useEffect(() => {
+    if (!selectedChat || selectedChat.type !== 'private') {
+      setPresence(null)
+      return
+    }
+    getUserPresence(selectedChat.telegram_id)
+      .then((p) => setPresence(p))
+      .catch(() => setPresence(null))
+  }, [selectedChat?.telegram_id, selectedChat?.type])
+
+  // Clear expired typing indicators every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTypingUsers((prev) => {
+        const now = Date.now()
+        const next: Record<number, { userName: string; expiresAt: number }> = {}
+        for (const [key, val] of Object.entries(prev)) {
+          if (val.expiresAt > now) next[Number(key)] = val
+        }
+        return Object.keys(next).length !== Object.keys(prev).length ? next : prev
+      })
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   // Fetch importance status when selected chat changes (private chats only)
   useEffect(() => {
@@ -381,6 +412,23 @@ export default function Chats() {
   }, [selectedChat, loadMessages])
 
   const handleWsEvent = useCallback((event: WSEvent) => {
+    if (event.type === 'user_typing') {
+      setTypingUsers((prev) => ({
+        ...prev,
+        [event.chat_id]: { userName: event.user_name, expiresAt: Date.now() + 5000 },
+      }))
+      return
+    }
+    if (event.type === 'user_status') {
+      // Update presence if this is the currently selected chat user
+      if (selectedChat && selectedChat.type === 'private' && event.user_id === selectedChat.telegram_id) {
+        setPresence({
+          status: event.status as UserPresence['status'],
+          last_seen: event.last_seen,
+        })
+      }
+      return
+    }
     if (event.type === 'new_message') {
       // If this chat_id is new (not yet seen in our list), sync 25 messages after loading
       setChats((prev) => {
@@ -534,6 +582,11 @@ export default function Chats() {
       setSyncing(false)
     }
   }
+
+  const handleTyping = useCallback(() => {
+    if (!selectedChat) return
+    sendTypingAction(selectedChat.telegram_id).catch(() => {})
+  }, [selectedChat])
 
   const handleSend = async (text: string) => {
     if (!selectedChat) return
@@ -798,7 +851,33 @@ export default function Chats() {
                 <div className="flex items-center gap-2">
                   <div>
                     <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                    <p className="text-xs text-slate-400">{selectedChat.type}</p>
+                    <p className="text-xs text-slate-400">
+                      {(() => {
+                        const typingEntry = typingUsers[selectedChat.telegram_id]
+                        if (typingEntry && typingEntry.expiresAt > Date.now()) {
+                          return <span className="text-indigo-400">typing...</span>
+                        }
+                        if (selectedChat.type === 'private' && presence) {
+                          if (presence.status === 'online') {
+                            return <span className="text-green-400">online</span>
+                          }
+                          if (presence.status === 'offline' && presence.last_seen) {
+                            const lastSeen = new Date(presence.last_seen)
+                            return <span>last seen {fmtDate(lastSeen.toISOString())}</span>
+                          }
+                          if (presence.status === 'recently') {
+                            return <span>last seen recently</span>
+                          }
+                          if (presence.status === 'last_week') {
+                            return <span>last seen within a week</span>
+                          }
+                          if (presence.status === 'last_month') {
+                            return <span>last seen within a month</span>
+                          }
+                        }
+                        return selectedChat.type
+                      })()}
+                    </p>
                   </div>
                   {selectedChat.type === 'private' && (
                     <button
@@ -919,8 +998,21 @@ export default function Chats() {
                 </div>
               )}
 
+              {/* Typing indicator */}
+              {(() => {
+                const typingEntry = typingUsers[selectedChat.telegram_id]
+                if (typingEntry && typingEntry.expiresAt > Date.now()) {
+                  return (
+                    <div className="px-4 py-1 text-xs text-indigo-400 animate-pulse">
+                      {typingEntry.userName} is typing...
+                    </div>
+                  )
+                }
+                return null
+              })()}
+
               {/* Compose */}
-              <ComposeBar onSend={handleSend} onSendFiles={handleSendFiles} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} uploadProgress={uploadProgress} />
+              <ComposeBar onSend={handleSend} onSendFiles={handleSendFiles} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} onTyping={handleTyping} uploadProgress={uploadProgress} />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">

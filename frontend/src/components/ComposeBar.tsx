@@ -13,6 +13,7 @@ interface Props {
   disabled?: boolean
   replyTo?: Message | null
   onCancelReply?: () => void
+  onTyping?: () => void
   uploadProgress?: number | null // 0-1 fraction, null when not uploading
 }
 
@@ -35,6 +36,7 @@ export default function ComposeBar({
   disabled,
   replyTo,
   onCancelReply,
+  onTyping,
   uploadProgress,
 }: Props) {
   const [text, setText] = useState('')
@@ -42,6 +44,7 @@ export default function ComposeBar({
   const [attachments, setAttachments] = useState<AttachedFile[]>([])
   const [dragOver, setDragOver] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const lastTypingSentRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const isUploading = uploadProgress != null
@@ -131,6 +134,12 @@ export default function ComposeBar({
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    // Throttle typing indicator to at most once every 3 seconds
+    const now = Date.now()
+    if (onTyping && now - lastTypingSentRef.current > 3000) {
+      lastTypingSentRef.current = now
+      onTyping()
+    }
   }
 
   const handleFileSelect = () => {
