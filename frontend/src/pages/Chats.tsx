@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2 } from 'lucide-react'
 import type { Chat, Folder, Message, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -166,6 +166,7 @@ export default function Chats() {
   const pendingAnchorRef = useRef<number | null>(null)
   // Reply-to state
   const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   // In-chat search state
   const [showChatSearch, setShowChatSearch] = useState(false)
   const [chatSearch, setChatSearch] = useState('')
@@ -521,6 +522,25 @@ export default function Chats() {
     await loadMessages(selectedChat)
   }
 
+  const handleSendFiles = async (files: File[], text: string) => {
+    if (!selectedChat) return
+    setUploadProgress(0)
+    try {
+      const { promise } = sendFiles(
+        selectedChat.telegram_id,
+        files,
+        text || undefined,
+        replyToMessage?.telegram_id,
+        (fraction) => setUploadProgress(fraction),
+      )
+      await promise
+      setReplyToMessage(null)
+      await loadMessages(selectedChat)
+    } finally {
+      setUploadProgress(null)
+    }
+  }
+
   const handleReact = async (msg: Message, emoji: string | null) => {
     if (!selectedChat) return
     try {
@@ -870,7 +890,7 @@ export default function Chats() {
               )}
 
               {/* Compose */}
-              <ComposeBar onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} />
+              <ComposeBar onSend={handleSend} onSendFiles={handleSendFiles} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} uploadProgress={uploadProgress} />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
