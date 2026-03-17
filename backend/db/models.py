@@ -18,10 +18,18 @@ class Chat(Base):
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     is_briefing: Mapped[bool] = mapped_column(Boolean, default=False)
     is_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_forum: Mapped[bool] = mapped_column(Boolean, default=False)
+    slow_mode_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_muted: Mapped[bool] = mapped_column(Boolean, default=False)
+    muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    is_marked_unread: Mapped[bool] = mapped_column(Boolean, default=False)
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
     members_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    pinned_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -46,6 +54,13 @@ class Message(Base):
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     reply_to_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    media_filename: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    grouped_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    delivery_state: Mapped[Optional[str]] = mapped_column(String, default="sent")  # sending, sent, delivered, read
+    is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

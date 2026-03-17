@@ -37,16 +37,16 @@ async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by:
 
     query = (
         select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
-        .where(Chat.is_hidden == False, Chat.is_briefing == False)  # noqa: E712
+        .where(Chat.is_hidden == False, Chat.is_briefing == False, Chat.is_archived == False)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
     )
 
     if sort_by == "unread":
-        query = query.order_by(desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
     elif sort_by == "alpha":
-        query = query.order_by(asc(Chat.name))
+        query = query.order_by(desc(Chat.is_pinned), asc(Chat.name))
     else:  # recent
-        query = query.order_by(desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(last_msg.c.last_date), Chat.name)
 
     result = await db.execute(query.limit(limit).offset(offset))
     return list(result.all())
@@ -151,6 +151,8 @@ async def upsert_chat(
     username: Optional[str] = None,
     unread_count: Optional[int] = None,
     members_count: Optional[int] = None,
+    is_forum: Optional[bool] = None,
+    slow_mode_seconds: Optional[int] = None,
 ) -> Chat:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if chat:
@@ -161,6 +163,10 @@ async def upsert_chat(
             chat.unread_count = unread_count
         if members_count is not None:
             chat.members_count = members_count
+        if is_forum is not None:
+            chat.is_forum = is_forum
+        if slow_mode_seconds is not None:
+            chat.slow_mode_seconds = slow_mode_seconds
     else:
         chat = Chat(
             telegram_id=telegram_id,
@@ -169,6 +175,8 @@ async def upsert_chat(
             username=username,
             unread_count=unread_count if unread_count is not None else 0,
             members_count=members_count,
+            is_forum=is_forum if is_forum is not None else False,
+            slow_mode_seconds=slow_mode_seconds if slow_mode_seconds is not None else 0,
         )
         db.add(chat)
     await db.commit()
@@ -184,6 +192,85 @@ async def mark_chat_read(db: AsyncSession, telegram_id: int) -> Optional[Chat]:
     await db.commit()
     await db.refresh(chat)
     return chat
+
+
+async def set_pinned(db: AsyncSession, telegram_id: int, pinned: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_pinned = pinned
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def set_chat_pinned_message(db: AsyncSession, telegram_id: int, pinned_message_id: int) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.pinned_message_id = pinned_message_id
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def set_archived(db: AsyncSession, telegram_id: int, archived: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_archived = archived
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def get_archived_chats(db: AsyncSession) -> list:
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.is_archived == True)  # noqa: E712
+        .order_by(Chat.name)
+    )
+    return list(result.scalars().all())
+
+
+async def set_muted(
+    db: AsyncSession,
+    telegram_id: int,
+    muted: bool,
+    muted_until: Optional[datetime] = None,
+) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_muted = muted
+    chat.muted_until = muted_until if muted else None
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def set_marked_unread(db: AsyncSession, telegram_id: int, marked_unread: bool) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.is_marked_unread = marked_unread
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
+async def get_pinned_message(db: AsyncSession, chat_telegram_id: int) -> Optional[Message]:
+    """Get the pinned message for a chat, if any."""
+    chat = await get_chat_by_telegram_id(db, chat_telegram_id)
+    if not chat or not chat.pinned_message_id:
+        return None
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == chat_telegram_id,
+            Message.telegram_id == chat.pinned_message_id,
+        ).limit(1)
+    )
+    return result.scalars().first()
 
 
 async def set_monitored(db: AsyncSession, telegram_id: int, monitored: bool) -> Optional[Chat]:
@@ -364,6 +451,21 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
         if "reply_to_telegram_id" in kwargs and kwargs["reply_to_telegram_id"] is not None and msg.reply_to_telegram_id is None:
             msg.reply_to_telegram_id = kwargs["reply_to_telegram_id"]
             updated = True
+        if kwargs.get("media_filename") and not msg.media_filename:
+            msg.media_filename = kwargs["media_filename"]
+            updated = True
+        if kwargs.get("media_size") and not msg.media_size:
+            msg.media_size = kwargs["media_size"]
+            updated = True
+        if kwargs.get("grouped_id") and not msg.grouped_id:
+            msg.grouped_id = kwargs["grouped_id"]
+            updated = True
+        if "delivery_state" in kwargs and kwargs["delivery_state"]:
+            msg.delivery_state = kwargs["delivery_state"]
+            updated = True
+        if "is_edited" in kwargs and kwargs["is_edited"] and not msg.is_edited:
+            msg.is_edited = True
+            updated = True
         if updated:
             await db.commit()
             await db.refresh(msg)
@@ -414,6 +516,86 @@ async def set_my_reaction(
     await db.commit()
     await db.refresh(msg)
     return msg
+
+
+# --- Forum topics & pinned messages ---
+
+async def get_topic_messages(
+    db: AsyncSession,
+    chat_telegram_id: int,
+    topic_id: int,
+    limit: int = 100,
+    offset: int = 0,
+) -> list:
+    """Get messages for a specific forum topic, with reply previews."""
+    Reply = Message.__table__.alias("reply_msg")
+    result = await db.execute(
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender"),
+            Reply.c.text.label("reply_text"),
+            Reply.c.media_type.label("reply_media_type"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
+        .where(
+            Message.chat_id == chat_telegram_id,
+            Message.topic_id == topic_id,
+        )
+        .order_by(Message.date.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return result.all()
+
+
+async def set_message_pinned(
+    db: AsyncSession,
+    chat_id: int,
+    telegram_msg_id: int,
+    pinned: bool,
+) -> Optional[Message]:
+    """Set or clear the pinned flag on a message."""
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == chat_id,
+            Message.telegram_id == telegram_msg_id,
+        ).limit(1)
+    )
+    msg = result.scalars().first()
+    if not msg:
+        return None
+    msg.is_pinned = pinned
+    await db.commit()
+    await db.refresh(msg)
+    return msg
+
+
+async def get_pinned_messages(db: AsyncSession, chat_telegram_id: int) -> list:
+    """Get all pinned messages in a chat, with reply previews."""
+    Reply = Message.__table__.alias("reply_msg")
+    result = await db.execute(
+        select(
+            Message,
+            Reply.c.sender_name.label("reply_sender"),
+            Reply.c.text.label("reply_text"),
+            Reply.c.media_type.label("reply_media_type"),
+        )
+        .outerjoin(
+            Reply,
+            (Reply.c.telegram_id == Message.reply_to_telegram_id)
+            & (Reply.c.chat_id == Message.chat_id),
+        )
+        .where(
+            Message.chat_id == chat_telegram_id,
+            Message.is_pinned == True,  # noqa: E712
+        )
+        .order_by(Message.date.desc())
+    )
+    return result.all()
 
 
 # --- Tags ---
@@ -1022,3 +1204,35 @@ async def get_messages_around(
     after_msgs = list(after_result.scalars().all())
 
     return {"before": before_msgs, "after": after_msgs}
+
+
+async def update_message_text(
+    db: AsyncSession, chat_id: int, telegram_id: int, text: str
+) -> None:
+    """Update the text of a message in the local DB after an edit."""
+    result = await db.execute(
+        select(Message).where(
+            Message.telegram_id == telegram_id,
+            Message.chat_id == chat_id,
+        ).limit(1)
+    )
+    msg = result.scalars().first()
+    if msg:
+        msg.text = text
+        msg.text_html = None  # clear cached HTML; will be re-rendered
+        await db.commit()
+
+
+async def delete_messages_by_telegram_ids(
+    db: AsyncSession, chat_id: int, telegram_ids: list[int]
+) -> None:
+    """Delete messages from the local DB by their Telegram IDs."""
+    from sqlalchemy import delete as sa_delete
+
+    await db.execute(
+        sa_delete(Message).where(
+            Message.chat_id == chat_id,
+            Message.telegram_id.in_(telegram_ids),
+        )
+    )
+    await db.commit()

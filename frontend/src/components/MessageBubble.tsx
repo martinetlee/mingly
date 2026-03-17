@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback } from 'react'
-import { Reply } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -7,6 +7,8 @@ import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
 import VideoPlayer from './VideoPlayer'
 import AudioPlayer from './AudioPlayer'
+import DocumentCard from './DocumentCard'
+import GifPlayer from './GifPlayer'
 
 interface Props {
   message: Message
@@ -14,6 +16,9 @@ interface Props {
   highlighted?: boolean
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
+  onEdit?: (msg: Message) => void
+  onDelete?: (msg: Message) => void
+  onForward?: (msg: Message) => void
   /** Show avatar on this message (first in a sender group) */
   showAvatar?: boolean
   /** Whether this is a group/channel chat (controls avatar indent) */
@@ -99,6 +104,22 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
   )
 }
 
+/** Delivery state indicator for outgoing messages */
+function DeliveryIndicator({ state }: { state?: string }) {
+  switch (state) {
+    case 'sending':
+      return <Loader2 size={12} className="text-indigo-300/60 animate-spin" />
+    case 'sent':
+      return <Check size={12} className="text-indigo-300/60" />
+    case 'delivered':
+      return <CheckCheck size={12} className="text-indigo-300/60" />
+    case 'read':
+      return <CheckCheck size={12} className="text-sky-400" />
+    default:
+      return <Check size={12} className="text-indigo-300/60" />
+  }
+}
+
 /** Floating emoji picker shown on hover */
 function EmojiPicker({
   isOut,
@@ -131,7 +152,62 @@ function EmojiPicker({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, showAvatar, isGroupChat }: Props) {
+/** Context menu dropdown for message actions */
+function ContextMenu({
+  isOut,
+  canEdit,
+  canDelete,
+  canForward,
+  onEdit,
+  onDelete,
+  onForward,
+}: {
+  isOut: boolean
+  canEdit: boolean
+  canDelete: boolean
+  canForward: boolean
+  onEdit: () => void
+  onDelete: () => void
+  onForward: () => void
+}) {
+  return (
+    <div
+      className={`absolute bottom-full mb-1 z-50 min-w-[140px] rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1 ${
+        isOut ? 'right-0' : 'left-0'
+      }`}
+    >
+      {canForward && (
+        <button
+          onClick={onForward}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+        >
+          <Forward size={13} />
+          Forward
+        </button>
+      )}
+      {canEdit && (
+        <button
+          onClick={onEdit}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+        >
+          <Pencil size={13} />
+          Edit
+        </button>
+      )}
+      {canDelete && (
+        <button
+          onClick={onDelete}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-red-400 hover:bg-slate-700 transition-colors"
+        >
+          <Trash2 size={13} />
+          Delete
+        </button>
+      )}
+    </div>
+  )
+}
+
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
   const hasVideo = message.media_type === 'video'
@@ -139,10 +215,14 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const hasVoice = message.media_type === 'voice'
   const hasAudio = message.media_type === 'audio'
   const hasPlayableMedia = hasVideo || hasVideoNote || hasVoice || hasAudio
+  const hasGif = message.media_url && message.media_type === 'gif'
+  const hasDocument = message.media_type === 'document'
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
+  const [showContextMenu, setShowContextMenu] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const pickerRef = useRef<HTMLDivElement>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
   const reply = message.reply_to_preview
 
   const handleSelectEmoji = (emoji: string | null) => {
@@ -156,7 +236,13 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     <div
       className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 group/bubble ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setShowPicker(false) }}
+      onMouseLeave={() => { setHovered(false); setShowPicker(false); setShowContextMenu(false) }}
+      onContextMenu={(e) => {
+        if (onEdit || onDelete || onForward) {
+          e.preventDefault()
+          setShowContextMenu((v) => !v)
+        }
+      }}
     >
       {/* Action buttons for outgoing messages — appear on the left */}
       {isOut && (
@@ -184,6 +270,29 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             >
               <Reply size={14} />
             </button>
+          )}
+          {/* More actions menu */}
+          {(onEdit || onDelete || onForward) && (
+            <div className="relative" ref={contextMenuRef}>
+              <button
+                onClick={() => setShowContextMenu((v) => !v)}
+                className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all"
+                title="More actions"
+              >
+                <MoreVertical size={14} />
+              </button>
+              {showContextMenu && (
+                <ContextMenu
+                  isOut={isOut}
+                  canEdit={isOut && !!message.text}
+                  canDelete
+                  canForward
+                  onEdit={() => { setShowContextMenu(false); onEdit?.(message) }}
+                  onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
+                  onForward={() => { setShowContextMenu(false); onForward?.(message) }}
+                />
+              )}
+            </div>
           )}
         </div>
       )}
@@ -283,7 +392,18 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               isOut={isOut}
             />
           )}
-          {message.media_type && !hasPhoto && !hasPlayableMedia && !message.text && (
+          {hasGif && (
+            <GifPlayer mediaUrl={message.media_url!} isOut={isOut} />
+          )}
+          {hasDocument && (
+            <DocumentCard
+              filename={message.media_filename ?? null}
+              fileSize={message.media_size ?? null}
+              mediaUrl={message.media_url ?? null}
+              isOut={isOut}
+            />
+          )}
+          {message.media_type && !hasPhoto && !hasPlayableMedia && !hasGif && !hasDocument && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
               [{message.media_type}]
             </span>
@@ -322,8 +442,12 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           </div>
         ) : null}
 
-        <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+        <span className={`mt-0.5 flex items-center gap-1 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
+          {message.is_edited && (
+            <span className="italic text-slate-500/70">edited</span>
+          )}
           {formatTime(message.date)}
+          {isOut && <DeliveryIndicator state={message.delivery_state} />}
         </span>
       </div>
 
@@ -352,6 +476,29 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             >
               <Reply size={14} />
             </button>
+          )}
+          {/* More actions menu (forward & delete for incoming) */}
+          {(onDelete || onForward) && (
+            <div className="relative" ref={contextMenuRef}>
+              <button
+                onClick={() => setShowContextMenu((v) => !v)}
+                className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all"
+                title="More actions"
+              >
+                <MoreVertical size={14} />
+              </button>
+              {showContextMenu && (
+                <ContextMenu
+                  isOut={isOut}
+                  canEdit={false}
+                  canDelete
+                  canForward
+                  onEdit={() => {}}
+                  onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
+                  onForward={() => { setShowContextMenu(false); onForward?.(message) }}
+                />
+              )}
+            </div>
           )}
         </div>
       )}

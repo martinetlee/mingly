@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import auth, catchup, chats, compose, contacts, conversations, dashboard, media, organizations, search, settings, llm, tags, intelligence, profiles
+from backend.api import admin, auth, catchup, chats, compose, contacts, conversations, dashboard, media, organizations, search, settings, llm, tags, intelligence, profiles
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -21,6 +21,7 @@ def create_app() -> FastAPI:
 
     # All other API routes require a valid session token
     protected = [Depends(require_session_token)]
+    app.include_router(admin.router, prefix="/api/admin", tags=["admin"], dependencies=protected)
     app.include_router(chats.router, prefix="/api/chats", tags=["chats"], dependencies=protected)
     app.include_router(compose.router, prefix="/api/compose", tags=["compose"], dependencies=protected)
     app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"], dependencies=protected)

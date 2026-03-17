@@ -26,6 +26,13 @@ export interface Chat {
   is_hidden: boolean
   is_briefing: boolean
   is_tracked: boolean
+  is_forum?: boolean
+  slow_mode_seconds?: number
+  is_pinned: boolean
+  is_archived: boolean
+  is_muted: boolean
+  muted_until: string | null
+  is_marked_unread: boolean
   unread_count?: number
   last_synced_at: string | null
   last_message?: {
@@ -78,6 +85,20 @@ export interface Message {
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
+  topic_id?: number | null
+  is_pinned?: boolean
+  media_filename?: string | null
+  media_size?: number | null
+  grouped_id?: number | null
+  delivery_state?: 'sending' | 'sent' | 'delivered' | 'read'
+  is_edited?: boolean
+}
+
+export interface PinnedMessage {
+  telegram_id: number
+  sender_name: string | null
+  text: string | null
+  date: string
 }
 
 export interface ContactPosition {
@@ -263,6 +284,18 @@ export interface OrgDetail {
   related_chats: OrgRelatedChat[]
 }
 
+export interface SharedMediaItem {
+  id: number
+  telegram_id: number
+  date: string | null
+  sender_name: string | null
+  media_type: string | null
+  media_url: string | null
+  media_filename: string | null
+  media_size: number | null
+  text: string | null
+}
+
 export interface ChatMember {
   id: number
   name: string
@@ -403,6 +436,68 @@ export interface CatchUpContext {
   new_messages_since_summary: number
 }
 
+export interface ForumTopic {
+  id: number
+  title: string
+  icon_color: number | null
+  icon_emoji_id: string | null
+  date: string | null
+  is_closed: boolean
+  is_pinned: boolean
+}
+
+export interface ChannelPostStats {
+  telegram_id: number
+  text: string
+  date: string | null
+  views: number
+  forwards: number
+  replies_count: number
+}
+
+export interface AdminPermissions {
+  change_info: boolean
+  post_messages: boolean
+  edit_messages: boolean
+  delete_messages: boolean
+  ban_users: boolean
+  invite_users: boolean
+  pin_messages: boolean
+  manage_call: boolean
+  anonymous: boolean
+  add_admins: boolean
+}
+
+export interface InviteLink {
+  link: string
+  title: string | null
+  expire_date: string | null
+  usage_limit: number | null
+  usage: number
+  request_needed: boolean
+  revoked: boolean
+}
+
+export interface GroupSettings {
+  title: string
+  about: string
+}
+
+export interface AdminActionLog {
+  id: number
+  chat_telegram_id: number
+  action: string
+  target_user_id: number | null
+  details: string | null
+  created_at: string | null
+}
+
+export interface UserPresence {
+  status: 'online' | 'offline' | 'recently' | 'last_week' | 'last_month' | 'unknown'
+  last_seen?: string | null
+  error?: string
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
@@ -411,3 +506,5 @@ export type WSEvent =
   | { type: 'message_sent'; chat_id: number; message_id: number }
   | { type: 'message_send_failed'; chat_id: number; error: string }
   | { type: 'research_complete'; entity: 'contact' | 'organization'; id: number }
+  | { type: 'user_typing'; user_id: number; chat_id: number; user_name: string }
+  | { type: 'user_status'; user_id: number; status: string; last_seen?: string | null }
