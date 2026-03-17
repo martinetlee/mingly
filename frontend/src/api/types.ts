@@ -83,6 +83,15 @@ export interface Message {
   reply_to_telegram_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
+  delivery_state?: 'sending' | 'sent' | 'delivered' | 'read'
+  is_edited?: boolean
+}
+
+export interface PinnedMessage {
+  telegram_id: number
+  sender_name: string | null
+  text: string | null
+  date: string
 }
 
 export interface ContactPosition {
@@ -408,6 +417,12 @@ export interface CatchUpContext {
   new_messages_since_summary: number
 }
 
+export interface UserPresence {
+  status: 'online' | 'offline' | 'recently' | 'last_week' | 'last_month' | 'unknown'
+  last_seen?: string | null
+  error?: string
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
@@ -416,3 +431,5 @@ export type WSEvent =
   | { type: 'message_sent'; chat_id: number; message_id: number }
   | { type: 'message_send_failed'; chat_id: number; error: string }
   | { type: 'research_complete'; entity: 'contact' | 'organization'; id: number }
+  | { type: 'user_typing'; user_id: number; chat_id: number; user_name: string }
+  | { type: 'user_status'; user_id: number; status: string; last_seen?: string | null }

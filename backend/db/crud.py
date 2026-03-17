@@ -196,6 +196,16 @@ async def set_pinned(db: AsyncSession, telegram_id: int, pinned: bool) -> Option
     return chat
 
 
+async def set_chat_pinned_message(db: AsyncSession, telegram_id: int, pinned_message_id: int) -> Optional[Chat]:
+    chat = await get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        return None
+    chat.pinned_message_id = pinned_message_id
+    await db.commit()
+    await db.refresh(chat)
+    return chat
+
+
 async def set_archived(db: AsyncSession, telegram_id: int, archived: bool) -> Optional[Chat]:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if not chat:
@@ -239,6 +249,20 @@ async def set_marked_unread(db: AsyncSession, telegram_id: int, marked_unread: b
     await db.commit()
     await db.refresh(chat)
     return chat
+
+
+async def get_pinned_message(db: AsyncSession, chat_telegram_id: int) -> Optional[Message]:
+    """Get the pinned message for a chat, if any."""
+    chat = await get_chat_by_telegram_id(db, chat_telegram_id)
+    if not chat or not chat.pinned_message_id:
+        return None
+    result = await db.execute(
+        select(Message).where(
+            Message.chat_id == chat_telegram_id,
+            Message.telegram_id == chat.pinned_message_id,
+        ).limit(1)
+    )
+    return result.scalars().first()
 
 
 async def set_monitored(db: AsyncSession, telegram_id: int, monitored: bool) -> Optional[Chat]:
@@ -418,6 +442,12 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
             updated = True
         if "reply_to_telegram_id" in kwargs and kwargs["reply_to_telegram_id"] is not None and msg.reply_to_telegram_id is None:
             msg.reply_to_telegram_id = kwargs["reply_to_telegram_id"]
+            updated = True
+        if "delivery_state" in kwargs and kwargs["delivery_state"]:
+            msg.delivery_state = kwargs["delivery_state"]
+            updated = True
+        if "is_edited" in kwargs and kwargs["is_edited"] and not msg.is_edited:
+            msg.is_edited = True
             updated = True
         if updated:
             await db.commit()
