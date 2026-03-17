@@ -8,7 +8,10 @@ interface Props {
   chatType: string
   highlightTelegramId?: number | null
   onReply?: (msg: Message) => void
-  onReact?: (msg: Message, emoji: string | null)  => void
+  onReact?: (msg: Message, emoji: string | null) => void
+  onEdit?: (msg: Message) => void
+  onDelete?: (msg: Message) => void
+  onForward?: (msg: Message) => void
   /** Number of unread messages from the end of the list */
   unreadCount?: number
 }
@@ -57,7 +60,7 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, unreadCount }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
   const highlightRef = useRef<HTMLDivElement>(null)
@@ -167,6 +170,9 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
                 highlighted={isHighlighted}
                 onReply={onReply}
                 onReact={onReact}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onForward={onForward}
               />
             </div>
           </div>

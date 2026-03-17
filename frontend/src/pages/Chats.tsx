@@ -2,12 +2,14 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus } from 'lucide-react'
 import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
+import ChatPickerDialog from '../components/ChatPickerDialog'
+import DeleteConfirmDialog from '../components/DeleteConfirmDialog'
 import NewChatDialog from '../components/NewChatDialog'
 
 function fmtDate(iso: string): string {
@@ -268,6 +270,11 @@ export default function Chats() {
   const [chatSearchResults, setChatSearchResults] = useState<Message[]>([])
   const [searchingChat, setSearchingChat] = useState(false)
   const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Edit/delete/forward state
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Message | null>(null)
+  const [forwardTarget, setForwardTarget] = useState<Message | null>(null)
 
   // Pinned message for the selected chat
   const [pinnedMessage, setPinnedMessage] = useState<PinnedMessage | null>(null)
@@ -633,6 +640,7 @@ export default function Chats() {
     setShowInfo(false)
     setHighlightMsgId(null)
     setReplyToMessage(null)
+    setEditingMessage(null)
     setShowChatSearch(false)
     setChatSearch('')
     setChatSearchResults([])
@@ -801,6 +809,46 @@ export default function Chats() {
     } catch {
       // silently ignore
     }
+  }
+
+  const handleEdit = (msg: Message) => {
+    setEditingMessage(msg)
+    setReplyToMessage(null)
+  }
+
+  const handleSaveEdit = async (text: string) => {
+    if (!selectedChat || !editingMessage) return
+    await editMessage(selectedChat.telegram_id, editingMessage.telegram_id, text)
+    setEditingMessage(null)
+    // Update local state immediately
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.telegram_id === editingMessage.telegram_id
+          ? { ...m, text, text_html: null }
+          : m
+      )
+    )
+  }
+
+  const handleDelete = (msg: Message) => {
+    setDeleteTarget(msg)
+  }
+
+  const handleConfirmDelete = async (revoke: boolean) => {
+    if (!selectedChat || !deleteTarget) return
+    await deleteMessages(selectedChat.telegram_id, [deleteTarget.telegram_id], revoke)
+    setMessages((prev) => prev.filter((m) => m.telegram_id !== deleteTarget.telegram_id))
+    setDeleteTarget(null)
+  }
+
+  const handleForward = (msg: Message) => {
+    setForwardTarget(msg)
+  }
+
+  const handleForwardToChat = async (targetChat: Chat) => {
+    if (!selectedChat || !forwardTarget) return
+    await forwardMessages(selectedChat.telegram_id, [forwardTarget.telegram_id], targetChat.telegram_id)
+    setForwardTarget(null)
   }
 
   const folderFiltered = selectedFolder === null
@@ -1248,7 +1296,7 @@ export default function Chats() {
                       </button>
                     </div>
                   )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} unreadCount={selectedChatUnread} />
+                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} onEdit={handleEdit} onDelete={handleDelete} onForward={handleForward} unreadCount={selectedChatUnread} />
                 </div>
               )}
 
@@ -1266,7 +1314,17 @@ export default function Chats() {
               })()}
 
               {/* Compose */}
-              <ComposeBar onSend={handleSend} onSendFiles={handleSendFiles} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} onTyping={handleTyping} uploadProgress={uploadProgress} />
+              <ComposeBar
+                onSend={handleSend}
+                onSendFiles={handleSendFiles}
+                replyTo={replyToMessage}
+                onCancelReply={() => setReplyToMessage(null)}
+                editingMessage={editingMessage}
+                onSaveEdit={handleSaveEdit}
+                onCancelEdit={() => setEditingMessage(null)}
+                onTyping={handleTyping}
+                uploadProgress={uploadProgress}
+              />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
@@ -1287,6 +1345,20 @@ export default function Chats() {
           <ChatInfoPanel chat={selectedChat} onClose={() => setShowInfo(false)} />
         )}
       </div>
+
+      {/* Forward chat picker dialog */}
+      <ChatPickerDialog
+        open={!!forwardTarget}
+        onClose={() => setForwardTarget(null)}
+        onSelect={handleForwardToChat}
+      />
+
+      {/* Delete confirmation dialog */}
+      <DeleteConfirmDialog
+        message={deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleConfirmDelete}
+      />
 
       {/* New Chat Dialog */}
       <NewChatDialog
