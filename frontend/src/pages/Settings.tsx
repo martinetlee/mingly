@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'reac
 import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
+import CloudSettings from '../components/CloudSettings'
 
 // ---------------------------------------------------------------------------
 // API helpers (self-contained so we can handle SSE streaming)
@@ -457,7 +458,7 @@ function TagsManager() {
 
 export default function Settings() {
   // Tab state
-  const [settingsTab, setSettingsTab] = useState<'general' | 'tags'>('general')
+  const [settingsTab, setSettingsTab] = useState<'general' | 'cloud' | 'tags'>('general')
 
   // Orchestrator state
   const [orchestratorId, setOrchestratorId] = useState<string | null>(null)
@@ -819,7 +820,7 @@ export default function Settings() {
         <h1 className="mb-4 text-lg font-semibold text-slate-100">Settings</h1>
         {/* Tab bar */}
         <div className="flex gap-1">
-          {(['general', 'tags'] as const).map((tab) => (
+          {(['general', 'cloud', 'tags'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setSettingsTab(tab)}
@@ -1193,6 +1194,10 @@ export default function Settings() {
               </div>
             </section>
           </>
+        )}
+
+        {settingsTab === 'cloud' && (
+          <CloudSettings />
         )}
 
         {settingsTab === 'tags' && (

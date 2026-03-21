@@ -752,3 +752,24 @@ export const setTranslationLanguage = (language: string) =>
     method: 'POST',
     body: JSON.stringify({ language }),
   })
+
+// ── Cloud ──
+
+export const getCloudStatus = () =>
+  request<{ status: string; email: string | null }>('/api/cloud/status')
+
+export const cloudConnect = (email: string) =>
+  request<{ status: string; message: string }>('/api/cloud/connect', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+
+export const cloudDisconnect = () =>
+  request<{ status: string; message: string }>('/api/cloud/disconnect', {
+    method: 'POST',
+  })
+
+export const cloudCancelConnect = () =>
+  request<{ status: string }>('/api/cloud/cancel-connect', {
+    method: 'POST',
+  })
