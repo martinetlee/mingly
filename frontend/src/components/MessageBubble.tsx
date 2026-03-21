@@ -5,6 +5,8 @@ import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
+import VideoPlayer from './VideoPlayer'
+import AudioPlayer from './AudioPlayer'
 import DocumentCard from './DocumentCard'
 import GifPlayer from './GifPlayer'
 
@@ -208,6 +210,11 @@ function ContextMenu({
 export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
   const hasPhoto = message.media_url && message.media_type === 'photo'
+  const hasVideo = message.media_type === 'video'
+  const hasVideoNote = message.media_type === 'video_note'
+  const hasVoice = message.media_type === 'voice'
+  const hasAudio = message.media_type === 'audio'
+  const hasPlayableMedia = hasVideo || hasVideoNote || hasVoice || hasAudio
   const hasGif = message.media_url && message.media_type === 'gif'
   const hasDocument = message.media_type === 'document'
   const [hovered, setHovered] = useState(false)
@@ -367,6 +374,24 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               )}
             </>
           )}
+          {(hasVideo || hasVideoNote) && (
+            <VideoPlayer
+              chatTelegramId={message.chat_id}
+              msgTelegramId={message.telegram_id}
+              mediaUrl={message.media_url || null}
+              isVideoNote={hasVideoNote}
+              isOut={isOut}
+            />
+          )}
+          {(hasVoice || hasAudio) && (
+            <AudioPlayer
+              chatTelegramId={message.chat_id}
+              msgTelegramId={message.telegram_id}
+              mediaUrl={message.media_url || null}
+              mediaType={hasVoice ? 'voice' : 'audio'}
+              isOut={isOut}
+            />
+          )}
           {hasGif && (
             <GifPlayer mediaUrl={message.media_url!} isOut={isOut} />
           )}
@@ -378,7 +403,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               isOut={isOut}
             />
           )}
-          {message.media_type && !hasPhoto && !hasGif && !hasDocument && !message.text && (
+          {message.media_type && !hasPhoto && !hasPlayableMedia && !hasGif && !hasDocument && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
               [{message.media_type}]
             </span>

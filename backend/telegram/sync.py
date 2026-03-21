@@ -59,6 +59,10 @@ def _media_type(msg) -> Optional[str]:
         return "photo"
     if getattr(msg, "sticker", None):
         return "sticker"
+    if getattr(msg, "video_note", None):
+        return "video_note"
+    if getattr(msg, "voice", None):
+        return "voice"
     if getattr(msg, "document", None):
         doc = msg.document
         # Check if document is an animated GIF
