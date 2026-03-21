@@ -90,6 +90,19 @@ class CreateSharedOrgRequest(BaseModel):
     website: Optional[str] = None
 
 
+class BackupEnableRequest(BaseModel):
+    master_password: str
+
+
+class BackupDisableRequest(BaseModel):
+    delete_remote: bool = False
+
+
+class BackupRestoreRequest(BaseModel):
+    master_password: str
+
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 async def _broadcast_cloud_status() -> None:
@@ -427,6 +440,7 @@ async def cloud_create_contact_link(org_id: str, contact_id: str, request: Reque
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
+
 @router.get("/orgs/{org_id}/directory")
 async def cloud_list_directory(org_id: str):
     """List shared external organizations for the org."""
@@ -450,3 +464,82 @@ async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
         return await _get_client().create_shared_org(token, org_id, data)
     except CloudAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+
+# ── Backup endpoints ─────────────────────────────────────────────────────
+
+@router.post("/backup/enable")
+async def cloud_backup_enable(req: BackupEnableRequest):
+    """Enable encrypted backup sync.
+
+    Derives the backup key from the master password, encrypts all contacts,
+    and uploads the encrypted payload to the cloud.
+    """
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.enable_backup(req.master_password)
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup enable failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to enable backup")
+
+
+@router.post("/backup/disable")
+async def cloud_backup_disable(req: BackupDisableRequest):
+    """Disable backup sync. Optionally delete the remote backup."""
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.disable_backup(delete_remote=req.delete_remote)
+        return result
+    except Exception as exc:
+        log.exception("Backup disable failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to disable backup")
+
+
+@router.post("/backup/restore")
+async def cloud_backup_restore(req: BackupRestoreRequest):
+    """Restore contacts from an encrypted cloud backup.
+
+    Returns the decrypted contact data without importing it.
+    """
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.restore_backup(req.master_password)
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup restore failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to restore backup")
+
+
+@router.post("/backup/sync")
+async def cloud_backup_sync():
+    """Manually trigger a backup sync."""
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.sync_backup()
+        return result
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup sync failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to sync backup")
+
+
+@router.get("/backup/status")
+async def cloud_backup_status():
+    """Get backup status: enabled state, last sync time, dirty flag."""
+    from backend.cloud.backup import backup_manager
+    return backup_manager.get_status()

@@ -938,3 +938,38 @@ export const createContactLink = (orgId: string, contactId: string, data: { shar
 
 export const listContactLinks = (orgId: string, contactId: string) =>
   request<ContactLink[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`)
+
+
+// ── Cloud Backup ──
+
+export interface BackupStatus {
+  enabled: boolean
+  last_sync: string | null
+  dirty: boolean
+}
+
+export const getBackupStatus = () =>
+  request<BackupStatus>('/api/cloud/backup/status')
+
+export const enableBackup = (masterPassword: string) =>
+  request<{ status: string; last_sync: string }>('/api/cloud/backup/enable', {
+    method: 'POST',
+    body: JSON.stringify({ master_password: masterPassword }),
+  })
+
+export const disableBackup = (deleteRemote = false) =>
+  request<{ status: string }>('/api/cloud/backup/disable', {
+    method: 'POST',
+    body: JSON.stringify({ delete_remote: deleteRemote }),
+  })
+
+export const restoreBackup = (masterPassword: string) =>
+  request<{ status: string; data?: unknown; detail?: string }>('/api/cloud/backup/restore', {
+    method: 'POST',
+    body: JSON.stringify({ master_password: masterPassword }),
+  })
+
+export const syncBackup = () =>
+  request<{ status: string; last_sync?: string }>('/api/cloud/backup/sync', {
+    method: 'POST',
+  })

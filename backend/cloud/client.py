@@ -276,3 +276,26 @@ class CloudAPIClient:
         async with self._client(access_token=access_token) as c:
             resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}/links")
             return await self._handle(resp)
+
+    # ── Backup endpoints ──────────────────────────────────────────────────
+
+    async def upload_backup(self, access_token: str, encrypted_payload: str) -> dict:
+        """PUT /me/backup — upload an encrypted personal backup."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.put(
+                "/me/backup",
+                json={"encrypted_payload": encrypted_payload},
+            )
+            return await self._handle(resp)
+
+    async def download_backup(self, access_token: str) -> dict:
+        """GET /me/backup — download the encrypted personal backup."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get("/me/backup")
+            return await self._handle(resp)
+
+    async def delete_backup(self, access_token: str) -> dict:
+        """DELETE /me/backup — delete the personal backup from the server."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.delete("/me/backup")
+            return await self._handle(resp)
