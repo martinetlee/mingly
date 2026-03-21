@@ -126,8 +126,9 @@ def _media_type(msg) -> Optional[str]:
         return "voice"
     if getattr(msg, "document", None):
         doc = msg.document
+        mime = getattr(doc, "mime_type", "") or ""
         # Check if document is an animated GIF
-        if doc and hasattr(doc, "mime_type") and doc.mime_type == "image/gif":
+        if mime == "image/gif":
             return "gif"
         # Check for video GIF (mp4 sent as GIF in Telegram)
         if doc and hasattr(doc, "attributes"):
@@ -136,6 +137,15 @@ def _media_type(msg) -> Optional[str]:
                     continue
                 if type(attr).__name__ == "DocumentAttributeAnimated":
                     return "gif"
+                # Document with video attributes is a video
+                if type(attr).__name__ == "DocumentAttributeVideo":
+                    return "video"
+        # Check MIME type for video
+        if mime.startswith("video/"):
+            return "video"
+        # Check MIME type for audio
+        if mime.startswith("audio/"):
+            return "audio"
         return "document"
     if getattr(msg, "video", None):
         return "video"
