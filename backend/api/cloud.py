@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
 from backend.cloud import auth as cloud_auth
@@ -76,6 +76,18 @@ class CreateOrgRequest(BaseModel):
 class UpdateMemberRequest(BaseModel):
     status: Optional[str] = None
     role: Optional[str] = None
+
+
+class ShareContactRequest(BaseModel):
+    telegram_id: int
+    name: str
+    telegram_handle: Optional[str] = None
+
+
+class CreateSharedOrgRequest(BaseModel):
+    name: str
+    domain: Optional[str] = None
+    website: Optional[str] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -357,5 +369,84 @@ async def cloud_remove_member(org_id: str, user_id: str):
     token = _require_connected()
     try:
         return await _get_client().remove_member(token, org_id, user_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+# ── Shared contacts endpoints ────────────────────────────────────────────
+
+@router.post("/orgs/{org_id}/share-contact")
+async def cloud_share_contact(org_id: str, req: ShareContactRequest):
+    """Share a local contact to the org's shared pool.
+
+    Creates a SharedContact via the cloud API.  Returns the created contact,
+    or a 409 with the existing contact if the telegram_id is already shared.
+    """
+    token = _require_connected()
+    client = _get_client()
+    data: dict = {
+        "telegram_id": req.telegram_id,
+        "name": req.name,
+    }
+    if req.telegram_handle:
+        data["telegram_handle"] = req.telegram_handle
+    try:
+        return await client.create_shared_contact(token, org_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/contacts")
+async def cloud_list_shared_contacts(org_id: str):
+    """List all shared contacts for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_shared_contacts(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/contacts/{contact_id}/links")
+async def cloud_list_contact_links(org_id: str, contact_id: str):
+    """List org links for a shared contact."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_contact_links(token, org_id, contact_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/contacts/{contact_id}/links")
+async def cloud_create_contact_link(org_id: str, contact_id: str, request: Request):
+    """Link a shared contact to an external org."""
+    token = _require_connected()
+    data = await request.json()
+    try:
+        return await _get_client().create_contact_link(token, org_id, contact_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/directory")
+async def cloud_list_directory(org_id: str):
+    """List shared external organizations for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_directory(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/directory")
+async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
+    """Create a shared (external) organization in the org's directory."""
+    token = _require_connected()
+    data: dict = {"name": req.name}
+    if req.domain:
+        data["domain"] = req.domain
+    if req.website:
+        data["website"] = req.website
+    try:
+        return await _get_client().create_shared_org(token, org_id, data)
     except CloudAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
