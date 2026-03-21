@@ -277,6 +277,46 @@ class CloudAPIClient:
             resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}/links")
             return await self._handle(resp)
 
+    async def update_contact_link(
+        self, access_token: str, org_id: str, contact_id: str, link_id: str, data: dict
+    ) -> dict:
+        """PATCH /orgs/{org_id}/contacts/{contact_id}/links/{link_id} — update link."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.patch(
+                f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}", json=data
+            )
+            return await self._handle(resp)
+
+    async def delete_contact_link(
+        self, access_token: str, org_id: str, contact_id: str, link_id: str
+    ) -> dict:
+        """DELETE /orgs/{org_id}/contacts/{contact_id}/links/{link_id} — soft-delete link."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.delete(
+                f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}"
+            )
+            return await self._handle(resp)
+
+    # ── Group chat metadata ──────────────────────────────────────────────
+
+    async def list_group_chats(
+        self, access_token: str, org_id: str, contact_id: str
+    ) -> dict:
+        """GET /orgs/{org_id}/contacts/{contact_id}/group-chats — list group chats."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}/group-chats")
+            return await self._handle(resp)
+
+    # ── Directory detail ─────────────────────────────────────────────────
+
+    async def get_shared_org_detail(
+        self, access_token: str, org_id: str, shared_org_id: str
+    ) -> dict:
+        """GET /orgs/{org_id}/directory/{shared_org_id} — get shared org details + contacts."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/directory/{shared_org_id}")
+            return await self._handle(resp)
+
     # ── Backup endpoints ──────────────────────────────────────────────────
 
     async def upload_backup(self, access_token: str, encrypted_payload: str) -> dict:

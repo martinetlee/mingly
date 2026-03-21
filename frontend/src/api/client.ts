@@ -939,6 +939,43 @@ export const createContactLink = (orgId: string, contactId: string, data: { shar
 export const listContactLinks = (orgId: string, contactId: string) =>
   request<ContactLink[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`)
 
+export const getSharedContact = (orgId: string, contactId: string) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/contacts/${contactId}`)
+
+export const updateSharedContact = (orgId: string, contactId: string, data: { name?: string; telegram_handle?: string }) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/contacts/${contactId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const updateContactLink = (orgId: string, contactId: string, linkId: string, data: { position?: string; relationship_context?: string }) =>
+  request<ContactLink>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links/${linkId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const deleteContactLink = (orgId: string, contactId: string, linkId: string) =>
+  request<{ success: boolean }>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links/${linkId}`, {
+    method: 'DELETE',
+  })
+
+export interface GroupChat {
+  id: string
+  chat_telegram_id: number
+  chat_title: string
+  added_by: string
+  added_at: string
+}
+
+export const listGroupChats = (orgId: string, contactId: string) =>
+  request<GroupChat[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/group-chats`)
+
+export interface SharedOrgDetail extends SharedOrg {
+  contacts?: SharedContact[]
+}
+
+export const getSharedOrgDetail = (orgId: string, sharedOrgId: string) =>
+  request<SharedOrgDetail>(`/api/cloud/orgs/${orgId}/directory/${sharedOrgId}`)
 
 // ── Cloud Backup ──
 

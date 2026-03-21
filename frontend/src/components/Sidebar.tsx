@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Settings,
   Search,
+  Globe,
 } from 'lucide-react'
 import { bulkSync } from '../api/client'
 
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
   { to: '/intelligence', icon: Brain, label: 'Intelligence' },
+  { to: '/directory', icon: Globe, label: 'CRM' },
 ]
 
 export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void }) {

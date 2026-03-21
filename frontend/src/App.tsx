@@ -13,6 +13,7 @@ import Settings from './pages/Settings'
 import Tracked from './pages/Tracked'
 import Intelligence from './pages/Intelligence'
 import Profile from './pages/Profile'
+import Directory from './pages/Directory'
 
 type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'app'
 
@@ -92,6 +93,7 @@ export default function App() {
           <Route path="tracked" element={<Tracked />} />
           <Route path="briefing" element={<Navigate to="/intelligence?tab=briefing" replace />} />
           <Route path="intelligence" element={<Intelligence />} />
+          <Route path="directory" element={<Directory />} />
           <Route path="profile/:userId" element={<Profile />} />
           <Route path="settings" element={<Settings />} />
         </Route>
