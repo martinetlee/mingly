@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message } from '../api/types'
 import MessageBubble from './MessageBubble'
 import MediaAlbumGrid from './MediaAlbumGrid'
@@ -14,6 +14,10 @@ interface Props {
   onForward?: (msg: Message) => void
   /** Number of unread messages from the end of the list */
   unreadCount?: number
+  /** Called when user scrolls near the top */
+  onScrollNearTop?: () => void
+  /** Whether older messages are currently loading */
+  loadingOlder?: boolean
 }
 
 /**
@@ -60,8 +64,9 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
   const highlightRef = useRef<HTMLDivElement>(null)
   const unreadRef = useRef<HTMLDivElement>(null)
@@ -95,6 +100,30 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
     bottomRef.current?.scrollIntoView({ behavior })
   }, [messages, highlightTelegramId])
 
+  // Preserve scroll position when older messages are prepended
+  const prevScrollHeightRef = useRef(0)
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const prevCount = prevCountRef.current
+    // If messages were prepended (count grew but we're not at initial load)
+    if (prevCount > 0 && messages.length > prevCount) {
+      const heightDiff = el.scrollHeight - prevScrollHeightRef.current
+      if (heightDiff > 0 && el.scrollTop < 100) {
+        el.scrollTop = heightDiff
+      }
+    }
+    prevScrollHeightRef.current = el.scrollHeight
+  })
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el || !onScrollNearTop) return
+    if (el.scrollTop < 200) {
+      onScrollNearTop()
+    }
+  }, [onScrollNearTop])
+
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
@@ -106,16 +135,21 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
   const grouped = groupMessages(messages)
 
   return (
-    <div className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
+    <div ref={scrollContainerRef} onScroll={handleScroll} className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
+      {loadingOlder && (
+        <div className="flex justify-center py-3">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+        </div>
+      )}
       {grouped.map((item, idx) => {
         if (item.type === 'album') {
           const firstMsg = item.messages[0]
           const isOut = firstMsg.is_outgoing
           const isHighlighted = item.messages.some(
-            (m) => highlightTelegramId != null && m.telegram_id === highlightTelegramId && !dimHighlight
+            (m) => highlightTelegramId != null && m.tg_message_id === highlightTelegramId && !dimHighlight
           )
           const hasHighlightRef = item.messages.some(
-            (m) => highlightTelegramId === m.telegram_id
+            (m) => highlightTelegramId === m.tg_message_id
           )
           // Collect text from all album messages (captions)
           const captionMsg = item.messages.find((m) => m.text)
@@ -154,14 +188,14 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
         const prevMsg = prevItem?.type === 'single' ? prevItem.message : prevItem?.type === 'album' ? prevItem.messages[prevItem.messages.length - 1] : undefined
         const showSender =
           isGroup && !msg.is_outgoing && msg.sender_name !== prevMsg?.sender_name
-        const isHighlighted = highlightTelegramId != null && msg.telegram_id === highlightTelegramId && !dimHighlight
+        const isHighlighted = highlightTelegramId != null && msg.tg_message_id === highlightTelegramId && !dimHighlight
 
         return (
           <div key={msg.id}>
             {unreadSeparatorIndex === idx && (
               <UnreadSeparator innerRef={unreadRef} />
             )}
-            <div ref={highlightTelegramId === msg.telegram_id ? highlightRef : undefined}>
+            <div ref={highlightTelegramId === msg.tg_message_id ? highlightRef : undefined}>
               <MessageBubble
                 message={msg}
                 showSender={showSender}

@@ -28,7 +28,7 @@ async def global_search(
     # Messages — join with Chat for chat_name, limit text to 200 chars
     msg_q = (
         select(
-            Message.telegram_id,
+            Message.tg_message_id,
             Message.chat_id,
             Chat.name.label("chat_name"),
             Message.sender_name,

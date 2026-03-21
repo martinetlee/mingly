@@ -261,6 +261,55 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN NOT NULL DEFAULT 0",
         ],
     ),
+    (
+        27,
+        "Add scam detection tables and message scam columns",
+        [
+            "ALTER TABLE messages ADD COLUMN scam_score REAL",
+            "ALTER TABLE messages ADD COLUMN scam_reason TEXT",
+            """CREATE TABLE IF NOT EXISTS scam_check_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT UNIQUE NOT NULL,
+                request_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payload_json TEXT NOT NULL,
+                response_json TEXT,
+                related_chat_id INTEGER,
+                related_message_ids_json TEXT,
+                related_telegram_ids_json TEXT,
+                followup_request_json TEXT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                completed_at DATETIME
+            )""",
+            """CREATE TABLE IF NOT EXISTS scam_flags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id BIGINT UNIQUE NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL,
+                reason TEXT,
+                request_id TEXT,
+                flagged_at DATETIME NOT NULL
+            )""",
+        ],
+    ),
+    (
+        28,
+        "Add last_activity_at to chats for sorting before messages are synced",
+        [
+            "ALTER TABLE chats ADD COLUMN last_activity_at DATETIME",
+        ],
+    ),
+    (
+        29,
+        "Rename messages.telegram_id to messages.tg_message_id",
+        [
+            "ALTER TABLE messages RENAME COLUMN telegram_id TO tg_message_id",
+            "ALTER TABLE messages RENAME COLUMN reply_to_telegram_id TO reply_to_tg_message_id",
+            "DROP INDEX IF EXISTS uq_message_telegram_chat",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_tgmsgid_chat ON messages (tg_message_id, chat_id)",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).
@@ -295,6 +344,12 @@ def _is_duplicate_column_error(exc: Exception) -> bool:
     """Check if an exception is a SQLite 'duplicate column name' error."""
     msg = str(exc).lower()
     return "duplicate column name" in msg
+
+
+def _is_no_such_column_error(exc: Exception) -> bool:
+    """Check if an exception is a SQLite 'no such column' error."""
+    msg = str(exc).lower()
+    return "no such column" in msg
 
 
 async def _record_migration(
@@ -333,6 +388,12 @@ async def run_migrations(conn: AsyncConnection) -> None:
                 if stmt.upper().startswith("ALTER TABLE") and _is_duplicate_column_error(exc):
                     logger.debug(
                         "Column already exists, skipping: %s", stmt
+                    )
+                elif _is_no_such_column_error(exc):
+                    # On a fresh DB, data migrations referencing removed columns
+                    # are harmless — the table was created with the final schema.
+                    logger.debug(
+                        "Column does not exist (fresh DB), skipping: %s", stmt
                     )
                 else:
                     logger.error(

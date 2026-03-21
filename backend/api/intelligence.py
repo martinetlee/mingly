@@ -510,7 +510,7 @@ async def intelligence_mentions(
         media_path = getattr(m, "media_path", None)
         return {
             "id": m.id,
-            "telegram_id": m.telegram_id,
+            "tg_message_id": m.tg_message_id,
             "chat_id": m.chat_id,
             "sender_id": m.sender_id,
             "sender_name": m.sender_name,
@@ -527,7 +527,7 @@ async def intelligence_mentions(
         context = await crud.get_messages_around(
             db,
             chat_id=msg.chat_id,
-            telegram_id=msg.telegram_id,
+            telegram_id=msg.tg_message_id,
             before=2,
             after=1,
         )
@@ -539,15 +539,15 @@ async def intelligence_mentions(
         replied = False
         user_reply_msg = None
         reply_has_gap = False
-        reply_msg = await crud.get_first_reply_after(db, msg.chat_id, msg.telegram_id)
+        reply_msg = await crud.get_first_reply_after(db, msg.chat_id, msg.tg_message_id)
         if reply_msg:
             replied = True
             user_reply_msg = _serialize_msg(reply_msg)
             # Determine if there are messages between the last context_after message
             # (or the mention itself) and the reply, indicating omitted messages
-            last_context_id = context["after"][-1].telegram_id if context["after"] else msg.telegram_id
+            last_context_id = context["after"][-1].tg_message_id if context["after"] else msg.tg_message_id
             gap_count = await crud.count_messages_between(
-                db, msg.chat_id, last_context_id, reply_msg.telegram_id
+                db, msg.chat_id, last_context_id, reply_msg.tg_message_id
             )
             reply_has_gap = gap_count > 0
 
@@ -1175,7 +1175,7 @@ async def intelligence_briefing(
                                 lines.append(f'[{chat_label}] [↩ {reply_sender}: "{snippet}"]: {msg.text[:300]}')
                             else:
                                 lines.append(f"[{chat_label}] {msg.text[:300]}")
-                            msg_chat_map[msg.telegram_id] = chat.telegram_id
+                            msg_chat_map[msg.tg_message_id] = chat.telegram_id
 
                     if not lines:
                         entry = {
@@ -1411,7 +1411,7 @@ async def regenerate_briefing_entry(
                                 lines.append(f'[{chat_label}] [↩ {reply_sender}: "{snippet}"]: {msg.text[:300]}')
                             else:
                                 lines.append(f"[{chat_label}] {msg.text[:300]}")
-                            msg_chat_map[msg.telegram_id] = chat.telegram_id
+                            msg_chat_map[msg.tg_message_id] = chat.telegram_id
 
                     if not lines:
                         summary = "No text messages in this period."

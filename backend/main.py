@@ -12,6 +12,8 @@ from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
 from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
+from backend.scam.client import MockScamAPIClient
+from backend.scam.service import init_scam_service, get_scam_service
 
 app = create_app()
 
@@ -32,6 +34,10 @@ async def on_startup():
     start_briefing_scheduler()
     # Start the catch-up summary scheduler
     start_catchup_summary_scheduler()
+
+    # Initialize scam detection service
+    scam_svc = init_scam_service(MockScamAPIClient())
+    asyncio.create_task(scam_svc.resume_pending_requests())
 
     if not has_credentials():
         return
@@ -64,11 +70,16 @@ if __name__ == "__main__":
         except OSError:
             time.sleep(0.3)
 
-    webview.create_window(
+    window = webview.create_window(
         "Mingly",
         f"http://{API_HOST}:{API_PORT}",
         width=1280,
         height=800,
         min_size=(900, 600),
     )
+
+    # Register the window so notification clicks can navigate to chats
+    from backend.telegram.sync import set_webview_window
+    set_webview_window(window)
+
     webview.start()

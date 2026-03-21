@@ -1,6 +1,5 @@
 import json
 import logging
-import subprocess
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
@@ -18,19 +17,81 @@ logger = logging.getLogger(__name__)
 from backend.telegram.client import get_client
 from backend.ws.manager import ws_manager
 
+try:
+    import Foundation
+    import objc
 
-def _send_native_notification(title: str, body: str) -> None:
-    """Send a macOS native notification via osascript (fire-and-forget)."""
-    try:
-        t = title.replace("\\", "\\\\").replace('"', '\\"')
-        b = body.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.Popen(
-            ["osascript", "-e", f'display notification "{b}" with title "{t}"'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+    _NS_AVAILABLE = True
+except ImportError:
+    _NS_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Notification delegate – handles clicks and navigates to the right chat
+# ---------------------------------------------------------------------------
+_webview_window = None  # set by main.py after webview.create_window()
+
+
+def set_webview_window(window):
+    """Register the pywebview window so notification clicks can navigate."""
+    global _webview_window
+    _webview_window = window
+
+
+if _NS_AVAILABLE:
+    NSUserNotificationCenter = objc.lookUpClass("NSUserNotificationCenter")
+    NSUserNotification = objc.lookUpClass("NSUserNotification")
+
+    class _NotificationDelegate(Foundation.NSObject):
+        """Delegate that forces notification display and handles clicks."""
+
+        def userNotificationCenter_shouldPresentNotification_(
+            self, center, notification
+        ):
+            return True
+
+        def userNotificationCenter_didActivateNotification_(
+            self, center, notification
+        ):
+            # Bring app window to front
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
+
+            user_info = notification.userInfo()
+            chat_id = user_info.get("chat_id") if user_info else None
+            if chat_id and _webview_window:
+                try:
+                    _webview_window.evaluate_js(
+                        f"window.history.pushState(null, '', '/chats?chatId={chat_id}');"
+                        f"window.dispatchEvent(new PopStateEvent('popstate'));"
+                    )
+                except Exception:
+                    pass
+
+    _delegate = _NotificationDelegate.alloc().init()
+    NSUserNotificationCenter.defaultUserNotificationCenter().setDelegate_(_delegate)
+
+
+def _send_native_notification(
+    title: str, body: str, chat_id: Optional[int] = None
+) -> None:
+    """Send a macOS native notification attributed to the Mingly app."""
+    if _NS_AVAILABLE:
+        try:
+            n = NSUserNotification.alloc().init()
+            n.setTitle_(title)
+            n.setInformativeText_(body)
+            if chat_id is not None:
+                n.setUserInfo_({"chat_id": chat_id})
+            NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
+            return
+        except Exception:
+            pass
+    # Fallback: no-op if pyobjc is missing (dev without pyobjc)
+    logger.debug("Native notification unavailable, skipping")
 
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(exist_ok=True)
@@ -65,8 +126,9 @@ def _media_type(msg) -> Optional[str]:
         return "voice"
     if getattr(msg, "document", None):
         doc = msg.document
+        mime = getattr(doc, "mime_type", "") or ""
         # Check if document is an animated GIF
-        if doc and hasattr(doc, "mime_type") and doc.mime_type == "image/gif":
+        if mime == "image/gif":
             return "gif"
         # Check for video GIF (mp4 sent as GIF in Telegram)
         if doc and hasattr(doc, "attributes"):
@@ -75,6 +137,15 @@ def _media_type(msg) -> Optional[str]:
                     continue
                 if type(attr).__name__ == "DocumentAttributeAnimated":
                     return "gif"
+                # Document with video attributes is a video
+                if type(attr).__name__ == "DocumentAttributeVideo":
+                    return "video"
+        # Check MIME type for video
+        if mime.startswith("video/"):
+            return "video"
+        # Check MIME type for audio
+        if mime.startswith("audio/"):
+            return "audio"
         return "document"
     if getattr(msg, "video", None):
         return "video"
@@ -238,6 +309,25 @@ def _extract_reactions(msg) -> Optional[str]:
     return json.dumps(out) if out else None
 
 
+PROFILE_PHOTO_DIR = DATA_DIR / "profile_photos"
+PROFILE_PHOTO_DIR.mkdir(exist_ok=True)
+
+
+async def _download_chat_photo(client, entity, dialog_id: int) -> None:
+    """Download chat/user profile photo to disk (fire-and-forget)."""
+    try:
+        photo_path = PROFILE_PHOTO_DIR / f"{dialog_id}.jpg"
+        if photo_path.exists():
+            return
+        downloaded = await client.download_profile_photo(
+            entity, file=str(photo_path), download_big=False
+        )
+        if not downloaded and photo_path.exists():
+            photo_path.unlink()
+    except Exception:
+        pass
+
+
 async def sync_dialogs(limit: Optional[int] = None) -> None:
     """Fetch dialogs and upsert into the chats table.
 
@@ -248,6 +338,8 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
     client = get_client()
     if not client:
         return
+
+    entities_to_download = []
 
     async with AsyncSessionLocal() as db:
         async for dialog in client.iter_dialogs(limit=limit):
@@ -261,6 +353,11 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                     or getattr(entity, "title", None)
                     or str(dialog.id)
                 )
+            # dialog.date is the timestamp of the last message in this chat
+            last_msg_date = getattr(dialog, "date", None)
+            if last_msg_date and hasattr(last_msg_date, "replace"):
+                last_msg_date = last_msg_date.replace(tzinfo=None)
+
             await crud.upsert_chat(
                 db,
                 telegram_id=dialog.id,
@@ -271,7 +368,16 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                 members_count=getattr(entity, "participants_count", None),
                 is_forum=getattr(entity, "forum", False) or False,
                 slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
+                last_message_date=last_msg_date,
             )
+
+            # Queue photo download (don't block dialog sync)
+            if getattr(entity, "photo", None):
+                entities_to_download.append((entity, dialog.id))
+
+    # Download profile photos in background
+    for entity, did in entities_to_download:
+        await _download_chat_photo(client, entity, did)
 
 
 async def resolve_numeric_names() -> int:
@@ -412,7 +518,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
 
             await crud.save_message(
                 db,
-                telegram_id=msg.id,
+                tg_message_id=msg.id,
                 chat_id=chat_telegram_id,
                 sender_id=msg.sender_id,
                 sender_name=_sender_name(sender),
@@ -423,7 +529,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
-                reply_to_telegram_id=msg.reply_to_msg_id,
+                reply_to_tg_message_id=msg.reply_to_msg_id,
                 topic_id=topic_id,
                 is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
@@ -471,7 +577,7 @@ async def register_event_handlers() -> None:
                 topic_id = getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
             saved = await crud.save_message(
                 db,
-                telegram_id=msg.id,
+                tg_message_id=msg.id,
                 chat_id=event.chat_id,
                 sender_id=msg.sender_id,
                 sender_name=_sender_name(sender),
@@ -482,7 +588,7 @@ async def register_event_handlers() -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
-                reply_to_telegram_id=msg.reply_to_msg_id,
+                reply_to_tg_message_id=msg.reply_to_msg_id,
                 topic_id=topic_id,
                 is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
@@ -517,13 +623,42 @@ async def register_event_handlers() -> None:
             "is_outgoing": saved.is_outgoing,
         })
 
+        # Run scam detection on incoming messages (fire-and-forget)
+        if not saved.is_outgoing and saved.text:
+            from backend.scam.service import get_scam_service
+            scam_svc = get_scam_service()
+            if scam_svc:
+                import asyncio as _asyncio
+                # Build sender profile for scam context
+                _sender_profile = []
+                if sender:
+                    _sender_profile = [{
+                        "telegram_id": saved.sender_id,
+                        "name": saved.sender_name,
+                        "bio": getattr(sender, "about", None) or "",
+                        "is_contact": getattr(sender, "contact", False) or False,
+                    }]
+                _asyncio.create_task(scam_svc.check_messages_for_scam(
+                    chat_id=event.chat_id,
+                    messages=[{
+                        "message_id": saved.tg_message_id,
+                        "sender_id": saved.sender_id,
+                        "sender_name": saved.sender_name,
+                        "text": saved.text,
+                        "date": str(saved.date),
+                    }],
+                    user_telegram_id=0,
+                    profiles=_sender_profile,
+                    chat_metadata={"chat_id": event.chat_id, "name": chat.name, "type": chat.type},
+                ))
+
         if not saved.is_outgoing:
             from backend.api.settings import get_notif_pref
             pref = get_notif_pref()
             if pref == "all" or (pref == "tracked" and chat.is_tracked):
                 body_text = (saved.text or "")[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
-                _send_native_notification(chat.name, body)
+                _send_native_notification(chat.name, body, chat_id=event.chat_id)
 
     @client.on(events.UserUpdate)
     async def on_user_update(event):

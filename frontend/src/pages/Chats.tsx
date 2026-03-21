@@ -13,6 +13,43 @@ import ChatPickerDialog from '../components/ChatPickerDialog'
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog'
 import NewChatDialog from '../components/NewChatDialog'
 
+import { authenticatedMediaUrl } from '../api/session'
+
+const AVATAR_COLORS = [
+  'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
+  'bg-violet-600', 'bg-pink-600', 'bg-teal-600', 'bg-orange-600',
+]
+const failedChatPhotos = new Set<number>()
+
+function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName: string; size?: number }) {
+  const [imgFailed, setImgFailed] = useState(false)
+  const initial = (chatName || '?')[0].toUpperCase()
+  const colorIndex = Math.abs(chatId) % AVATAR_COLORS.length
+  const bgColor = AVATAR_COLORS[colorIndex]
+  const hasPhoto = !failedChatPhotos.has(chatId) && !imgFailed
+  const photoUrl = authenticatedMediaUrl(`/api/media/profile_photos/${chatId}.jpg`)
+
+  return (
+    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+      <div
+        className={`absolute inset-0 flex items-center justify-center rounded-full text-white font-medium ${bgColor}`}
+        style={{ fontSize: size * 0.38 }}
+      >
+        {initial}
+      </div>
+      {hasPhoto && (
+        <img
+          src={photoUrl}
+          alt=""
+          className="absolute inset-0 rounded-full object-cover"
+          style={{ width: size, height: size }}
+          onError={() => { failedChatPhotos.add(chatId); setImgFailed(true) }}
+        />
+      )}
+    </div>
+  )
+}
+
 function fmtDate(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
@@ -157,9 +194,7 @@ function ChatItem({
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:rounded"
       >
         {/* Avatar */}
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-          {chat.name.charAt(0).toUpperCase()}
-        </div>
+        <ChatAvatar chatId={chat.telegram_id} chatName={chat.name} size={36} />
 
         {/* Name + preview */}
         <div className="min-w-0 flex-1">
@@ -459,19 +494,43 @@ export default function Chats() {
     }
   }, [LIMIT])
 
+  // Track whether we've exhausted Telegram history for this chat
+  const [noMoreRemote, setNoMoreRemote] = useState(false)
+
   const loadMoreMessages = useCallback(async () => {
     if (!selectedChat || loadingMore) return
     setLoadingMore(true)
     const nextOffset = messageOffset + LIMIT
     try {
       const data = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
-      setMessages((prev) => [...data, ...prev])
-      setMessageOffset(nextOffset)
-      setHasMore(data.length === LIMIT)
+      if (data.length > 0) {
+        setMessages((prev) => [...data, ...prev])
+        setMessageOffset(nextOffset)
+        setHasMore(data.length === LIMIT)
+      } else {
+        // No more local messages — try fetching from Telegram
+        setHasMore(false)
+        if (!noMoreRemote) {
+          try {
+            await syncChat(selectedChat.telegram_id, 100)
+            // Reload all messages after sync
+            const refreshed = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
+            if (refreshed.length > 0) {
+              setMessages((prev) => [...refreshed, ...prev])
+              setMessageOffset(nextOffset)
+              setHasMore(refreshed.length === LIMIT)
+            } else {
+              setNoMoreRemote(true)
+            }
+          } catch {
+            setNoMoreRemote(true)
+          }
+        }
+      }
     } finally {
       setLoadingMore(false)
     }
-  }, [selectedChat, messageOffset, loadingMore, LIMIT])
+  }, [selectedChat, messageOffset, loadingMore, LIMIT, noMoreRemote])
 
   useEffect(() => {
     // Parse URL params for mention navigation: ?chatId=X&msgId=Y
@@ -589,6 +648,12 @@ export default function Chats() {
         }
       }
     }
+    if (event.type === 'scam_detected') {
+      // Reload messages to show scam warnings
+      if (selectedChat && event.chat_id === selectedChat.telegram_id) {
+        loadMessages(selectedChat)
+      }
+    }
   }, [selectedChat, loadChats, loadMessages])
 
   useWebSocket(handleWsEvent)
@@ -630,9 +695,9 @@ export default function Chats() {
     if (!selectedChat) return
     setLoadingMessages(true)
     try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.telegram_id)
+      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.tg_message_id)
       setMessages(data)
-      setHighlightMsgId(msg.telegram_id)
+      setHighlightMsgId(msg.tg_message_id)
       setTimeout(() => setHighlightMsgId(null), 3000)
     } finally {
       setLoadingMessages(false)
@@ -646,6 +711,7 @@ export default function Chats() {
     setSelectedChat(chat)
     setMessages([])
     setHasMore(false)
+    setNoMoreRemote(false)
     setMessageOffset(0)
     setShowInfo(false)
     setHighlightMsgId(null)
@@ -786,9 +852,17 @@ export default function Chats() {
 
   const handleSend = async (text: string) => {
     if (!selectedChat) return
-    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.telegram_id)
+    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.tg_message_id)
     setReplyToMessage(null)
     await loadMessages(selectedChat)
+    // Update chat list sidebar with the sent message
+    setChats((prev) =>
+      prev.map((c) =>
+        c.telegram_id === selectedChat.telegram_id
+          ? { ...c, last_message: { text, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
+          : c
+      )
+    )
   }
 
   const handleSelectTopic = useCallback(async (topicId: number | null, topicTitle: string | null) => {
@@ -816,9 +890,9 @@ export default function Chats() {
     if (!selectedChat) return
     const newPinned = !msg.is_pinned
     try {
-      await pinMessage(selectedChat.telegram_id, msg.telegram_id, newPinned)
+      await pinMessage(selectedChat.telegram_id, msg.tg_message_id, newPinned)
       setMessages((prev) =>
-        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, is_pinned: newPinned } : m)
+        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, is_pinned: newPinned } : m)
       )
     } catch {
       // silently ignore
@@ -833,12 +907,21 @@ export default function Chats() {
         selectedChat.telegram_id,
         files,
         text || undefined,
-        replyToMessage?.telegram_id,
+        replyToMessage?.tg_message_id,
         (fraction) => setUploadProgress(fraction),
       )
       await promise
       setReplyToMessage(null)
       await loadMessages(selectedChat)
+      // Update chat list sidebar
+      const preview = text || `[${files[0]?.type?.startsWith('image/') ? 'photo' : 'file'}]`
+      setChats((prev) =>
+        prev.map((c) =>
+          c.telegram_id === selectedChat.telegram_id
+            ? { ...c, last_message: { text: preview, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
+            : c
+        )
+      )
     } finally {
       setUploadProgress(null)
     }
@@ -847,10 +930,10 @@ export default function Chats() {
   const handleReact = async (msg: Message, emoji: string | null) => {
     if (!selectedChat) return
     try {
-      await reactToMessage(selectedChat.telegram_id, msg.telegram_id, emoji)
+      await reactToMessage(selectedChat.telegram_id, msg.tg_message_id, emoji)
       // Update the message's my_reaction in local state immediately
       setMessages((prev) =>
-        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, my_reaction: emoji } : m)
+        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, my_reaction: emoji } : m)
       )
     } catch {
       // silently ignore
@@ -864,12 +947,12 @@ export default function Chats() {
 
   const handleSaveEdit = async (text: string) => {
     if (!selectedChat || !editingMessage) return
-    await editMessage(selectedChat.telegram_id, editingMessage.telegram_id, text)
+    await editMessage(selectedChat.telegram_id, editingMessage.tg_message_id, text)
     setEditingMessage(null)
     // Update local state immediately
     setMessages((prev) =>
       prev.map((m) =>
-        m.telegram_id === editingMessage.telegram_id
+        m.tg_message_id === editingMessage.tg_message_id
           ? { ...m, text, text_html: null }
           : m
       )
@@ -882,8 +965,8 @@ export default function Chats() {
 
   const handleConfirmDelete = async (revoke: boolean) => {
     if (!selectedChat || !deleteTarget) return
-    await deleteMessages(selectedChat.telegram_id, [deleteTarget.telegram_id], revoke)
-    setMessages((prev) => prev.filter((m) => m.telegram_id !== deleteTarget.telegram_id))
+    await deleteMessages(selectedChat.telegram_id, [deleteTarget.tg_message_id], revoke)
+    setMessages((prev) => prev.filter((m) => m.tg_message_id !== deleteTarget.tg_message_id))
     setDeleteTarget(null)
   }
 
@@ -893,7 +976,7 @@ export default function Chats() {
 
   const handleForwardToChat = async (targetChat: Chat) => {
     if (!selectedChat || !forwardTarget) return
-    await forwardMessages(selectedChat.telegram_id, [forwardTarget.telegram_id], targetChat.telegram_id)
+    await forwardMessages(selectedChat.telegram_id, [forwardTarget.tg_message_id], targetChat.telegram_id)
     setForwardTarget(null)
   }
 
@@ -924,17 +1007,16 @@ export default function Chats() {
       const ua = a.unread_count ?? 0
       const ub = b.unread_count ?? 0
       if (ub !== ua) return ub - ua
-      // fallback: recent
-      const da = a.last_message?.date ?? ''
-      const db2 = b.last_message?.date ?? ''
+      const da = a.last_activity_at ?? ''
+      const db2 = b.last_activity_at ?? ''
       return db2.localeCompare(da)
     }
     if (sortBy === 'alpha') {
       return a.name.localeCompare(b.name)
     }
     // recent (default)
-    const da = a.last_message?.date ?? ''
-    const db2 = b.last_message?.date ?? ''
+    const da = a.last_activity_at ?? ''
+    const db2 = b.last_activity_at ?? ''
     if (da !== db2) return db2.localeCompare(da)
     return a.name.localeCompare(b.name)
   })
@@ -1297,7 +1379,7 @@ export default function Chats() {
                     <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
                       {chatSearchResults.map((msg) => (
                         <button
-                          key={msg.telegram_id}
+                          key={msg.tg_message_id}
                           onClick={() => handleJumpToMessage(msg)}
                           className="flex items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-slate-700/50 transition-colors"
                         >
@@ -1351,18 +1433,19 @@ export default function Chats() {
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col overflow-hidden">
-                  {hasMore && (
-                    <div className="flex justify-center border-b border-slate-700/50 py-2">
-                      <button
-                        onClick={loadMoreMessages}
-                        disabled={loadingMore}
-                        className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                      >
-                        {loadingMore ? 'Loading…' : 'Load older messages'}
-                      </button>
-                    </div>
-                  )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} onEdit={handleEdit} onDelete={handleDelete} onForward={handleForward} unreadCount={selectedChatUnread} />
+                  <MessageList
+                    messages={messages}
+                    chatType={selectedChat.type}
+                    highlightTelegramId={highlightMsgId}
+                    onReply={setReplyToMessage}
+                    onReact={handleReact}
+                    onEdit={handleEdit}
+                    onDelete={handleDelete}
+                    onForward={handleForward}
+                    unreadCount={selectedChatUnread}
+                    loadingOlder={loadingMore}
+                    onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
+                  />
                 </div>
               )}
 

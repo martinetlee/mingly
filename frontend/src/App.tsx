@@ -36,6 +36,24 @@ export default function App() {
     onSessionExpired(() => setState('vault-locked'))
   }, [])
 
+  // Intercept clicks on external links and open them in the default browser
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a')
+      if (!anchor) return
+      const href = anchor.getAttribute('href')
+      if (!href) return
+      // Only intercept absolute http/https URLs (external links)
+      if (href.startsWith('http://') || href.startsWith('https://')) {
+        e.preventDefault()
+        e.stopPropagation()
+        window.open(href, '_blank')
+      }
+    }
+    document.addEventListener('click', handler, true)
+    return () => document.removeEventListener('click', handler, true)
+  }, [])
+
   const handleVaultUnlocked = () => {
     getAuthStatus()
       .then((s) => setState(s.authenticated ? 'app' : 'onboarding'))

@@ -163,7 +163,7 @@ export default function Contacts() {
 
   const handleSend = async (text: string) => {
     if (!selected) return
-    await sendMessage(selected.telegram_id, text, replyToMessage?.telegram_id)
+    await sendMessage(selected.telegram_id, text, replyToMessage?.tg_message_id)
     setReplyToMessage(null)
     await loadMessages(selected)
   }
@@ -171,9 +171,9 @@ export default function Contacts() {
   const handleReact = async (msg: Message, emoji: string | null) => {
     if (!selected) return
     try {
-      await reactToMessage(selected.telegram_id, msg.telegram_id, emoji)
+      await reactToMessage(selected.telegram_id, msg.tg_message_id, emoji)
       setMessages((prev) =>
-        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, my_reaction: emoji } : m)
+        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, my_reaction: emoji } : m)
       )
     } catch {
       // silently ignore

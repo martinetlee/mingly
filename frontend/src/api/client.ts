@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -191,8 +191,8 @@ export const setBriefing = (telegram_id: number, briefing: boolean) =>
     body: JSON.stringify({ briefing }),
   })
 
-export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number, emoji: string | null) =>
-  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_telegram_id}/react`, {
+export const reactToMessage = (chat_telegram_id: number, msg_tg_id: number, emoji: string | null) =>
+  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_tg_id}/react`, {
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
@@ -233,8 +233,8 @@ export const setSlowMode = (telegram_id: number, seconds: number) =>
 
 // --- Pin/Unpin Messages ---
 
-export const pinMessage = (telegram_id: number, msg_telegram_id: number, pinned: boolean, notify = false) =>
-  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_telegram_id}/pin`, {
+export const pinMessage = (telegram_id: number, msg_tg_id: number, pinned: boolean, notify = false) =>
+  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_tg_id}/pin`, {
     method: 'POST',
     body: JSON.stringify({ pinned, notify }),
   })
@@ -720,4 +720,35 @@ export const joinViaInviteLink = (link: string) =>
   request<Chat>('/api/chats/join', {
     method: 'POST',
     body: JSON.stringify({ link }),
+  })
+
+// ── Scam Detection ──
+
+export const getScamFlags = () =>
+  request<ScamFlag[]>('/api/scam/flags')
+
+export const dismissScamFlag = (telegramId: number) =>
+  request<{ status: string }>(`/api/scam/flags/${telegramId}`, { method: 'DELETE' })
+
+export const getChatScamStatus = (chatId: number) =>
+  request<{ has_scam_flags: boolean; flagged_message_count: number; flagged_users: { telegram_id: number; confidence: number | null; reason: string | null }[] }>(`/api/scam/status/${chatId}`)
+
+export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[]) =>
+  request<{ status: string; message_count: number }>('/api/scam/check-messages', {
+    method: 'POST',
+    body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
+  })
+
+// ── Translation ──
+
+export const translateMessage = (text: string, targetLanguage: string) =>
+  request<{ translation: string }>('/api/translate', {
+    method: 'POST',
+    body: JSON.stringify({ text, target_language: targetLanguage }),
+  })
+
+export const setTranslationLanguage = (language: string) =>
+  request<{ success: boolean; language: string }>('/api/settings/prefs/translation-language', {
+    method: 'POST',
+    body: JSON.stringify({ language }),
   })
