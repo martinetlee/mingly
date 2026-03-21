@@ -21,7 +21,9 @@ interface Props {
 }
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB per file
-const ACCEPTED_TYPES = 'image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv'
+// NOTE: No accept filter — pywebview on macOS has a bug where it hardcodes
+// the native file dialog to only allow image/jpg when WebKit passes MIME types.
+// Removing the filter lets users pick any file type.
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -381,7 +383,6 @@ export default function ComposeBar({
         ref={fileInputRef}
         type="file"
         multiple
-        accept={ACCEPTED_TYPES}
         onChange={handleFileChange}
         className="hidden"
       />

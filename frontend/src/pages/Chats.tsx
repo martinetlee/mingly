@@ -789,6 +789,14 @@ export default function Chats() {
     await sendMessage(selectedChat.telegram_id, text, replyToMessage?.telegram_id)
     setReplyToMessage(null)
     await loadMessages(selectedChat)
+    // Update chat list sidebar with the sent message
+    setChats((prev) =>
+      prev.map((c) =>
+        c.telegram_id === selectedChat.telegram_id
+          ? { ...c, last_message: { text, sender_name: null, date: new Date().toISOString() } }
+          : c
+      )
+    )
   }
 
   const handleSelectTopic = useCallback(async (topicId: number | null, topicTitle: string | null) => {
@@ -839,6 +847,15 @@ export default function Chats() {
       await promise
       setReplyToMessage(null)
       await loadMessages(selectedChat)
+      // Update chat list sidebar
+      const preview = text || `[${files[0]?.type?.startsWith('image/') ? 'photo' : 'file'}]`
+      setChats((prev) =>
+        prev.map((c) =>
+          c.telegram_id === selectedChat.telegram_id
+            ? { ...c, last_message: { text: preview, sender_name: null, date: new Date().toISOString() } }
+            : c
+        )
+      )
     } finally {
       setUploadProgress(null)
     }

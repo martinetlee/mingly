@@ -1,8 +1,9 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
+import { downloadMedia } from '../api/client'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
 import VideoPlayer from './VideoPlayer'
@@ -209,7 +210,21 @@ function ContextMenu({
 
 export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat }: Props) {
   const isOut = message.is_outgoing
-  const hasPhoto = message.media_url && message.media_type === 'photo'
+  // Lazy photo download: if media_type is photo but media_url is missing, download it
+  const [lazyPhotoUrl, setLazyPhotoUrl] = useState<string | null>(null)
+  const [photoLoading, setPhotoLoading] = useState(false)
+  useEffect(() => {
+    if (message.media_type === 'photo' && !message.media_url && !lazyPhotoUrl && !photoLoading) {
+      setPhotoLoading(true)
+      downloadMedia(message.chat_id, message.telegram_id)
+        .then((res) => setLazyPhotoUrl(res.media_url))
+        .catch(() => {})
+        .finally(() => setPhotoLoading(false))
+    }
+  }, [message.media_type, message.media_url, message.chat_id, message.telegram_id, lazyPhotoUrl, photoLoading])
+
+  const photoUrl = message.media_url || lazyPhotoUrl
+  const hasPhoto = !!photoUrl && message.media_type === 'photo'
   const hasVideo = message.media_type === 'video'
   const hasVideoNote = message.media_type === 'video_note'
   const hasVoice = message.media_type === 'voice'
@@ -360,7 +375,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           {hasPhoto && (
             <>
               <img
-                src={authenticatedMediaUrl(message.media_url!)}
+                src={authenticatedMediaUrl(photoUrl!)}
                 alt="photo"
                 className={`block cursor-pointer object-cover ${isOut ? 'ml-auto' : 'mr-auto'} hover:opacity-90 transition-opacity`}
                 style={{ maxWidth: 320, maxHeight: 320 }}
@@ -368,11 +383,17 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               />
               {lightboxOpen && (
                 <ImageLightbox
-                  src={authenticatedMediaUrl(message.media_url!)}
+                  src={authenticatedMediaUrl(photoUrl!)}
                   onClose={() => setLightboxOpen(false)}
                 />
               )}
             </>
+          )}
+          {photoLoading && message.media_type === 'photo' && !hasPhoto && (
+            <div className={`px-3 py-4 flex items-center gap-2 ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-xs">Loading photo…</span>
+            </div>
           )}
           {(hasVideo || hasVideoNote) && (
             <VideoPlayer
@@ -403,7 +424,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               isOut={isOut}
             />
           )}
-          {message.media_type && !hasPhoto && !hasPlayableMedia && !hasGif && !hasDocument && !message.text && (
+          {message.media_type && !hasPhoto && !photoLoading && !hasPlayableMedia && !hasGif && !hasDocument && !message.text && (
             <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
               [{message.media_type}]
             </span>

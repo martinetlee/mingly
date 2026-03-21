@@ -1,8 +1,8 @@
 """On-demand media download endpoint.
 
-Downloads video, audio, voice, and video_note media from Telegram when
-requested by the frontend (lazy download). Photos are already downloaded
-during sync, so this only handles non-photo media types.
+Downloads media from Telegram when requested by the frontend (lazy
+download). Photos are normally downloaded during sync but may be missing
+for messages synced before that feature existed.
 """
 
 import logging
@@ -26,6 +26,7 @@ MEDIA_DIR.mkdir(exist_ok=True)
 
 # File extensions per media type
 _EXTENSIONS = {
+    "photo": ".jpg",
     "video": ".mp4",
     "video_note": ".mp4",
     "voice": ".ogg",

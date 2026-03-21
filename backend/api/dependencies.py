@@ -28,6 +28,16 @@ _ALLOWED_ORIGINS: set[str] = {
 }
 
 
+def _is_allowed_origin(origin: str) -> bool:
+    """Check if origin is allowed — includes any localhost/127.0.0.1 port."""
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    # Accept any loopback origin (dynamic port)
+    if origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:"):
+        return True
+    return False
+
+
 def generate_session_token() -> str:
     """Create a new session token (called when vault is unlocked/initialized)."""
     global _session_token
@@ -73,4 +83,4 @@ def validate_ws_origin(websocket: WebSocket) -> bool:
     if origin is None:
         # Electron / Tauri desktop clients may not send Origin
         return True
-    return origin in _ALLOWED_ORIGINS
+    return _is_allowed_origin(origin)
