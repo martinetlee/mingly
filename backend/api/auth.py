@@ -15,6 +15,7 @@ from backend.secrets import (
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
 )
 from backend.api.dependencies import generate_session_token, clear_session_token, require_session_token
+from backend.cloud.session import cloud_session
 
 router = APIRouter()
 
@@ -87,6 +88,8 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         except Exception:
             pass
+    # Bootstrap cloud session (non-blocking)
+    asyncio.create_task(cloud_session.start())
     return {"success": True, "session_token": token}
 
 
