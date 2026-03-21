@@ -1,17 +1,19 @@
 """LLM-based message translation."""
 
 import json
+import re
+import logging
 from typing import Optional
 
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.registry import get_registry
 
-TRANSLATE_SYSTEM_PROMPT = """\
-You are a translator. Translate the following message into {target_language}.
-Preserve the original tone, formatting, and meaning.
-If the message is already in {target_language}, return it unchanged.
+logger = logging.getLogger(__name__)
 
-Respond ONLY with valid JSON: {{"translation": "<translated text>"}}"""
+TRANSLATE_SYSTEM_PROMPT = """\
+Translate the following message into {target_language}.
+Preserve the original tone and meaning.
+Reply with ONLY the translated text, nothing else. No quotes, no explanation."""
 
 
 async def translate_message(
@@ -40,12 +42,22 @@ async def translate_message(
     ]
 
     response = await provider.complete(messages, max_tokens=2000, temperature=0.2)
+    result = response.content.strip()
 
+    # Try JSON parsing first (in case model wraps in JSON)
     try:
-        parsed = json.loads(response.content)
-        return str(parsed["translation"])
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        raise LLMError(
-            f"Invalid JSON from model: {response.content!r}",
-            provider=response.provider,
-        ) from e
+        parsed = json.loads(result)
+        if isinstance(parsed, dict) and "translation" in parsed:
+            return str(parsed["translation"])
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strip surrounding quotes if present
+    if (result.startswith('"') and result.endswith('"')) or \
+       (result.startswith("'") and result.endswith("'")):
+        result = result[1:-1]
+
+    if not result:
+        raise LLMError("Empty translation response", provider=response.provider)
+
+    return result
