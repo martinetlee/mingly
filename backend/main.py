@@ -64,11 +64,16 @@ if __name__ == "__main__":
         except OSError:
             time.sleep(0.3)
 
-    webview.create_window(
+    window = webview.create_window(
         "Mingly",
         f"http://{API_HOST}:{API_PORT}",
         width=1280,
         height=800,
         min_size=(900, 600),
     )
+
+    # Register the window so notification clicks can navigate to chats
+    from backend.telegram.sync import set_webview_window
+    set_webview_window(window)
+
     webview.start()
