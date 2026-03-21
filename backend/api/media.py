@@ -51,7 +51,7 @@ async def download_media(chat_telegram_id: int, msg_telegram_id: int) -> MediaDo
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Message).where(
-                Message.telegram_id == msg_telegram_id,
+                Message.tg_message_id == msg_telegram_id,
                 Message.chat_id == chat_telegram_id,
             ).limit(1)
         )

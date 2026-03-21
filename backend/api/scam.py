@@ -59,7 +59,7 @@ async def check_messages(req: CheckMessagesRequest):
         result = await db.execute(
             select(Message).where(
                 Message.chat_id == req.chat_id,
-                Message.telegram_id.in_(req.message_telegram_ids),
+                Message.tg_message_id.in_(req.message_telegram_ids),
             )
         )
         msgs = result.scalars().all()
@@ -68,19 +68,38 @@ async def check_messages(req: CheckMessagesRequest):
 
         messages = [
             {
-                "telegram_id": m.telegram_id,
+                "message_id": m.tg_message_id,
                 "sender_id": m.sender_id,
                 "sender_name": m.sender_name,
                 "text": m.text,
+                "date": m.date.isoformat() if m.date else None,
             }
             for m in msgs
         ]
+
+        # Build sender profiles with contact status
+        sender_ids = list({m.sender_id for m in msgs if m.sender_id})
+        profiles = []
+        if sender_ids:
+            from backend.db.models import Contact
+            contact_result = await db.execute(
+                select(Contact.telegram_id).where(Contact.telegram_id.in_(sender_ids))
+            )
+            contact_ids = {row[0] for row in contact_result.fetchall()}
+            for m in msgs:
+                if m.sender_id and m.sender_id not in {p["telegram_id"] for p in profiles}:
+                    profiles.append({
+                        "telegram_id": m.sender_id,
+                        "name": m.sender_name,
+                        "is_contact": m.sender_id in contact_ids,
+                    })
 
     import asyncio
     asyncio.create_task(svc.check_messages_for_scam(
         chat_id=req.chat_id,
         messages=messages,
-        user_telegram_id=0,  # TODO: get from session
+        user_telegram_id=0,
+        profiles=profiles,
         chat_metadata={"chat_id": req.chat_id},
     ))
     return {"status": "queued", "message_count": len(messages)}

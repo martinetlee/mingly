@@ -191,8 +191,8 @@ export const setBriefing = (telegram_id: number, briefing: boolean) =>
     body: JSON.stringify({ briefing }),
   })
 
-export const reactToMessage = (chat_telegram_id: number, msg_telegram_id: number, emoji: string | null) =>
-  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_telegram_id}/react`, {
+export const reactToMessage = (chat_telegram_id: number, msg_tg_id: number, emoji: string | null) =>
+  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_tg_id}/react`, {
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
@@ -233,8 +233,8 @@ export const setSlowMode = (telegram_id: number, seconds: number) =>
 
 // --- Pin/Unpin Messages ---
 
-export const pinMessage = (telegram_id: number, msg_telegram_id: number, pinned: boolean, notify = false) =>
-  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_telegram_id}/pin`, {
+export const pinMessage = (telegram_id: number, msg_tg_id: number, pinned: boolean, notify = false) =>
+  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_tg_id}/pin`, {
     method: 'POST',
     body: JSON.stringify({ pinned, notify }),
   })

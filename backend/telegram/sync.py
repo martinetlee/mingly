@@ -508,7 +508,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
 
             await crud.save_message(
                 db,
-                telegram_id=msg.id,
+                tg_message_id=msg.id,
                 chat_id=chat_telegram_id,
                 sender_id=msg.sender_id,
                 sender_name=_sender_name(sender),
@@ -519,7 +519,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
-                reply_to_telegram_id=msg.reply_to_msg_id,
+                reply_to_tg_message_id=msg.reply_to_msg_id,
                 topic_id=topic_id,
                 is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
@@ -567,7 +567,7 @@ async def register_event_handlers() -> None:
                 topic_id = getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
             saved = await crud.save_message(
                 db,
-                telegram_id=msg.id,
+                tg_message_id=msg.id,
                 chat_id=event.chat_id,
                 sender_id=msg.sender_id,
                 sender_name=_sender_name(sender),
@@ -578,7 +578,7 @@ async def register_event_handlers() -> None:
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
-                reply_to_telegram_id=msg.reply_to_msg_id,
+                reply_to_tg_message_id=msg.reply_to_msg_id,
                 topic_id=topic_id,
                 is_pinned=getattr(msg, "pinned", False) or False,
                 media_filename=_media_filename(msg),
@@ -619,16 +619,27 @@ async def register_event_handlers() -> None:
             scam_svc = get_scam_service()
             if scam_svc:
                 import asyncio as _asyncio
+                # Build sender profile for scam context
+                _sender_profile = []
+                if sender:
+                    _sender_profile = [{
+                        "telegram_id": saved.sender_id,
+                        "name": saved.sender_name,
+                        "bio": getattr(sender, "about", None) or "",
+                        "is_contact": getattr(sender, "contact", False) or False,
+                    }]
                 _asyncio.create_task(scam_svc.check_messages_for_scam(
                     chat_id=event.chat_id,
                     messages=[{
-                        "telegram_id": saved.telegram_id,
+                        "message_id": saved.tg_message_id,
                         "sender_id": saved.sender_id,
                         "sender_name": saved.sender_name,
                         "text": saved.text,
+                        "date": str(saved.date),
                     }],
                     user_telegram_id=0,
-                    chat_metadata={"name": chat.name, "type": chat.type},
+                    profiles=_sender_profile,
+                    chat_metadata={"chat_id": event.chat_id, "name": chat.name, "type": chat.type},
                 ))
 
         if not saved.is_outgoing:

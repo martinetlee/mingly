@@ -70,7 +70,7 @@ export interface ReplyPreview {
 
 export interface Message {
   id: number
-  telegram_id: number
+  tg_message_id: number
   chat_id: number
   sender_id: number | null
   sender_name: string | null
@@ -83,7 +83,7 @@ export interface Message {
   media_url: string | null
   importance_score: number | null
   user_flagged: boolean
-  reply_to_telegram_id?: number | null
+  reply_to_tg_message_id?: number | null
   reply_to_preview?: ReplyPreview | null
   my_reaction?: string | null
   topic_id?: number | null
@@ -106,7 +106,7 @@ export interface ScamFlag {
 }
 
 export interface PinnedMessage {
-  telegram_id: number
+  tg_message_id: number
   sender_name: string | null
   text: string | null
   date: string
@@ -361,7 +361,7 @@ export interface ConversationDetail {
 
 export interface MentionMessage {
   id: number
-  telegram_id: number
+  tg_message_id: number
   chat_id: number
   sender_id: number | null
   sender_name: string | null

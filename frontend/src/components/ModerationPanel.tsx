@@ -71,8 +71,8 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
 
   const handleUnpin = async (msg: Message) => {
     try {
-      await pinMessage(chat.telegram_id, msg.telegram_id, false)
-      setPinnedMessages((prev) => prev.filter((m) => m.telegram_id !== msg.telegram_id))
+      await pinMessage(chat.telegram_id, msg.tg_message_id, false)
+      setPinnedMessages((prev) => prev.filter((m) => m.tg_message_id !== msg.tg_message_id))
     } catch {
       // ignore
     }
@@ -104,7 +104,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
               <p className="text-[11px] text-slate-500">No pinned messages</p>
             ) : (
               pinnedMessages.map((msg) => (
-                <div key={msg.telegram_id} className="group flex items-start gap-2 rounded px-2 py-1.5 bg-slate-700/30">
+                <div key={msg.tg_message_id} className="group flex items-start gap-2 rounded px-2 py-1.5 bg-slate-700/30">
                   <div className="flex-1 min-w-0">
                     <p className="text-[10px] text-slate-400 font-medium">{msg.sender_name || 'Unknown'}</p>
                     <p className="text-[11px] text-slate-300 truncate">{msg.text || '[media]'}</p>

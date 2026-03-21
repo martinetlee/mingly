@@ -36,10 +36,10 @@ class Chat(Base):
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (UniqueConstraint("telegram_id", "chat_id", name="uq_message_telegram_chat"),)
+    __table_args__ = (UniqueConstraint("tg_message_id", "chat_id", name="uq_message_tgmsgid_chat"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tg_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sender_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     sender_name: Mapped[Optional[str]] = mapped_column(String)
@@ -53,7 +53,7 @@ class Message(Base):
     importance_score: Mapped[Optional[float]] = mapped_column(Float)
     importance_reason: Mapped[Optional[str]] = mapped_column(Text)
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
-    reply_to_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    reply_to_tg_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)

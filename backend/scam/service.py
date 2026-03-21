@@ -82,10 +82,11 @@ class ScamDetectionService:
 
         request_id = str(uuid.uuid4())
         now = datetime.utcnow()
-        msg_ids = [m.get("telegram_id") for m in messages if m.get("telegram_id")]
+        msg_ids = [m.get("message_id") for m in messages if m.get("message_id")]
         sender_ids = list({m.get("sender_id") for m in messages if m.get("sender_id")})
 
         payload = {
+            "request_id": request_id,
             "messages": messages,
             "user_telegram_id": user_telegram_id,
             "profiles": profiles or [],
@@ -110,7 +111,7 @@ class ScamDetectionService:
 
         try:
             result = await self._client.is_this_scam(
-                messages, user_telegram_id, profiles or [], chat_metadata or {}
+                request_id, messages, user_telegram_id, profiles or [], chat_metadata or {}
             )
             await self._apply_message_result(request_id, chat_id, msg_ids, sender_ids, result)
         except Exception as e:
@@ -187,11 +188,29 @@ class ScamDetectionService:
         for req in pending:
             try:
                 payload = json.loads(req.payload_json)
+
+                # Try polling for result first (fallback if callback was missed)
+                polled = await self._client.get_result(req.request_id)
+                if polled is not None:
+                    if req.request_type == "are_flagged_scams":
+                        tg_ids = json.loads(req.related_telegram_ids_json or "[]")
+                        flagged = {tid: polled for tid in tg_ids} if polled.is_scam else {}
+                        await self._apply_user_flags(req.request_id, flagged)
+                    else:
+                        msg_ids = json.loads(req.related_message_ids_json or "[]")
+                        sender_ids = json.loads(req.related_telegram_ids_json or "[]")
+                        await self._apply_message_result(
+                            req.request_id, req.related_chat_id, msg_ids, sender_ids, polled
+                        )
+                    continue
+
+                # No result yet — re-issue the request
                 if req.request_type == "are_flagged_scams":
                     results = await self._client.are_flagged_scams(payload["telegram_ids"])
                     await self._apply_user_flags(req.request_id, results)
                 elif req.request_type == "is_this_scam":
                     result = await self._client.is_this_scam(
+                        req.request_id,
                         payload["messages"],
                         payload["user_telegram_id"],
                         payload.get("profiles", []),
@@ -258,7 +277,7 @@ class ScamDetectionService:
                     update(Message)
                     .where(
                         Message.chat_id == chat_id,
-                        Message.telegram_id.in_(msg_ids),
+                        Message.tg_message_id.in_(msg_ids),
                     )
                     .values(scam_score=result.confidence, scam_reason=result.reason)
                 )
@@ -325,7 +344,7 @@ class ScamDetectionService:
                 )
                 msgs = result.scalars().all()
                 gathered_data = [
-                    {"telegram_id": m.telegram_id, "sender_id": m.sender_id,
+                    {"message_id": m.tg_message_id, "sender_id": m.sender_id,
                      "sender_name": m.sender_name, "text": m.text, "date": str(m.date)}
                     for m in msgs
                 ]

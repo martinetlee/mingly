@@ -146,10 +146,10 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
           const firstMsg = item.messages[0]
           const isOut = firstMsg.is_outgoing
           const isHighlighted = item.messages.some(
-            (m) => highlightTelegramId != null && m.telegram_id === highlightTelegramId && !dimHighlight
+            (m) => highlightTelegramId != null && m.tg_message_id === highlightTelegramId && !dimHighlight
           )
           const hasHighlightRef = item.messages.some(
-            (m) => highlightTelegramId === m.telegram_id
+            (m) => highlightTelegramId === m.tg_message_id
           )
           // Collect text from all album messages (captions)
           const captionMsg = item.messages.find((m) => m.text)
@@ -188,14 +188,14 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
         const prevMsg = prevItem?.type === 'single' ? prevItem.message : prevItem?.type === 'album' ? prevItem.messages[prevItem.messages.length - 1] : undefined
         const showSender =
           isGroup && !msg.is_outgoing && msg.sender_name !== prevMsg?.sender_name
-        const isHighlighted = highlightTelegramId != null && msg.telegram_id === highlightTelegramId && !dimHighlight
+        const isHighlighted = highlightTelegramId != null && msg.tg_message_id === highlightTelegramId && !dimHighlight
 
         return (
           <div key={msg.id}>
             {unreadSeparatorIndex === idx && (
               <UnreadSeparator innerRef={unreadRef} />
             )}
-            <div ref={highlightTelegramId === msg.telegram_id ? highlightRef : undefined}>
+            <div ref={highlightTelegramId === msg.tg_message_id ? highlightRef : undefined}>
               <MessageBubble
                 message={msg}
                 showSender={showSender}

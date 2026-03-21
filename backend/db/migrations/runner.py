@@ -300,6 +300,16 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE chats ADD COLUMN last_activity_at DATETIME",
         ],
     ),
+    (
+        29,
+        "Rename messages.telegram_id to messages.tg_message_id",
+        [
+            "ALTER TABLE messages RENAME COLUMN telegram_id TO tg_message_id",
+            "ALTER TABLE messages RENAME COLUMN reply_to_telegram_id TO reply_to_tg_message_id",
+            "DROP INDEX IF EXISTS uq_message_telegram_chat",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_tgmsgid_chat ON messages (tg_message_id, chat_id)",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

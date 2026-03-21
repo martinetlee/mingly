@@ -32,7 +32,7 @@ async def send_message(req: SendRequest):
         async with AsyncSessionLocal() as db:
             await crud.save_message(
                 db,
-                telegram_id=msg.id,
+                tg_message_id=msg.id,
                 chat_id=req.chat_id,
                 sender_id=msg.sender_id,
                 sender_name=None,
@@ -169,7 +169,7 @@ async def send_files(
             async with AsyncSessionLocal() as db:
                 await crud.save_message(
                     db,
-                    telegram_id=msg.id,
+                    tg_message_id=msg.id,
                     chat_id=chat_id,
                     sender_id=msg.sender_id,
                     sender_name=None,

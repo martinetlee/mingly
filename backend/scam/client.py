@@ -57,12 +57,17 @@ class ScamAPIClient(ABC):
     @abstractmethod
     async def is_this_scam(
         self,
+        request_id: str,
         messages: list[dict],
         user_telegram_id: int,
         profiles: list[dict],
         chat_metadata: dict,
     ) -> ScamCheckResult:
-        """Analyze messages for scam patterns."""
+        """Analyze messages for scam patterns. request_id is for idempotency."""
+
+    @abstractmethod
+    async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
+        """Poll for the result of an async request. Returns None if still processing."""
 
     @abstractmethod
     async def respond_to_followup(self, request_id: str, data: Any) -> Union[ScamCheckResult, FollowUpRequest, None]:
@@ -77,6 +82,7 @@ class MockScamAPIClient(ScamAPIClient):
 
     async def is_this_scam(
         self,
+        request_id: str,
         messages: list[dict],
         user_telegram_id: int,
         profiles: list[dict],
@@ -93,7 +99,9 @@ class MockScamAPIClient(ScamAPIClient):
         if chat_metadata:
             parts.append(f"Chat: {chat_metadata.get('name', 'Unknown')} ({chat_metadata.get('type', 'unknown')})")
         for profile in profiles[:5]:  # limit profiles
-            parts.append(f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}")
+            bio = profile.get('bio') or ''
+            is_contact = profile.get('is_contact', False)
+            parts.append(f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}, Bio:{bio}, Is contact:{is_contact}")
         parts.append("\nMessages to analyze:")
         for msg in messages[:20]:  # limit messages
             sender = msg.get("sender_name", "Unknown")
@@ -117,6 +125,10 @@ class MockScamAPIClient(ScamAPIClient):
         except (json.JSONDecodeError, LLMError, Exception) as e:
             logger.warning("Scam detection LLM call failed: %s", e)
             return ScamCheckResult(is_scam=False, confidence=0.0, reason=f"Analysis failed: {e}")
+
+    async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
+        # Mock always returns synchronously, no polling needed
+        return None
 
     async def respond_to_followup(self, request_id: str, data: Any) -> Union[ScamCheckResult, FollowUpRequest, None]:
         # Mock doesn't use follow-ups
@@ -155,6 +167,7 @@ class ExternalScamAPIClient(ScamAPIClient):
 
     async def is_this_scam(
         self,
+        request_id: str,
         messages: list[dict],
         user_telegram_id: int,
         profiles: list[dict],
@@ -165,6 +178,7 @@ class ExternalScamAPIClient(ScamAPIClient):
             resp = await client.post(
                 f"{self._base_url}/isThisScam",
                 json={
+                    "request_id": request_id,
                     "messages": messages,
                     "user_telegram_id": user_telegram_id,
                     "profiles": profiles,
@@ -175,6 +189,25 @@ class ExternalScamAPIClient(ScamAPIClient):
             )
             resp.raise_for_status()
             data = resp.json()
+            return ScamCheckResult(
+                is_scam=data.get("is_scam", False),
+                confidence=data.get("confidence", 0.0),
+                reason=data.get("reason", ""),
+                raw_response=data,
+            )
+
+    async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{self._base_url}/result/{request_id}",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") == "processing":
+                return None
             return ScamCheckResult(
                 is_scam=data.get("is_scam", False),
                 confidence=data.get("confidence", 0.0),

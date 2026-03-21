@@ -238,12 +238,12 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   useEffect(() => {
     if (message.media_type === 'photo' && !message.media_url && !lazyPhotoUrl && !photoLoading) {
       setPhotoLoading(true)
-      downloadMedia(message.chat_id, message.telegram_id)
+      downloadMedia(message.chat_id, message.tg_message_id)
         .then((res) => setLazyPhotoUrl(res.media_url))
         .catch(() => {})
         .finally(() => setPhotoLoading(false))
     }
-  }, [message.media_type, message.media_url, message.chat_id, message.telegram_id, lazyPhotoUrl, photoLoading])
+  }, [message.media_type, message.media_url, message.chat_id, message.tg_message_id, lazyPhotoUrl, photoLoading])
 
   const photoUrl = message.media_url || lazyPhotoUrl
   const hasPhoto = !!photoUrl && message.media_type === 'photo'
@@ -267,7 +267,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     setScamChecking(true)
     setScamCheckDone(null)
     try {
-      await checkMessagesForScam(message.chat_id, [message.telegram_id])
+      await checkMessagesForScam(message.chat_id, [message.tg_message_id])
       // The actual result comes via WebSocket, but show "checking" for a bit
       // then fall back to "safe" if no scam_score update arrives
       setTimeout(() => {
@@ -277,7 +277,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     } catch {
       setScamChecking(false)
     }
-  }, [message.chat_id, message.telegram_id])
+  }, [message.chat_id, message.tg_message_id])
 
   const handleTranslate = useCallback(async () => {
     if (!message.text || translating) return
@@ -482,7 +482,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           {(hasVideo || hasVideoNote) && (
             <VideoPlayer
               chatTelegramId={message.chat_id}
-              msgTelegramId={message.telegram_id}
+              msgTelegramId={message.tg_message_id}
               mediaUrl={message.media_url || null}
               isVideoNote={hasVideoNote}
               isOut={isOut}
@@ -491,7 +491,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           {(hasVoice || hasAudio) && (
             <AudioPlayer
               chatTelegramId={message.chat_id}
-              msgTelegramId={message.telegram_id}
+              msgTelegramId={message.tg_message_id}
               mediaUrl={message.media_url || null}
               mediaType={hasVoice ? 'voice' : 'audio'}
               isOut={isOut}

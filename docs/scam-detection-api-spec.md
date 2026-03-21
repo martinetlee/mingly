@@ -1,6 +1,6 @@
 # Scam Detection External API — Technical Specification
 
-The external service must implement 3 HTTP endpoints. All requests include an `Authorization: Bearer <api_key>` header.
+The external service must implement 4 HTTP endpoints. All requests include an `Authorization: Bearer <api_key>` header.
 
 ## 1. `POST /areFlaggedScams`
 
@@ -49,22 +49,27 @@ Analyze messages for scam patterns. May return an immediate verdict, an async pr
 
 ```json
 {
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
   "messages": [
     {
-      "telegram_id": 42,
+      "message_id": 42,
       "sender_id": 123456789,
       "sender_name": "John",
-      "text": "Send me 1 BTC and I'll return 10!"
+      "text": "Send me 1 BTC and I'll return 10!",
+      "date": "2026-03-21T09:00:00"
     }
   ],
   "user_telegram_id": 111222333,
   "profiles": [
     {
       "telegram_id": 123456789,
-      "name": "John"
+      "name": "John",
+      "bio": "Crypto enthusiast | DM for deals",
+      "is_contact": false
     }
   ],
   "chat_metadata": {
+    "chat_id": 987654321,
     "name": "Crypto Group",
     "type": "group"
   }
@@ -73,16 +78,21 @@ Analyze messages for scam patterns. May return an immediate verdict, an async pr
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | `string` | UUID for idempotency — duplicate request_ids should return the same result without re-processing |
 | `messages` | `object[]` | Messages to analyze |
-| `messages[].telegram_id` | `int` | Message ID within the chat |
+| `messages[].message_id` | `int` | Message ID within the chat |
 | `messages[].sender_id` | `int` | Telegram ID of the sender |
 | `messages[].sender_name` | `string\|null` | Display name of the sender |
 | `messages[].text` | `string\|null` | Message text content |
+| `messages[].date` | `string\|null` | ISO 8601 timestamp of the message |
 | `user_telegram_id` | `int` | Telegram ID of the app user (the person requesting the check) |
 | `profiles` | `object[]` | Profile data for participants in the conversation |
 | `profiles[].telegram_id` | `int` | Telegram ID |
 | `profiles[].name` | `string` | Display name |
+| `profiles[].bio` | `string\|null` | User's bio/about text |
+| `profiles[].is_contact` | `bool` | Whether this user is in the app user's contacts |
 | `chat_metadata` | `object` | Metadata about the chat |
+| `chat_metadata.chat_id` | `int` | Telegram chat ID |
 | `chat_metadata.name` | `string` | Chat/group name |
 | `chat_metadata.type` | `string` | `"private"`, `"group"`, or `"channel"` |
 
@@ -142,11 +152,42 @@ The service needs more context before making a decision.
 
 | Value | Description | Params | Mingly responds with |
 |-------|-------------|--------|---------------------|
-| `chat_history` | Full message history for the chat | `limit` (int, max messages) | Array of `{telegram_id, sender_id, sender_name, text, date}` |
+| `chat_history` | Full message history for the chat | `limit` (int, max messages) | Array of `{message_id, sender_id, sender_name, text, date}` |
 
 ---
 
-## 3. `POST /followup/{request_id}`
+## 3. `GET /result/{request_id}`
+
+Poll for the result of an async request. Used as a fallback when the callback webhook fails (e.g., delivery issues, auth errors, or temporary downtime on Mingly's side).
+
+### Response — Still Processing
+
+```json
+{
+  "status": "processing"
+}
+```
+
+### Response — Result Ready
+
+```json
+{
+  "is_scam": true,
+  "confidence": 0.88,
+  "reason": "Pattern matches known romance scam"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `string` | `"processing"` if not yet ready |
+| `is_scam` | `bool` | Whether the messages are a scam (present when ready) |
+| `confidence` | `float` | Confidence score, 0.0–1.0 (present when ready) |
+| `reason` | `string` | Human-readable explanation (present when ready) |
+
+---
+
+## 4. `POST /followup/{request_id}`
 
 Continue a multi-step analysis. Mingly sends the data that was requested in the `need_more_data` response.
 
@@ -156,7 +197,7 @@ Continue a multi-step analysis. Mingly sends the data that was requested in the 
 {
   "data": [
     {
-      "telegram_id": 42,
+      "message_id": 42,
       "sender_id": 123456789,
       "sender_name": "John",
       "text": "Hello there",
@@ -231,6 +272,12 @@ Mingly                          External API
   │  ... for async flow ...          │
   │                                  │
   │◄── POST /api/scam/callback/{id} ┤  (external calls Mingly back)
+  │                                  │
+  │  ... or polling fallback ...     │
+  │                                  │
+  ├── GET /result/{id} ────────────►│  (poll if callback was missed)
+  │◄── {is_scam, ...} ─────────────┤  (result ready)
+  │◄── {status: "processing"} ──────┤  (not ready yet)
   │                                  │
 ```
 

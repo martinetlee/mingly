@@ -85,7 +85,7 @@ async def list_folders():
 def _serialize_msg(row) -> dict:
     m, reply_sender, reply_text, reply_media_type = row
     reply_preview = None
-    if m.reply_to_telegram_id is not None:
+    if m.reply_to_tg_message_id is not None:
         reply_preview = {
             "sender_name": reply_sender,
             "text": reply_text,
@@ -93,7 +93,7 @@ def _serialize_msg(row) -> dict:
         }
     return {
         "id": m.id,
-        "telegram_id": m.telegram_id,
+        "tg_message_id": m.tg_message_id,
         "chat_id": m.chat_id,
         "sender_id": m.sender_id,
         "sender_name": m.sender_name,
@@ -106,7 +106,7 @@ def _serialize_msg(row) -> dict:
         "reactions": json.loads(m.reactions_json) if m.reactions_json else None,
         "importance_score": m.importance_score,
         "user_flagged": m.user_flagged,
-        "reply_to_telegram_id": m.reply_to_telegram_id,
+        "reply_to_tg_message_id": m.reply_to_tg_message_id,
         "reply_to_preview": reply_preview,
         "my_reaction": m.my_reaction,
         "topic_id": m.topic_id if hasattr(m, 'topic_id') else None,
@@ -452,10 +452,10 @@ class ReactRequest(BaseModel):
     emoji: Optional[str] = None
 
 
-@router.post("/{telegram_id}/messages/{msg_telegram_id}/react")
+@router.post("/{telegram_id}/messages/{msg_tg_id}/react")
 async def react_to_message(
     telegram_id: int,
-    msg_telegram_id: int,
+    msg_tg_id: int,
     req: ReactRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -471,14 +471,14 @@ async def react_to_message(
         reaction_list = [ReactionEmoji(emoticon=req.emoji)] if req.emoji else []
         await client(SendReactionRequest(
             peer=telegram_id,
-            msg_id=msg_telegram_id,
+            msg_id=msg_tg_id,
             reaction=reaction_list,
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send reaction: {e}")
 
     # Persist to local DB
-    msg = await crud.set_my_reaction(db, telegram_id, msg_telegram_id, req.emoji)
+    msg = await crud.set_my_reaction(db, telegram_id, msg_tg_id, req.emoji)
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
 
@@ -549,7 +549,7 @@ async def get_shared_media(
     for m in messages:
         items.append({
             "id": m.id,
-            "telegram_id": m.telegram_id,
+            "tg_message_id": m.tg_message_id,
             "date": m.date.isoformat() if m.date else None,
             "sender_name": m.sender_name,
             "media_type": m.media_type,
@@ -838,10 +838,10 @@ class MessagePinRequest(BaseModel):
     notify: bool = False
 
 
-@router.post("/{telegram_id}/messages/{msg_telegram_id}/pin")
+@router.post("/{telegram_id}/messages/{msg_tg_id}/pin")
 async def pin_message(
     telegram_id: int,
-    msg_telegram_id: int,
+    msg_tg_id: int,
     req: MessagePinRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -853,14 +853,14 @@ async def pin_message(
 
     try:
         if req.pinned:
-            await client.pin_message(telegram_id, msg_telegram_id, notify=req.notify)
+            await client.pin_message(telegram_id, msg_tg_id, notify=req.notify)
         else:
-            await client.unpin_message(telegram_id, msg_telegram_id)
+            await client.unpin_message(telegram_id, msg_tg_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot {'pin' if req.pinned else 'unpin'} message: {e}")
 
     # Update local DB
-    msg = await crud.set_message_pinned(db, telegram_id, msg_telegram_id, req.pinned)
+    msg = await crud.set_message_pinned(db, telegram_id, msg_tg_id, req.pinned)
     return {"success": True, "is_pinned": req.pinned}
 
 

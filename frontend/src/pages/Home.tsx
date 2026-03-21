@@ -118,8 +118,8 @@ function HomeMentionCard({
         <div
           role="button"
           tabIndex={0}
-          onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id) } }}
+          onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id) } }}
           className="px-3 pb-2.5 cursor-pointer"
         >
           <p className="text-xs text-slate-500 truncate">
@@ -133,7 +133,7 @@ function HomeMentionCard({
         <div className="border-t border-slate-700/50">
           <div className="px-3 py-2.5 space-y-1.5">
             {allMsgs.map(({ msg, highlighted }, i) => (
-              <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
+              <MentionMsgRow key={`${msg.tg_message_id}-${i}`} msg={msg} highlighted={highlighted} />
             ))}
           </div>
           {group.user_reply_msg && (
@@ -148,7 +148,7 @@ function HomeMentionCard({
           )}
           <div className="px-3 pb-3">
             <button
-              onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.telegram_id)}
+              onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id)}
               className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
             >
               Jump to mention →
@@ -256,10 +256,10 @@ export default function Home() {
         const g = visibleMentions[selectedMentionIdx]
         if (!g) return
         const emoji = g.mention_msg.my_reaction ? null : '👀'
-        reactToMessage(g.chat.telegram_id, g.mention_msg.telegram_id, emoji)
+        reactToMessage(g.chat.telegram_id, g.mention_msg.tg_message_id, emoji)
           .then(() => {
             setMentions((prev) => prev.map((pg) =>
-              pg.mention_msg.telegram_id === g.mention_msg.telegram_id
+              pg.mention_msg.tg_message_id === g.mention_msg.tg_message_id
                 ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: emoji } }
                 : pg
             ))
@@ -268,7 +268,7 @@ export default function Home() {
       },
       'r': () => {
         const g = visibleMentions[selectedMentionIdx]
-        if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.telegram_id}`)
+        if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.tg_message_id}`)
       },
     }
   }, [activeTab, visibleMentions, selectedMentionIdx, navigate])
@@ -411,7 +411,7 @@ export default function Home() {
             ) : (
               <div className="space-y-2">
                 {visibleMentions.map((group, i) => (
-                  <div key={`${group.chat.telegram_id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
+                  <div key={`${group.chat.telegram_id}-${group.mention_msg.tg_message_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
                     <HomeMentionCard
                       group={group}
                       onNavigate={handleMentionNavigate}

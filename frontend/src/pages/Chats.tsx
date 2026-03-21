@@ -695,9 +695,9 @@ export default function Chats() {
     if (!selectedChat) return
     setLoadingMessages(true)
     try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.telegram_id)
+      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.tg_message_id)
       setMessages(data)
-      setHighlightMsgId(msg.telegram_id)
+      setHighlightMsgId(msg.tg_message_id)
       setTimeout(() => setHighlightMsgId(null), 3000)
     } finally {
       setLoadingMessages(false)
@@ -852,7 +852,7 @@ export default function Chats() {
 
   const handleSend = async (text: string) => {
     if (!selectedChat) return
-    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.telegram_id)
+    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.tg_message_id)
     setReplyToMessage(null)
     await loadMessages(selectedChat)
     // Update chat list sidebar with the sent message
@@ -890,9 +890,9 @@ export default function Chats() {
     if (!selectedChat) return
     const newPinned = !msg.is_pinned
     try {
-      await pinMessage(selectedChat.telegram_id, msg.telegram_id, newPinned)
+      await pinMessage(selectedChat.telegram_id, msg.tg_message_id, newPinned)
       setMessages((prev) =>
-        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, is_pinned: newPinned } : m)
+        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, is_pinned: newPinned } : m)
       )
     } catch {
       // silently ignore
@@ -907,7 +907,7 @@ export default function Chats() {
         selectedChat.telegram_id,
         files,
         text || undefined,
-        replyToMessage?.telegram_id,
+        replyToMessage?.tg_message_id,
         (fraction) => setUploadProgress(fraction),
       )
       await promise
@@ -930,10 +930,10 @@ export default function Chats() {
   const handleReact = async (msg: Message, emoji: string | null) => {
     if (!selectedChat) return
     try {
-      await reactToMessage(selectedChat.telegram_id, msg.telegram_id, emoji)
+      await reactToMessage(selectedChat.telegram_id, msg.tg_message_id, emoji)
       // Update the message's my_reaction in local state immediately
       setMessages((prev) =>
-        prev.map((m) => m.telegram_id === msg.telegram_id ? { ...m, my_reaction: emoji } : m)
+        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, my_reaction: emoji } : m)
       )
     } catch {
       // silently ignore
@@ -947,12 +947,12 @@ export default function Chats() {
 
   const handleSaveEdit = async (text: string) => {
     if (!selectedChat || !editingMessage) return
-    await editMessage(selectedChat.telegram_id, editingMessage.telegram_id, text)
+    await editMessage(selectedChat.telegram_id, editingMessage.tg_message_id, text)
     setEditingMessage(null)
     // Update local state immediately
     setMessages((prev) =>
       prev.map((m) =>
-        m.telegram_id === editingMessage.telegram_id
+        m.tg_message_id === editingMessage.tg_message_id
           ? { ...m, text, text_html: null }
           : m
       )
@@ -965,8 +965,8 @@ export default function Chats() {
 
   const handleConfirmDelete = async (revoke: boolean) => {
     if (!selectedChat || !deleteTarget) return
-    await deleteMessages(selectedChat.telegram_id, [deleteTarget.telegram_id], revoke)
-    setMessages((prev) => prev.filter((m) => m.telegram_id !== deleteTarget.telegram_id))
+    await deleteMessages(selectedChat.telegram_id, [deleteTarget.tg_message_id], revoke)
+    setMessages((prev) => prev.filter((m) => m.tg_message_id !== deleteTarget.tg_message_id))
     setDeleteTarget(null)
   }
 
@@ -976,7 +976,7 @@ export default function Chats() {
 
   const handleForwardToChat = async (targetChat: Chat) => {
     if (!selectedChat || !forwardTarget) return
-    await forwardMessages(selectedChat.telegram_id, [forwardTarget.telegram_id], targetChat.telegram_id)
+    await forwardMessages(selectedChat.telegram_id, [forwardTarget.tg_message_id], targetChat.telegram_id)
     setForwardTarget(null)
   }
 
@@ -1379,7 +1379,7 @@ export default function Chats() {
                     <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
                       {chatSearchResults.map((msg) => (
                         <button
-                          key={msg.telegram_id}
+                          key={msg.tg_message_id}
                           onClick={() => handleJumpToMessage(msg)}
                           className="flex items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-slate-700/50 transition-colors"
                         >

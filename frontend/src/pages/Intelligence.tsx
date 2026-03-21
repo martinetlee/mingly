@@ -540,8 +540,8 @@ function MentionCard({
         <div
           role="button"
           tabIndex={0}
-          onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.id, group.mention_msg.telegram_id) } }}
+          onClick={() => onNavigate(group.chat.id, group.mention_msg.tg_message_id)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.id, group.mention_msg.tg_message_id) } }}
           className="px-3 pb-2.5 cursor-pointer"
         >
           <p className="text-xs text-slate-500 truncate">
@@ -557,7 +557,7 @@ function MentionCard({
           {/* Context messages (before, mention, after) */}
           <div className="px-3 py-2.5 space-y-1.5">
             {allMsgs.map(({ msg, highlighted }, i) => (
-              <MentionMsgRow key={`${msg.telegram_id}-${i}`} msg={msg} highlighted={highlighted} />
+              <MentionMsgRow key={`${msg.tg_message_id}-${i}`} msg={msg} highlighted={highlighted} />
             ))}
           </div>
 
@@ -575,7 +575,7 @@ function MentionCard({
                 <MentionMsgRow msg={group.user_reply_msg} highlighted={false} />
                 {/* Jump-to-reply button overlaid on the message */}
                 <button
-                  onClick={() => onNavigate(group.chat.id, group.user_reply_msg!.telegram_id)}
+                  onClick={() => onNavigate(group.chat.id, group.user_reply_msg!.tg_message_id)}
                   className="absolute right-1 top-1 rounded px-1.5 py-0.5 text-[10px] text-indigo-400 hover:bg-indigo-900/30 hover:text-indigo-300 transition-colors"
                   title="Jump to your reply in chat"
                 >
@@ -588,7 +588,7 @@ function MentionCard({
           {/* Jump to mention button */}
           <div className="px-3 pb-3">
             <button
-              onClick={() => onNavigate(group.chat.id, group.mention_msg.telegram_id)}
+              onClick={() => onNavigate(group.chat.id, group.mention_msg.tg_message_id)}
               className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
             >
               Jump to mention →
@@ -708,10 +708,10 @@ function MentionsTab() {
       const g = visibleGroups[selectedIdx]
       if (!g) return
       const emoji = g.mention_msg.my_reaction ? null : '👀'
-      reactToMessage(g.chat.telegram_id, g.mention_msg.telegram_id, emoji)
+      reactToMessage(g.chat.telegram_id, g.mention_msg.tg_message_id, emoji)
         .then(() => {
           setGroups((prev) => prev.map((pg) =>
-            pg.mention_msg.telegram_id === g.mention_msg.telegram_id
+            pg.mention_msg.tg_message_id === g.mention_msg.tg_message_id
               ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: emoji } }
               : pg
           ))
@@ -720,7 +720,7 @@ function MentionsTab() {
     },
     'r': () => {
       const g = visibleGroups[selectedIdx]
-      if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.telegram_id}`)
+      if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.tg_message_id}`)
     },
   }), [visibleGroups, selectedIdx, navigate])
 
@@ -855,7 +855,7 @@ function MentionsTab() {
         {!loading && !error && visibleGroups.length > 0 && (
           <div className="space-y-2">
             {visibleGroups.map((group, i) => (
-              <div key={`${group.chat.id}-${group.mention_msg.telegram_id}-${i}`} ref={i === selectedIdx ? selectedCardRef : null}>
+              <div key={`${group.chat.id}-${group.mention_msg.tg_message_id}-${i}`} ref={i === selectedIdx ? selectedCardRef : null}>
                 <MentionCard
                   group={group}
                   onNavigate={handleNavigate}
