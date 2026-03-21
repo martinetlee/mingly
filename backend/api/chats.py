@@ -116,6 +116,8 @@ def _serialize_msg(row) -> dict:
         "grouped_id": m.grouped_id,
         "delivery_state": m.delivery_state or "sent",
         "is_edited": m.is_edited,
+        "scam_score": getattr(m, 'scam_score', None),
+        "scam_reason": getattr(m, 'scam_reason', None),
     }
 
 
@@ -143,6 +145,7 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         "is_marked_unread": c.is_marked_unread,
         "unread_count": c.unread_count or 0,
         "last_synced_at": c.last_synced_at,
+        "last_activity_at": getattr(c, 'last_activity_at', None),
     }
     if last_text is not None or last_sender is not None or last_date is not None:
         d["last_message"] = {
@@ -152,6 +155,9 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         }
     else:
         d["last_message"] = None
+    # Ensure last_activity_at is serialized as ISO string
+    if d.get("last_activity_at") and hasattr(d["last_activity_at"], "isoformat"):
+        d["last_activity_at"] = d["last_activity_at"].isoformat()
     return d
 
 

@@ -27,6 +27,7 @@ class Chat(Base):
     is_marked_unread: Mapped[bool] = mapped_column(Boolean, default=False)
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
     members_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     pinned_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -61,6 +62,8 @@ class Message(Base):
     grouped_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     delivery_state: Mapped[Optional[str]] = mapped_column(String, default="sent")  # sending, sent, delivered, read
     is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    scam_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    scam_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -183,6 +186,36 @@ class BriefingRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     days: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ScamCheckRequest(Base):
+    __tablename__ = "scam_check_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    request_type: Mapped[str] = mapped_column(String, nullable=False)  # are_flagged_scams, is_this_scam
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending, awaiting_followup, completed, failed, expired
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    related_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    related_message_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    related_telegram_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    followup_request_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ScamFlag(Base):
+    __tablename__ = "scam_flags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)  # external_api, local_llm, manual
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class BriefingEntry(Base):

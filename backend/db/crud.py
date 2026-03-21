@@ -42,11 +42,11 @@ async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by:
     )
 
     if sort_by == "unread":
-        query = query.order_by(desc(Chat.is_pinned), desc(Chat.unread_count), desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(Chat.unread_count), desc(Chat.last_activity_at), Chat.name)
     elif sort_by == "alpha":
         query = query.order_by(desc(Chat.is_pinned), asc(Chat.name))
     else:  # recent
-        query = query.order_by(desc(Chat.is_pinned), desc(last_msg.c.last_date), Chat.name)
+        query = query.order_by(desc(Chat.is_pinned), desc(Chat.last_activity_at), Chat.name)
 
     result = await db.execute(query.limit(limit).offset(offset))
     return list(result.all())
@@ -81,7 +81,7 @@ async def get_tracked_chats(db: AsyncSession) -> list:
         select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
         .where(Chat.is_tracked == True)  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
-        .order_by(desc(last_msg.c.last_date), Chat.name)
+        .order_by(desc(Chat.last_activity_at), Chat.name)
     )
     return list(result.all())
 
@@ -153,6 +153,7 @@ async def upsert_chat(
     members_count: Optional[int] = None,
     is_forum: Optional[bool] = None,
     slow_mode_seconds: Optional[int] = None,
+    last_message_date: Optional[datetime] = None,
 ) -> Chat:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if chat:
@@ -167,6 +168,8 @@ async def upsert_chat(
             chat.is_forum = is_forum
         if slow_mode_seconds is not None:
             chat.slow_mode_seconds = slow_mode_seconds
+        if last_message_date:
+            chat.last_activity_at = last_message_date
     else:
         chat = Chat(
             telegram_id=telegram_id,
@@ -177,6 +180,7 @@ async def upsert_chat(
             members_count=members_count,
             is_forum=is_forum if is_forum is not None else False,
             slow_mode_seconds=slow_mode_seconds if slow_mode_seconds is not None else 0,
+            last_activity_at=last_message_date,
         )
         db.add(chat)
     await db.commit()
@@ -474,6 +478,12 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
     try:
         msg = Message(**kwargs)
         db.add(msg)
+        # Update last_activity_at on the chat for sort order
+        msg_date = kwargs.get("date")
+        if msg_date and kwargs.get("chat_id"):
+            chat = await get_chat_by_telegram_id(db, kwargs["chat_id"])
+            if chat and (not chat.last_activity_at or msg_date > chat.last_activity_at):
+                chat.last_activity_at = msg_date
         await db.commit()
         await db.refresh(msg)
         return msg

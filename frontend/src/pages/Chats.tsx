@@ -13,6 +13,43 @@ import ChatPickerDialog from '../components/ChatPickerDialog'
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog'
 import NewChatDialog from '../components/NewChatDialog'
 
+import { authenticatedMediaUrl } from '../api/session'
+
+const AVATAR_COLORS = [
+  'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
+  'bg-violet-600', 'bg-pink-600', 'bg-teal-600', 'bg-orange-600',
+]
+const failedChatPhotos = new Set<number>()
+
+function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName: string; size?: number }) {
+  const [imgFailed, setImgFailed] = useState(false)
+  const initial = (chatName || '?')[0].toUpperCase()
+  const colorIndex = Math.abs(chatId) % AVATAR_COLORS.length
+  const bgColor = AVATAR_COLORS[colorIndex]
+  const hasPhoto = !failedChatPhotos.has(chatId) && !imgFailed
+  const photoUrl = authenticatedMediaUrl(`/api/media/profile_photos/${chatId}.jpg`)
+
+  return (
+    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+      <div
+        className={`absolute inset-0 flex items-center justify-center rounded-full text-white font-medium ${bgColor}`}
+        style={{ fontSize: size * 0.38 }}
+      >
+        {initial}
+      </div>
+      {hasPhoto && (
+        <img
+          src={photoUrl}
+          alt=""
+          className="absolute inset-0 rounded-full object-cover"
+          style={{ width: size, height: size }}
+          onError={() => { failedChatPhotos.add(chatId); setImgFailed(true) }}
+        />
+      )}
+    </div>
+  )
+}
+
 function fmtDate(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
@@ -157,9 +194,7 @@ function ChatItem({
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:rounded"
       >
         {/* Avatar */}
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-          {chat.name.charAt(0).toUpperCase()}
-        </div>
+        <ChatAvatar chatId={chat.telegram_id} chatName={chat.name} size={36} />
 
         {/* Name + preview */}
         <div className="min-w-0 flex-1">
@@ -589,6 +624,12 @@ export default function Chats() {
         }
       }
     }
+    if (event.type === 'scam_detected') {
+      // Reload messages to show scam warnings
+      if (selectedChat && event.chat_id === selectedChat.telegram_id) {
+        loadMessages(selectedChat)
+      }
+    }
   }, [selectedChat, loadChats, loadMessages])
 
   useWebSocket(handleWsEvent)
@@ -793,7 +834,7 @@ export default function Chats() {
     setChats((prev) =>
       prev.map((c) =>
         c.telegram_id === selectedChat.telegram_id
-          ? { ...c, last_message: { text, sender_name: null, date: new Date().toISOString() } }
+          ? { ...c, last_message: { text, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
           : c
       )
     )
@@ -852,7 +893,7 @@ export default function Chats() {
       setChats((prev) =>
         prev.map((c) =>
           c.telegram_id === selectedChat.telegram_id
-            ? { ...c, last_message: { text: preview, sender_name: null, date: new Date().toISOString() } }
+            ? { ...c, last_message: { text: preview, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
             : c
         )
       )
@@ -941,17 +982,16 @@ export default function Chats() {
       const ua = a.unread_count ?? 0
       const ub = b.unread_count ?? 0
       if (ub !== ua) return ub - ua
-      // fallback: recent
-      const da = a.last_message?.date ?? ''
-      const db2 = b.last_message?.date ?? ''
+      const da = a.last_activity_at ?? ''
+      const db2 = b.last_activity_at ?? ''
       return db2.localeCompare(da)
     }
     if (sortBy === 'alpha') {
       return a.name.localeCompare(b.name)
     }
     // recent (default)
-    const da = a.last_message?.date ?? ''
-    const db2 = b.last_message?.date ?? ''
+    const da = a.last_activity_at ?? ''
+    const db2 = b.last_activity_at ?? ''
     if (da !== db2) return db2.localeCompare(da)
     return a.name.localeCompare(b.name)
   })

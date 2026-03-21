@@ -35,6 +35,7 @@ export interface Chat {
   is_marked_unread: boolean
   unread_count?: number
   last_synced_at: string | null
+  last_activity_at?: string | null
   last_message?: {
     text: string
     sender_name: string | null
@@ -92,6 +93,16 @@ export interface Message {
   grouped_id?: number | null
   delivery_state?: 'sending' | 'sent' | 'delivered' | 'read'
   is_edited?: boolean
+  scam_score?: number | null
+  scam_reason?: string | null
+}
+
+export interface ScamFlag {
+  telegram_id: number
+  source: 'external_api' | 'local_llm' | 'manual'
+  confidence: number | null
+  reason: string | null
+  flagged_at: string
 }
 
 export interface PinnedMessage {
@@ -508,3 +519,5 @@ export type WSEvent =
   | { type: 'research_complete'; entity: 'contact' | 'organization'; id: number }
   | { type: 'user_typing'; user_id: number; chat_id: number; user_name: string }
   | { type: 'user_status'; user_id: number; status: string; last_seen?: string | null }
+  | { type: 'scam_detected'; chat_id: number; message_ids: number[]; sender_ids: number[]; confidence: number; reason: string }
+  | { type: 'scam_users_flagged'; telegram_ids: number[] }

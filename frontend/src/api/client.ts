@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -720,4 +720,21 @@ export const joinViaInviteLink = (link: string) =>
   request<Chat>('/api/chats/join', {
     method: 'POST',
     body: JSON.stringify({ link }),
+  })
+
+// ── Scam Detection ──
+
+export const getScamFlags = () =>
+  request<ScamFlag[]>('/api/scam/flags')
+
+export const dismissScamFlag = (telegramId: number) =>
+  request<{ status: string }>(`/api/scam/flags/${telegramId}`, { method: 'DELETE' })
+
+export const getChatScamStatus = (chatId: number) =>
+  request<{ has_scam_flags: boolean; flagged_message_count: number; flagged_users: { telegram_id: number; confidence: number | null; reason: string | null }[] }>(`/api/scam/status/${chatId}`)
+
+export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[]) =>
+  request<{ status: string; message_count: number }>('/api/scam/check-messages', {
+    method: 'POST',
+    body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
   })

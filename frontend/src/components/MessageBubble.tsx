@@ -1,9 +1,9 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2 } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
-import { downloadMedia } from '../api/client'
+import { downloadMedia, dismissScamFlag, checkMessagesForScam } from '../api/client'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
 import VideoPlayer from './VideoPlayer'
@@ -162,6 +162,7 @@ function ContextMenu({
   onEdit,
   onDelete,
   onForward,
+  onCheckScam,
 }: {
   isOut: boolean
   canEdit: boolean
@@ -170,6 +171,7 @@ function ContextMenu({
   onEdit: () => void
   onDelete: () => void
   onForward: () => void
+  onCheckScam?: () => void
 }) {
   return (
     <div
@@ -193,6 +195,15 @@ function ContextMenu({
         >
           <Pencil size={13} />
           Edit
+        </button>
+      )}
+      {onCheckScam && (
+        <button
+          onClick={onCheckScam}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-amber-400 hover:bg-slate-700 transition-colors"
+        >
+          <ShieldAlert size={13} />
+          Check for scam
         </button>
       )}
       {canDelete && (
@@ -236,6 +247,32 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [showPicker, setShowPicker] = useState(false)
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [scamChecking, setScamChecking] = useState(false)
+  const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | null>(null)
+
+  const handleCheckScam = useCallback(async () => {
+    setScamChecking(true)
+    setScamCheckDone(null)
+    try {
+      await checkMessagesForScam(message.chat_id, [message.telegram_id])
+      // The actual result comes via WebSocket, but show "checking" for a bit
+      // then fall back to "safe" if no scam_score update arrives
+      setTimeout(() => {
+        setScamChecking(false)
+        setScamCheckDone((prev) => prev ?? 'safe')
+      }, 8000)
+    } catch {
+      setScamChecking(false)
+    }
+  }, [message.chat_id, message.telegram_id])
+
+  // If scam_score updates (via parent re-render from WS event), reflect it
+  useEffect(() => {
+    if (scamChecking && message.scam_score != null) {
+      setScamChecking(false)
+      setScamCheckDone(message.scam_score > 0.5 ? 'scam' : 'safe')
+    }
+  }, [message.scam_score, scamChecking])
   const pickerRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const reply = message.reply_to_preview
@@ -305,6 +342,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onEdit={() => { setShowContextMenu(false); onEdit?.(message) }}
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
+                  onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
                 />
               )}
             </div>
@@ -429,6 +467,37 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
               [{message.media_type}]
             </span>
           )}
+          {/* Scam check in progress */}
+          {scamChecking && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs">
+              <Loader2 size={13} className="animate-spin flex-shrink-0" />
+              <span>Checking for scam…</span>
+            </div>
+          )}
+          {/* Scam check result: safe */}
+          {!scamChecking && scamCheckDone === 'safe' && !(message.scam_score != null && message.scam_score > 0.5) && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs">
+              <Check size={13} className="flex-shrink-0" />
+              <span>No scam detected</span>
+            </div>
+          )}
+          {/* Scam warning banner */}
+          {(message.scam_score != null && message.scam_score > 0.5) && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 border-t border-red-500/30 text-red-300 text-xs">
+              <ShieldAlert size={13} className="flex-shrink-0" />
+              <span className="flex-1">{message.scam_reason || 'Potential scam detected'}</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (message.sender_id) dismissScamFlag(message.sender_id).catch(() => {})
+                }}
+                className="text-red-400 hover:text-red-200 p-0.5"
+                title="Dismiss"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Reactions row: existing aggregate reactions + my reaction highlight */}
@@ -517,6 +586,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onEdit={() => {}}
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
+                  onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
                 />
               )}
             </div>

@@ -299,6 +299,25 @@ def _extract_reactions(msg) -> Optional[str]:
     return json.dumps(out) if out else None
 
 
+PROFILE_PHOTO_DIR = DATA_DIR / "profile_photos"
+PROFILE_PHOTO_DIR.mkdir(exist_ok=True)
+
+
+async def _download_chat_photo(client, entity, dialog_id: int) -> None:
+    """Download chat/user profile photo to disk (fire-and-forget)."""
+    try:
+        photo_path = PROFILE_PHOTO_DIR / f"{dialog_id}.jpg"
+        if photo_path.exists():
+            return
+        downloaded = await client.download_profile_photo(
+            entity, file=str(photo_path), download_big=False
+        )
+        if not downloaded and photo_path.exists():
+            photo_path.unlink()
+    except Exception:
+        pass
+
+
 async def sync_dialogs(limit: Optional[int] = None) -> None:
     """Fetch dialogs and upsert into the chats table.
 
@@ -309,6 +328,8 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
     client = get_client()
     if not client:
         return
+
+    entities_to_download = []
 
     async with AsyncSessionLocal() as db:
         async for dialog in client.iter_dialogs(limit=limit):
@@ -322,6 +343,11 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                     or getattr(entity, "title", None)
                     or str(dialog.id)
                 )
+            # dialog.date is the timestamp of the last message in this chat
+            last_msg_date = getattr(dialog, "date", None)
+            if last_msg_date and hasattr(last_msg_date, "replace"):
+                last_msg_date = last_msg_date.replace(tzinfo=None)
+
             await crud.upsert_chat(
                 db,
                 telegram_id=dialog.id,
@@ -332,7 +358,16 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                 members_count=getattr(entity, "participants_count", None),
                 is_forum=getattr(entity, "forum", False) or False,
                 slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
+                last_message_date=last_msg_date,
             )
+
+            # Queue photo download (don't block dialog sync)
+            if getattr(entity, "photo", None):
+                entities_to_download.append((entity, dialog.id))
+
+    # Download profile photos in background
+    for entity, did in entities_to_download:
+        await _download_chat_photo(client, entity, did)
 
 
 async def resolve_numeric_names() -> int:
@@ -577,6 +612,24 @@ async def register_event_handlers() -> None:
             "is_tracked": chat.is_tracked,
             "is_outgoing": saved.is_outgoing,
         })
+
+        # Run scam detection on incoming messages (fire-and-forget)
+        if not saved.is_outgoing and saved.text:
+            from backend.scam.service import get_scam_service
+            scam_svc = get_scam_service()
+            if scam_svc:
+                import asyncio as _asyncio
+                _asyncio.create_task(scam_svc.check_messages_for_scam(
+                    chat_id=event.chat_id,
+                    messages=[{
+                        "telegram_id": saved.telegram_id,
+                        "sender_id": saved.sender_id,
+                        "sender_name": saved.sender_name,
+                        "text": saved.text,
+                    }],
+                    user_telegram_id=0,
+                    chat_metadata={"name": chat.name, "type": chat.type},
+                ))
 
         if not saved.is_outgoing:
             from backend.api.settings import get_notif_pref
