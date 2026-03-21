@@ -1,9 +1,9 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
-import { downloadMedia, dismissScamFlag, checkMessagesForScam } from '../api/client'
+import { downloadMedia, dismissScamFlag, checkMessagesForScam, translateMessage, getPrefs } from '../api/client'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
 import VideoPlayer from './VideoPlayer'
@@ -163,6 +163,7 @@ function ContextMenu({
   onDelete,
   onForward,
   onCheckScam,
+  onTranslate,
 }: {
   isOut: boolean
   canEdit: boolean
@@ -172,6 +173,7 @@ function ContextMenu({
   onDelete: () => void
   onForward: () => void
   onCheckScam?: () => void
+  onTranslate?: () => void
 }) {
   return (
     <div
@@ -179,6 +181,15 @@ function ContextMenu({
         isOut ? 'right-0' : 'left-0'
       }`}
     >
+      {onTranslate && (
+        <button
+          onClick={onTranslate}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+        >
+          <Languages size={13} />
+          Translate
+        </button>
+      )}
       {canForward && (
         <button
           onClick={onForward}
@@ -249,6 +260,8 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [scamChecking, setScamChecking] = useState(false)
   const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | null>(null)
+  const [translation, setTranslation] = useState<string | null>(null)
+  const [translating, setTranslating] = useState(false)
 
   const handleCheckScam = useCallback(async () => {
     setScamChecking(true)
@@ -265,6 +278,21 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
       setScamChecking(false)
     }
   }, [message.chat_id, message.telegram_id])
+
+  const handleTranslate = useCallback(async () => {
+    if (!message.text || translating) return
+    setTranslating(true)
+    try {
+      const prefs = await getPrefs()
+      const lang = prefs.translation_language || 'English'
+      const result = await translateMessage(message.text, lang)
+      setTranslation(result.translation)
+    } catch {
+      setTranslation('[Translation failed]')
+    } finally {
+      setTranslating(false)
+    }
+  }, [message.text, translating])
 
   // If scam_score updates (via parent re-render from WS event), reflect it
   useEffect(() => {
@@ -343,6 +371,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
+                  onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
                 />
               )}
             </div>
@@ -409,6 +438,23 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             <p className="px-3 py-2">
               <FormattedText html={message.text_html ?? simpleMarkdownToHtml(message.text)} isOut={isOut} />
             </p>
+          )}
+          {/* Translation */}
+          {translating && (
+            <div className={`flex items-center gap-1.5 px-3 py-1.5 text-xs ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>
+              <Loader2 size={12} className="animate-spin" />
+              <span>Translating…</span>
+            </div>
+          )}
+          {translation && !translating && (
+            <div className={`px-3 py-1.5 border-t ${isOut ? 'border-indigo-500/30' : 'border-slate-600/50'}`}>
+              <div className={`flex items-center gap-1 mb-0.5 text-[10px] ${isOut ? 'text-indigo-300/70' : 'text-slate-500'}`}>
+                <Languages size={10} />
+                <span>Translation</span>
+                <button onClick={() => setTranslation(null)} className="ml-auto hover:text-slate-300"><X size={10} /></button>
+              </div>
+              <p className={`text-sm ${isOut ? 'text-indigo-100' : 'text-slate-200'}`}>{translation}</p>
+            </div>
           )}
           {hasPhoto && (
             <>
@@ -587,6 +633,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
+                  onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
                 />
               )}
             </div>

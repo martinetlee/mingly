@@ -255,6 +255,7 @@ export interface Prefs {
   briefing_max_tokens?: number
   briefing_last_run?: string
   catchup_summary_interval_minutes?: number
+  translation_language?: string
   [key: string]: unknown
 }
 

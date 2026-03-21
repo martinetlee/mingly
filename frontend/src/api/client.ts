@@ -738,3 +738,17 @@ export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[
     method: 'POST',
     body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
   })
+
+// ── Translation ──
+
+export const translateMessage = (text: string, targetLanguage: string) =>
+  request<{ translation: string }>('/api/translate', {
+    method: 'POST',
+    body: JSON.stringify({ text, target_language: targetLanguage }),
+  })
+
+export const setTranslationLanguage = (language: string) =>
+  request<{ success: boolean; language: string }>('/api/settings/prefs/translation-language', {
+    method: 'POST',
+    body: JSON.stringify({ language }),
+  })

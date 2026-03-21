@@ -494,19 +494,43 @@ export default function Chats() {
     }
   }, [LIMIT])
 
+  // Track whether we've exhausted Telegram history for this chat
+  const [noMoreRemote, setNoMoreRemote] = useState(false)
+
   const loadMoreMessages = useCallback(async () => {
     if (!selectedChat || loadingMore) return
     setLoadingMore(true)
     const nextOffset = messageOffset + LIMIT
     try {
       const data = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
-      setMessages((prev) => [...data, ...prev])
-      setMessageOffset(nextOffset)
-      setHasMore(data.length === LIMIT)
+      if (data.length > 0) {
+        setMessages((prev) => [...data, ...prev])
+        setMessageOffset(nextOffset)
+        setHasMore(data.length === LIMIT)
+      } else {
+        // No more local messages — try fetching from Telegram
+        setHasMore(false)
+        if (!noMoreRemote) {
+          try {
+            await syncChat(selectedChat.telegram_id, 100)
+            // Reload all messages after sync
+            const refreshed = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
+            if (refreshed.length > 0) {
+              setMessages((prev) => [...refreshed, ...prev])
+              setMessageOffset(nextOffset)
+              setHasMore(refreshed.length === LIMIT)
+            } else {
+              setNoMoreRemote(true)
+            }
+          } catch {
+            setNoMoreRemote(true)
+          }
+        }
+      }
     } finally {
       setLoadingMore(false)
     }
-  }, [selectedChat, messageOffset, loadingMore, LIMIT])
+  }, [selectedChat, messageOffset, loadingMore, LIMIT, noMoreRemote])
 
   useEffect(() => {
     // Parse URL params for mention navigation: ?chatId=X&msgId=Y
@@ -687,6 +711,7 @@ export default function Chats() {
     setSelectedChat(chat)
     setMessages([])
     setHasMore(false)
+    setNoMoreRemote(false)
     setMessageOffset(0)
     setShowInfo(false)
     setHighlightMsgId(null)
@@ -1408,18 +1433,19 @@ export default function Chats() {
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col overflow-hidden">
-                  {hasMore && (
-                    <div className="flex justify-center border-b border-slate-700/50 py-2">
-                      <button
-                        onClick={loadMoreMessages}
-                        disabled={loadingMore}
-                        className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                      >
-                        {loadingMore ? 'Loading…' : 'Load older messages'}
-                      </button>
-                    </div>
-                  )}
-                  <MessageList messages={messages} chatType={selectedChat.type} highlightTelegramId={highlightMsgId} onReply={setReplyToMessage} onReact={handleReact} onEdit={handleEdit} onDelete={handleDelete} onForward={handleForward} unreadCount={selectedChatUnread} />
+                  <MessageList
+                    messages={messages}
+                    chatType={selectedChat.type}
+                    highlightTelegramId={highlightMsgId}
+                    onReply={setReplyToMessage}
+                    onReact={handleReact}
+                    onEdit={handleEdit}
+                    onDelete={handleDelete}
+                    onForward={handleForward}
+                    unreadCount={selectedChatUnread}
+                    loadingOlder={loadingMore}
+                    onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
+                  />
                 </div>
               )}
 

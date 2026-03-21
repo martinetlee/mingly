@@ -285,3 +285,15 @@ async def set_user_organizations(req: UserOrganizationsRequest):
     prefs["user_organizations"] = req.organizations
     _save_prefs(prefs)
     return {"success": True, "organizations": req.organizations}
+
+
+class TranslationLanguageRequest(BaseModel):
+    language: str
+
+
+@router.post("/prefs/translation-language")
+async def set_translation_language(req: TranslationLanguageRequest):
+    prefs = _load_prefs()
+    prefs["translation_language"] = req.language
+    _save_prefs(prefs)
+    return {"success": True, "language": req.language}

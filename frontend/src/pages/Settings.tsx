@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
 
@@ -483,6 +483,9 @@ export default function Settings() {
   // Catch-up summary interval
   const [catchUpInterval, setCatchUpInterval] = useState<number>(30)
 
+  // Translation language
+  const [translationLang, setTranslationLang] = useState<string>('English')
+
   // User organizations
   const [allOrgs, setAllOrgs] = useState<string[]>([])
   const [userOrgs, setUserOrgs] = useState<string[]>([])
@@ -540,6 +543,7 @@ export default function Settings() {
         if (prefs.briefing_time) setBriefingTime(prefs.briefing_time)
         if (prefs.briefing_max_tokens) setBriefingMaxTokens(Number(prefs.briefing_max_tokens))
         if (prefs.catchup_summary_interval_minutes) setCatchUpInterval(Number(prefs.catchup_summary_interval_minutes))
+        if (prefs.translation_language) setTranslationLang(prefs.translation_language as string)
       })
       .catch(() => {})
 
@@ -962,6 +966,46 @@ export default function Settings() {
                 {notifPref !== 'off' && (
                   <p className="mt-2 text-xs text-emerald-400">✓ Native notifications enabled</p>
                 )}
+              </div>
+            </section>
+
+            {/* ── Translation ── */}
+            <section className="max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Translation</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Default language for translating messages.
+              </p>
+
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="mb-1.5 block text-xs font-medium text-slate-400">
+                  Translate to
+                </label>
+                <select
+                  value={translationLang}
+                  onChange={(e) => {
+                    setTranslationLang(e.target.value)
+                    apiSetTranslationLanguage(e.target.value).catch(() => {})
+                  }}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value="English">English</option>
+                  <option value="Chinese (Traditional)">Chinese (Traditional)</option>
+                  <option value="Chinese (Simplified)">Chinese (Simplified)</option>
+                  <option value="Japanese">Japanese</option>
+                  <option value="Korean">Korean</option>
+                  <option value="Spanish">Spanish</option>
+                  <option value="French">French</option>
+                  <option value="German">German</option>
+                  <option value="Portuguese">Portuguese</option>
+                  <option value="Russian">Russian</option>
+                  <option value="Arabic">Arabic</option>
+                  <option value="Hindi">Hindi</option>
+                  <option value="Thai">Thai</option>
+                  <option value="Vietnamese">Vietnamese</option>
+                  <option value="Indonesian">Indonesian</option>
+                  <option value="Turkish">Turkish</option>
+                  <option value="Italian">Italian</option>
+                </select>
               </div>
             </section>
 

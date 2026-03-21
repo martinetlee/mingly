@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message } from '../api/types'
 import MessageBubble from './MessageBubble'
 import MediaAlbumGrid from './MediaAlbumGrid'
@@ -14,6 +14,10 @@ interface Props {
   onForward?: (msg: Message) => void
   /** Number of unread messages from the end of the list */
   unreadCount?: number
+  /** Called when user scrolls near the top */
+  onScrollNearTop?: () => void
+  /** Whether older messages are currently loading */
+  loadingOlder?: boolean
 }
 
 /**
@@ -60,8 +64,9 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
   const highlightRef = useRef<HTMLDivElement>(null)
   const unreadRef = useRef<HTMLDivElement>(null)
@@ -95,6 +100,30 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
     bottomRef.current?.scrollIntoView({ behavior })
   }, [messages, highlightTelegramId])
 
+  // Preserve scroll position when older messages are prepended
+  const prevScrollHeightRef = useRef(0)
+  useEffect(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const prevCount = prevCountRef.current
+    // If messages were prepended (count grew but we're not at initial load)
+    if (prevCount > 0 && messages.length > prevCount) {
+      const heightDiff = el.scrollHeight - prevScrollHeightRef.current
+      if (heightDiff > 0 && el.scrollTop < 100) {
+        el.scrollTop = heightDiff
+      }
+    }
+    prevScrollHeightRef.current = el.scrollHeight
+  })
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el || !onScrollNearTop) return
+    if (el.scrollTop < 200) {
+      onScrollNearTop()
+    }
+  }, [onScrollNearTop])
+
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
@@ -106,7 +135,12 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
   const grouped = groupMessages(messages)
 
   return (
-    <div className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
+    <div ref={scrollContainerRef} onScroll={handleScroll} className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
+      {loadingOlder && (
+        <div className="flex justify-center py-3">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+        </div>
+      )}
       {grouped.map((item, idx) => {
         if (item.type === 'album') {
           const firstMsg = item.messages[0]
