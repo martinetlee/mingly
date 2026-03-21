@@ -95,3 +95,103 @@ class CloudAPIClient:
                 body["refresh_token"] = refresh_token
             resp = await c.post("/auth/logout", json=body)
             return await self._handle(resp)
+
+    # ── User / email endpoints ─────────────────────────────────────────────
+
+    async def get_profile(self, access_token: str) -> dict:
+        """GET /me — get current user profile with verified emails."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get("/me")
+            return await self._handle(resp)
+
+    async def add_email(self, access_token: str, email: str) -> dict:
+        """POST /me/emails — add a new email (triggers verification magic link).
+
+        Returns ``{request_id, claim_secret, message, expires_in}``.
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post("/me/emails", json={"email": email})
+            return await self._handle(resp)
+
+    async def remove_email(
+        self, access_token: str, email_id: str, confirm: bool = False
+    ) -> dict:
+        """DELETE /me/emails/{email_id} — remove a verified email.
+
+        When ``confirm=True``, cascading org membership revocations proceed.
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.delete(
+                f"/me/emails/{email_id}",
+                params={"confirm": str(confirm).lower()},
+            )
+            return await self._handle(resp)
+
+    async def poll_email_verification(
+        self, access_token: str, request_id: str, claim_secret: str
+    ) -> dict:
+        """Poll the claim endpoint for an email-verification magic link.
+
+        Re-uses the same ``/auth/magic-link/claim/{request_id}`` endpoint
+        used for login, but with ``purpose=verify_email``.
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(
+                f"/auth/magic-link/claim/{request_id}",
+                headers={"X-Claim-Secret": claim_secret},
+            )
+            return await self._handle(resp)
+
+    # ── Org endpoints ──────────────────────────────────────────────────────
+
+    async def list_orgs(self, access_token: str) -> dict:
+        """GET /orgs — list orgs the user belongs to."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get("/orgs")
+            return await self._handle(resp)
+
+    async def create_org(self, access_token: str, name: str, domain: str) -> dict:
+        """POST /orgs — create a new org (requires verified email on domain)."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post("/orgs", json={"name": name, "domain": domain})
+            return await self._handle(resp)
+
+    async def get_org(self, access_token: str, org_id: str) -> dict:
+        """GET /orgs/{org_id} — get org details."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}")
+            return await self._handle(resp)
+
+    async def join_org(self, access_token: str, org_id: str) -> dict:
+        """POST /orgs/{org_id}/join — join or request to join an org."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post(f"/orgs/{org_id}/join")
+            return await self._handle(resp)
+
+    async def list_members(self, access_token: str, org_id: str) -> dict:
+        """GET /orgs/{org_id}/members — list org members."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/members")
+            return await self._handle(resp)
+
+    async def list_pending(self, access_token: str, org_id: str) -> dict:
+        """GET /orgs/{org_id}/members/pending — list pending join requests."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/members/pending")
+            return await self._handle(resp)
+
+    async def update_member(
+        self, access_token: str, org_id: str, user_id: str, data: dict
+    ) -> dict:
+        """PATCH /orgs/{org_id}/members/{user_id} — update member role/status."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.patch(f"/orgs/{org_id}/members/{user_id}", json=data)
+            return await self._handle(resp)
+
+    async def remove_member(
+        self, access_token: str, org_id: str, user_id: str
+    ) -> dict:
+        """DELETE /orgs/{org_id}/members/{user_id} — revoke membership."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.delete(f"/orgs/{org_id}/members/{user_id}")
+            return await self._handle(resp)

@@ -773,3 +773,108 @@ export const cloudCancelConnect = () =>
   request<{ status: string }>('/api/cloud/cancel-connect', {
     method: 'POST',
   })
+
+// ── Cloud Profile / Emails ──
+
+export const getCloudProfile = () =>
+  request<{
+    id: string
+    primary_email: string
+    created_at: string
+    emails: Array<{
+      id: string
+      email: string
+      domain: string
+      verified_at: string
+    }>
+  }>('/api/cloud/profile')
+
+export const addCloudEmail = (email: string) =>
+  request<{
+    status: string
+    request_id: string
+    claim_secret: string
+    message: string
+  }>('/api/cloud/emails', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+
+export const pollEmailVerification = (requestId: string, claimSecret: string) =>
+  request<{ status: string }>(`/api/cloud/emails/verify-status/${requestId}?claim_secret=${encodeURIComponent(claimSecret)}`)
+
+export const removeCloudEmail = (emailId: string, confirm = false) =>
+  request<{
+    removed_email: string
+    revoked_memberships: Array<{ org_id: string; org_name: string }>
+  }>(`/api/cloud/emails/${emailId}?confirm=${confirm}`, {
+    method: 'DELETE',
+  })
+
+// ── Cloud Orgs ──
+
+export const getCloudOrgs = () =>
+  request<Array<{
+    id: string
+    name: string
+    domain: string
+    role: string
+    member_count: number
+    status: string
+  }>>('/api/cloud/orgs')
+
+export const createCloudOrg = (name: string, domain: string) =>
+  request<{
+    id: string
+    name: string
+    domain: string
+  }>('/api/cloud/orgs', {
+    method: 'POST',
+    body: JSON.stringify({ name, domain }),
+  })
+
+export const getCloudOrg = (orgId: string) =>
+  request<{
+    id: string
+    name: string
+    domain: string
+    join_policy: string
+    created_at: string
+    member_count: number
+  }>(`/api/cloud/orgs/${orgId}`)
+
+export const joinCloudOrg = (orgId: string) =>
+  request<{
+    membership_id: string
+    status: string
+    message: string
+  }>(`/api/cloud/orgs/${orgId}/join`, {
+    method: 'POST',
+  })
+
+export const getCloudOrgMembers = (orgId: string) =>
+  request<Array<{
+    user_id: string
+    email: string
+    role: string
+    status: string
+    joined_at: string
+  }>>(`/api/cloud/orgs/${orgId}/members`)
+
+export const getCloudOrgPending = (orgId: string) =>
+  request<Array<{
+    user_id: string
+    email: string
+    requested_at: string
+  }>>(`/api/cloud/orgs/${orgId}/members/pending`)
+
+export const updateCloudOrgMember = (orgId: string, userId: string, data: { status?: string; role?: string }) =>
+  request<{ user_id: string; status: string; role: string }>(`/api/cloud/orgs/${orgId}/members/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const removeCloudOrgMember = (orgId: string, userId: string) =>
+  request<{ success: boolean }>(`/api/cloud/orgs/${orgId}/members/${userId}`, {
+    method: 'DELETE',
+  })

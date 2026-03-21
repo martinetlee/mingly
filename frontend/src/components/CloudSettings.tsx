@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { getCloudStatus, cloudConnect, cloudDisconnect, cloudCancelConnect } from '../api/client'
 import { getSessionToken } from '../api/session'
+import EmailManagement from './EmailManagement'
+import OrgManagement from './OrgManagement'
 
 type CloudStatus = 'connected' | 'disconnected' | 'connecting' | 'offline' | 'expired' | 'timeout' | 'error'
 
@@ -238,6 +240,14 @@ export default function CloudSettings() {
       {error && status !== 'timeout' && status !== 'error' && (
         <div className="mt-3 rounded-lg bg-red-900/40 border border-red-700/50 px-3 py-2 text-xs text-red-300">
           {error}
+        </div>
+      )}
+
+      {/* Email & Org management — only visible when connected */}
+      {status === 'connected' && (
+        <div className="mt-6 space-y-2">
+          <EmailManagement />
+          <OrgManagement />
         </div>
       )}
     </section>
