@@ -78,6 +78,18 @@ class UpdateMemberRequest(BaseModel):
     role: Optional[str] = None
 
 
+class ShareContactRequest(BaseModel):
+    telegram_id: int
+    name: str
+    telegram_handle: Optional[str] = None
+
+
+class CreateSharedOrgRequest(BaseModel):
+    name: str
+    domain: Optional[str] = None
+    website: Optional[str] = None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 async def _broadcast_cloud_status() -> None:
@@ -357,5 +369,63 @@ async def cloud_remove_member(org_id: str, user_id: str):
     token = _require_connected()
     try:
         return await _get_client().remove_member(token, org_id, user_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+# ── Shared contacts endpoints ────────────────────────────────────────────
+
+@router.post("/orgs/{org_id}/share-contact")
+async def cloud_share_contact(org_id: str, req: ShareContactRequest):
+    """Share a local contact to the org's shared pool.
+
+    Creates a SharedContact via the cloud API.  Returns the created contact,
+    or a 409 with the existing contact if the telegram_id is already shared.
+    """
+    token = _require_connected()
+    client = _get_client()
+    data: dict = {
+        "telegram_id": req.telegram_id,
+        "name": req.name,
+    }
+    if req.telegram_handle:
+        data["telegram_handle"] = req.telegram_handle
+    try:
+        return await client.create_shared_contact(token, org_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/contacts")
+async def cloud_list_shared_contacts(org_id: str):
+    """List all shared contacts for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_shared_contacts(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/directory")
+async def cloud_list_directory(org_id: str):
+    """List shared external organizations for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_directory(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/directory")
+async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
+    """Create a shared (external) organization in the org's directory."""
+    token = _require_connected()
+    data: dict = {"name": req.name}
+    if req.domain:
+        data["domain"] = req.domain
+    if req.website:
+        data["website"] = req.website
+    try:
+        return await _get_client().create_shared_org(token, org_id, data)
     except CloudAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)

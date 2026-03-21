@@ -878,3 +878,63 @@ export const removeCloudOrgMember = (orgId: string, userId: string) =>
   request<{ success: boolean }>(`/api/cloud/orgs/${orgId}/members/${userId}`, {
     method: 'DELETE',
   })
+
+// ── Cloud Shared Contacts ──
+
+export interface SharedContact {
+  id: string
+  org_id: string
+  telegram_id: number
+  name: string
+  telegram_handle: string | null
+  contributed_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface SharedOrg {
+  id: string
+  org_id: string
+  name: string
+  domain: string | null
+  website: string | null
+  contact_count?: number
+  created_at: string
+}
+
+export interface ContactLink {
+  id: string
+  shared_contact_id: string
+  shared_org_id: string
+  org_id: string
+  position: string | null
+  relationship_context: string | null
+  created_at: string
+}
+
+export const shareContactToOrg = (orgId: string, data: { telegram_id: number; name: string; telegram_handle?: string }) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/share-contact`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const listSharedContacts = (orgId: string) =>
+  request<SharedContact[]>(`/api/cloud/orgs/${orgId}/contacts`)
+
+export const listDirectory = (orgId: string) =>
+  request<SharedOrg[]>(`/api/cloud/orgs/${orgId}/directory`)
+
+export const createSharedOrg = (orgId: string, data: { name: string; domain?: string; website?: string }) =>
+  request<SharedOrg>(`/api/cloud/orgs/${orgId}/directory`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const createContactLink = (orgId: string, contactId: string, data: { shared_org_id: string; position?: string; relationship_context?: string }) =>
+  request<ContactLink>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const listContactLinks = (orgId: string, contactId: string) =>
+  request<ContactLink[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`)
