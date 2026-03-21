@@ -1,5 +1,6 @@
 """
-REST endpoints for cloud account management (connect / disconnect / status).
+REST endpoints for cloud account management (connect / disconnect / status),
+email management, and org management.
 """
 
 import asyncio
@@ -10,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from backend.cloud import auth as cloud_auth
-from backend.cloud.client import CloudAPIError
+from backend.cloud.client import CloudAPIClient, CloudAPIError
 from backend.cloud.session import cloud_session
 from backend.ws.manager import ws_manager
 
@@ -19,6 +20,23 @@ log = logging.getLogger(__name__)
 
 # In-memory state for an active connect (magic-link) flow
 _active_connect: Optional[asyncio.Task] = None
+
+# In-memory state for active email verification polling tasks
+_email_verify_tasks: dict[str, asyncio.Task] = {}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _require_connected() -> str:
+    """Return the current access token or raise 401."""
+    token = cloud_session.access_token
+    if not token or cloud_session.status != "connected":
+        raise HTTPException(status_code=401, detail="Not connected to cloud")
+    return token
+
+
+def _get_client() -> CloudAPIClient:
+    return CloudAPIClient()
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -40,6 +58,24 @@ class CloudStatusResponse(BaseModel):
 class DisconnectResponse(BaseModel):
     status: str
     message: str
+
+
+class AddEmailRequest(BaseModel):
+    email: EmailStr
+
+
+class RemoveEmailRequest(BaseModel):
+    confirm: bool = False
+
+
+class CreateOrgRequest(BaseModel):
+    name: str
+    domain: str
+
+
+class UpdateMemberRequest(BaseModel):
+    status: Optional[str] = None
+    role: Optional[str] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -181,3 +217,145 @@ async def cloud_cancel_connect():
         _active_connect = None
     await _broadcast_cloud_status()
     return {"status": "cancelled"}
+
+
+# ── Email management endpoints ────────────────────────────────────────────
+
+@router.get("/profile")
+async def cloud_profile():
+    """Get user profile with verified emails."""
+    token = _require_connected()
+    try:
+        return await _get_client().get_profile(token)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/emails")
+async def cloud_add_email(req: AddEmailRequest):
+    """Add a new email address (triggers verification magic link).
+
+    Returns request_id for polling verification status.
+    """
+    token = _require_connected()
+    try:
+        result = await _get_client().add_email(token, req.email)
+        # Return the request_id and claim_secret so frontend can poll
+        return {
+            "status": "verification_sent",
+            "request_id": result.get("request_id"),
+            "claim_secret": result.get("claim_secret"),
+            "message": result.get("message", "Verification email sent. Check your inbox."),
+        }
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/emails/verify-status/{request_id}")
+async def cloud_email_verify_status(request_id: str, claim_secret: str):
+    """Poll verification status for an email being verified."""
+    token = _require_connected()
+    try:
+        result = await _get_client().poll_email_verification(
+            token, request_id, claim_secret
+        )
+        return result
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.delete("/emails/{email_id}")
+async def cloud_remove_email(email_id: str, confirm: bool = False):
+    """Remove a verified email. Pass confirm=true to cascade org membership revocations."""
+    token = _require_connected()
+    try:
+        return await _get_client().remove_email(token, email_id, confirm=confirm)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+# ── Org management endpoints ─────────────────────────────────────────────
+
+@router.get("/orgs")
+async def cloud_list_orgs():
+    """List orgs the user belongs to."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_orgs(token)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs")
+async def cloud_create_org(req: CreateOrgRequest):
+    """Create a new org (requires verified email on that domain)."""
+    token = _require_connected()
+    try:
+        return await _get_client().create_org(token, req.name, req.domain)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}")
+async def cloud_get_org(org_id: str):
+    """Get org details."""
+    token = _require_connected()
+    try:
+        return await _get_client().get_org(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/join")
+async def cloud_join_org(org_id: str):
+    """Join or request to join an org."""
+    token = _require_connected()
+    try:
+        return await _get_client().join_org(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/members")
+async def cloud_list_members(org_id: str):
+    """List org members."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_members(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/members/pending")
+async def cloud_list_pending(org_id: str):
+    """List pending join requests (admin only)."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_pending(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.patch("/orgs/{org_id}/members/{user_id}")
+async def cloud_update_member(org_id: str, user_id: str, req: UpdateMemberRequest):
+    """Update member role or status (admin only)."""
+    token = _require_connected()
+    data = {}
+    if req.status is not None:
+        data["status"] = req.status
+    if req.role is not None:
+        data["role"] = req.role
+    try:
+        return await _get_client().update_member(token, org_id, user_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.delete("/orgs/{org_id}/members/{user_id}")
+async def cloud_remove_member(org_id: str, user_id: str):
+    """Remove a member from the org (admin or self)."""
+    token = _require_connected()
+    try:
+        return await _get_client().remove_member(token, org_id, user_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
