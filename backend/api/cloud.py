@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
 from backend.cloud import auth as cloud_auth
@@ -402,6 +402,27 @@ async def cloud_list_shared_contacts(org_id: str):
     token = _require_connected()
     try:
         return await _get_client().list_shared_contacts(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/contacts/{contact_id}/links")
+async def cloud_list_contact_links(org_id: str, contact_id: str):
+    """List org links for a shared contact."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_contact_links(token, org_id, contact_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/contacts/{contact_id}/links")
+async def cloud_create_contact_link(org_id: str, contact_id: str, request: Request):
+    """Link a shared contact to an external org."""
+    token = _require_connected()
+    data = await request.json()
+    try:
+        return await _get_client().create_contact_link(token, org_id, contact_id, data)
     except CloudAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
