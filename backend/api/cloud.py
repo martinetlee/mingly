@@ -78,6 +78,30 @@ class UpdateMemberRequest(BaseModel):
     role: Optional[str] = None
 
 
+class ShareContactRequest(BaseModel):
+    telegram_id: int
+    name: str
+    telegram_handle: Optional[str] = None
+
+
+class CreateSharedOrgRequest(BaseModel):
+    name: str
+    domain: Optional[str] = None
+    website: Optional[str] = None
+
+
+class BackupEnableRequest(BaseModel):
+    master_password: str
+
+
+class BackupDisableRequest(BaseModel):
+    delete_remote: bool = False
+
+
+class BackupRestoreRequest(BaseModel):
+    master_password: str
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 async def _broadcast_cloud_status() -> None:
@@ -359,3 +383,139 @@ async def cloud_remove_member(org_id: str, user_id: str):
         return await _get_client().remove_member(token, org_id, user_id)
     except CloudAPIError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+# ── Shared contacts endpoints ────────────────────────────────────────────
+
+@router.post("/orgs/{org_id}/share-contact")
+async def cloud_share_contact(org_id: str, req: ShareContactRequest):
+    """Share a local contact to the org's shared pool.
+
+    Creates a SharedContact via the cloud API.  Returns the created contact,
+    or a 409 with the existing contact if the telegram_id is already shared.
+    """
+    token = _require_connected()
+    client = _get_client()
+    data: dict = {
+        "telegram_id": req.telegram_id,
+        "name": req.name,
+    }
+    if req.telegram_handle:
+        data["telegram_handle"] = req.telegram_handle
+    try:
+        return await client.create_shared_contact(token, org_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/contacts")
+async def cloud_list_shared_contacts(org_id: str):
+    """List all shared contacts for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_shared_contacts(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/orgs/{org_id}/directory")
+async def cloud_list_directory(org_id: str):
+    """List shared external organizations for the org."""
+    token = _require_connected()
+    try:
+        return await _get_client().list_directory(token, org_id)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post("/orgs/{org_id}/directory")
+async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
+    """Create a shared (external) organization in the org's directory."""
+    token = _require_connected()
+    data: dict = {"name": req.name}
+    if req.domain:
+        data["domain"] = req.domain
+    if req.website:
+        data["website"] = req.website
+    try:
+        return await _get_client().create_shared_org(token, org_id, data)
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+# ── Backup endpoints ─────────────────────────────────────────────────────
+
+@router.post("/backup/enable")
+async def cloud_backup_enable(req: BackupEnableRequest):
+    """Enable encrypted backup sync.
+
+    Derives the backup key from the master password, encrypts all contacts,
+    and uploads the encrypted payload to the cloud.
+    """
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.enable_backup(req.master_password)
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup enable failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to enable backup")
+
+
+@router.post("/backup/disable")
+async def cloud_backup_disable(req: BackupDisableRequest):
+    """Disable backup sync. Optionally delete the remote backup."""
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.disable_backup(delete_remote=req.delete_remote)
+        return result
+    except Exception as exc:
+        log.exception("Backup disable failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to disable backup")
+
+
+@router.post("/backup/restore")
+async def cloud_backup_restore(req: BackupRestoreRequest):
+    """Restore contacts from an encrypted cloud backup.
+
+    Returns the decrypted contact data without importing it.
+    """
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.restore_backup(req.master_password)
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup restore failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to restore backup")
+
+
+@router.post("/backup/sync")
+async def cloud_backup_sync():
+    """Manually trigger a backup sync."""
+    _require_connected()
+    from backend.cloud.backup import backup_manager
+    try:
+        result = await backup_manager.sync_backup()
+        return result
+    except CloudAPIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:
+        log.exception("Backup sync failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to sync backup")
+
+
+@router.get("/backup/status")
+async def cloud_backup_status():
+    """Get backup status: enabled state, last sync time, dirty flag."""
+    from backend.cloud.backup import backup_manager
+    return backup_manager.get_status()

@@ -195,3 +195,107 @@ class CloudAPIClient:
         async with self._client(access_token=access_token) as c:
             resp = await c.delete(f"/orgs/{org_id}/members/{user_id}")
             return await self._handle(resp)
+
+    # ── Shared contacts endpoints ─────────────────────────────────────────
+
+    async def list_shared_contacts(self, access_token: str, org_id: str) -> dict:
+        """GET /orgs/{org_id}/contacts — list shared contacts for an org."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/contacts")
+            return await self._handle(resp)
+
+    async def create_shared_contact(
+        self, access_token: str, org_id: str, data: dict
+    ) -> dict:
+        """POST /orgs/{org_id}/contacts — contribute a contact to the org.
+
+        ``data`` should contain at minimum ``telegram_id``, ``name``, and
+        optionally ``telegram_handle``.  Returns the created contact or
+        raises ``CloudAPIError(409)`` if a contact with that telegram_id
+        already exists in the org.
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post(f"/orgs/{org_id}/contacts", json=data)
+            return await self._handle(resp)
+
+    async def get_shared_contact(
+        self, access_token: str, org_id: str, contact_id: str
+    ) -> dict:
+        """GET /orgs/{org_id}/contacts/{contact_id} — get shared contact detail."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}")
+            return await self._handle(resp)
+
+    async def update_shared_contact(
+        self, access_token: str, org_id: str, contact_id: str, data: dict
+    ) -> dict:
+        """PATCH /orgs/{org_id}/contacts/{contact_id} — update shared contact info."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.patch(f"/orgs/{org_id}/contacts/{contact_id}", json=data)
+            return await self._handle(resp)
+
+    # ── Directory (shared external orgs) ──────────────────────────────────
+
+    async def list_directory(self, access_token: str, org_id: str) -> dict:
+        """GET /orgs/{org_id}/directory — list shared external orgs."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/directory")
+            return await self._handle(resp)
+
+    async def create_shared_org(
+        self, access_token: str, org_id: str, data: dict
+    ) -> dict:
+        """POST /orgs/{org_id}/directory — create a shared external org.
+
+        ``data`` should contain ``name`` and optionally ``domain``, ``website``.
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post(f"/orgs/{org_id}/directory", json=data)
+            return await self._handle(resp)
+
+    # ── Contact org links ─────────────────────────────────────────────────
+
+    async def create_contact_link(
+        self, access_token: str, org_id: str, contact_id: str, data: dict
+    ) -> dict:
+        """POST /orgs/{org_id}/contacts/{contact_id}/links — link contact to external org.
+
+        ``data`` should contain ``shared_org_id`` and optionally ``position``
+        and ``relationship_context`` (client/vendor/partner/prospect).
+        """
+        async with self._client(access_token=access_token) as c:
+            resp = await c.post(
+                f"/orgs/{org_id}/contacts/{contact_id}/links", json=data
+            )
+            return await self._handle(resp)
+
+    async def list_contact_links(
+        self, access_token: str, org_id: str, contact_id: str
+    ) -> dict:
+        """GET /orgs/{org_id}/contacts/{contact_id}/links — list contact org links."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}/links")
+            return await self._handle(resp)
+
+    # ── Backup endpoints ──────────────────────────────────────────────────
+
+    async def upload_backup(self, access_token: str, encrypted_payload: str) -> dict:
+        """PUT /me/backup — upload an encrypted personal backup."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.put(
+                "/me/backup",
+                json={"encrypted_payload": encrypted_payload},
+            )
+            return await self._handle(resp)
+
+    async def download_backup(self, access_token: str) -> dict:
+        """GET /me/backup — download the encrypted personal backup."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.get("/me/backup")
+            return await self._handle(resp)
+
+    async def delete_backup(self, access_token: str) -> dict:
+        """DELETE /me/backup — delete the personal backup from the server."""
+        async with self._client(access_token=access_token) as c:
+            resp = await c.delete("/me/backup")
+            return await self._handle(resp)

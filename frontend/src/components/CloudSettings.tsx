@@ -3,6 +3,7 @@ import { getCloudStatus, cloudConnect, cloudDisconnect, cloudCancelConnect } fro
 import { getSessionToken } from '../api/session'
 import EmailManagement from './EmailManagement'
 import OrgManagement from './OrgManagement'
+import BackupSettings from './BackupSettings'
 
 type CloudStatus = 'connected' | 'disconnected' | 'connecting' | 'offline' | 'expired' | 'timeout' | 'error'
 
@@ -248,6 +249,7 @@ export default function CloudSettings() {
         <div className="mt-6 space-y-2">
           <EmailManagement />
           <OrgManagement />
+          <BackupSettings />
         </div>
       )}
     </section>
