@@ -103,7 +103,7 @@ export default function BackupSettings() {
         }
         const detail = parts.length > 0 ? ` ${parts.join('. ')}.` : ''
         setSuccess(`Backup restored and imported successfully.${detail}`)
-        setStatus({ enabled: true, last_sync: new Date().toISOString(), dirty: false })
+        setStatus((prev) => ({ enabled: true, last_sync: prev?.last_sync ?? null, dirty: false }))
       } else if (res.status === 'no_backup') {
         setError('No backup found on the server.')
       } else if (res.status === 'decrypt_failed') {
