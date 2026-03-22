@@ -83,7 +83,26 @@ export default function BackupSettings() {
     try {
       const res = await restoreBackup(password)
       if (res.status === 'restored') {
-        setSuccess('Backup decrypted successfully. Contact data was returned but has not been imported into your local database yet. A future update will add automatic import.')
+        const s = res.import_summary
+        const parts: string[] = []
+        if (s?.contacts) {
+          const c = s.contacts
+          const cParts: string[] = []
+          if (c.new > 0) cParts.push(`${c.new} new`)
+          if (c.updated > 0) cParts.push(`${c.updated} updated`)
+          if (c.skipped > 0) cParts.push(`${c.skipped} unchanged`)
+          if (cParts.length > 0) parts.push(`Contacts: ${cParts.join(', ')}`)
+        }
+        if (s?.positions) {
+          const p = s.positions
+          const pParts: string[] = []
+          if (p.new > 0) pParts.push(`${p.new} new`)
+          if (p.updated > 0) pParts.push(`${p.updated} updated`)
+          if (p.skipped > 0) pParts.push(`${p.skipped} unchanged`)
+          if (pParts.length > 0) parts.push(`Positions: ${pParts.join(', ')}`)
+        }
+        const detail = parts.length > 0 ? ` ${parts.join('. ')}.` : ''
+        setSuccess(`Backup restored and imported successfully.${detail}`)
       } else if (res.status === 'no_backup') {
         setError('No backup found on the server.')
       } else if (res.status === 'decrypt_failed') {

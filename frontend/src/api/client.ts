@@ -1003,7 +1003,7 @@ export const disableBackup = (deleteRemote = false) =>
   })
 
 export const restoreBackup = (masterPassword: string) =>
-  request<{ status: string; data?: unknown; detail?: string }>('/api/cloud/backup/restore', {
+  request<{ status: string; detail?: string; import_summary?: { contacts: { new: number; updated: number; skipped: number }; positions: { new: number; updated: number; skipped: number } } }>('/api/cloud/backup/restore', {
     method: 'POST',
     body: JSON.stringify({ master_password: masterPassword }),
   })

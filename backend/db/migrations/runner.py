@@ -310,6 +310,13 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_tgmsgid_chat ON messages (tg_message_id, chat_id)",
         ],
     ),
+    (
+        30,
+        "Add cloud_shared_to column to contacts for tracking which orgs a contact was shared to",
+        [
+            "ALTER TABLE contacts ADD COLUMN cloud_shared_to TEXT",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

@@ -142,6 +142,142 @@ async def _get_all_contacts_data() -> dict:
     }
 
 
+async def _import_contacts_from_backup(data: dict) -> dict:
+    """Import contacts and positions from a decrypted backup payload into the local DB.
+
+    Upserts by telegram_id for contacts and by (telegram_id, organization) for positions.
+    Returns a summary dict with counts: new, updated, skipped (for both contacts and positions).
+    """
+    from backend.db.database import AsyncSessionLocal
+    from backend.db.models import Contact, ContactPosition
+    from sqlalchemy import select
+
+    contacts_list = data.get("contacts", [])
+    positions_list = data.get("positions", [])
+
+    # Fields that we update on contacts (excluding telegram_id which is the match key)
+    _CONTACT_FIELDS = [
+        "first_name", "last_name", "username", "phone",
+        "twitter_handle", "linkedin_url", "notes", "is_important",
+        "relationship_status", "relationship_status_manual",
+        "last_interaction_at", "last_outgoing_at", "last_incoming_at",
+    ]
+    _DATETIME_FIELDS = {"last_interaction_at", "last_outgoing_at", "last_incoming_at", "ended_at"}
+
+    contacts_new = 0
+    contacts_updated = 0
+    contacts_skipped = 0
+    positions_new = 0
+    positions_updated = 0
+    positions_skipped = 0
+
+    async with AsyncSessionLocal() as db:
+        # ── Import contacts ──────────────────────────────────────────────
+        for c_data in contacts_list:
+            telegram_id = c_data.get("telegram_id")
+            if not telegram_id:
+                contacts_skipped += 1
+                continue
+
+            try:
+                result = await db.execute(
+                    select(Contact).where(Contact.telegram_id == telegram_id)
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    # Update existing contact fields
+                    changed = False
+                    for field in _CONTACT_FIELDS:
+                        if field not in c_data:
+                            continue
+                        value = c_data[field]
+                        # Parse datetime strings back to datetime objects
+                        if field in _DATETIME_FIELDS and isinstance(value, str):
+                            value = datetime.fromisoformat(value)
+                        if getattr(existing, field) != value:
+                            setattr(existing, field, value)
+                            changed = True
+                    if changed:
+                        contacts_updated += 1
+                    else:
+                        contacts_skipped += 1
+                else:
+                    # Create new contact
+                    kwargs = {"telegram_id": telegram_id}
+                    for field in _CONTACT_FIELDS:
+                        if field not in c_data:
+                            continue
+                        value = c_data[field]
+                        if field in _DATETIME_FIELDS and isinstance(value, str):
+                            value = datetime.fromisoformat(value)
+                        kwargs[field] = value
+                    db.add(Contact(**kwargs))
+                    contacts_new += 1
+            except Exception as exc:
+                log.warning("Failed to import contact telegram_id=%s: %s", telegram_id, exc)
+                contacts_skipped += 1
+
+        # ── Import positions ─────────────────────────────────────────────
+        for p_data in positions_list:
+            telegram_id = p_data.get("telegram_id")
+            organization = p_data.get("organization")
+            if not telegram_id or not organization:
+                positions_skipped += 1
+                continue
+
+            try:
+                result = await db.execute(
+                    select(ContactPosition).where(
+                        ContactPosition.telegram_id == telegram_id,
+                        ContactPosition.organization == organization,
+                    )
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    changed = False
+                    for field in ("title", "is_active", "ended_at"):
+                        if field not in p_data:
+                            continue
+                        value = p_data[field]
+                        if field in _DATETIME_FIELDS and isinstance(value, str):
+                            value = datetime.fromisoformat(value)
+                        if getattr(existing, field) != value:
+                            setattr(existing, field, value)
+                            changed = True
+                    if changed:
+                        positions_updated += 1
+                    else:
+                        positions_skipped += 1
+                else:
+                    kwargs = {
+                        "telegram_id": telegram_id,
+                        "organization": organization,
+                    }
+                    for field in ("title", "is_active", "ended_at"):
+                        if field not in p_data:
+                            continue
+                        value = p_data[field]
+                        if field in _DATETIME_FIELDS and isinstance(value, str):
+                            value = datetime.fromisoformat(value)
+                        kwargs[field] = value
+                    db.add(ContactPosition(**kwargs))
+                    positions_new += 1
+            except Exception as exc:
+                log.warning("Failed to import position telegram_id=%s org=%s: %s", telegram_id, organization, exc)
+                positions_skipped += 1
+
+        await db.commit()
+
+    summary = {
+        "contacts": {"new": contacts_new, "updated": contacts_updated, "skipped": contacts_skipped},
+        "positions": {"new": positions_new, "updated": positions_updated, "skipped": positions_skipped},
+    }
+    log.info("Backup import complete: %s", summary)
+    return summary
+
+
 # ── BackupManager ─────────────────────────────────────────────────────────────
 
 class BackupManager:
@@ -276,10 +412,10 @@ class BackupManager:
     # ── Restore ───────────────────────────────────────────────────────────
 
     async def restore_backup(self, master_password: str) -> dict:
-        """Download encrypted backup, decrypt, return contact data.
+        """Download encrypted backup, decrypt, and import contacts into the local DB.
 
-        Does NOT automatically import into the local DB — the caller
-        decides how to handle the restored data.
+        Upserts contacts by telegram_id (inserts new, updates existing).
+        Returns a summary with counts of new, updated, and skipped contacts.
         """
         creds = get_cloud_credentials()
         if not creds or not creds.get("user_id"):
@@ -311,7 +447,13 @@ class BackupManager:
         # original object may remain in memory until GC; this only rebinds the name)
         master_password = ""  # noqa: F841
 
-        return {"status": "restored", "data": data}
+        # Import contacts into local database
+        import_summary = await _import_contacts_from_backup(data)
+
+        # Start background sync now that backup is enabled
+        self._start_sync_task()
+
+        return {"status": "restored", "import_summary": import_summary}
 
     # ── Password change (spec 6.5) ────────────────────────────────────────
 

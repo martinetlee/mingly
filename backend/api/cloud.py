@@ -5,15 +5,19 @@ email management, and org management.
 
 import asyncio
 import functools
+import json
 import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import select
 
 from backend.cloud import auth as cloud_auth
 from backend.cloud.client import CloudAPIClient, CloudAPIError
 from backend.cloud.session import cloud_session
+from backend.db.database import AsyncSessionLocal
+from backend.db.models import Contact
 from backend.ws.manager import ws_manager
 
 router = APIRouter()
@@ -412,7 +416,24 @@ async def cloud_share_contact(org_id: str, req: ShareContactRequest):
     }
     if req.telegram_handle:
         data["telegram_handle"] = req.telegram_handle
-    return await _get_client().create_shared_contact(token, org_id, data)
+    result = await _get_client().create_shared_contact(token, org_id, data)
+
+    # Tag local contact with cloud_shared_to for tracking (best-effort)
+    try:
+        async with AsyncSessionLocal() as db:
+            contact = (await db.execute(
+                select(Contact).where(Contact.telegram_id == req.telegram_id)
+            )).scalar_one_or_none()
+            if contact:
+                existing: list = json.loads(contact.cloud_shared_to) if contact.cloud_shared_to else []
+                if org_id not in existing:
+                    existing.append(org_id)
+                    contact.cloud_shared_to = json.dumps(existing)
+                    await db.commit()
+    except Exception:
+        log.warning("Failed to tag local contact %s with cloud_shared_to", req.telegram_id, exc_info=True)
+
+    return result
 
 
 @router.get("/orgs/{org_id}/contacts")
