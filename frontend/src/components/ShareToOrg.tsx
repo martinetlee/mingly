@@ -58,22 +58,6 @@ export default function ShareToOrg({
   // Filter to active orgs
   const activeOrgs = orgs.filter((o) => o.status === 'active')
 
-  const handleStartShare = useCallback(() => {
-    setError(null)
-    if (activeOrgs.length === 0) {
-      setError('You are not a member of any cloud org.')
-      setStep('error')
-      return
-    }
-    if (activeOrgs.length === 1) {
-      // Skip org selection — go straight to sharing
-      setSelectedOrgId(activeOrgs[0].id)
-      doShare(activeOrgs[0].id)
-    } else {
-      setStep('select-org')
-    }
-  }, [activeOrgs])
-
   const doShare = useCallback(async (orgId: string) => {
     setStep('sharing')
     setError(null)
@@ -102,6 +86,22 @@ export default function ShareToOrg({
       }
     }
   }, [telegramId, contactName, telegramHandle, activeOrgs])
+
+  const handleStartShare = useCallback(() => {
+    setError(null)
+    if (activeOrgs.length === 0) {
+      setError('You are not a member of any cloud org.')
+      setStep('error')
+      return
+    }
+    if (activeOrgs.length === 1) {
+      // Skip org selection — go straight to sharing
+      setSelectedOrgId(activeOrgs[0].id)
+      doShare(activeOrgs[0].id)
+    } else {
+      setStep('select-org')
+    }
+  }, [activeOrgs, doShare])
 
   const handleOrgSelected = useCallback(() => {
     if (!selectedOrgId) return

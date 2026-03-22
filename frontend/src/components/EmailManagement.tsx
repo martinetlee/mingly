@@ -25,8 +25,6 @@ export default function EmailManagement() {
   const [newEmail, setNewEmail] = useState('')
   const [addingEmail, setAddingEmail] = useState(false)
   const [verifying, setVerifying] = useState(false)
-  const [verifyRequestId, setVerifyRequestId] = useState<string | null>(null)
-  const [verifyClaimSecret, setVerifyClaimSecret] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -65,8 +63,6 @@ export default function EmailManagement() {
     setError(null)
     try {
       const result = await addCloudEmail(newEmail.trim())
-      setVerifyRequestId(result.request_id)
-      setVerifyClaimSecret(result.claim_secret)
       setVerifying(true)
       setAddingEmail(false)
 
@@ -80,8 +76,6 @@ export default function EmailManagement() {
             setVerifying(false)
             setShowAddForm(false)
             setNewEmail('')
-            setVerifyRequestId(null)
-            setVerifyClaimSecret(null)
             await fetchProfile()
           } else if (status.status === 'expired') {
             clearInterval(poll)
@@ -122,8 +116,6 @@ export default function EmailManagement() {
       timeoutRef.current = null
     }
     setVerifying(false)
-    setVerifyRequestId(null)
-    setVerifyClaimSecret(null)
     setShowAddForm(false)
     setNewEmail('')
   }, [])

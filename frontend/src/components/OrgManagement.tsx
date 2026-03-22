@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import {
   getCloudProfile,
   createCloudOrg,
@@ -35,8 +35,15 @@ type View = 'list' | 'detail' | 'create'
 
 export default function OrgManagement() {
   const { orgs, loading, error: fetchError, refetch: fetchOrgs } = useCloudOrgs()
-  const [error, setError] = useState<string | null>(fetchError)
+  const [error, setError] = useState<string | null>(null)
   const [view, setView] = useState<View>('list')
+
+  // Sync fetch errors into local error state
+  useEffect(() => {
+    if (fetchError) {
+      setError(fetchError)
+    }
+  }, [fetchError])
 
   // Create org state
   const [orgName, setOrgName] = useState('')

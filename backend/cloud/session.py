@@ -62,6 +62,10 @@ class CloudSessionManager:
     # ── Public properties ─────────────────────────────────────────────────
 
     @property
+    def client(self) -> CloudAPIClient:
+        return self._client
+
+    @property
     def status(self) -> str:
         return self._status
 
@@ -72,6 +76,15 @@ class CloudSessionManager:
     @property
     def email(self) -> Optional[str]:
         return get_cloud_email()
+
+    def update_tokens(
+        self,
+        access_token: str,
+        token_exp: Optional[float] = None,
+    ) -> None:
+        """Update in-memory session tokens (called from 401-retry path)."""
+        self._access_token = access_token
+        self._token_exp = token_exp
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 

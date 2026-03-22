@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 _VAULT_KEY_BACKUP_ENABLED = "cloud_backup_enabled"
 _VAULT_KEY_BACKUP_LAST_SYNC = "cloud_backup_last_sync"
-_VAULT_KEY_BACKUP_PASSWORD = "cloud_backup_password"
+_VAULT_KEY_BACKUP_KEY = "cloud_backup_key"
 
 _SYNC_INTERVAL_S = 30 * 60  # 30 minutes
 
@@ -196,16 +196,19 @@ class BackupManager:
         if not token:
             raise RuntimeError("Cloud session not active")
 
-        # Derive key on demand (password kept in vault for re-derivation during sync)
+        # Derive key and store it (not the password) in the vault
         key = derive_backup_key(master_password, user_id)
-        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, master_password)
+        secrets.save_secret(_VAULT_KEY_BACKUP_KEY, base64.b64encode(key).decode("ascii"))
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
+
+        # Clear password from memory
+        master_password = ""  # noqa: F841
 
         # Encrypt and upload
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, key)
 
-        client = cloud_session._client
+        client = cloud_session.client
         await client.upload_backup(token, encrypted)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -225,12 +228,12 @@ class BackupManager:
             token = cloud_session.access_token
             if token:
                 try:
-                    client = cloud_session._client
+                    client = cloud_session.client
                     await client.delete_backup(token)
                 except Exception as exc:
                     log.warning("Failed to delete remote backup: %s", exc)
 
-        secrets.delete_secret(_VAULT_KEY_BACKUP_PASSWORD)
+        secrets.delete_secret(_VAULT_KEY_BACKUP_KEY)
         secrets.delete_secret(_VAULT_KEY_BACKUP_ENABLED)
         secrets.delete_secret(_VAULT_KEY_BACKUP_LAST_SYNC)
         self._dirty = False
@@ -244,9 +247,9 @@ class BackupManager:
         if not self.enabled:
             return {"status": "not_enabled"}
 
-        password = secrets.get_secret(_VAULT_KEY_BACKUP_PASSWORD)
-        if not password:
-            return {"status": "error", "detail": "Backup password not found in vault"}
+        key_b64 = secrets.get_secret(_VAULT_KEY_BACKUP_KEY)
+        if not key_b64:
+            return {"status": "error", "detail": "Backup key not found in vault"}
 
         creds = get_cloud_credentials()
         if not creds or not creds.get("user_id"):
@@ -256,11 +259,11 @@ class BackupManager:
         if not token:
             return {"status": "error", "detail": "Cloud session not active"}
 
-        key = derive_backup_key(password, creds["user_id"])
+        key = base64.b64decode(key_b64)
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, key)
 
-        client = cloud_session._client
+        client = cloud_session.client
         await client.upload_backup(token, encrypted)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -288,7 +291,7 @@ class BackupManager:
         user_id = creds["user_id"]
         key = derive_backup_key(master_password, user_id)
 
-        client = cloud_session._client
+        client = cloud_session.client
         result = await client.download_backup(token)
         encrypted_payload = result.get("encrypted_payload")
         if not encrypted_payload:
@@ -299,9 +302,12 @@ class BackupManager:
         except Exception:
             return {"status": "decrypt_failed", "detail": "Wrong password or corrupted backup"}
 
-        # Cache password in vault for future syncs (key is re-derived on demand)
-        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, master_password)
+        # Cache derived key in vault for future syncs
+        secrets.save_secret(_VAULT_KEY_BACKUP_KEY, base64.b64encode(key).decode("ascii"))
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
+
+        # Clear password from memory
+        master_password = ""  # noqa: F841
 
         return {"status": "restored", "data": data}
 
@@ -327,15 +333,19 @@ class BackupManager:
         # Derive new key
         new_key = derive_backup_key(new_password, user_id)
 
+        # Clear passwords from memory
+        old_password = ""  # noqa: F841
+        new_password = ""  # noqa: F841
+
         # Re-encrypt current contacts with new key (no need to decrypt old backup)
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, new_key)
 
-        client = cloud_session._client
+        client = cloud_session.client
         await client.upload_backup(token, encrypted)
 
-        # Update cached password (key is re-derived on demand)
-        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, new_password)
+        # Update cached derived key in vault
+        secrets.save_secret(_VAULT_KEY_BACKUP_KEY, base64.b64encode(new_key).decode("ascii"))
 
         now = datetime.now(timezone.utc).isoformat()
         secrets.save_secret(_VAULT_KEY_BACKUP_LAST_SYNC, now)

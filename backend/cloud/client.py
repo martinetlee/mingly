@@ -5,6 +5,7 @@ All methods are async and use httpx.  The base URL is configurable via the
 MINGLY_CLOUD_URL environment variable (defaults to https://cloud.mingly.io).
 """
 
+import asyncio
 import os
 from typing import Optional
 
@@ -36,6 +37,7 @@ class CloudAPIClient:
         self.base_url = (base_url or CLOUD_BASE_URL).rstrip("/")
         self._timeout = timeout
         self._shared_client: Optional[httpx.AsyncClient] = None
+        self._refresh_lock = asyncio.Lock()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -87,32 +89,43 @@ class CloudAPIClient:
         resp = await c.request(method, url, headers=headers, **kwargs)
 
         if resp.status_code == 401 and access_token:
-            # Attempt one token refresh and retry, persisting rotated tokens
-            # through the same path as CloudSessionManager._do_refresh().
+            # Serialize refresh attempts so concurrent 401s don't all refresh.
             try:
-                from backend.cloud.session import cloud_session
-                from backend.cloud.auth import get_cloud_credentials, save_cloud_credentials
-                creds = get_cloud_credentials()
-                if creds and creds.get("refresh_token"):
-                    refresh_result = await self.refresh_tokens(creds["refresh_token"])
-                    new_access = refresh_result.get("access_token")
-                    new_refresh = refresh_result.get("refresh_token")
-                    if new_access and new_refresh:
-                        # Persist both tokens to the vault (token rotation)
-                        current_creds = get_cloud_credentials()
-                        if current_creds is not None:
-                            save_cloud_credentials(
-                                access_token=new_access,
-                                refresh_token=new_refresh,
-                                email=current_creds.get("email", ""),
-                                user_id=current_creds.get("user_id", ""),
-                            )
-                        # Update in-memory session state
-                        from backend.cloud.session import _decode_jwt_exp
-                        cloud_session._access_token = new_access
-                        cloud_session._token_exp = _decode_jwt_exp(new_access)
-                        retry_headers = {**self._auth_headers(new_access), **extra_headers}
-                        resp = await c.request(method, url, headers=retry_headers, **kwargs)
+                async with self._refresh_lock:
+                    from backend.cloud.session import cloud_session
+                    # Check if another coroutine already refreshed the token
+                    current_token = cloud_session.access_token
+                    if current_token and current_token != access_token:
+                        # Token was already refreshed — just retry with the new one
+                        new_access = current_token
+                    else:
+                        # We need to perform the refresh
+                        from backend.cloud.auth import get_cloud_credentials, save_cloud_credentials
+                        creds = get_cloud_credentials()
+                        new_access = None
+                        if creds and creds.get("refresh_token"):
+                            refresh_result = await self.refresh_tokens(creds["refresh_token"])
+                            new_access = refresh_result.get("access_token")
+                            new_refresh = refresh_result.get("refresh_token")
+                            if new_access and new_refresh:
+                                # Persist both tokens to the vault (token rotation)
+                                current_creds = get_cloud_credentials()
+                                if current_creds is not None:
+                                    save_cloud_credentials(
+                                        access_token=new_access,
+                                        refresh_token=new_refresh,
+                                        email=current_creds.get("email", ""),
+                                        user_id=current_creds.get("user_id", ""),
+                                    )
+                                # Update in-memory session state via public method
+                                from backend.cloud.session import _decode_jwt_exp
+                                cloud_session.update_tokens(
+                                    access_token=new_access,
+                                    token_exp=_decode_jwt_exp(new_access),
+                                )
+                if new_access:
+                    retry_headers = {**self._auth_headers(new_access), **extra_headers}
+                    resp = await c.request(method, url, headers=retry_headers, **kwargs)
             except Exception:
                 pass  # Fall through to handle original 401
 

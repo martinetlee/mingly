@@ -6,7 +6,7 @@ email management, and org management.
 import asyncio
 import functools
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
@@ -49,7 +49,7 @@ def _require_connected() -> str:
 
 def _get_client() -> CloudAPIClient:
     """Return the shared CloudAPIClient from the cloud session singleton."""
-    return cloud_session._client
+    return cloud_session.client
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -87,8 +87,8 @@ class CreateOrgRequest(BaseModel):
 
 
 class UpdateMemberRequest(BaseModel):
-    status: Optional[str] = None
-    role: Optional[str] = None
+    status: Optional[Literal["active", "revoked"]] = None
+    role: Optional[Literal["admin", "member"]] = None
 
 
 class ShareContactRequest(BaseModel):
@@ -105,6 +105,16 @@ class CreateSharedOrgRequest(BaseModel):
 
 class CreateContactLinkRequest(BaseModel):
     shared_org_id: str
+    position: Optional[str] = None
+    relationship_context: Optional[str] = None
+
+
+class UpdateSharedContactRequest(BaseModel):
+    name: Optional[str] = None
+    telegram_handle: Optional[str] = None
+
+
+class UpdateContactLinkRequest(BaseModel):
     position: Optional[str] = None
     relationship_context: Optional[str] = None
 
@@ -438,25 +448,21 @@ async def cloud_get_shared_contact(org_id: str, contact_id: str):
 
 
 @router.patch("/orgs/{org_id}/contacts/{contact_id}")
-async def cloud_update_shared_contact(org_id: str, contact_id: str, request: Request):
+@_cloud_api
+async def cloud_update_shared_contact(org_id: str, contact_id: str, req: UpdateSharedContactRequest):
     """Update shared contact info (name, telegram_handle)."""
     token = _require_connected()
-    data = await request.json()
-    try:
-        return await _get_client().update_shared_contact(token, org_id, contact_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    data = req.model_dump(exclude_none=True)
+    return await _get_client().update_shared_contact(token, org_id, contact_id, data)
 
 
 @router.patch("/orgs/{org_id}/contacts/{contact_id}/links/{link_id}")
-async def cloud_update_contact_link(org_id: str, contact_id: str, link_id: str, request: Request):
+@_cloud_api
+async def cloud_update_contact_link(org_id: str, contact_id: str, link_id: str, req: UpdateContactLinkRequest):
     """Update a contact org link (position, relationship_context)."""
     token = _require_connected()
-    data = await request.json()
-    try:
-        return await _get_client().update_contact_link(token, org_id, contact_id, link_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    data = req.model_dump(exclude_none=True)
+    return await _get_client().update_contact_link(token, org_id, contact_id, link_id, data)
 
 
 @router.delete("/orgs/{org_id}/contacts/{contact_id}/links/{link_id}")
