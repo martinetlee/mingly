@@ -201,7 +201,8 @@ class BackupManager:
         secrets.save_secret(_VAULT_KEY_BACKUP_KEY, base64.b64encode(key).decode("ascii"))
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
 
-        # Clear password from memory
+        # Best-effort password clearing (Python strings are immutable, so the
+        # original object may remain in memory until GC; this only rebinds the name)
         master_password = ""  # noqa: F841
 
         # Encrypt and upload
@@ -306,7 +307,8 @@ class BackupManager:
         secrets.save_secret(_VAULT_KEY_BACKUP_KEY, base64.b64encode(key).decode("ascii"))
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
 
-        # Clear password from memory
+        # Best-effort password clearing (Python strings are immutable, so the
+        # original object may remain in memory until GC; this only rebinds the name)
         master_password = ""  # noqa: F841
 
         return {"status": "restored", "data": data}

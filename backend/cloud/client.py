@@ -40,7 +40,7 @@ class CloudAPIClient:
         self.base_url = (base_url or CLOUD_BASE_URL).rstrip("/")
         self._timeout = timeout
         self._shared_client: Optional[httpx.AsyncClient] = None
-        self._refresh_lock = asyncio.Lock()
+        self._refresh_lock: Optional[asyncio.Lock] = None
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -94,6 +94,8 @@ class CloudAPIClient:
         if resp.status_code == 401 and access_token:
             # Serialize refresh attempts so concurrent 401s don't all refresh.
             try:
+                if self._refresh_lock is None:
+                    self._refresh_lock = asyncio.Lock()
                 async with self._refresh_lock:
                     from backend.cloud.session import cloud_session
                     # Check if another coroutine already refreshed the token
@@ -121,10 +123,10 @@ class CloudAPIClient:
                                         user_id=current_creds.get("user_id", ""),
                                     )
                                 # Update in-memory session state via public method
-                                from backend.cloud.session import _decode_jwt_exp
+                                from backend.cloud.session import decode_jwt_exp
                                 cloud_session.update_tokens(
                                     access_token=new_access,
-                                    token_exp=_decode_jwt_exp(new_access),
+                                    token_exp=decode_jwt_exp(new_access),
                                 )
                 if new_access:
                     retry_headers = {**self._auth_headers(new_access), **extra_headers}

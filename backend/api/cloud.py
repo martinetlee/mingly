@@ -440,13 +440,11 @@ async def cloud_create_contact_link(org_id: str, contact_id: str, req: CreateCon
     return await _get_client().create_contact_link(token, org_id, contact_id, data)
 
 @router.get("/orgs/{org_id}/contacts/{contact_id}")
+@_cloud_api
 async def cloud_get_shared_contact(org_id: str, contact_id: str):
     """Get shared contact detail."""
     token = _require_connected()
-    try:
-        return await _get_client().get_shared_contact(token, org_id, contact_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().get_shared_contact(token, org_id, contact_id)
 
 
 @router.patch("/orgs/{org_id}/contacts/{contact_id}")
@@ -468,33 +466,27 @@ async def cloud_update_contact_link(org_id: str, contact_id: str, link_id: str, 
 
 
 @router.delete("/orgs/{org_id}/contacts/{contact_id}/links/{link_id}")
+@_cloud_api
 async def cloud_delete_contact_link(org_id: str, contact_id: str, link_id: str):
     """Soft-delete a contact org link."""
     token = _require_connected()
-    try:
-        return await _get_client().delete_contact_link(token, org_id, contact_id, link_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().delete_contact_link(token, org_id, contact_id, link_id)
 
 
 @router.get("/orgs/{org_id}/contacts/{contact_id}/group-chats")
+@_cloud_api
 async def cloud_list_group_chats(org_id: str, contact_id: str):
     """List group chats a shared contact is in."""
     token = _require_connected()
-    try:
-        return await _get_client().list_group_chats(token, org_id, contact_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_group_chats(token, org_id, contact_id)
 
 
 @router.get("/orgs/{org_id}/directory/{shared_org_id}")
+@_cloud_api
 async def cloud_get_shared_org_detail(org_id: str, shared_org_id: str):
     """Get shared org details + linked contacts."""
     token = _require_connected()
-    try:
-        return await _get_client().get_shared_org_detail(token, org_id, shared_org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().get_shared_org_detail(token, org_id, shared_org_id)
 
 
 @router.get("/orgs/{org_id}/directory")

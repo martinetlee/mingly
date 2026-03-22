@@ -27,7 +27,7 @@ from backend.cloud.auth import (
 log = logging.getLogger(__name__)
 
 
-def _decode_jwt_exp(token: str) -> Optional[float]:
+def decode_jwt_exp(token: str) -> Optional[float]:
     """Extract the ``exp`` claim from a JWT without verification.
 
     Returns the expiry as a Unix timestamp, or None on failure.
@@ -114,7 +114,7 @@ class CloudSessionManager:
     async def on_connect(self, access_token: str) -> None:
         """Called after a successful magic-link connect to activate the session."""
         self._access_token = access_token
-        self._token_exp = _decode_jwt_exp(access_token)
+        self._token_exp = decode_jwt_exp(access_token)
         self._status = "connected"
         self._get_stop_event().clear()
         self._start_background_refresh()
@@ -139,7 +139,7 @@ class CloudSessionManager:
                 # accept the new tokens in memory but skip vault persistence.
                 log.warning("Vault locked during token rotation — skipping vault save")
                 self._access_token = new_access
-                self._token_exp = _decode_jwt_exp(new_access)
+                self._token_exp = decode_jwt_exp(new_access)
                 return True
             save_cloud_credentials(
                 access_token=new_access,
@@ -148,7 +148,7 @@ class CloudSessionManager:
                 user_id=creds.get("user_id", ""),
             )
             self._access_token = new_access
-            self._token_exp = _decode_jwt_exp(new_access)
+            self._token_exp = decode_jwt_exp(new_access)
             return True
         except CloudAPIError as exc:
             if exc.status_code == 401:
