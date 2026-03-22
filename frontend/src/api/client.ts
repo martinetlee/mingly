@@ -801,7 +801,9 @@ export const addCloudEmail = (email: string) =>
   })
 
 export const pollEmailVerification = (requestId: string, claimSecret: string) =>
-  request<{ status: string }>(`/api/cloud/emails/verify-status/${requestId}?claim_secret=${encodeURIComponent(claimSecret)}`)
+  request<{ status: string }>(`/api/cloud/emails/verify-status/${requestId}`, {
+    headers: { 'X-Claim-Secret': claimSecret },
+  })
 
 export const removeCloudEmail = (emailId: string, confirm = false) =>
   request<{

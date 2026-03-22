@@ -83,7 +83,7 @@ export default function BackupSettings() {
     try {
       const res = await restoreBackup(password)
       if (res.status === 'restored') {
-        setSuccess('Backup restored successfully. Your contacts have been recovered.')
+        setSuccess('Backup decrypted successfully. Contact data was returned but has not been imported into your local database yet. A future update will add automatic import.')
       } else if (res.status === 'no_backup') {
         setError('No backup found on the server.')
       } else if (res.status === 'decrypt_failed') {

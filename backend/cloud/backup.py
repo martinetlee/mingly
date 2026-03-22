@@ -22,23 +22,21 @@ import hashlib
 import json
 import logging
 import os
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from backend import secrets
 from backend.cloud.auth import get_cloud_credentials
-from backend.cloud.client import CloudAPIClient, CloudAPIError
+from backend.cloud.client import CloudAPIError
 from backend.cloud.session import cloud_session
 
 log = logging.getLogger(__name__)
 
-# Vault key for caching the derived backup key
-_VAULT_KEY_BACKUP = "cloud_backup_key"
 _VAULT_KEY_BACKUP_ENABLED = "cloud_backup_enabled"
 _VAULT_KEY_BACKUP_LAST_SYNC = "cloud_backup_last_sync"
+_VAULT_KEY_BACKUP_PASSWORD = "cloud_backup_password"
 
 _SYNC_INTERVAL_S = 30 * 60  # 30 minutes
 
@@ -50,6 +48,11 @@ def derive_backup_key(master_password: str, user_id: str) -> bytes:
 
     Uses PBKDF2-HMAC-SHA256 with 100k iterations.
     Salt: "mingly-backup-v1" + user_id
+
+    NOTE: The salt is deterministic (uses public user_id) by design.
+    This allows the user to re-derive the key on any device without
+    storing the salt separately — only the master password is needed
+    for recovery.
     """
     salt = f"mingly-backup-v1{user_id}".encode("utf-8")
     key = hashlib.pbkdf2_hmac(
@@ -133,7 +136,7 @@ async def _get_all_contacts_data() -> dict:
 
     return {
         "version": 1,
-        "exported_at": datetime.utcnow().isoformat(),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
         "contacts": contact_list,
         "positions": position_list,
     }
@@ -147,7 +150,13 @@ class BackupManager:
     def __init__(self):
         self._dirty: bool = False
         self._task: Optional[asyncio.Task] = None
-        self._stop_event = asyncio.Event()
+        self._stop_event: Optional[asyncio.Event] = None
+
+    def _get_stop_event(self) -> asyncio.Event:
+        """Lazy-initialize the stop event within an async context."""
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        return self._stop_event
 
     # ── Properties ─────────────────────────────────────────────────────────
 
@@ -163,7 +172,12 @@ class BackupManager:
     # ── Dirty tracking ────────────────────────────────────────────────────
 
     def mark_dirty(self) -> None:
-        """Called when contacts change to flag that a sync is needed."""
+        """Called when contacts change to flag that a sync is needed.
+
+        NOTE: This is not yet wired into contact mutation paths (create,
+        update, delete).  For now, auto-sync only works with manual trigger
+        via the /backup/sync endpoint.  Wire into contact CRUD when ready.
+        """
         self._dirty = True
 
     # ── Enable / Disable ──────────────────────────────────────────────────
@@ -182,19 +196,19 @@ class BackupManager:
         if not token:
             raise RuntimeError("Cloud session not active")
 
-        # Derive key and cache in vault
+        # Derive key on demand (password kept in vault for re-derivation during sync)
         key = derive_backup_key(master_password, user_id)
-        secrets.save_secret(_VAULT_KEY_BACKUP, base64.b64encode(key).decode("ascii"))
+        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, master_password)
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
 
         # Encrypt and upload
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, key)
 
-        client = CloudAPIClient()
+        client = cloud_session._client
         await client.upload_backup(token, encrypted)
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         secrets.save_secret(_VAULT_KEY_BACKUP_LAST_SYNC, now)
         self._dirty = False
 
@@ -211,12 +225,12 @@ class BackupManager:
             token = cloud_session.access_token
             if token:
                 try:
-                    client = CloudAPIClient()
+                    client = cloud_session._client
                     await client.delete_backup(token)
                 except Exception as exc:
                     log.warning("Failed to delete remote backup: %s", exc)
 
-        secrets.delete_secret(_VAULT_KEY_BACKUP)
+        secrets.delete_secret(_VAULT_KEY_BACKUP_PASSWORD)
         secrets.delete_secret(_VAULT_KEY_BACKUP_ENABLED)
         secrets.delete_secret(_VAULT_KEY_BACKUP_LAST_SYNC)
         self._dirty = False
@@ -230,22 +244,26 @@ class BackupManager:
         if not self.enabled:
             return {"status": "not_enabled"}
 
-        key_b64 = secrets.get_secret(_VAULT_KEY_BACKUP)
-        if not key_b64:
-            return {"status": "error", "detail": "Backup key not found in vault"}
+        password = secrets.get_secret(_VAULT_KEY_BACKUP_PASSWORD)
+        if not password:
+            return {"status": "error", "detail": "Backup password not found in vault"}
+
+        creds = get_cloud_credentials()
+        if not creds or not creds.get("user_id"):
+            return {"status": "error", "detail": "Not connected to cloud"}
 
         token = cloud_session.access_token
         if not token:
             return {"status": "error", "detail": "Cloud session not active"}
 
-        key = base64.b64decode(key_b64)
+        key = derive_backup_key(password, creds["user_id"])
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, key)
 
-        client = CloudAPIClient()
+        client = cloud_session._client
         await client.upload_backup(token, encrypted)
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         secrets.save_secret(_VAULT_KEY_BACKUP_LAST_SYNC, now)
         self._dirty = False
 
@@ -270,7 +288,7 @@ class BackupManager:
         user_id = creds["user_id"]
         key = derive_backup_key(master_password, user_id)
 
-        client = CloudAPIClient()
+        client = cloud_session._client
         result = await client.download_backup(token)
         encrypted_payload = result.get("encrypted_payload")
         if not encrypted_payload:
@@ -281,8 +299,8 @@ class BackupManager:
         except Exception:
             return {"status": "decrypt_failed", "detail": "Wrong password or corrupted backup"}
 
-        # Cache key in vault for future syncs
-        secrets.save_secret(_VAULT_KEY_BACKUP, base64.b64encode(key).decode("ascii"))
+        # Cache password in vault for future syncs (key is re-derived on demand)
+        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, master_password)
         secrets.save_secret(_VAULT_KEY_BACKUP_ENABLED, "true")
 
         return {"status": "restored", "data": data}
@@ -313,13 +331,13 @@ class BackupManager:
         contact_data = await _get_all_contacts_data()
         encrypted = encrypt_backup(contact_data, new_key)
 
-        client = CloudAPIClient()
+        client = cloud_session._client
         await client.upload_backup(token, encrypted)
 
-        # Update cached key
-        secrets.save_secret(_VAULT_KEY_BACKUP, base64.b64encode(new_key).decode("ascii"))
+        # Update cached password (key is re-derived on demand)
+        secrets.save_secret(_VAULT_KEY_BACKUP_PASSWORD, new_password)
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         secrets.save_secret(_VAULT_KEY_BACKUP_LAST_SYNC, now)
 
         return {"status": "rekeyed", "last_sync": now}
@@ -329,21 +347,24 @@ class BackupManager:
     def _start_sync_task(self) -> None:
         if self._task and not self._task.done():
             return
-        self._stop_event.clear()
+        stop = self._get_stop_event()
+        stop.clear()
         self._task = asyncio.ensure_future(self._sync_loop())
 
     def _stop_sync_task(self) -> None:
-        self._stop_event.set()
+        stop = self._get_stop_event()
+        stop.set()
         if self._task and not self._task.done():
             self._task.cancel()
         self._task = None
 
     async def _sync_loop(self) -> None:
         """Periodically sync if contacts are dirty."""
-        while not self._stop_event.is_set():
+        stop = self._get_stop_event()
+        while not stop.is_set():
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=_SYNC_INTERVAL_S
+                    stop.wait(), timeout=_SYNC_INTERVAL_S
                 )
                 break  # stop event set
             except asyncio.TimeoutError:

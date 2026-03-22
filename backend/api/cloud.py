@@ -4,6 +4,7 @@ email management, and org management.
 """
 
 import asyncio
+import functools
 import logging
 from typing import Optional
 
@@ -18,11 +19,22 @@ from backend.ws.manager import ws_manager
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+
+def _cloud_api(fn):
+    """Decorator that converts ``CloudAPIError`` into ``HTTPException``.
+
+    Eliminates the repetitive try/except CloudAPIError pattern.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except CloudAPIError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return wrapper
+
 # In-memory state for an active connect (magic-link) flow
 _active_connect: Optional[asyncio.Task] = None
-
-# In-memory state for active email verification polling tasks
-_email_verify_tasks: dict[str, asyncio.Task] = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -36,7 +48,8 @@ def _require_connected() -> str:
 
 
 def _get_client() -> CloudAPIClient:
-    return CloudAPIClient()
+    """Return the shared CloudAPIClient from the cloud session singleton."""
+    return cloud_session._client
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -88,6 +101,12 @@ class CreateSharedOrgRequest(BaseModel):
     name: str
     domain: Optional[str] = None
     website: Optional[str] = None
+
+
+class CreateContactLinkRequest(BaseModel):
+    shared_org_id: str
+    position: Optional[str] = None
+    relationship_context: Optional[str] = None
 
 
 class BackupEnableRequest(BaseModel):
@@ -247,121 +266,104 @@ async def cloud_cancel_connect():
 # ── Email management endpoints ────────────────────────────────────────────
 
 @router.get("/profile")
+@_cloud_api
 async def cloud_profile():
     """Get user profile with verified emails."""
     token = _require_connected()
-    try:
-        return await _get_client().get_profile(token)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().get_profile(token)
 
 
 @router.post("/emails")
+@_cloud_api
 async def cloud_add_email(req: AddEmailRequest):
     """Add a new email address (triggers verification magic link).
 
     Returns request_id for polling verification status.
     """
     token = _require_connected()
-    try:
-        result = await _get_client().add_email(token, req.email)
-        # Return the request_id and claim_secret so frontend can poll
-        return {
-            "status": "verification_sent",
-            "request_id": result.get("request_id"),
-            "claim_secret": result.get("claim_secret"),
-            "message": result.get("message", "Verification email sent. Check your inbox."),
-        }
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    result = await _get_client().add_email(token, req.email)
+    # Return the request_id and claim_secret so frontend can poll
+    return {
+        "status": "verification_sent",
+        "request_id": result.get("request_id"),
+        "claim_secret": result.get("claim_secret"),
+        "message": result.get("message", "Verification email sent. Check your inbox."),
+    }
 
 
 @router.get("/emails/verify-status/{request_id}")
-async def cloud_email_verify_status(request_id: str, claim_secret: str):
+@_cloud_api
+async def cloud_email_verify_status(request_id: str, request: Request):
     """Poll verification status for an email being verified."""
+    claim_secret = request.headers.get("X-Claim-Secret")
+    if not claim_secret:
+        raise HTTPException(status_code=400, detail="Missing X-Claim-Secret header")
     token = _require_connected()
-    try:
-        result = await _get_client().poll_email_verification(
-            token, request_id, claim_secret
-        )
-        return result
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().poll_email_verification(
+        token, request_id, claim_secret
+    )
 
 
 @router.delete("/emails/{email_id}")
+@_cloud_api
 async def cloud_remove_email(email_id: str, confirm: bool = False):
     """Remove a verified email. Pass confirm=true to cascade org membership revocations."""
     token = _require_connected()
-    try:
-        return await _get_client().remove_email(token, email_id, confirm=confirm)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().remove_email(token, email_id, confirm=confirm)
 
 
 # ── Org management endpoints ─────────────────────────────────────────────
 
 @router.get("/orgs")
+@_cloud_api
 async def cloud_list_orgs():
     """List orgs the user belongs to."""
     token = _require_connected()
-    try:
-        return await _get_client().list_orgs(token)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_orgs(token)
 
 
 @router.post("/orgs")
+@_cloud_api
 async def cloud_create_org(req: CreateOrgRequest):
     """Create a new org (requires verified email on that domain)."""
     token = _require_connected()
-    try:
-        return await _get_client().create_org(token, req.name, req.domain)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().create_org(token, req.name, req.domain)
 
 
 @router.get("/orgs/{org_id}")
+@_cloud_api
 async def cloud_get_org(org_id: str):
     """Get org details."""
     token = _require_connected()
-    try:
-        return await _get_client().get_org(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().get_org(token, org_id)
 
 
 @router.post("/orgs/{org_id}/join")
+@_cloud_api
 async def cloud_join_org(org_id: str):
     """Join or request to join an org."""
     token = _require_connected()
-    try:
-        return await _get_client().join_org(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().join_org(token, org_id)
 
 
 @router.get("/orgs/{org_id}/members")
+@_cloud_api
 async def cloud_list_members(org_id: str):
     """List org members."""
     token = _require_connected()
-    try:
-        return await _get_client().list_members(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_members(token, org_id)
 
 
 @router.get("/orgs/{org_id}/members/pending")
+@_cloud_api
 async def cloud_list_pending(org_id: str):
     """List pending join requests (admin only)."""
     token = _require_connected()
-    try:
-        return await _get_client().list_pending(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_pending(token, org_id)
 
 
 @router.patch("/orgs/{org_id}/members/{user_id}")
+@_cloud_api
 async def cloud_update_member(org_id: str, user_id: str, req: UpdateMemberRequest):
     """Update member role or status (admin only)."""
     token = _require_connected()
@@ -370,25 +372,21 @@ async def cloud_update_member(org_id: str, user_id: str, req: UpdateMemberReques
         data["status"] = req.status
     if req.role is not None:
         data["role"] = req.role
-    try:
-        return await _get_client().update_member(token, org_id, user_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().update_member(token, org_id, user_id, data)
 
 
 @router.delete("/orgs/{org_id}/members/{user_id}")
+@_cloud_api
 async def cloud_remove_member(org_id: str, user_id: str):
     """Remove a member from the org (admin or self)."""
     token = _require_connected()
-    try:
-        return await _get_client().remove_member(token, org_id, user_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().remove_member(token, org_id, user_id)
 
 
 # ── Shared contacts endpoints ────────────────────────────────────────────
 
 @router.post("/orgs/{org_id}/share-contact")
+@_cloud_api
 async def cloud_share_contact(org_id: str, req: ShareContactRequest):
     """Share a local contact to the org's shared pool.
 
@@ -396,49 +394,38 @@ async def cloud_share_contact(org_id: str, req: ShareContactRequest):
     or a 409 with the existing contact if the telegram_id is already shared.
     """
     token = _require_connected()
-    client = _get_client()
     data: dict = {
         "telegram_id": req.telegram_id,
         "name": req.name,
     }
     if req.telegram_handle:
         data["telegram_handle"] = req.telegram_handle
-    try:
-        return await client.create_shared_contact(token, org_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().create_shared_contact(token, org_id, data)
 
 
 @router.get("/orgs/{org_id}/contacts")
+@_cloud_api
 async def cloud_list_shared_contacts(org_id: str):
     """List all shared contacts for the org."""
     token = _require_connected()
-    try:
-        return await _get_client().list_shared_contacts(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_shared_contacts(token, org_id)
 
 
 @router.get("/orgs/{org_id}/contacts/{contact_id}/links")
+@_cloud_api
 async def cloud_list_contact_links(org_id: str, contact_id: str):
     """List org links for a shared contact."""
     token = _require_connected()
-    try:
-        return await _get_client().list_contact_links(token, org_id, contact_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_contact_links(token, org_id, contact_id)
 
 
 @router.post("/orgs/{org_id}/contacts/{contact_id}/links")
-async def cloud_create_contact_link(org_id: str, contact_id: str, request: Request):
+@_cloud_api
+async def cloud_create_contact_link(org_id: str, contact_id: str, req: CreateContactLinkRequest):
     """Link a shared contact to an external org."""
     token = _require_connected()
-    data = await request.json()
-    try:
-        return await _get_client().create_contact_link(token, org_id, contact_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
-
+    data = req.model_dump(exclude_none=True)
+    return await _get_client().create_contact_link(token, org_id, contact_id, data)
 
 @router.get("/orgs/{org_id}/contacts/{contact_id}")
 async def cloud_get_shared_contact(org_id: str, contact_id: str):
@@ -503,16 +490,15 @@ async def cloud_get_shared_org_detail(org_id: str, shared_org_id: str):
 
 
 @router.get("/orgs/{org_id}/directory")
+@_cloud_api
 async def cloud_list_directory(org_id: str):
     """List shared external organizations for the org."""
     token = _require_connected()
-    try:
-        return await _get_client().list_directory(token, org_id)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    return await _get_client().list_directory(token, org_id)
 
 
 @router.post("/orgs/{org_id}/directory")
+@_cloud_api
 async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
     """Create a shared (external) organization in the org's directory."""
     token = _require_connected()
@@ -521,16 +507,13 @@ async def cloud_create_shared_org(org_id: str, req: CreateSharedOrgRequest):
         data["domain"] = req.domain
     if req.website:
         data["website"] = req.website
-    try:
-        return await _get_client().create_shared_org(token, org_id, data)
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
-
+    return await _get_client().create_shared_org(token, org_id, data)
 
 
 # ── Backup endpoints ─────────────────────────────────────────────────────
 
 @router.post("/backup/enable")
+@_cloud_api
 async def cloud_backup_enable(req: BackupEnableRequest):
     """Enable encrypted backup sync.
 
@@ -540,12 +523,9 @@ async def cloud_backup_enable(req: BackupEnableRequest):
     _require_connected()
     from backend.cloud.backup import backup_manager
     try:
-        result = await backup_manager.enable_backup(req.master_password)
-        return result
+        return await backup_manager.enable_backup(req.master_password)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     except Exception as exc:
         log.exception("Backup enable failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to enable backup")
@@ -557,14 +537,14 @@ async def cloud_backup_disable(req: BackupDisableRequest):
     _require_connected()
     from backend.cloud.backup import backup_manager
     try:
-        result = await backup_manager.disable_backup(delete_remote=req.delete_remote)
-        return result
+        return await backup_manager.disable_backup(delete_remote=req.delete_remote)
     except Exception as exc:
         log.exception("Backup disable failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to disable backup")
 
 
 @router.post("/backup/restore")
+@_cloud_api
 async def cloud_backup_restore(req: BackupRestoreRequest):
     """Restore contacts from an encrypted cloud backup.
 
@@ -573,27 +553,22 @@ async def cloud_backup_restore(req: BackupRestoreRequest):
     _require_connected()
     from backend.cloud.backup import backup_manager
     try:
-        result = await backup_manager.restore_backup(req.master_password)
-        return result
+        return await backup_manager.restore_backup(req.master_password)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     except Exception as exc:
         log.exception("Backup restore failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to restore backup")
 
 
 @router.post("/backup/sync")
+@_cloud_api
 async def cloud_backup_sync():
     """Manually trigger a backup sync."""
     _require_connected()
     from backend.cloud.backup import backup_manager
     try:
-        result = await backup_manager.sync_backup()
-        return result
-    except CloudAPIError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        return await backup_manager.sync_backup()
     except Exception as exc:
         log.exception("Backup sync failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to sync backup")

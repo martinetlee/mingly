@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,17 @@ from backend.api.dependencies import generate_session_token, clear_session_token
 from backend.cloud.session import cloud_session
 
 router = APIRouter()
+log = logging.getLogger(__name__)
+
+
+async def _safe_task(coro, name: str = "background") -> None:
+    """Wrapper that logs exceptions from fire-and-forget tasks."""
+    try:
+        await coro
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("Background task '%s' failed", name)
 
 
 async def _background_full_sync() -> None:
@@ -88,8 +100,13 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
         except Exception:
             pass
-    # Bootstrap cloud session (non-blocking)
-    asyncio.create_task(cloud_session.start())
+    # Bootstrap cloud session (non-blocking) and restart backup sync if enabled
+    async def _cloud_bootstrap() -> None:
+        await cloud_session.start()
+        from backend.cloud.backup import backup_manager
+        backup_manager.start_if_enabled()
+
+    asyncio.create_task(_safe_task(_cloud_bootstrap(), name="cloud_bootstrap"))
     return {"success": True, "session_token": token}
 
 

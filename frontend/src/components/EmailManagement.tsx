@@ -28,6 +28,7 @@ export default function EmailManagement() {
   const [verifyRequestId, setVerifyRequestId] = useState<string | null>(null)
   const [verifyClaimSecret, setVerifyClaimSecret] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Remove email state
   const [removeTarget, setRemoveTarget] = useState<VerifiedEmail | null>(null)
@@ -50,10 +51,11 @@ export default function EmailManagement() {
     fetchProfile()
   }, [fetchProfile])
 
-  // Clean up polling on unmount
+  // Clean up polling and timeout on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
     }
   }, [])
 
@@ -94,13 +96,14 @@ export default function EmailManagement() {
       pollRef.current = poll
 
       // Stop polling after 15 minutes
-      setTimeout(() => {
+      timeoutRef.current = setTimeout(() => {
         if (pollRef.current === poll) {
           clearInterval(poll)
           pollRef.current = null
           setVerifying(false)
           setError('Verification timed out. Please try again.')
         }
+        timeoutRef.current = null
       }, 15 * 60 * 1000)
     } catch (err: unknown) {
       setAddingEmail(false)
@@ -113,6 +116,10 @@ export default function EmailManagement() {
     if (pollRef.current) {
       clearInterval(pollRef.current)
       pollRef.current = null
+    }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
     }
     setVerifying(false)
     setVerifyRequestId(null)

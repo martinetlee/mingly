@@ -1,6 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import {
-  getCloudOrgs,
   shareContactToOrg,
   listDirectory,
   createSharedOrg,
@@ -8,6 +7,7 @@ import {
   type SharedContact,
   type SharedOrg,
 } from '../api/client'
+import { useCloudOrgs } from '../hooks/useCloudOrgs'
 
 interface ShareToOrgProps {
   /** Local contact telegram_id */
@@ -38,7 +38,7 @@ export default function ShareToOrg({
 }: ShareToOrgProps) {
   // State
   const [step, setStep] = useState<Step>('idle')
-  const [orgs, setOrgs] = useState<Array<{ id: string; name: string; domain: string }>>([])
+  const { orgs } = useCloudOrgs()
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null)
   const [sharedContact, setSharedContact] = useState<SharedContact | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -55,36 +55,24 @@ export default function ShareToOrg({
   // Duplicate state
   const [existingContact, setExistingContact] = useState<SharedContact | null>(null)
 
-  // Load user orgs on mount
-  useEffect(() => {
-    getCloudOrgs()
-      .then((data) => {
-        const active = data.filter((o) => o.status === 'active')
-        setOrgs(active)
-        if (active.length === 1) {
-          setSelectedOrgId(active[0].id)
-        }
-      })
-      .catch(() => {
-        // Not connected or error — button will be hidden
-      })
-  }, [])
+  // Filter to active orgs
+  const activeOrgs = orgs.filter((o) => o.status === 'active')
 
   const handleStartShare = useCallback(() => {
     setError(null)
-    if (orgs.length === 0) {
+    if (activeOrgs.length === 0) {
       setError('You are not a member of any cloud org.')
       setStep('error')
       return
     }
-    if (orgs.length === 1) {
+    if (activeOrgs.length === 1) {
       // Skip org selection — go straight to sharing
-      setSelectedOrgId(orgs[0].id)
-      doShare(orgs[0].id)
+      setSelectedOrgId(activeOrgs[0].id)
+      doShare(activeOrgs[0].id)
     } else {
       setStep('select-org')
     }
-  }, [orgs])
+  }, [activeOrgs])
 
   const doShare = useCallback(async (orgId: string) => {
     setStep('sharing')
@@ -99,21 +87,21 @@ export default function ShareToOrg({
       }
       const contact = await shareContactToOrg(orgId, data)
       setSharedContact(contact)
-      setSharedOrgName(orgs.find((o) => o.id === orgId)?.name || orgId)
+      setSharedOrgName(activeOrgs.find((o) => o.id === orgId)?.name || orgId)
       setStep('success')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to share contact'
       // Check for duplicate (409)
       if (msg.includes('409') || msg.toLowerCase().includes('already exists') || msg.toLowerCase().includes('duplicate') || msg.toLowerCase().includes('conflict')) {
         setExistingContact(null)
-        setSharedOrgName(orgs.find((o) => o.id === orgId)?.name || orgId)
+        setSharedOrgName(activeOrgs.find((o) => o.id === orgId)?.name || orgId)
         setStep('duplicate')
       } else {
         setError(msg)
         setStep('error')
       }
     }
-  }, [telegramId, contactName, telegramHandle, orgs])
+  }, [telegramId, contactName, telegramHandle, activeOrgs])
 
   const handleOrgSelected = useCallback(() => {
     if (!selectedOrgId) return
@@ -193,7 +181,7 @@ export default function ShareToOrg({
   }, [])
 
   // Don't render if not connected to any cloud org
-  if (orgs.length === 0 && step === 'idle') return null
+  if (activeOrgs.length === 0 && step === 'idle') return null
 
   return (
     <div className="inline-block">
@@ -215,7 +203,7 @@ export default function ShareToOrg({
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-4 min-w-[280px]">
           <h3 className="mb-3 text-sm font-medium text-slate-200">Select Organization</h3>
           <div className="space-y-2 mb-3">
-            {orgs.map((org) => (
+            {activeOrgs.map((org) => (
               <label
                 key={org.id}
                 className={`flex items-center gap-2 rounded-lg border p-2.5 cursor-pointer transition-colors ${

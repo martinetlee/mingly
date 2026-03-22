@@ -1,6 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import {
-  getCloudOrgs,
   getCloudProfile,
   createCloudOrg,
   joinCloudOrg,
@@ -9,15 +8,7 @@ import {
   updateCloudOrgMember,
   removeCloudOrgMember,
 } from '../api/client'
-
-interface CloudOrg {
-  id: string
-  name: string
-  domain: string
-  role: string
-  member_count: number
-  status: string
-}
+import { useCloudOrgs, type CloudOrg } from '../hooks/useCloudOrgs'
 
 interface OrgMember {
   user_id: string
@@ -43,9 +34,8 @@ interface VerifiedEmail {
 type View = 'list' | 'detail' | 'create'
 
 export default function OrgManagement() {
-  const [orgs, setOrgs] = useState<CloudOrg[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { orgs, loading, error: fetchError, refetch: fetchOrgs } = useCloudOrgs()
+  const [error, setError] = useState<string | null>(fetchError)
   const [view, setView] = useState<View>('list')
 
   // Create org state
@@ -61,19 +51,6 @@ export default function OrgManagement() {
   const [membersLoading, setMembersLoading] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
-  const fetchOrgs = useCallback(async () => {
-    try {
-      const data = await getCloudOrgs()
-      setOrgs(Array.isArray(data) ? data : [])
-      setError(null)
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to load organizations'
-      setError(msg)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
   const fetchVerifiedDomains = useCallback(async () => {
     try {
       const profile = await getCloudProfile()
@@ -86,10 +63,6 @@ export default function OrgManagement() {
       // Ignore — domains are optional hints
     }
   }, [orgDomain])
-
-  useEffect(() => {
-    fetchOrgs()
-  }, [fetchOrgs])
 
   const openCreateView = useCallback(async () => {
     setView('create')

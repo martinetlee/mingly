@@ -51,7 +51,13 @@ class CloudSessionManager:
         self._status: str = "disconnected"  # connected | disconnected | offline | expired
         self._access_token: Optional[str] = None
         self._token_exp: Optional[float] = None
-        self._stop_event = asyncio.Event()
+        self._stop_event: Optional[asyncio.Event] = None
+
+    def _get_stop_event(self) -> asyncio.Event:
+        """Lazy-initialize the stop event within an async context."""
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        return self._stop_event
 
     # ── Public properties ─────────────────────────────────────────────────
 
@@ -85,7 +91,7 @@ class CloudSessionManager:
 
     def stop(self) -> None:
         """Stop the background refresh loop (call on app shutdown / vault lock)."""
-        self._stop_event.set()
+        self._get_stop_event().set()
         if self._task and not self._task.done():
             self._task.cancel()
         self._task = None
@@ -97,7 +103,7 @@ class CloudSessionManager:
         self._access_token = access_token
         self._token_exp = _decode_jwt_exp(access_token)
         self._status = "connected"
-        self._stop_event.clear()
+        self._get_stop_event().clear()
         self._start_background_refresh()
 
     async def on_disconnect(self) -> None:
@@ -115,11 +121,18 @@ class CloudSessionManager:
             new_refresh = result["refresh_token"]
             # Update vault immediately (token rotation)
             creds = get_cloud_credentials()
+            if creds is None:
+                # Vault was locked between refresh call and credential read;
+                # accept the new tokens in memory but skip vault persistence.
+                log.warning("Vault locked during token rotation — skipping vault save")
+                self._access_token = new_access
+                self._token_exp = _decode_jwt_exp(new_access)
+                return True
             save_cloud_credentials(
                 access_token=new_access,
                 refresh_token=new_refresh,
-                email=creds.get("email", "") if creds else "",
-                user_id=creds.get("user_id", "") if creds else "",
+                email=creds.get("email", ""),
+                user_id=creds.get("user_id", ""),
             )
             self._access_token = new_access
             self._token_exp = _decode_jwt_exp(new_access)
@@ -142,12 +155,13 @@ class CloudSessionManager:
     def _start_background_refresh(self) -> None:
         if self._task and not self._task.done():
             return
-        self._stop_event.clear()
+        self._get_stop_event().clear()
         self._task = asyncio.ensure_future(self._refresh_loop())
 
     async def _refresh_loop(self) -> None:
         """Periodically refresh the JWT before it expires."""
-        while not self._stop_event.is_set():
+        stop = self._get_stop_event()
+        while not stop.is_set():
             # Sleep until 5 minutes before expiry, or 50 minutes if unknown
             if self._token_exp:
                 wait = max(self._token_exp - time.time() - 300, 60)
@@ -155,7 +169,7 @@ class CloudSessionManager:
                 wait = 50 * 60  # 50 minutes (JWT typically lasts 1 hour)
 
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=wait)
+                await asyncio.wait_for(stop.wait(), timeout=wait)
                 break  # stop_event was set
             except asyncio.TimeoutError:
                 pass  # time to refresh
@@ -171,7 +185,7 @@ class CloudSessionManager:
             elif self._status == "offline":
                 # Retry in 60 seconds when offline
                 try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+                    await asyncio.wait_for(stop.wait(), timeout=60)
                     break
                 except asyncio.TimeoutError:
                     pass
