@@ -5,8 +5,9 @@ export interface CloudOrg {
   id: string
   name: string
   domain: string
+  join_policy: string
+  created_at: string
   role: string
-  member_count: number
   status: string
 }
 

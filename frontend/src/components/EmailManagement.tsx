@@ -12,7 +12,7 @@ interface Profile {
   id: string
   primary_email: string
   created_at: string
-  emails: VerifiedEmail[]
+  verified_emails: VerifiedEmail[]
 }
 
 export default function EmailManagement() {
@@ -175,7 +175,7 @@ export default function EmailManagement() {
 
       {/* Email list */}
       <div className="space-y-2 mb-3">
-        {profile.emails.map((em) => {
+        {profile.verified_emails.map((em) => {
           const isPrimary = em.email === profile.primary_email
           return (
             <div
@@ -207,7 +207,7 @@ export default function EmailManagement() {
             </div>
           )
         })}
-        {profile.emails.length === 0 && (
+        {profile.verified_emails.length === 0 && (
           <p className="text-xs text-slate-500 italic">No verified emails yet.</p>
         )}
       </div>

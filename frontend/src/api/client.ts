@@ -781,7 +781,7 @@ export const getCloudProfile = () =>
     id: string
     primary_email: string
     created_at: string
-    emails: Array<{
+    verified_emails: Array<{
       id: string
       email: string
       domain: string
@@ -791,7 +791,6 @@ export const getCloudProfile = () =>
 
 export const addCloudEmail = (email: string) =>
   request<{
-    status: string
     request_id: string
     claim_secret: string
     message: string
@@ -820,8 +819,9 @@ export const getCloudOrgs = () =>
     id: string
     name: string
     domain: string
+    join_policy: string
+    created_at: string
     role: string
-    member_count: number
     status: string
   }>>('/api/cloud/orgs')
 

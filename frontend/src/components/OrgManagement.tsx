@@ -54,7 +54,7 @@ export default function OrgManagement() {
   const fetchVerifiedDomains = useCallback(async () => {
     try {
       const profile = await getCloudProfile()
-      const domains = [...new Set(profile.emails.map((e: VerifiedEmail) => e.domain))]
+      const domains = [...new Set(profile.verified_emails.map((e: VerifiedEmail) => e.domain))]
       setVerifiedDomains(domains)
       if (domains.length > 0 && !orgDomain) {
         setOrgDomain(domains[0])
@@ -230,7 +230,7 @@ export default function OrgManagement() {
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
                       <span>{org.domain}</span>
-                      <span>{org.member_count} member{org.member_count !== 1 ? 's' : ''}</span>
+                      <span>{org.join_policy === 'auto' ? 'Auto-join' : 'Approval required'}</span>
                     </div>
                   </div>
                   <svg className="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
