@@ -87,17 +87,31 @@ class CloudAPIClient:
         resp = await c.request(method, url, headers=headers, **kwargs)
 
         if resp.status_code == 401 and access_token:
-            # Attempt one token refresh and retry
+            # Attempt one token refresh and retry, persisting rotated tokens
+            # through the same path as CloudSessionManager._do_refresh().
             try:
                 from backend.cloud.session import cloud_session
-                from backend.cloud.auth import get_cloud_credentials
+                from backend.cloud.auth import get_cloud_credentials, save_cloud_credentials
                 creds = get_cloud_credentials()
                 if creds and creds.get("refresh_token"):
                     refresh_result = await self.refresh_tokens(creds["refresh_token"])
-                    new_token = refresh_result.get("access_token")
-                    if new_token:
-                        cloud_session._access_token = new_token
-                        retry_headers = {**self._auth_headers(new_token), **extra_headers}
+                    new_access = refresh_result.get("access_token")
+                    new_refresh = refresh_result.get("refresh_token")
+                    if new_access and new_refresh:
+                        # Persist both tokens to the vault (token rotation)
+                        current_creds = get_cloud_credentials()
+                        if current_creds is not None:
+                            save_cloud_credentials(
+                                access_token=new_access,
+                                refresh_token=new_refresh,
+                                email=current_creds.get("email", ""),
+                                user_id=current_creds.get("user_id", ""),
+                            )
+                        # Update in-memory session state
+                        from backend.cloud.session import _decode_jwt_exp
+                        cloud_session._access_token = new_access
+                        cloud_session._token_exp = _decode_jwt_exp(new_access)
+                        retry_headers = {**self._auth_headers(new_access), **extra_headers}
                         resp = await c.request(method, url, headers=retry_headers, **kwargs)
             except Exception:
                 pass  # Fall through to handle original 401
@@ -295,21 +309,19 @@ class CloudAPIClient:
         self, access_token: str, org_id: str, contact_id: str, link_id: str, data: dict
     ) -> dict:
         """PATCH /orgs/{org_id}/contacts/{contact_id}/links/{link_id} — update link."""
-        async with self._client(access_token=access_token) as c:
-            resp = await c.patch(
-                f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}", json=data
-            )
-            return await self._handle(resp)
+        return await self._request(
+            "PATCH", f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}",
+            access_token=access_token, json=data,
+        )
 
     async def delete_contact_link(
         self, access_token: str, org_id: str, contact_id: str, link_id: str
     ) -> dict:
         """DELETE /orgs/{org_id}/contacts/{contact_id}/links/{link_id} — soft-delete link."""
-        async with self._client(access_token=access_token) as c:
-            resp = await c.delete(
-                f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}"
-            )
-            return await self._handle(resp)
+        return await self._request(
+            "DELETE", f"/orgs/{org_id}/contacts/{contact_id}/links/{link_id}",
+            access_token=access_token,
+        )
 
     # ── Group chat metadata ──────────────────────────────────────────────
 
@@ -317,9 +329,10 @@ class CloudAPIClient:
         self, access_token: str, org_id: str, contact_id: str
     ) -> dict:
         """GET /orgs/{org_id}/contacts/{contact_id}/group-chats — list group chats."""
-        async with self._client(access_token=access_token) as c:
-            resp = await c.get(f"/orgs/{org_id}/contacts/{contact_id}/group-chats")
-            return await self._handle(resp)
+        return await self._request(
+            "GET", f"/orgs/{org_id}/contacts/{contact_id}/group-chats",
+            access_token=access_token,
+        )
 
     # ── Directory detail ─────────────────────────────────────────────────
 
@@ -327,9 +340,10 @@ class CloudAPIClient:
         self, access_token: str, org_id: str, shared_org_id: str
     ) -> dict:
         """GET /orgs/{org_id}/directory/{shared_org_id} — get shared org details + contacts."""
-        async with self._client(access_token=access_token) as c:
-            resp = await c.get(f"/orgs/{org_id}/directory/{shared_org_id}")
-            return await self._handle(resp)
+        return await self._request(
+            "GET", f"/orgs/{org_id}/directory/{shared_org_id}",
+            access_token=access_token,
+        )
 
     # ── Backup endpoints ──────────────────────────────────────────────────
 
