@@ -162,12 +162,24 @@ export default function ContactDetail({ orgId, contactId, onBack }: ContactDetai
 
   // Update link
   const handleSaveLink = useCallback(async (linkId: string) => {
+    const originalLink = links.find((l) => l.id === linkId)
+    if (!originalLink) return
+
+    const data: { position?: string; relationship_context?: string } = {}
+    const trimmedPosition = editLinkPosition.trim()
+    const originalPosition = originalLink.position || ''
+    const originalRelationship = originalLink.relationship_context || ''
+
+    if (trimmedPosition !== originalPosition) data.position = trimmedPosition
+    if (editLinkRelationship !== originalRelationship) data.relationship_context = editLinkRelationship
+
+    if (Object.keys(data).length === 0) {
+      setEditingLinkId(null)
+      return
+    }
+
     setSaving(true)
     try {
-      const data: { position?: string; relationship_context?: string } = {}
-      if (editLinkPosition !== undefined) data.position = editLinkPosition.trim()
-      if (editLinkRelationship !== undefined) data.relationship_context = editLinkRelationship
-
       await updateContactLink(orgId, contactId, linkId, data)
       setEditingLinkId(null)
 
@@ -178,7 +190,7 @@ export default function ContactDetail({ orgId, contactId, onBack }: ContactDetai
     } finally {
       setSaving(false)
     }
-  }, [orgId, contactId, editLinkPosition, editLinkRelationship])
+  }, [orgId, contactId, editLinkPosition, editLinkRelationship, links])
 
   // Delete link
   const handleDeleteLink = useCallback(async (linkId: string) => {

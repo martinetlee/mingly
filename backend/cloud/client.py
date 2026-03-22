@@ -6,10 +6,13 @@ MINGLY_CLOUD_URL environment variable (defaults to https://cloud.mingly.io).
 """
 
 import asyncio
+import logging
 import os
 from typing import Optional
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 _DEFAULT_BASE_URL = "https://cloud.mingly.io"
@@ -127,7 +130,7 @@ class CloudAPIClient:
                     retry_headers = {**self._auth_headers(new_access), **extra_headers}
                     resp = await c.request(method, url, headers=retry_headers, **kwargs)
             except Exception:
-                pass  # Fall through to handle original 401
+                log.warning("Token refresh failed during 401 retry", exc_info=True)
 
         return await self._handle(resp)
 

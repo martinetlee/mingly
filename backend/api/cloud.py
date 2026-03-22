@@ -151,6 +151,7 @@ async def _connect_background(email: str) -> None:
     Broadcasts status updates via WebSocket so the frontend can react.
     """
     global _active_connect
+    current_task = asyncio.current_task()
     try:
         # Step 1: request magic link
         result = await cloud_auth.connect(email)
@@ -203,7 +204,8 @@ async def _connect_background(email: str) -> None:
             "error": "An unexpected error occurred. Please try again.",
         })
     finally:
-        _active_connect = None
+        if _active_connect is current_task:
+            _active_connect = None
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -538,6 +540,7 @@ async def cloud_backup_enable(req: BackupEnableRequest):
 
 
 @router.post("/backup/disable")
+@_cloud_api
 async def cloud_backup_disable(req: BackupDisableRequest):
     """Disable backup sync. Optionally delete the remote backup."""
     _require_connected()

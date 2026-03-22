@@ -50,7 +50,10 @@ export default function CloudSettings() {
 
     window.addEventListener('cloud_status', handleCloudStatus)
 
-    // Also set up a dedicated WS listener for cloud events
+    // TODO: Consolidate this dedicated WebSocket with the shared useWebSocket hook
+    // (used in Chats, Intelligence, Tracked pages). Ideally, useWebSocket should be
+    // lifted to a layout-level provider that dispatches cloud_status CustomEvents,
+    // so this component can rely solely on the window event listener above.
     try {
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws

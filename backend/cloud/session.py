@@ -35,7 +35,7 @@ def _decode_jwt_exp(token: str) -> Optional[float]:
     try:
         payload_b64 = token.split(".")[1]
         # Add padding
-        padded = payload_b64 + "=" * (4 - len(payload_b64) % 4)
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded))
         return float(payload["exp"])
     except Exception:
