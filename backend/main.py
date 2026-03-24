@@ -12,7 +12,7 @@ from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
 from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
-from backend.scam.client import MockScamAPIClient
+from backend.scam.client import ExternalScamAPIClient, MockScamAPIClient
 from backend.scam.service import init_scam_service, get_scam_service
 
 app = create_app()
@@ -35,8 +35,17 @@ async def on_startup():
     # Start the catch-up summary scheduler
     start_catchup_summary_scheduler()
 
-    # Initialize scam detection service
-    scam_svc = init_scam_service(MockScamAPIClient())
+    # Initialize scam detection service from saved preferences
+    from backend.api.settings import get_scam_detection_settings
+    scam_settings = get_scam_detection_settings()
+    if scam_settings["mode"] == "external" and scam_settings["api_url"]:
+        scam_client = ExternalScamAPIClient(
+            base_url=scam_settings["api_url"],
+            api_key=scam_settings["api_key"],
+        )
+    else:
+        scam_client = MockScamAPIClient()
+    scam_svc = init_scam_service(scam_client)
     asyncio.create_task(scam_svc.resume_pending_requests())
 
     if not has_credentials():

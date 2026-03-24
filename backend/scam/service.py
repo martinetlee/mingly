@@ -113,9 +113,15 @@ class ScamDetectionService:
             result = await self._client.is_this_scam(
                 request_id, messages, user_telegram_id, profiles or [], chat_metadata or {}
             )
-            await self._apply_message_result(request_id, chat_id, msg_ids, sender_ids, result)
+            if result.error:
+                # Client returned an error result — broadcast it so frontend knows
+                await self._broadcast_error(chat_id, msg_ids, result.error)
+                await self._mark_request(request_id, "failed")
+            else:
+                await self._apply_message_result(request_id, chat_id, msg_ids, sender_ids, result)
         except Exception as e:
             logger.error("isThisScam failed for chat %d: %s", chat_id, e)
+            await self._broadcast_error(chat_id, msg_ids, f"Scam detection failed: {e}")
             await self._mark_request(request_id, "failed")
 
     async def handle_api_response(self, request_id: str, response: dict) -> None:
@@ -375,6 +381,17 @@ class ScamDetectionService:
             except Exception as e:
                 logger.error("Follow-up response failed for %s: %s", req.request_id, e)
                 await self._mark_request(req.request_id, "failed")
+
+    async def _broadcast_error(
+        self, chat_id: Optional[int], msg_ids: list[int], error: str
+    ) -> None:
+        """Broadcast a scam check error to the frontend."""
+        await ws_manager.broadcast({
+            "type": "scam_check_error",
+            "chat_id": chat_id,
+            "message_ids": msg_ids,
+            "error": error,
+        })
 
     async def _mark_request(self, request_id: str, status: str) -> None:
         async with AsyncSessionLocal() as db:

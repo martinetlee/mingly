@@ -39,6 +39,7 @@ class ScamCheckResult:
     confidence: float
     reason: str
     raw_response: Optional[dict] = None
+    error: Optional[str] = None
 
 
 @dataclass
@@ -92,7 +93,7 @@ class MockScamAPIClient(ScamAPIClient):
         provider = registry.get_any()
         if provider is None:
             logger.debug("No LLM provider available for scam detection")
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason="No LLM available")
+            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="No LLM provider available")
 
         # Build context
         parts = []
@@ -124,7 +125,7 @@ class MockScamAPIClient(ScamAPIClient):
             )
         except (json.JSONDecodeError, LLMError, Exception) as e:
             logger.warning("Scam detection LLM call failed: %s", e)
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason=f"Analysis failed: {e}")
+            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=f"Scam detection failed: {e}")
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
         # Mock always returns synchronously, no polling needed
@@ -187,7 +188,9 @@ class ExternalScamAPIClient(ScamAPIClient):
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=60,
             )
-            resp.raise_for_status()
+            if not resp.is_success:
+                detail = resp.text[:500]
+                raise Exception(f"HTTP {resp.status_code} from {self._base_url}/isThisScam: {detail}")
             data = resp.json()
             return ScamCheckResult(
                 is_scam=data.get("is_scam", False),

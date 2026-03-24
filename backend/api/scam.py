@@ -94,13 +94,25 @@ async def check_messages(req: CheckMessagesRequest):
                         "is_contact": m.sender_id in contact_ids,
                     })
 
+        # Fetch chat metadata
+        from backend.db.models import Chat
+        chat_result = await db.execute(
+            select(Chat).where(Chat.telegram_id == req.chat_id)
+        )
+        chat = chat_result.scalars().first()
+        chat_metadata = {
+            "chat_id": req.chat_id,
+            "name": chat.name or "Unknown" if chat else "Unknown",
+            "type": chat.type or "private" if chat else "private",
+        }
+
     import asyncio
     asyncio.create_task(svc.check_messages_for_scam(
         chat_id=req.chat_id,
         messages=messages,
         user_telegram_id=0,
         profiles=profiles,
-        chat_metadata={"chat_id": req.chat_id},
+        chat_metadata=chat_metadata,
     ))
     return {"status": "queued", "message_count": len(messages)}
 

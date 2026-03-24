@@ -654,6 +654,10 @@ export default function Chats() {
         loadMessages(selectedChat)
       }
     }
+    if (event.type === 'scam_check_error') {
+      // Dispatch error to MessageBubble components
+      window.dispatchEvent(new CustomEvent('scam_check_error', { detail: event }))
+    }
   }, [selectedChat, loadChats, loadMessages])
 
   useWebSocket(handleWsEvent)

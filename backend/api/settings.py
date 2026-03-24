@@ -297,3 +297,82 @@ async def set_translation_language(req: TranslationLanguageRequest):
     prefs["translation_language"] = req.language
     _save_prefs(prefs)
     return {"success": True, "language": req.language}
+
+
+# ---------------------------------------------------------------------------
+# Scam detection settings
+# ---------------------------------------------------------------------------
+
+class ScamDetectionSettingsRequest(BaseModel):
+    mode: str  # 'local_llm' | 'external'
+    api_url: str = ""
+    api_key: str = ""
+
+
+def get_scam_detection_settings() -> dict:
+    """Return scam detection settings from prefs."""
+    prefs = _load_prefs()
+    return {
+        "mode": prefs.get("scam_detection_mode", "local_llm"),
+        "api_url": prefs.get("scam_detection_api_url", ""),
+        "api_key": prefs.get("scam_detection_api_key", ""),
+    }
+
+
+@router.get("/prefs/scam-detection")
+async def get_scam_detection():
+    """Get current scam detection configuration."""
+    settings = get_scam_detection_settings()
+    # Mask API key in response
+    if settings["api_key"]:
+        settings["api_key_set"] = True
+        settings["api_key"] = ""
+    else:
+        settings["api_key_set"] = False
+    return settings
+
+
+@router.post("/prefs/scam-detection")
+async def set_scam_detection(req: ScamDetectionSettingsRequest):
+    """Update scam detection configuration and reconfigure the service."""
+    from fastapi import HTTPException
+
+    if req.mode not in ("local_llm", "external"):
+        raise HTTPException(status_code=400, detail="Mode must be 'local_llm' or 'external'")
+
+    if req.mode == "external" and not req.api_url.strip():
+        raise HTTPException(status_code=400, detail="API URL is required for external mode")
+
+    prefs = _load_prefs()
+    prefs["scam_detection_mode"] = req.mode
+    prefs["scam_detection_api_url"] = req.api_url.strip()
+    # Only update API key if provided (non-empty), otherwise keep existing
+    if req.api_key:
+        prefs["scam_detection_api_key"] = req.api_key
+    elif req.mode == "local_llm":
+        # Clear API key when switching to local mode
+        prefs.pop("scam_detection_api_key", None)
+    _save_prefs(prefs)
+
+    # Reconfigure the live scam service
+    _reconfigure_scam_service(prefs)
+
+    return {"success": True, "mode": req.mode}
+
+
+def _reconfigure_scam_service(prefs: dict) -> None:
+    """Swap the scam detection client based on current preferences."""
+    from backend.scam.client import ExternalScamAPIClient, MockScamAPIClient
+    from backend.scam.service import get_scam_service
+
+    svc = get_scam_service()
+    if svc is None:
+        return
+
+    mode = prefs.get("scam_detection_mode", "local_llm")
+    if mode == "external":
+        api_url = prefs.get("scam_detection_api_url", "")
+        api_key = prefs.get("scam_detection_api_key", "")
+        svc._client = ExternalScamAPIClient(base_url=api_url, api_key=api_key)
+    else:
+        svc._client = MockScamAPIClient()

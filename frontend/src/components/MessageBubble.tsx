@@ -259,7 +259,8 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [scamChecking, setScamChecking] = useState(false)
-  const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | null>(null)
+  const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | 'error' | null>(null)
+  const [scamError, setScamError] = useState<string | null>(null)
   const [translation, setTranslation] = useState<string | null>(null)
   const [translating, setTranslating] = useState(false)
 
@@ -301,6 +302,21 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
       setScamCheckDone(message.scam_score > 0.5 ? 'scam' : 'safe')
     }
   }, [message.scam_score, scamChecking])
+
+  // Listen for scam check errors via WS
+  useEffect(() => {
+    if (!scamChecking) return
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (detail.message_ids?.includes(message.tg_message_id)) {
+        setScamChecking(false)
+        setScamCheckDone('error')
+        setScamError(detail.error || 'Scam check failed')
+      }
+    }
+    window.addEventListener('scam_check_error', handler)
+    return () => window.removeEventListener('scam_check_error', handler)
+  }, [scamChecking, message.tg_message_id])
   const pickerRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const reply = message.reply_to_preview
@@ -525,6 +541,13 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs">
               <Check size={13} className="flex-shrink-0" />
               <span>No scam detected</span>
+            </div>
+          )}
+          {/* Scam check error */}
+          {!scamChecking && scamCheckDone === 'error' && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-orange-500/30 bg-orange-500/10 text-orange-300 text-xs">
+              <ShieldAlert size={13} className="flex-shrink-0" />
+              <span className="flex-1">{scamError || 'Scam check failed'}</span>
             </div>
           )}
           {/* Scam warning banner */}

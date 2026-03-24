@@ -724,6 +724,15 @@ export const joinViaInviteLink = (link: string) =>
 
 // ── Scam Detection ──
 
+export const getScamDetectionSettings = () =>
+  request<{ mode: string; api_url: string; api_key: string; api_key_set: boolean }>('/api/settings/prefs/scam-detection')
+
+export const setScamDetectionSettings = (mode: string, apiUrl: string, apiKey: string) =>
+  request<{ success: boolean; mode: string }>('/api/settings/prefs/scam-detection', {
+    method: 'POST',
+    body: JSON.stringify({ mode, api_url: apiUrl, api_key: apiKey }),
+  })
+
 export const getScamFlags = () =>
   request<ScamFlag[]>('/api/scam/flags')
 

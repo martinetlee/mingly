@@ -522,3 +522,4 @@ export type WSEvent =
   | { type: 'user_status'; user_id: number; status: string; last_seen?: string | null }
   | { type: 'scam_detected'; chat_id: number; message_ids: number[]; sender_ids: number[]; confidence: number; reason: string }
   | { type: 'scam_users_flagged'; telegram_ids: number[] }
+  | { type: 'scam_check_error'; chat_id: number; message_ids: number[]; error: string }
