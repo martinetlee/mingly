@@ -192,6 +192,20 @@ class ExternalScamAPIClient(ScamAPIClient):
                 detail = resp.text[:500]
                 raise Exception(f"HTTP {resp.status_code} from {self._base_url}/isThisScam: {detail}")
             data = resp.json()
+
+            # Handle async processing — poll until we get a verdict
+            if data.get("status") == "processing":
+                import asyncio
+                for _ in range(30):  # poll up to 30 times (~60s)
+                    await asyncio.sleep(2)
+                    poll_result = await self.get_result(request_id)
+                    if poll_result is not None:
+                        return poll_result
+                return ScamCheckResult(
+                    is_scam=False, confidence=0.0, reason="",
+                    error="Scam check timed out waiting for result",
+                )
+
             return ScamCheckResult(
                 is_scam=data.get("is_scam", False),
                 confidence=data.get("confidence", 0.0),
