@@ -761,3 +761,263 @@ export const setTranslationLanguage = (language: string) =>
     method: 'POST',
     body: JSON.stringify({ language }),
   })
+
+// ── Cloud ──
+
+export const getCloudStatus = () =>
+  request<{ status: string; email: string | null }>('/api/cloud/status')
+
+export const cloudConnect = (email: string) =>
+  request<{ status: string; message: string }>('/api/cloud/connect', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+
+export const cloudDisconnect = () =>
+  request<{ status: string; message: string }>('/api/cloud/disconnect', {
+    method: 'POST',
+  })
+
+export const cloudCancelConnect = () =>
+  request<{ status: string }>('/api/cloud/cancel-connect', {
+    method: 'POST',
+  })
+
+// ── Cloud Profile / Emails ──
+
+export const getCloudProfile = () =>
+  request<{
+    id: string
+    primary_email: string
+    created_at: string
+    verified_emails: Array<{
+      id: string
+      email: string
+      domain: string
+      verified_at: string
+    }>
+  }>('/api/cloud/profile')
+
+export const addCloudEmail = (email: string) =>
+  request<{
+    request_id: string
+    claim_secret: string
+    message: string
+  }>('/api/cloud/emails', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+
+export const pollEmailVerification = (requestId: string, claimSecret: string) =>
+  request<{ status: string }>(`/api/cloud/emails/verify-status/${requestId}`, {
+    headers: { 'X-Claim-Secret': claimSecret },
+  })
+
+export const removeCloudEmail = (emailId: string, confirm = false) =>
+  request<{
+    removed_email: string
+    revoked_memberships: Array<{ org_id: string; org_name: string }>
+  }>(`/api/cloud/emails/${emailId}?confirm=${confirm}`, {
+    method: 'DELETE',
+  })
+
+// ── Cloud Orgs ──
+
+export const getCloudOrgs = () =>
+  request<Array<{
+    id: string
+    name: string
+    domain: string
+    join_policy: string
+    created_at: string
+    role: string
+    status: string
+  }>>('/api/cloud/orgs')
+
+export const createCloudOrg = (name: string, domain: string) =>
+  request<{
+    id: string
+    name: string
+    domain: string
+  }>('/api/cloud/orgs', {
+    method: 'POST',
+    body: JSON.stringify({ name, domain }),
+  })
+
+export const getCloudOrg = (orgId: string) =>
+  request<{
+    id: string
+    name: string
+    domain: string
+    join_policy: string
+    created_at: string
+    member_count: number
+  }>(`/api/cloud/orgs/${orgId}`)
+
+export const joinCloudOrg = (orgId: string) =>
+  request<{
+    membership_id: string
+    status: string
+    message: string
+  }>(`/api/cloud/orgs/${orgId}/join`, {
+    method: 'POST',
+  })
+
+export const getCloudOrgMembers = (orgId: string) =>
+  request<Array<{
+    user_id: string
+    email: string
+    role: string
+    status: string
+    joined_at: string
+  }>>(`/api/cloud/orgs/${orgId}/members`)
+
+export const getCloudOrgPending = (orgId: string) =>
+  request<Array<{
+    user_id: string
+    email: string
+    requested_at: string
+  }>>(`/api/cloud/orgs/${orgId}/members/pending`)
+
+export const updateCloudOrgMember = (orgId: string, userId: string, data: { status?: string; role?: string }) =>
+  request<{ user_id: string; status: string; role: string }>(`/api/cloud/orgs/${orgId}/members/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const removeCloudOrgMember = (orgId: string, userId: string) =>
+  request<{ success: boolean }>(`/api/cloud/orgs/${orgId}/members/${userId}`, {
+    method: 'DELETE',
+  })
+
+// ── Cloud Shared Contacts ──
+
+export interface SharedContact {
+  id: string
+  org_id: string
+  telegram_id: number
+  name: string
+  telegram_handle: string | null
+  contributed_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface SharedOrg {
+  id: string
+  org_id: string
+  name: string
+  domain: string | null
+  website: string | null
+  contact_count?: number
+  created_at: string
+}
+
+export interface ContactLink {
+  id: string
+  shared_contact_id: string
+  shared_org_id: string
+  org_id: string
+  position: string | null
+  relationship_context: string | null
+  created_at: string
+}
+
+export const shareContactToOrg = (orgId: string, data: { telegram_id: number; name: string; telegram_handle?: string }) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/share-contact`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const listSharedContacts = (orgId: string) =>
+  request<SharedContact[]>(`/api/cloud/orgs/${orgId}/contacts`)
+
+export const listDirectory = (orgId: string) =>
+  request<SharedOrg[]>(`/api/cloud/orgs/${orgId}/directory`)
+
+export const createSharedOrg = (orgId: string, data: { name: string; domain?: string; website?: string }) =>
+  request<SharedOrg>(`/api/cloud/orgs/${orgId}/directory`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const createContactLink = (orgId: string, contactId: string, data: { shared_org_id: string; position?: string; relationship_context?: string }) =>
+  request<ContactLink>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const listContactLinks = (orgId: string, contactId: string) =>
+  request<ContactLink[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links`)
+
+export const getSharedContact = (orgId: string, contactId: string) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/contacts/${contactId}`)
+
+export const updateSharedContact = (orgId: string, contactId: string, data: { name?: string; telegram_handle?: string }) =>
+  request<SharedContact>(`/api/cloud/orgs/${orgId}/contacts/${contactId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const updateContactLink = (orgId: string, contactId: string, linkId: string, data: { position?: string; relationship_context?: string }) =>
+  request<ContactLink>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links/${linkId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+
+export const deleteContactLink = (orgId: string, contactId: string, linkId: string) =>
+  request<{ success: boolean }>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/links/${linkId}`, {
+    method: 'DELETE',
+  })
+
+export interface GroupChat {
+  id: string
+  chat_telegram_id: number
+  chat_title: string
+  added_by: string
+  added_at: string
+}
+
+export const listGroupChats = (orgId: string, contactId: string) =>
+  request<GroupChat[]>(`/api/cloud/orgs/${orgId}/contacts/${contactId}/group-chats`)
+
+export interface SharedOrgDetail extends SharedOrg {
+  contacts?: SharedContact[]
+}
+
+export const getSharedOrgDetail = (orgId: string, sharedOrgId: string) =>
+  request<SharedOrgDetail>(`/api/cloud/orgs/${orgId}/directory/${sharedOrgId}`)
+
+// ── Cloud Backup ──
+
+export interface BackupStatus {
+  enabled: boolean
+  last_sync: string | null
+  dirty: boolean
+}
+
+export const getBackupStatus = () =>
+  request<BackupStatus>('/api/cloud/backup/status')
+
+export const enableBackup = (masterPassword: string) =>
+  request<{ status: string; last_sync: string }>('/api/cloud/backup/enable', {
+    method: 'POST',
+    body: JSON.stringify({ master_password: masterPassword }),
+  })
+
+export const disableBackup = (deleteRemote = false) =>
+  request<{ status: string }>('/api/cloud/backup/disable', {
+    method: 'POST',
+    body: JSON.stringify({ delete_remote: deleteRemote }),
+  })
+
+export const restoreBackup = (masterPassword: string) =>
+  request<{ status: string; detail?: string; import_summary?: { contacts: { new: number; updated: number; skipped: number }; positions: { new: number; updated: number; skipped: number } } }>('/api/cloud/backup/restore', {
+    method: 'POST',
+    body: JSON.stringify({ master_password: masterPassword }),
+  })
+
+export const syncBackup = () =>
+  request<{ status: string; last_sync?: string }>('/api/cloud/backup/sync', {
+    method: 'POST',
+  })

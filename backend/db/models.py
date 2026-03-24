@@ -105,6 +105,7 @@ class Contact(Base):
     last_interaction_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_outgoing_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_incoming_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cloud_shared_to: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON array of org_id strings
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

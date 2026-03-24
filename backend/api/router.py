@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import admin, auth, catchup, chats, compose, contacts, conversations, dashboard, media, organizations, scam, search, settings, llm, tags, intelligence, profiles, translate
+from backend.api import admin, auth, catchup, chats, cloud, compose, contacts, conversations, dashboard, media, organizations, scam, search, settings, llm, tags, intelligence, profiles, translate
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router, prefix="/api/media-download", tags=["media"], dependencies=protected)
     app.include_router(scam.router, prefix="/api/scam", tags=["scam"], dependencies=protected)
     app.include_router(translate.router, prefix="/api/translate", tags=["translate"], dependencies=protected)
+    app.include_router(cloud.router, prefix="/api/cloud", tags=["cloud"], dependencies=protected)
 
     @app.get("/api/media/{file_path:path}")
     async def serve_media(
