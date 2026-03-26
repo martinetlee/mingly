@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus } from 'lucide-react'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert } from 'lucide-react'
 import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -164,6 +164,7 @@ function ChatItem({
   onHide,
   onBriefing,
   onContextMenu,
+  hasScamFlag,
 }: {
   chat: Chat
   selected: boolean
@@ -172,6 +173,7 @@ function ChatItem({
   onHide: () => void
   onBriefing: () => void
   onContextMenu: (e: React.MouseEvent) => void
+  hasScamFlag?: boolean
 }) {
   const typeColor = {
     private: 'bg-indigo-500/20 text-indigo-400',
@@ -211,6 +213,7 @@ function ChatItem({
                 <MessageSquare size={9} className="inline" />
               </span>
             )}
+            {hasScamFlag && <span title="Contains flagged scammer"><ShieldAlert size={11} className="flex-shrink-0 text-red-400" /></span>}
             {chat.is_muted && <BellOff size={11} className="flex-shrink-0 text-slate-500" />}
             {chat.last_message?.date && (
               <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
@@ -281,6 +284,8 @@ export default function Chats() {
   const [messageOffset, setMessageOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [flaggedSenderIds, setFlaggedSenderIds] = useState<Set<number>>(new Set())
+  const [flaggedChatIds, setFlaggedChatIds] = useState<Set<number>>(new Set())
   const [search, setSearch] = useState('')
   const [showHidden, setShowHidden] = useState(false)
   const [hiddenChats, setHiddenChats] = useState<Chat[]>([])
@@ -547,6 +552,12 @@ export default function Chats() {
     }
     loadChats()
     loadFolders()
+    getScamFlags()
+      .then((data) => {
+        setFlaggedSenderIds(new Set(data.flags.map((f) => f.telegram_id)))
+        setFlaggedChatIds(new Set(data.flagged_chat_ids))
+      })
+      .catch(() => {})
   }, [loadChats, loadFolders, location.search])
 
   // When chats load, auto-select the chat from URL params if pending
@@ -649,14 +660,27 @@ export default function Chats() {
       }
     }
     if (event.type === 'scam_detected') {
-      // Reload messages to show scam warnings
+      // Update scam scores in-place without reloading (avoids scroll jump)
       if (selectedChat && event.chat_id === selectedChat.telegram_id) {
-        loadMessages(selectedChat)
+        setMessages((prev) => prev.map((m) =>
+          event.message_ids.includes(m.tg_message_id)
+            ? { ...m, scam_score: event.confidence, scam_reason: event.reason }
+            : m
+        ))
       }
     }
     if (event.type === 'scam_check_error') {
-      // Dispatch error to MessageBubble components
       window.dispatchEvent(new CustomEvent('scam_check_error', { detail: event }))
+    }
+    if (event.type === 'scam_check_safe') {
+      window.dispatchEvent(new CustomEvent('scam_check_safe', { detail: event }))
+    }
+    if (event.type === 'scam_users_flagged') {
+      setFlaggedSenderIds((prev) => {
+        const next = new Set(prev)
+        for (const id of event.telegram_ids) next.add(id)
+        return next
+      })
     }
   }, [selectedChat, loadChats, loadMessages])
 
@@ -1158,6 +1182,7 @@ export default function Chats() {
                 onHide={() => handleHideChat(chat)}
                 onBriefing={() => handleBriefingChat(chat)}
                 onContextMenu={(e) => setContextMenu({ chat, x: e.clientX, y: e.clientY })}
+                hasScamFlag={flaggedChatIds.has(chat.telegram_id)}
               />
             ))
           )}
@@ -1449,6 +1474,7 @@ export default function Chats() {
                     unreadCount={selectedChatUnread}
                     loadingOlder={loadingMore}
                     onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
+                    flaggedSenderIds={flaggedSenderIds}
                   />
                 </div>
               )}

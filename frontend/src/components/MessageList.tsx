@@ -18,6 +18,8 @@ interface Props {
   onScrollNearTop?: () => void
   /** Whether older messages are currently loading */
   loadingOlder?: boolean
+  /** Set of telegram IDs flagged as scammers */
+  flaggedSenderIds?: Set<number>
 }
 
 /**
@@ -64,7 +66,7 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
@@ -207,6 +209,7 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
                 onEdit={onEdit}
                 onDelete={onDelete}
                 onForward={onForward}
+                isFlaggedSender={!!msg.sender_id && !!flaggedSenderIds?.has(msg.sender_id)}
               />
             </div>
           </div>

@@ -279,13 +279,17 @@ class ScamDetectionService:
         async with AsyncSessionLocal() as db:
             if result.is_scam and msg_ids and chat_id:
                 # Update scam_score on the checked messages
-                await db.execute(
+                update_result = await db.execute(
                     update(Message)
                     .where(
                         Message.chat_id == chat_id,
                         Message.tg_message_id.in_(msg_ids),
                     )
                     .values(scam_score=result.confidence, scam_reason=result.reason)
+                )
+                logger.info(
+                    "Scam score update: chat_id=%s msg_ids=%s confidence=%s rows_matched=%s",
+                    chat_id, msg_ids, result.confidence, update_result.rowcount,
                 )
 
                 # Flag senders
@@ -331,6 +335,21 @@ class ScamDetectionService:
                 "sender_ids": sender_ids,
                 "confidence": result.confidence,
                 "reason": result.reason,
+            })
+
+            # Check if senders are known scammers in the external API
+            if sender_ids:
+                try:
+                    flagged = await self._client.are_flagged_scams(sender_ids)
+                    if flagged:
+                        await self._apply_user_flags(request_id, flagged)
+                except Exception as e:
+                    logger.warning("are_flagged_scams check failed: %s", e)
+        else:
+            await ws_manager.broadcast({
+                "type": "scam_check_safe",
+                "chat_id": chat_id,
+                "message_ids": msg_ids,
             })
 
     async def _handle_followup(self, req: ScamCheckRequest, followup: dict) -> None:

@@ -734,7 +734,7 @@ export const setScamDetectionSettings = (mode: string, apiUrl: string, apiKey: s
   })
 
 export const getScamFlags = () =>
-  request<ScamFlag[]>('/api/scam/flags')
+  request<{ flags: ScamFlag[]; flagged_chat_ids: number[] }>('/api/scam/flags')
 
 export const dismissScamFlag = (telegramId: number) =>
   request<{ status: string }>(`/api/scam/flags/${telegramId}`, { method: 'DELETE' })

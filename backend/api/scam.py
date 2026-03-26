@@ -107,13 +107,20 @@ async def check_messages(req: CheckMessagesRequest):
         }
 
     import asyncio
-    asyncio.create_task(svc.check_messages_for_scam(
-        chat_id=req.chat_id,
-        messages=messages,
-        user_telegram_id=0,
-        profiles=profiles,
-        chat_metadata=chat_metadata,
-    ))
+
+    async def _run_check():
+        try:
+            await svc.check_messages_for_scam(
+                chat_id=req.chat_id,
+                messages=messages,
+                user_telegram_id=0,
+                profiles=profiles,
+                chat_metadata=chat_metadata,
+            )
+        except Exception:
+            logger.exception("Scam check task failed for chat %s", req.chat_id)
+
+    asyncio.create_task(_run_check())
     return {"status": "queued", "message_count": len(messages)}
 
 
@@ -129,20 +136,36 @@ async def scam_callback(request_id: str, payload: CallbackPayload):
 
 @router.get("/flags")
 async def list_flags():
-    """List all scam-flagged users."""
+    """List all scam-flagged users and which chats they appear in."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ScamFlag).order_by(ScamFlag.flagged_at.desc()))
         flags = result.scalars().all()
-        return [
-            {
-                "telegram_id": f.telegram_id,
-                "source": f.source,
-                "confidence": f.confidence,
-                "reason": f.reason,
-                "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
-            }
-            for f in flags
-        ]
+
+        # Find chat IDs containing flagged senders
+        flagged_tids = [f.telegram_id for f in flags]
+        flagged_chat_ids: list[int] = []
+        if flagged_tids:
+            from sqlalchemy import distinct
+            chat_result = await db.execute(
+                select(distinct(Message.chat_id)).where(
+                    Message.sender_id.in_(flagged_tids)
+                )
+            )
+            flagged_chat_ids = [row[0] for row in chat_result.fetchall()]
+
+        return {
+            "flags": [
+                {
+                    "telegram_id": f.telegram_id,
+                    "source": f.source,
+                    "confidence": f.confidence,
+                    "reason": f.reason,
+                    "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
+                }
+                for f in flags
+            ],
+            "flagged_chat_ids": flagged_chat_ids,
+        }
 
 
 @router.delete("/flags/{telegram_id}")

@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages, ChevronDown } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -24,6 +24,8 @@ interface Props {
   showAvatar?: boolean
   /** Whether this is a group/channel chat (controls avatar indent) */
   isGroupChat?: boolean
+  /** Whether the sender is a known flagged scammer */
+  isFlaggedSender?: boolean
 }
 
 // Common quick-reaction emojis (mirrors Telegram's default set)
@@ -175,11 +177,25 @@ function ContextMenu({
   onCheckScam?: () => void
   onTranslate?: () => void
 }) {
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [flipDown, setFlipDown] = useState(false)
+
+  useEffect(() => {
+    const el = menuRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    // Flip down if the menu extends above the visible area (viewport + ~80px for header)
+    if (rect.top < 80) {
+      setFlipDown(true)
+    }
+  }, [])
+
   return (
     <div
-      className={`absolute bottom-full mb-1 z-50 min-w-[140px] rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1 ${
-        isOut ? 'right-0' : 'left-0'
-      }`}
+      ref={menuRef}
+      className={`absolute z-50 min-w-[140px] rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1 ${
+        flipDown ? 'top-full mt-1' : 'bottom-full mb-1'
+      } ${isOut ? 'right-0' : 'left-0'}`}
     >
       {onTranslate && (
         <button
@@ -230,7 +246,7 @@ function ContextMenu({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender }: Props) {
   const isOut = message.is_outgoing
   // Lazy photo download: if media_type is photo but media_url is missing, download it
   const [lazyPhotoUrl, setLazyPhotoUrl] = useState<string | null>(null)
@@ -261,6 +277,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [scamChecking, setScamChecking] = useState(false)
   const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | 'error' | null>(null)
   const [scamError, setScamError] = useState<string | null>(null)
+  const [scamInfoExpanded, setScamInfoExpanded] = useState(false)
   const [translation, setTranslation] = useState<string | null>(null)
   const [translating, setTranslating] = useState(false)
 
@@ -269,14 +286,12 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     setScamCheckDone(null)
     try {
       await checkMessagesForScam(message.chat_id, [message.tg_message_id])
-      // The actual result comes via WebSocket, but show "checking" for a bit
-      // then fall back to "safe" if no scam_score update arrives
-      setTimeout(() => {
-        setScamChecking(false)
-        setScamCheckDone((prev) => prev ?? 'safe')
-      }, 8000)
+      // Result arrives via WebSocket (scam_detected or scam_check_error).
+      // Keep showing "Checking…" until then.
     } catch {
       setScamChecking(false)
+      setScamCheckDone('error')
+      setScamError('Failed to start scam check')
     }
   }, [message.chat_id, message.tg_message_id])
 
@@ -303,10 +318,10 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     }
   }, [message.scam_score, scamChecking])
 
-  // Listen for scam check errors via WS
+  // Listen for scam check results via WS
   useEffect(() => {
     if (!scamChecking) return
-    const handler = (e: Event) => {
+    const onError = (e: Event) => {
       const detail = (e as CustomEvent).detail
       if (detail.message_ids?.includes(message.tg_message_id)) {
         setScamChecking(false)
@@ -314,8 +329,19 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
         setScamError(detail.error || 'Scam check failed')
       }
     }
-    window.addEventListener('scam_check_error', handler)
-    return () => window.removeEventListener('scam_check_error', handler)
+    const onSafe = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (detail.message_ids?.includes(message.tg_message_id)) {
+        setScamChecking(false)
+        setScamCheckDone('safe')
+      }
+    }
+    window.addEventListener('scam_check_error', onError)
+    window.addEventListener('scam_check_safe', onSafe)
+    return () => {
+      window.removeEventListener('scam_check_error', onError)
+      window.removeEventListener('scam_check_safe', onSafe)
+    }
   }, [scamChecking, message.tg_message_id])
   const pickerRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -326,6 +352,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     onReact?.(message, emoji)
   }
 
+  const isScam = message.scam_score != null && message.scam_score > 0.5
   const showAvatarColumn = isGroupChat && !isOut
 
   return (
@@ -412,21 +439,31 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           message.sender_id ? (
             <Link
               to={`/profile/${message.sender_id}`}
-              className="mb-0.5 ml-1 text-xs font-medium text-purple-400 hover:text-purple-300 transition-colors"
+              className={`mb-0.5 ml-1 text-xs font-medium transition-colors inline-flex items-center gap-1 ${
+                isFlaggedSender ? 'text-red-400 hover:text-red-300' : 'text-purple-400 hover:text-purple-300'
+              }`}
             >
+              {isFlaggedSender && <ShieldAlert size={11} className="flex-shrink-0" />}
               {message.sender_name}
             </Link>
           ) : (
-            <span className="mb-0.5 ml-1 text-xs font-medium text-purple-400">
+            <span className={`mb-0.5 ml-1 text-xs font-medium inline-flex items-center gap-1 ${
+              isFlaggedSender ? 'text-red-400' : 'text-purple-400'
+            }`}>
+              {isFlaggedSender && <ShieldAlert size={11} className="flex-shrink-0" />}
               {message.sender_name}
             </span>
           )
         )}
         <div
           className={`rounded-2xl text-sm leading-relaxed overflow-hidden ${
-            isOut
-              ? 'rounded-br-sm bg-indigo-600 text-white'
-              : 'rounded-bl-sm bg-slate-700 text-gray-100 border border-slate-600'
+            isScam
+              ? isOut
+                ? 'rounded-br-sm bg-red-900/80 text-white border border-red-500/40'
+                : 'rounded-bl-sm bg-red-900/40 text-gray-100 border border-red-500/40'
+              : isOut
+                ? 'rounded-br-sm bg-indigo-600 text-white'
+                : 'rounded-bl-sm bg-slate-700 text-gray-100 border border-slate-600'
           }`}
         >
           {/* Reply-to quote block */}
@@ -537,7 +574,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             </div>
           )}
           {/* Scam check result: safe */}
-          {!scamChecking && scamCheckDone === 'safe' && !(message.scam_score != null && message.scam_score > 0.5) && (
+          {!scamChecking && scamCheckDone === 'safe' && !isScam && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs">
               <Check size={13} className="flex-shrink-0" />
               <span>No scam detected</span>
@@ -551,20 +588,30 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             </div>
           )}
           {/* Scam warning banner */}
-          {(message.scam_score != null && message.scam_score > 0.5) && (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 border-t border-red-500/30 text-red-300 text-xs">
-              <ShieldAlert size={13} className="flex-shrink-0" />
-              <span className="flex-1">{message.scam_reason || 'Potential scam detected'}</span>
+          {isScam && (
+            <div className="border-t border-red-500/30 bg-red-500/20">
               <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (message.sender_id) dismissScamFlag(message.sender_id).catch(() => {})
-                }}
-                className="text-red-400 hover:text-red-200 p-0.5"
-                title="Dismiss"
+                onClick={(e) => { e.stopPropagation(); setScamInfoExpanded((v) => !v) }}
+                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-red-300 text-xs hover:bg-red-500/10 transition-colors"
               >
-                <X size={12} />
+                <ShieldAlert size={13} className="flex-shrink-0" />
+                <span className="flex-1 text-left">Potential scam detected</span>
+                <ChevronDown size={12} className={`flex-shrink-0 transition-transform ${scamInfoExpanded ? 'rotate-180' : ''}`} />
               </button>
+              {scamInfoExpanded && (
+                <div className="px-3 pb-2 text-xs text-red-300/80 space-y-1.5">
+                  <p>{message.scam_reason || 'This message has been flagged as a potential scam.'}</p>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (message.sender_id) dismissScamFlag(message.sender_id).catch(() => {})
+                    }}
+                    className="text-red-400 hover:text-red-200 underline"
+                  >
+                    Dismiss flag
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

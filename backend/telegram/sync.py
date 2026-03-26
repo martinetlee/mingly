@@ -561,10 +561,26 @@ async def register_event_handlers() -> None:
     async def on_new_message(event):
         msg = event.message
         async with AsyncSessionLocal() as db:
-            # Only persist if the chat is known
             chat = await crud.get_chat_by_telegram_id(db, event.chat_id)
             if not chat:
-                return
+                # Auto-create the chat for new conversations
+                try:
+                    entity = await client.get_entity(event.chat_id)
+                    chat_type = _chat_type(entity)
+                    name = getattr(entity, "title", None) or (
+                        f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
+                    ) or str(event.chat_id)
+                    username = getattr(entity, "username", None)
+                    chat = await crud.upsert_chat(
+                        db, event.chat_id, name, chat_type,
+                        username=username,
+                        last_message_date=msg.date.replace(tzinfo=None) if msg.date else None,
+                    )
+                    await db.commit()
+                    logger.info("Auto-created chat %s (%s) from incoming message", name, event.chat_id)
+                except Exception:
+                    logger.warning("Failed to auto-create chat %s", event.chat_id, exc_info=True)
+                    return
 
             sender = await msg.get_sender() if msg.sender_id else None
             media_path = await _download_photo(client, msg)
@@ -638,19 +654,24 @@ async def register_event_handlers() -> None:
                         "bio": getattr(sender, "about", None) or "",
                         "is_contact": getattr(sender, "contact", False) or False,
                     }]
-                _asyncio.create_task(scam_svc.check_messages_for_scam(
-                    chat_id=event.chat_id,
-                    messages=[{
-                        "message_id": saved.tg_message_id,
-                        "sender_id": saved.sender_id,
-                        "sender_name": saved.sender_name,
-                        "text": saved.text,
-                        "date": str(saved.date),
-                    }],
-                    user_telegram_id=0,
-                    profiles=_sender_profile,
-                    chat_metadata={"chat_id": event.chat_id, "name": chat.name, "type": chat.type},
-                ))
+                async def _run_scam_check():
+                    try:
+                        await scam_svc.check_messages_for_scam(
+                            chat_id=event.chat_id,
+                            messages=[{
+                                "message_id": saved.tg_message_id,
+                                "sender_id": saved.sender_id,
+                                "sender_name": saved.sender_name,
+                                "text": saved.text,
+                                "date": str(saved.date),
+                            }],
+                            user_telegram_id=0,
+                            profiles=_sender_profile,
+                            chat_metadata={"chat_id": event.chat_id, "name": chat.name, "type": chat.type},
+                        )
+                    except Exception:
+                        logger.exception("Scam check failed for chat %s msg %s", event.chat_id, saved.tg_message_id)
+                _asyncio.create_task(_run_scam_check())
 
         if not saved.is_outgoing:
             from backend.api.settings import get_notif_pref
