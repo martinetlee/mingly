@@ -267,7 +267,7 @@ def _entities_to_html(text: str, entities) -> Optional[str]:
     # plain text without parse_mode. Calling thtml.unparse() here produces garbled
     # HTML because Telegram's auto-detected URL entities are applied at byte offsets
     # that interleave with the markdown markers. Skip thtml for these messages.
-    has_raw_markdown = bool(re.search(r'\*\*|\[\[', text))
+    has_raw_markdown = bool(re.search(r'\*\*|\[\[|\]\s*\(https?://', text))
 
     if entities and not has_raw_markdown:
         from telethon.extensions import html as thtml
@@ -556,6 +556,7 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
             try:
                 await sync_messages(dialog.id, limit=messages_per_chat)
                 synced += 1
+                await ws_manager.broadcast({"type": "chat_synced", "chat_id": dialog.id})
             except Exception as e:
                 logger.warning("bulk_sync: failed to sync chat %s (%s): %s", dialog.name, dialog.id, e)
                 continue
@@ -650,8 +651,25 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
 
         # Fetch and store pinned message id + content for the chat
         try:
-            full_chat = await client.get_entity(chat_telegram_id)
-            pinned_msg_id = getattr(full_chat, "pinned_msg_id", None)
+            entity = await client.get_entity(chat_telegram_id)
+            # get_entity returns the basic entity; pinned_msg_id may be there
+            # or we may need the full chat info
+            pinned_msg_id = getattr(entity, "pinned_msg_id", None)
+            if pinned_msg_id is None:
+                # Try getting full chat info which has pinned_msg_id for channels/groups
+                try:
+                    full = await client(
+                        __import__('telethon.tl.functions.channels', fromlist=['GetFullChannelRequest']).GetFullChannelRequest(entity)
+                    )
+                    pinned_msg_id = getattr(full.full_chat, "pinned_msg_id", None)
+                except Exception:
+                    try:
+                        full = await client(
+                            __import__('telethon.tl.functions.messages', fromlist=['GetFullChatRequest']).GetFullChatRequest(chat_id=abs(chat_telegram_id))
+                        )
+                        pinned_msg_id = getattr(full.full_chat, "pinned_msg_id", None)
+                    except Exception:
+                        pass
             if pinned_msg_id:
                 await crud.set_chat_pinned_message(db, chat_telegram_id, pinned_msg_id)
                 # Fetch the pinned message itself so it's available for display

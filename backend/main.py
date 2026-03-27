@@ -80,12 +80,22 @@ if __name__ == "__main__":
         except OSError:
             time.sleep(0.3)
 
+    # Expose Python functions to JavaScript via window.pywebview.api
+    import webbrowser
+
+    class JsApi:
+        def open_url(self, url):
+            """Open an external URL in the system's default browser."""
+            if url and (url.startswith("http://") or url.startswith("https://")):
+                webbrowser.open(url)
+
     window = webview.create_window(
         "Mingly",
         f"http://{API_HOST}:{API_PORT}",
         width=1280,
         height=800,
         min_size=(900, 600),
+        js_api=JsApi(),
     )
 
     # Register the window so notification clicks can navigate to chats

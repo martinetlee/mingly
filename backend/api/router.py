@@ -39,6 +39,19 @@ def create_app() -> FastAPI:
     app.include_router(scam.router, prefix="/api/scam", tags=["scam"], dependencies=protected)
     app.include_router(translate.router, prefix="/api/translate", tags=["translate"], dependencies=protected)
 
+    @app.post("/api/open-url")
+    async def open_external_url(
+        body: dict,
+        _token: str = Depends(require_session_token),
+    ):
+        """Open a URL in the system's default browser."""
+        import webbrowser
+        url = body.get("url", "")
+        if not url or not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(status_code=400, detail="Invalid URL")
+        webbrowser.open(url)
+        return {"status": "ok"}
+
     @app.get("/api/media/{file_path:path}")
     async def serve_media(
         file_path: str,

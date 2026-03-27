@@ -3,7 +3,7 @@ import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock,
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
-import { downloadMedia, dismissScamFlag, checkMessagesForScam, translateMessage, getPrefs } from '../api/client'
+import { downloadMedia, dismissScamFlag, checkMessagesForScam, translateMessage, getPrefs, openExternalUrl } from '../api/client'
 import ImageLightbox from './ImageLightbox'
 import SenderAvatar from './SenderAvatar'
 import VideoPlayer from './VideoPlayer'
@@ -97,8 +97,8 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
     if (href.startsWith('/profile/')) {
       navigate(href)
     } else if (href.startsWith('http://') || href.startsWith('https://')) {
-      // Open external links in system browser
-      window.open(href, '_blank', 'noopener,noreferrer')
+      // Open external links in system browser via backend
+      openExternalUrl(href)
     }
   }, [navigate])
 
@@ -505,7 +505,13 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
           )}
           {message.text && (
             <p className="px-3 py-2 select-text">
-              <FormattedText html={message.text_html ?? simpleMarkdownToHtml(message.text)} isOut={isOut} />
+              <FormattedText html={
+                // If text_html still contains raw Markdown link syntax, it was mangled by
+                // entity processing — fall back to client-side Markdown conversion
+                message.text_html && !/\]\s*\(https?:\/\//.test(message.text_html)
+                  ? message.text_html
+                  : simpleMarkdownToHtml(message.text)
+              } isOut={isOut} />
             </p>
           )}
           {/* Translation */}

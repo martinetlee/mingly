@@ -690,6 +690,12 @@ export default function Chats() {
         loadMessages(selectedChat)
       }
     }
+    if (event.type === 'bulk_sync_complete') {
+      // Bulk sync done — reload if current chat has no messages
+      if (selectedChat && messages.length === 0) {
+        loadMessages(selectedChat)
+      }
+    }
     if (event.type === 'scam_users_flagged') {
       setFlaggedSenderIds((prev) => {
         const next = new Set(prev)
@@ -1055,10 +1061,13 @@ export default function Chats() {
       setSearchingTelegram(true)
       try {
         const results = await searchChatsTelegram(search)
-        // Filter out chats already in local results
-        const localIds = new Set(filtered.map((c) => c.telegram_id))
+        // Filter out chats already in local list
+        const localIds = new Set(chats.map((c) => c.telegram_id))
         setTelegramSearchResults(results.filter((c) => !localIds.has(c.telegram_id)))
-      } catch {}
+      } catch (err) {
+        console.warn('Telegram search failed:', err)
+        setTelegramSearchResults([])
+      }
       setSearchingTelegram(false)
     }, 300)
     return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
@@ -1229,10 +1238,10 @@ export default function Chats() {
           )}
 
           {/* Telegram search results (chats not in local DB) */}
-          {search.trim() && (telegramSearchResults.length > 0 || searchingTelegram) && (
+          {search.trim() && (
             <div className="border-t border-slate-700/50">
               <p className="px-3 py-1.5 text-[10px] font-medium text-slate-500 uppercase tracking-wider">
-                {searchingTelegram ? 'Searching Telegram…' : 'From Telegram'}
+                {searchingTelegram ? 'Searching all chats…' : telegramSearchResults.length > 0 ? 'All chats' : 'No other chats found'}
               </p>
               {telegramSearchResults.map((chat) => (
                 <ChatItem
@@ -1540,14 +1549,17 @@ export default function Chats() {
               {pinnedMessage && (
                 <div className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors"
                   onClick={() => {
-                    // Jump to pinned message
-                    const el = document.querySelector(`[data-msg-id="${pinnedMessage.tg_message_id}"]`)
-                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                    // Jump to pinned message using anchor-based navigation
+                    if (selectedChat && pinnedMessage.tg_message_id) {
+                      pendingAnchorRef.current = pinnedMessage.tg_message_id
+                      setHighlightMsgId(pinnedMessage.tg_message_id)
+                      loadMessages(selectedChat)
+                    }
                   }}
                 >
                   <Pin size={14} className="text-indigo-400 flex-shrink-0" />
                   {pinnedMessage.media_url && pinnedMessage.media_type === 'photo' && (
-                    <img src={pinnedMessage.media_url} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
+                    <img src={authenticatedMediaUrl(pinnedMessage.media_url)} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
                   )}
                   <div className="min-w-0 flex-1">
                     <p className="text-[11px] font-medium text-indigo-400">Pinned message</p>

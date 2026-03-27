@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { getVaultStatus, getAuthStatus } from './api/client'
+import { getVaultStatus, getAuthStatus, openExternalUrl } from './api/client'
 import { onSessionExpired } from './api/session'
 import Layout from './components/Layout'
 import Onboarding from './pages/Onboarding'
@@ -47,7 +47,7 @@ export default function App() {
       if (href.startsWith('http://') || href.startsWith('https://')) {
         e.preventDefault()
         e.stopPropagation()
-        window.open(href, '_blank')
+        openExternalUrl(href)
       }
     }
     document.addEventListener('click', handler, true)

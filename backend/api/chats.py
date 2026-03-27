@@ -98,7 +98,7 @@ def _serialize_msg(row) -> dict:
         "sender_id": m.sender_id,
         "sender_name": m.sender_name,
         "text": m.text,
-        "date": m.date,
+        "date": m.date.isoformat() + "Z" if m.date else None,
         "is_outgoing": m.is_outgoing,
         "media_type": m.media_type,
         "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
@@ -151,13 +151,13 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         d["last_message"] = {
             "text": (last_text[:100] if last_text and len(last_text) > 100 else last_text) or "",
             "sender_name": last_sender,
-            "date": last_date.isoformat() if last_date else None,
+            "date": last_date.isoformat() + "Z" if last_date else None,
         }
     else:
         d["last_message"] = None
     # Ensure last_activity_at is serialized as ISO string
     if d.get("last_activity_at") and hasattr(d["last_activity_at"], "isoformat"):
-        d["last_activity_at"] = d["last_activity_at"].isoformat()
+        d["last_activity_at"] = d["last_activity_at"].isoformat() + "Z"
     return d
 
 
@@ -238,33 +238,19 @@ async def search_chats(q: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/search/telegram")
 async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
-    """Search chats via Telegram dialog search (finds chats not in local DB)."""
+    """Search all synced chats by name (covers all dialogs from sync_dialogs)."""
     if not q.strip():
         return []
-    client = get_client()
-    if not client:
-        return []
-    results = []
-    try:
-        async for dialog in client.iter_dialogs(search=q):
-            entity = dialog.entity
-            # Upsert so it's available locally going forward
-            chat = await crud.upsert_chat(
-                db,
-                telegram_id=dialog.id,
-                name=dialog.name or str(dialog.id),
-                chat_type=_chat_type(entity),
-                username=getattr(entity, "username", None),
-                unread_count=dialog.unread_count,
-                members_count=getattr(entity, "participants_count", None),
-            )
-            await db.commit()
-            results.append(_chat_dict(chat))
-            if len(results) >= 20:
-                break
-    except Exception:
-        pass
-    return results
+    from sqlalchemy import select as sa_sel
+    from backend.db.models import Chat
+    # Search all chats in DB (sync_dialogs imports all user's dialogs)
+    result = await db.execute(
+        sa_sel(Chat)
+        .where(Chat.name.ilike(f"%{q}%"))
+        .order_by(Chat.last_activity_at.desc().nullslast())
+        .limit(20)
+    )
+    return [_chat_dict(c) for c in result.scalars().all()]
 
 
 @router.get("/search/messages")
@@ -638,6 +624,8 @@ async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depen
             status_code=422,
             detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({e})",
         )
+    from backend.ws.manager import ws_manager
+    await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
     return {"status": "ok"}
 
 
@@ -851,18 +839,21 @@ async def list_topics(telegram_id: int, db: AsyncSession = Depends(get_db)):
                 "is_pinned": getattr(topic, "pinned", False) or False,
             })
         return topics
-    except ImportError:
-        # GetForumTopicsRequest not available in this Telethon version;
+    except (ImportError, Exception) as exc:
+        # GetForumTopicsRequest not available or call failed;
         # fall back to deriving topics from synced messages
-        from sqlalchemy import distinct
+        if not isinstance(exc, ImportError):
+            logger.warning("GetForumTopicsRequest failed, using fallback: %s", exc)
+        from sqlalchemy import select as sa_sel, distinct
+        from backend.db.models import Message
         rows = (await db.execute(
-            select(distinct(Message.topic_id))
+            sa_sel(distinct(Message.topic_id))
             .where(Message.chat_id == telegram_id, Message.topic_id.isnot(None))
         )).fetchall()
         topics = []
         for (tid,) in rows:
             first_msg = (await db.execute(
-                select(Message)
+                sa_sel(Message)
                 .where(Message.chat_id == telegram_id, Message.topic_id == tid)
                 .order_by(Message.date)
                 .limit(1)
@@ -877,8 +868,6 @@ async def list_topics(telegram_id: int, db: AsyncSession = Depends(get_db)):
                 "is_pinned": False,
             })
         return topics
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot fetch topics: {e}")
 
 
 class CreateTopicRequest(BaseModel):

@@ -150,8 +150,10 @@ export const getSharedMedia = (telegram_id: number, mediaFilter: 'media' | 'file
 export const markChatRead = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
 
-export const getPinnedMessage = (telegram_id: number) =>
-  request<PinnedMessage | null>(`/api/chats/${telegram_id}/pinned`)
+export const getPinnedMessage = async (telegram_id: number): Promise<PinnedMessage | null> => {
+  const msgs = await request<PinnedMessage[]>(`/api/chats/${telegram_id}/pinned`)
+  return msgs && msgs.length > 0 ? msgs[0] : null
+}
 
 export const getHiddenChats = () =>
   request<Chat[]>('/api/chats/hidden')
@@ -765,6 +767,17 @@ export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[
   })
 
 // ── Translation ──
+
+export const openExternalUrl = (url: string) => {
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.open_url) {
+    return pywebview.api.open_url(url)
+  }
+  return request<{ status: string }>('/api/open-url', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  }).catch(() => { window.open(url, '_blank') })
+}
 
 export const translateMessage = (text: string, targetLanguage: string) =>
   request<{ translation: string }>('/api/translate', {
