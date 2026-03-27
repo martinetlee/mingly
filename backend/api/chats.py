@@ -216,6 +216,128 @@ async def list_chats(limit: int = 50, offset: int = 0, sort_by: str = "recent", 
     return [_chat_dict(chat, last_text, last_sender, last_date) for chat, last_text, last_sender, last_date in rows]
 
 
+@router.get("/search")
+async def search_chats(q: str, db: AsyncSession = Depends(get_db)):
+    """Search chats by name in local DB."""
+    if not q.strip():
+        return {"local": []}
+    from sqlalchemy import select, desc
+    from backend.db.models import Chat
+    result = await db.execute(
+        select(Chat)
+        .where(
+            Chat.name.ilike(f"%{q}%"),
+            Chat.is_hidden == False,  # noqa: E712
+        )
+        .order_by(desc(Chat.last_activity_at))
+        .limit(20)
+    )
+    local = [_chat_dict(c) for c in result.scalars().all()]
+    return {"local": local}
+
+
+@router.get("/search/telegram")
+async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
+    """Search chats via Telegram dialog search (finds chats not in local DB)."""
+    if not q.strip():
+        return []
+    client = get_client()
+    if not client:
+        return []
+    results = []
+    try:
+        async for dialog in client.iter_dialogs(search=q):
+            entity = dialog.entity
+            # Upsert so it's available locally going forward
+            chat = await crud.upsert_chat(
+                db,
+                telegram_id=dialog.id,
+                name=dialog.name or str(dialog.id),
+                chat_type=_chat_type(entity),
+                username=getattr(entity, "username", None),
+                unread_count=dialog.unread_count,
+                members_count=getattr(entity, "participants_count", None),
+            )
+            await db.commit()
+            results.append(_chat_dict(chat))
+            if len(results) >= 20:
+                break
+    except Exception:
+        pass
+    return results
+
+
+@router.get("/search/messages")
+async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
+    """Search message content globally via Telegram SearchGlobalRequest."""
+    if not q.strip():
+        return []
+    client = get_client()
+    if not client:
+        return []
+    try:
+        from telethon.tl.functions.messages import SearchGlobalRequest
+        from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty
+
+        result = await client(SearchGlobalRequest(
+            q=q,
+            filter=InputMessagesFilterEmpty(),
+            min_date=None,
+            max_date=None,
+            offset_rate=0,
+            offset_peer=InputPeerEmpty(),
+            offset_id=0,
+            limit=30,
+        ))
+
+        # Group results by chat
+        chat_messages: dict[int, list] = {}
+        chats_map: dict[int, dict] = {}
+
+        for c in getattr(result, "chats", []):
+            chats_map[c.id] = {"name": getattr(c, "title", str(c.id)), "type": "channel" if hasattr(c, "broadcast") else "group"}
+        for u in getattr(result, "users", []):
+            name = f"{getattr(u, 'first_name', '') or ''} {getattr(u, 'last_name', '') or ''}".strip() or str(u.id)
+            chats_map[u.id] = {"name": name, "type": "private"}
+
+        for msg in getattr(result, "messages", []):
+            peer = msg.peer_id
+            if not peer:
+                continue
+            tg_id = utils.get_peer_id(peer)
+
+            if tg_id not in chat_messages:
+                chat_messages[tg_id] = []
+            if len(chat_messages[tg_id]) < 3:  # max 3 messages per chat
+                sender_name = None
+                if msg.from_id and hasattr(msg.from_id, "user_id"):
+                    u = chats_map.get(msg.from_id.user_id)
+                    sender_name = u["name"] if u else None
+                chat_messages[tg_id].append({
+                    "tg_message_id": msg.id,
+                    "text": (msg.message or "")[:120],
+                    "sender_name": sender_name,
+                    "date": msg.date.replace(tzinfo=None).isoformat() if msg.date else None,
+                })
+
+        results = []
+        for tg_id, messages in chat_messages.items():
+            info = chats_map.get(abs(tg_id) if tg_id > 0 else abs(tg_id) - 1000000000000, {})
+            # Try local DB for richer chat info
+            local_chat = await crud.get_chat_by_telegram_id(db, tg_id)
+            results.append({
+                "telegram_id": tg_id,
+                "name": local_chat.name if local_chat else info.get("name", str(tg_id)),
+                "type": local_chat.type if local_chat else info.get("type", "unknown"),
+                "messages": messages,
+            })
+        return results
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Global message search failed: %s", e)
+        return []
+
+
 @router.get("/hidden")
 async def list_hidden_chats(db: AsyncSession = Depends(get_db)):
     return [_chat_dict(c) for c in await crud.get_hidden_chats(db)]

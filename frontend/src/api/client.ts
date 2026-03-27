@@ -104,6 +104,22 @@ export const logout = () =>
 export const getChats = (limit = 50, offset = 0, sortBy = 'recent') =>
   request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}`)
 
+export const searchChatsLocal = (q: string) =>
+  request<{ local: Chat[] }>(`/api/chats/search?q=${encodeURIComponent(q)}`)
+
+export const searchChatsTelegram = (q: string) =>
+  request<Chat[]>(`/api/chats/search/telegram?q=${encodeURIComponent(q)}`)
+
+export interface MessageSearchResult {
+  telegram_id: number
+  name: string
+  type: string
+  messages: { tg_message_id: number; text: string; sender_name: string | null; date: string | null }[]
+}
+
+export const searchMessagesGlobal = (q: string) =>
+  request<MessageSearchResult[]>(`/api/chats/search/messages?q=${encodeURIComponent(q)}`)
+
 export const bulkSync = () =>
   request<{ synced: number }>('/api/chats/bulk-sync', { method: 'POST' })
 

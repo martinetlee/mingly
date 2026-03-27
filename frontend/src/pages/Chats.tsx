@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert } from 'lucide-react'
 import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags } from '../api/client'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags, searchChatsLocal, searchChatsTelegram, searchMessagesGlobal } from '../api/client'
+import type { MessageSearchResult } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
@@ -287,6 +288,11 @@ export default function Chats() {
   const [flaggedSenderIds, setFlaggedSenderIds] = useState<Set<number>>(new Set())
   const [flaggedChatIds, setFlaggedChatIds] = useState<Set<number>>(new Set())
   const [search, setSearch] = useState('')
+  const [telegramSearchResults, setTelegramSearchResults] = useState<Chat[]>([])
+  const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchResult[]>([])
+  const [searchingTelegram, setSearchingTelegram] = useState(false)
+  const [searchingMessages, setSearchingMessages] = useState(false)
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [hiddenChats, setHiddenChats] = useState<Chat[]>([])
   const [showInfo, setShowInfo] = useState(false)
@@ -1035,6 +1041,29 @@ export default function Chats() {
     c.name.toLowerCase().includes(search.toLowerCase())
   )
 
+  // Debounced Telegram search when typing in search bar
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    if (!search.trim()) {
+      setTelegramSearchResults([])
+      setMessageSearchResults([])
+      setSearchingTelegram(false)
+      setSearchingMessages(false)
+      return
+    }
+    searchTimerRef.current = setTimeout(async () => {
+      setSearchingTelegram(true)
+      try {
+        const results = await searchChatsTelegram(search)
+        // Filter out chats already in local results
+        const localIds = new Set(filtered.map((c) => c.telegram_id))
+        setTelegramSearchResults(results.filter((c) => !localIds.has(c.telegram_id)))
+      } catch {}
+      setSearchingTelegram(false)
+    }, 300)
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
+  }, [search]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Apply client-side sort to guarantee correct order (pinned first)
   const sorted = [...filtered].sort((a, b) => {
     // Pinned chats always come first
@@ -1197,6 +1226,73 @@ export default function Chats() {
           )}
           {loadingMoreChats && (
             <p className="px-4 py-3 text-center text-xs text-slate-500">Loading…</p>
+          )}
+
+          {/* Telegram search results (chats not in local DB) */}
+          {search.trim() && (telegramSearchResults.length > 0 || searchingTelegram) && (
+            <div className="border-t border-slate-700/50">
+              <p className="px-3 py-1.5 text-[10px] font-medium text-slate-500 uppercase tracking-wider">
+                {searchingTelegram ? 'Searching Telegram…' : 'From Telegram'}
+              </p>
+              {telegramSearchResults.map((chat) => (
+                <ChatItem
+                  key={`tg-${chat.telegram_id}`}
+                  chat={chat}
+                  selected={selectedChat?.telegram_id === chat.telegram_id}
+                  onClick={() => handleSelectChat(chat)}
+                  onToggleTrack={() => {}}
+                  onHide={() => {}}
+                  onBriefing={() => {}}
+                  onContextMenu={() => {}}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Search messages button */}
+          {search.trim() && (
+            <div className="border-t border-slate-700/50 px-3 py-2">
+              {searchingMessages ? (
+                <p className="text-center text-xs text-slate-500">Searching messages…</p>
+              ) : messageSearchResults.length > 0 ? (
+                <div>
+                  <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">Messages</p>
+                  {messageSearchResults.map((r) => (
+                    <button
+                      key={r.telegram_id}
+                      onClick={() => {
+                        const existing = chats.find((c) => c.telegram_id === r.telegram_id)
+                        if (existing) handleSelectChat(existing)
+                      }}
+                      className="w-full text-left px-2 py-1.5 rounded hover:bg-slate-700/50 transition-colors"
+                    >
+                      <p className="text-xs font-medium text-slate-300 truncate">{r.name}</p>
+                      {r.messages[0] && (
+                        <p className="text-[11px] text-slate-500 truncate">
+                          {r.messages[0].sender_name && <span className="text-slate-400">{r.messages[0].sender_name}: </span>}
+                          {r.messages[0].text}
+                        </p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <button
+                  onClick={async () => {
+                    setSearchingMessages(true)
+                    try {
+                      const results = await searchMessagesGlobal(search)
+                      setMessageSearchResults(results)
+                    } catch {}
+                    setSearchingMessages(false)
+                  }}
+                  className="w-full rounded-lg border border-slate-600 bg-slate-700/50 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Search size={12} />
+                  Search message content
+                </button>
+              )}
+            </div>
           )}
         </div>
 

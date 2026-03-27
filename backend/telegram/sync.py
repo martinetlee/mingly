@@ -495,16 +495,12 @@ async def sync_global_mentions(days: int = 7) -> int:
             for msg in getattr(result, "messages", []):
                 if not msg.message and not msg.media:
                     continue
-                # Determine chat_id (peer_id)
+                # Determine chat_id using Telethon's utility for correct sign conversion
                 peer = msg.peer_id
-                chat_id = getattr(peer, "channel_id", None) or getattr(peer, "chat_id", None) or getattr(peer, "user_id", None)
-                if not chat_id:
+                if not peer:
                     continue
-                # Telegram uses positive IDs internally; convert to the signed format Telethon uses
-                if hasattr(peer, "channel_id"):
-                    chat_id = -1000000000000 - peer.channel_id
-                elif hasattr(peer, "chat_id"):
-                    chat_id = -peer.chat_id
+                from telethon import utils as tl_utils
+                chat_id = tl_utils.get_peer_id(peer)
 
                 sender = chats_map.get(msg.from_id.user_id) if msg.from_id and hasattr(msg.from_id, "user_id") else None
                 text_html = _entities_to_html(msg.message or "", msg.entities)
