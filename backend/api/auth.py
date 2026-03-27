@@ -9,7 +9,7 @@ from backend.telegram.client import (
     get_client, send_code, sign_in, sign_in_2fa, persist_session,
     get_me, disconnect, has_credentials, init_client,
 )
-from backend.telegram.sync import sync_dialogs, register_event_handlers, bulk_sync, resolve_numeric_names
+from backend.telegram.sync import sync_dialogs, register_event_handlers, bulk_sync, resolve_numeric_names, sync_global_mentions
 from backend.secrets import (
     save_secret, delete_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
@@ -85,6 +85,7 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 # Background: sync remaining dialogs + messages
                 asyncio.create_task(_background_full_sync())
                 asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+                asyncio.create_task(sync_global_mentions(days=30))
         except Exception:
             pass
     return {"success": True, "session_token": token}

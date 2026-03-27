@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages, ChevronDown } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages, ChevronDown, Copy } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -92,9 +92,13 @@ function FormattedText({ html, isOut }: { html: string; isOut: boolean }) {
     const anchor = (e.target as HTMLElement).closest('a')
     if (!anchor) return
     const href = anchor.getAttribute('href')
-    if (href && href.startsWith('/profile/')) {
-      e.preventDefault()
+    if (!href) return
+    e.preventDefault()
+    if (href.startsWith('/profile/')) {
       navigate(href)
+    } else if (href.startsWith('http://') || href.startsWith('https://')) {
+      // Open external links in system browser
+      window.open(href, '_blank', 'noopener,noreferrer')
     }
   }, [navigate])
 
@@ -166,6 +170,7 @@ function ContextMenu({
   onForward,
   onCheckScam,
   onTranslate,
+  onCopy,
 }: {
   isOut: boolean
   canEdit: boolean
@@ -176,6 +181,7 @@ function ContextMenu({
   onForward: () => void
   onCheckScam?: () => void
   onTranslate?: () => void
+  onCopy?: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [flipDown, setFlipDown] = useState(false)
@@ -197,6 +203,15 @@ function ContextMenu({
         flipDown ? 'top-full mt-1' : 'bottom-full mb-1'
       } ${isOut ? 'right-0' : 'left-0'}`}
     >
+      {onCopy && (
+        <button
+          onClick={onCopy}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+        >
+          <Copy size={13} />
+          Copy text
+        </button>
+      )}
       {onTranslate && (
         <button
           onClick={onTranslate}
@@ -415,6 +430,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
                   onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
+                  onCopy={message.text ? () => { setShowContextMenu(false); navigator.clipboard.writeText(message.text!) } : undefined}
                 />
               )}
             </div>
@@ -488,7 +504,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
             </div>
           )}
           {message.text && (
-            <p className="px-3 py-2">
+            <p className="px-3 py-2 select-text">
               <FormattedText html={message.text_html ?? simpleMarkdownToHtml(message.text)} isOut={isOut} />
             </p>
           )}
@@ -704,6 +720,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
                   onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
+                  onCopy={message.text ? () => { setShowContextMenu(false); navigator.clipboard.writeText(message.text!) } : undefined}
                 />
               )}
             </div>

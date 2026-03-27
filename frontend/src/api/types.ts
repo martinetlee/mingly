@@ -109,6 +109,8 @@ export interface PinnedMessage {
   tg_message_id: number
   sender_name: string | null
   text: string | null
+  media_type: string | null
+  media_url: string | null
   date: string
 }
 
@@ -524,3 +526,5 @@ export type WSEvent =
   | { type: 'scam_users_flagged'; telegram_ids: number[] }
   | { type: 'scam_check_error'; chat_id: number; message_ids: number[]; error: string }
   | { type: 'scam_check_safe'; chat_id: number; message_ids: number[] }
+  | { type: 'chat_synced'; chat_id: number }
+  | { type: 'bulk_sync_complete'; synced: number }

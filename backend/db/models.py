@@ -31,6 +31,9 @@ class Chat(Base):
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     pinned_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_message_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_message_sender: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_message_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

@@ -4,6 +4,7 @@ import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRigh
 import type { DashboardData, MentionGroup, MentionMessage } from '../api/types'
 import { getDashboard, getMentions, reactToMessage } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import { useWebSocket } from '../hooks/useWebSocket'
 import CatchUpQueue from '../components/CatchUpQueue'
 
 function getGreeting(): string {
@@ -220,7 +221,31 @@ export default function Home() {
     fetchMentions()
   }, [fetchMentions])
 
+  // Re-fetch data when new incoming messages arrive or sync completes
+  const handleWsEvent = useCallback((event: { type: string; is_outgoing?: boolean }) => {
+    if (event.type === 'new_message' && !event.is_outgoing) {
+      fetchMentions()
+    }
+    if (event.type === 'chat_synced' || event.type === 'bulk_sync_complete') {
+      fetchMentions()
+      refreshDashboard()
+    }
+  }, [fetchMentions, refreshDashboard])
+  useWebSocket(handleWsEvent)
+
   // Filter mentions client-side
+  const mentionCounts = useMemo(() => {
+    let notActed = 0, acknowledged = 0, replied = 0
+    for (const g of mentions) {
+      const r = g.replied
+      const a = !!g.mention_msg.my_reaction && !r
+      if (r) replied++
+      else if (a) acknowledged++
+      else notActed++
+    }
+    return { not_acted: notActed, all: mentions.length, acknowledged, replied }
+  }, [mentions])
+
   const visibleMentions = useMemo(() => mentions.filter((g) => {
     const isReplied = g.replied
     const isAcknowledged = !!g.mention_msg.my_reaction && !isReplied
@@ -384,7 +409,7 @@ export default function Home() {
                       : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
                   }`}
                 >
-                  {opt.label}
+                  {opt.label}{mentionCounts[opt.value] > 0 ? ` (${mentionCounts[opt.value]})` : ''}
                 </button>
               ))}
               <button

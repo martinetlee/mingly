@@ -463,12 +463,15 @@ export default function Chats() {
       setChats((prev) => {
         const existingIds = new Set(prev.map((c) => c.telegram_id))
         const newChats = data.filter((c) => !existingIds.has(c.telegram_id))
-        // Auto-sync 25 messages for each newly visible chat (fire-and-forget)
-        for (const c of newChats) {
-          if (!autoSyncedRef.current.has(c.telegram_id)) {
-            autoSyncedRef.current.add(c.telegram_id)
-            syncChat(c.telegram_id, 25).catch(() => {})
-          }
+        // Auto-sync newly visible chats (sequential to avoid stampeding)
+        const toSync = newChats.filter((c) => !autoSyncedRef.current.has(c.telegram_id))
+        for (const c of toSync) autoSyncedRef.current.add(c.telegram_id)
+        if (toSync.length > 0) {
+          ;(async () => {
+            for (const c of toSync) {
+              await syncChat(c.telegram_id, 25).catch(() => {})
+            }
+          })()
         }
         return [...prev, ...newChats]
       })
@@ -674,6 +677,12 @@ export default function Chats() {
     }
     if (event.type === 'scam_check_safe') {
       window.dispatchEvent(new CustomEvent('scam_check_safe', { detail: event }))
+    }
+    if (event.type === 'chat_synced') {
+      // Background sync finished — reload messages if viewing this chat
+      if (selectedChat && event.chat_id === selectedChat.telegram_id) {
+        loadMessages(selectedChat)
+      }
     }
     if (event.type === 'scam_users_flagged') {
       setFlaggedSenderIds((prev) => {
@@ -1164,7 +1173,7 @@ export default function Chats() {
           className="flex-1 overflow-y-auto"
           onScroll={(e) => {
             const el = e.currentTarget
-            if (el.scrollHeight - el.scrollTop - el.clientHeight < 400) {
+            if (el.scrollHeight - el.scrollTop - el.clientHeight < 400 && !loadingMoreChats) {
               loadMoreChats()
             }
           }}
@@ -1433,20 +1442,29 @@ export default function Chats() {
 
               {/* Pinned message banner */}
               {pinnedMessage && (
-                <div className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2">
-                  <Pin size={14} className="text-slate-400 flex-shrink-0" />
+                <div className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors"
+                  onClick={() => {
+                    // Jump to pinned message
+                    const el = document.querySelector(`[data-msg-id="${pinnedMessage.tg_message_id}"]`)
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                  }}
+                >
+                  <Pin size={14} className="text-indigo-400 flex-shrink-0" />
+                  {pinnedMessage.media_url && pinnedMessage.media_type === 'photo' && (
+                    <img src={pinnedMessage.media_url} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
+                  )}
                   <div className="min-w-0 flex-1">
-                    {pinnedMessage.sender_name && (
-                      <span className="text-[11px] font-medium text-purple-400 mr-1.5">
-                        {pinnedMessage.sender_name}
-                      </span>
-                    )}
-                    <span className="text-xs text-slate-400 truncate">
-                      {pinnedMessage.text ? pinnedMessage.text.slice(0, 120) : '[media]'}
-                    </span>
+                    <p className="text-[11px] font-medium text-indigo-400">Pinned message</p>
+                    <p className="text-xs text-slate-300 truncate">
+                      {pinnedMessage.text
+                        ? pinnedMessage.text.slice(0, 120)
+                        : pinnedMessage.media_type
+                          ? `[${pinnedMessage.media_type}]`
+                          : ''}
+                    </p>
                   </div>
                   <button
-                    onClick={() => setPinnedMessage(null)}
+                    onClick={(e) => { e.stopPropagation(); setPinnedMessage(null) }}
                     className="flex-shrink-0 text-slate-500 hover:text-slate-300 transition-colors"
                     title="Dismiss pinned message"
                   >

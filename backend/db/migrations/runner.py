@@ -310,6 +310,30 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_tgmsgid_chat ON messages (tg_message_id, chat_id)",
         ],
     ),
+    (
+        30,
+        "Add performance indexes on messages for chat loading",
+        [
+            "CREATE INDEX IF NOT EXISTS ix_messages_chat_date ON messages (chat_id, date DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_messages_chat_tgmsgid ON messages (chat_id, tg_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_messages_sender_id ON messages (sender_id)",
+        ],
+    ),
+    (
+        31,
+        "Cache last message fields on chats table to avoid window function",
+        [
+            "ALTER TABLE chats ADD COLUMN last_message_text TEXT",
+            "ALTER TABLE chats ADD COLUMN last_message_sender TEXT",
+            "ALTER TABLE chats ADD COLUMN last_message_date DATETIME",
+            # Backfill from existing messages
+            """UPDATE chats SET
+                last_message_text = (SELECT text FROM messages WHERE messages.chat_id = chats.telegram_id ORDER BY date DESC LIMIT 1),
+                last_message_sender = (SELECT sender_name FROM messages WHERE messages.chat_id = chats.telegram_id ORDER BY date DESC LIMIT 1),
+                last_message_date = (SELECT date FROM messages WHERE messages.chat_id = chats.telegram_id ORDER BY date DESC LIMIT 1)
+            """,
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

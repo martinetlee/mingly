@@ -7,7 +7,7 @@ from backend.api.router import create_app
 from backend.config import API_HOST, API_PORT
 from backend.db.database import init_db
 from backend.telegram.client import has_credentials, init_client
-from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers
+from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers, sync_global_mentions
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
@@ -55,6 +55,7 @@ async def on_startup():
         await sync_dialogs()
         await register_event_handlers()
         asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+        asyncio.create_task(sync_global_mentions(days=30))
 
 
 if __name__ == "__main__":

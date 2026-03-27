@@ -9,36 +9,9 @@ from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, Briefing
 # --- Chats ---
 
 async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by: str = "recent") -> list:
-    # Subquery: latest message per chat using window function
-    row_num = func.row_number().over(
-        partition_by=Message.chat_id,
-        order_by=desc(Message.date),
-    ).label("rn")
-    ranked = (
-        select(
-            Message.chat_id,
-            Message.text.label("last_text"),
-            Message.sender_name.label("last_sender"),
-            Message.date.label("last_date"),
-            row_num,
-        )
-        .subquery()
-    )
-    last_msg = (
-        select(
-            ranked.c.chat_id,
-            ranked.c.last_text,
-            ranked.c.last_sender,
-            ranked.c.last_date,
-        )
-        .where(ranked.c.rn == 1)
-        .subquery()
-    )
-
     query = (
-        select(Chat, last_msg.c.last_text, last_msg.c.last_sender, last_msg.c.last_date)
+        select(Chat)
         .where(Chat.is_hidden == False, Chat.is_briefing == False, Chat.is_archived == False)  # noqa: E712
-        .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
     )
 
     if sort_by == "unread":
@@ -49,7 +22,8 @@ async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by:
         query = query.order_by(desc(Chat.is_pinned), desc(Chat.last_activity_at), Chat.name)
 
     result = await db.execute(query.limit(limit).offset(offset))
-    return list(result.all())
+    chats = result.scalars().all()
+    return [(c, c.last_message_text, c.last_message_sender, c.last_message_date) for c in chats]
 
 
 async def get_tracked_chats(db: AsyncSession) -> list:
@@ -478,12 +452,15 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
     try:
         msg = Message(**kwargs)
         db.add(msg)
-        # Update last_activity_at on the chat for sort order
+        # Update cached last message fields on the chat
         msg_date = kwargs.get("date")
         if msg_date and kwargs.get("chat_id"):
             chat = await get_chat_by_telegram_id(db, kwargs["chat_id"])
             if chat and (not chat.last_activity_at or msg_date > chat.last_activity_at):
                 chat.last_activity_at = msg_date
+                chat.last_message_text = kwargs.get("text")
+                chat.last_message_sender = kwargs.get("sender_name")
+                chat.last_message_date = msg_date
         await db.commit()
         await db.refresh(msg)
         return msg
@@ -781,13 +758,21 @@ async def get_mentions(
     days: int = 7,
     group_name_filter: str = "",
     tag_name_filter: str = "",
+    user_id: Optional[int] = None,
 ) -> list:
     """
-    Return messages where the current user's @username appears in the text,
+    Return messages where the current user is mentioned,
     limited to non-outgoing messages in group/channel chats.
+    Detects both @username text mentions and entity-based inline mentions
+    (where user_id appears in text_html mention links).
     Each row is a (Message, Chat) tuple.
     """
     since = datetime.utcnow() - timedelta(days=days)
+
+    # Match @username in text OR user_id in entity mention links
+    mention_conditions = [Message.text.ilike(f"%@{username}%")]
+    if user_id:
+        mention_conditions.append(Message.text_html.like(f'%/profile/{user_id}"%'))
 
     q = (
         select(Message, Chat)
@@ -795,7 +780,7 @@ async def get_mentions(
         .where(
             Message.is_outgoing == False,  # noqa: E712
             Chat.type.in_(["group", "channel", "supergroup"]),
-            Message.text.ilike(f"%@{username}%"),
+            or_(*mention_conditions),
             Message.date >= since,
         )
     )

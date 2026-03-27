@@ -411,14 +411,33 @@ async def get_messages(
     if anchor_telegram_id is not None:
         offset = await crud.get_offset_for_anchor(db, telegram_id, anchor_telegram_id)
 
-    # Auto-sync on first open (skip hidden chats)
+    # Auto-sync on first open — non-blocking (skip hidden chats)
     if offset == 0:
         chat = await crud.get_chat_by_telegram_id(db, telegram_id)
         if chat and chat.last_synced_at is None and not chat.is_hidden and not chat.is_briefing:
-            try:
-                await sync_messages(telegram_id, limit=100)
-            except ValueError:
-                pass  # Entity not resolvable; return whatever messages are in DB
+            import asyncio
+
+            async def _bg_sync():
+                try:
+                    await sync_messages(telegram_id, limit=100)
+                    # If very few messages were saved (chat full of service messages),
+                    # try a deeper fetch
+                    from sqlalchemy import func as sa_func, select as sa_select
+                    async with AsyncSessionLocal() as db2:
+                        count = (await db2.execute(
+                            sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == telegram_id)
+                        )).scalar() or 0
+                    if count < 5:
+                        await sync_messages(telegram_id, limit=500)
+                    from backend.ws.manager import ws_manager
+                    await ws_manager.broadcast({
+                        "type": "chat_synced",
+                        "chat_id": telegram_id,
+                    })
+                except Exception:
+                    pass
+
+            asyncio.create_task(_bg_sync())
 
     rows = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
     return [_serialize_msg(row) for row in reversed(rows)]
@@ -708,6 +727,32 @@ async def list_topics(telegram_id: int, db: AsyncSession = Depends(get_db)):
                 "date": topic.date.replace(tzinfo=None).isoformat() if topic.date else None,
                 "is_closed": getattr(topic, "closed", False) or False,
                 "is_pinned": getattr(topic, "pinned", False) or False,
+            })
+        return topics
+    except ImportError:
+        # GetForumTopicsRequest not available in this Telethon version;
+        # fall back to deriving topics from synced messages
+        from sqlalchemy import distinct
+        rows = (await db.execute(
+            select(distinct(Message.topic_id))
+            .where(Message.chat_id == telegram_id, Message.topic_id.isnot(None))
+        )).fetchall()
+        topics = []
+        for (tid,) in rows:
+            first_msg = (await db.execute(
+                select(Message)
+                .where(Message.chat_id == telegram_id, Message.topic_id == tid)
+                .order_by(Message.date)
+                .limit(1)
+            )).scalars().first()
+            topics.append({
+                "id": tid,
+                "title": f"Topic {tid}",
+                "icon_color": None,
+                "icon_emoji_id": None,
+                "date": first_msg.date.isoformat() if first_msg and first_msg.date else None,
+                "is_closed": False,
+                "is_pinned": False,
             })
         return topics
     except Exception as e:

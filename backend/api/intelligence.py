@@ -34,6 +34,33 @@ from backend.api.settings import (
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
+# Cached Telegram me() for mentions
+# ---------------------------------------------------------------------------
+
+_cached_me: Optional[Tuple[Optional[str], Optional[int]]] = None
+
+
+async def _get_cached_me() -> Tuple[Optional[str], Optional[int]]:
+    """Return (username, user_id) from Telegram, cached after first success."""
+    global _cached_me
+    if _cached_me is not None:
+        return _cached_me
+
+    from backend.telegram.client import get_client
+    client = get_client()
+    if client is None:
+        return None, None
+    try:
+        me = await client.get_me()
+        if me:
+            _cached_me = (me.username, me.id)
+            return _cached_me
+    except Exception:
+        pass
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions (OpenAI function-calling schema)
 # ---------------------------------------------------------------------------
 
@@ -482,28 +509,18 @@ async def intelligence_mentions(
       - group_name: filter by chat name substring
       - tag_name: filter to chats with this tag
     """
-    from backend.telegram.client import get_client
-
-    client = get_client()
-    if client is None:
-        return []
-
-    try:
-        me = await client.get_me()
-    except Exception:
-        return []
-
-    username = me.username if me else None
-    if not username:
+    username, user_id = await _get_cached_me()
+    if not username and not user_id:
         return []
 
     mention_rows = await crud.get_mentions(
         db,
-        username,
+        username or "",
         limit=50,
         days=days,
         group_name_filter=group_name,
         tag_name_filter=tag_name,
+        user_id=user_id,
     )
 
     def _serialize_msg(m: Any) -> dict:

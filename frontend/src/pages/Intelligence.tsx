@@ -672,6 +672,9 @@ function MentionsTab() {
         fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
       }, 1500)
     }
+    if (evt.type === 'bulk_sync_complete' || evt.type === 'chat_synced') {
+      fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+    }
   })
 
   const handleNavigate = (chatId: number, msgId: number) => {

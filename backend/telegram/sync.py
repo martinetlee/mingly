@@ -340,6 +340,7 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
         return
 
     entities_to_download = []
+    chats_with_unread_mentions = []
 
     async with AsyncSessionLocal() as db:
         async for dialog in client.iter_dialogs(limit=limit):
@@ -371,9 +372,27 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
                 last_message_date=last_msg_date,
             )
 
+            # Track chats with unread mentions for priority sync
+            unread_mentions = getattr(dialog, "unread_mentions_count", 0) or 0
+            if unread_mentions > 0:
+                chats_with_unread_mentions.append((dialog.id, name, unread_mentions))
+
             # Queue photo download (don't block dialog sync)
             if getattr(entity, "photo", None):
                 entities_to_download.append((entity, dialog.id))
+
+    # Priority-sync chats with unread mentions (deep sync to catch mention messages)
+    if chats_with_unread_mentions:
+        logger.info(
+            "Syncing %d chats with unread mentions: %s",
+            len(chats_with_unread_mentions),
+            [(n, c) for cid, n, c in chats_with_unread_mentions],
+        )
+        for chat_id, name, count in chats_with_unread_mentions:
+            try:
+                await sync_messages(chat_id, limit=max(100, count * 5))
+            except Exception as e:
+                logger.warning("Failed to sync mention chat %s (%s): %s", name, chat_id, e)
 
     # Download profile photos in background
     for entity, did in entities_to_download:
@@ -424,6 +443,97 @@ async def resolve_numeric_names() -> int:
     return updated
 
 
+async def sync_global_mentions(days: int = 7) -> int:
+    """Search Telegram globally for messages mentioning the current user.
+
+    Uses Telegram's SearchGlobalRequest to find @username mentions across all
+    chats without requiring a full message sync. Saves found messages to DB.
+
+    Returns count of mention messages saved.
+    """
+    client = get_client()
+    if not client:
+        return 0
+
+    try:
+        me = await client.get_me()
+    except Exception:
+        return 0
+
+    username = me.username if me else None
+    if not username:
+        return 0
+
+    from telethon.tl.functions.messages import SearchGlobalRequest
+    from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty
+    from datetime import timedelta
+    import time
+
+    min_date = datetime.utcnow() - timedelta(days=days)
+    saved_count = 0
+
+    try:
+        result = await client(SearchGlobalRequest(
+            q=f"@{username}",
+            filter=InputMessagesFilterEmpty(),
+            min_date=min_date,
+            max_date=None,
+            offset_rate=0,
+            offset_peer=InputPeerEmpty(),
+            offset_id=0,
+            limit=100,
+        ))
+
+        # Build a map of chat entities from the result
+        chats_map = {}
+        for c in getattr(result, "chats", []):
+            chats_map[c.id] = c
+        for u in getattr(result, "users", []):
+            chats_map[u.id] = u
+
+        async with AsyncSessionLocal() as db:
+            for msg in getattr(result, "messages", []):
+                if not msg.message and not msg.media:
+                    continue
+                # Determine chat_id (peer_id)
+                peer = msg.peer_id
+                chat_id = getattr(peer, "channel_id", None) or getattr(peer, "chat_id", None) or getattr(peer, "user_id", None)
+                if not chat_id:
+                    continue
+                # Telegram uses positive IDs internally; convert to the signed format Telethon uses
+                if hasattr(peer, "channel_id"):
+                    chat_id = -1000000000000 - peer.channel_id
+                elif hasattr(peer, "chat_id"):
+                    chat_id = -peer.chat_id
+
+                sender = chats_map.get(msg.from_id.user_id) if msg.from_id and hasattr(msg.from_id, "user_id") else None
+                text_html = _entities_to_html(msg.message or "", msg.entities)
+
+                await crud.save_message(
+                    db,
+                    tg_message_id=msg.id,
+                    chat_id=chat_id,
+                    sender_id=msg.from_id.user_id if msg.from_id and hasattr(msg.from_id, "user_id") else None,
+                    sender_name=_sender_name(sender),
+                    text=msg.message or "",
+                    text_html=text_html,
+                    reactions_json=None,
+                    date=msg.date.replace(tzinfo=None) if msg.date else datetime.utcnow(),
+                    is_outgoing=msg.out or False,
+                    media_type=_media_type(msg),
+                    media_path=None,
+                    reply_to_tg_message_id=getattr(msg.reply_to, "reply_to_msg_id", None) if msg.reply_to else None,
+                    is_edited=bool(msg.edit_date),
+                )
+                saved_count += 1
+
+        logger.info("Global mention search: found %d messages for @%s", saved_count, username)
+    except Exception as e:
+        logger.warning("Global mention search failed: %s", e)
+
+    return saved_count
+
+
 async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
     """Sync messages for the n most recent dialogs. Returns count of chats synced."""
     client = get_client()
@@ -449,10 +559,13 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
                 continue
             try:
                 await sync_messages(dialog.id, limit=messages_per_chat)
-            except ValueError:
+                synced += 1
+            except Exception as e:
+                logger.warning("bulk_sync: failed to sync chat %s (%s): %s", dialog.name, dialog.id, e)
                 continue
-            synced += 1
 
+    # Notify frontend that bulk sync is done so pages can refresh
+    await ws_manager.broadcast({"type": "bulk_sync_complete", "synced": synced})
     return synced
 
 
@@ -539,12 +652,40 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 is_edited=bool(msg.edit_date),
             )
 
-        # Fetch and store pinned message id for the chat
+        # Fetch and store pinned message id + content for the chat
         try:
             full_chat = await client.get_entity(chat_telegram_id)
             pinned_msg_id = getattr(full_chat, "pinned_msg_id", None)
             if pinned_msg_id:
                 await crud.set_chat_pinned_message(db, chat_telegram_id, pinned_msg_id)
+                # Fetch the pinned message itself so it's available for display
+                try:
+                    msgs = await client.get_messages(chat_telegram_id, ids=[pinned_msg_id])
+                    if msgs and msgs[0]:
+                        pmsg = msgs[0]
+                        sender = await pmsg.get_sender() if pmsg.sender_id else None
+                        text_html = _entities_to_html(pmsg.text or "", pmsg.entities)
+                        saved = await crud.save_message(
+                            db,
+                            tg_message_id=pmsg.id,
+                            chat_id=chat_telegram_id,
+                            sender_id=pmsg.sender_id,
+                            sender_name=_sender_name(sender),
+                            text=pmsg.text or "",
+                            text_html=text_html,
+                            reactions_json=_extract_reactions(pmsg),
+                            date=pmsg.date.replace(tzinfo=None),
+                            is_outgoing=pmsg.out,
+                            media_type=_media_type(pmsg),
+                            media_path=await _download_photo(client, pmsg),
+                            reply_to_tg_message_id=pmsg.reply_to_msg_id if hasattr(pmsg, 'reply_to_msg_id') else None,
+                            is_pinned=True,
+                            media_filename=_media_filename(pmsg),
+                            media_size=_media_size(pmsg),
+                            is_edited=bool(pmsg.edit_date),
+                        )
+                except Exception:
+                    pass
         except Exception:
             pass
 
