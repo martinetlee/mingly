@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -743,12 +743,12 @@ export const joinViaInviteLink = (link: string) =>
 // ── Scam Detection ──
 
 export const getScamDetectionSettings = () =>
-  request<{ mode: string; api_url: string; api_key: string; api_key_set: boolean }>('/api/settings/prefs/scam-detection')
+  request<{ mode: string; api_url: string; api_key: string; api_key_set: boolean; max_tokens: number }>('/api/settings/prefs/scam-detection')
 
-export const setScamDetectionSettings = (mode: string, apiUrl: string, apiKey: string) =>
+export const setScamDetectionSettings = (mode: string, apiUrl: string, apiKey: string, maxTokens: number = 200) =>
   request<{ success: boolean; mode: string }>('/api/settings/prefs/scam-detection', {
     method: 'POST',
-    body: JSON.stringify({ mode, api_url: apiUrl, api_key: apiKey }),
+    body: JSON.stringify({ mode, api_url: apiUrl, api_key: apiKey, max_tokens: maxTokens }),
   })
 
 export const getScamFlags = () =>
@@ -771,6 +771,28 @@ export const getScannedMessages = () =>
 
 export const clearMessageScam = (chatId: number, tgMessageId: number) =>
   request<{ status: string }>(`/api/scam/scanned-messages/${chatId}/${tgMessageId}`, { method: 'DELETE' })
+
+export const getScamPipeline = () =>
+  request<{ version: string; updated_at: string; categories: ScamCategory[] }>('/api/scam/pipeline')
+
+export const getReportContext = (chatId: number, targetMessageId: number) =>
+  request<{ messages: ReportContextMessage[] }>(`/api/scam/reports/context?chat_id=${chatId}&target_message_id=${targetMessageId}`)
+
+export const createScamReport = (data: {
+  reported_telegram_id: number
+  reported_in_chat_id: number
+  reporter_verdict: string
+  scam_category?: string
+  custom_category?: string
+  included_message_ids: number[]
+}) =>
+  request<{ report_id: string; status: string; created_at: string }>('/api/scam/reports', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const getScamReports = () =>
+  request<{ reports: ScamReport[] }>('/api/scam/reports')
 
 // ── Translation ──
 

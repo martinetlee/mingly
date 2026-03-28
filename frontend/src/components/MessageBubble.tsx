@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, X, Languages, ChevronDown, Copy } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -26,6 +26,7 @@ interface Props {
   isGroupChat?: boolean
   /** Whether the sender is a known flagged scammer */
   isFlaggedSender?: boolean
+  onReportScam?: (msg: Message) => void
 }
 
 // Common quick-reaction emojis (mirrors Telegram's default set)
@@ -169,6 +170,7 @@ function ContextMenu({
   onDelete,
   onForward,
   onCheckScam,
+  onReportScam,
   onTranslate,
   onCopy,
 }: {
@@ -180,6 +182,7 @@ function ContextMenu({
   onDelete: () => void
   onForward: () => void
   onCheckScam?: () => void
+  onReportScam?: () => void
   onTranslate?: () => void
   onCopy?: () => void
 }) {
@@ -248,6 +251,15 @@ function ContextMenu({
           Check for scam
         </button>
       )}
+      {onReportScam && (
+        <button
+          onClick={onReportScam}
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-red-400 hover:bg-slate-700 transition-colors"
+        >
+          <Flag size={13} />
+          Report scam
+        </button>
+      )}
       {canDelete && (
         <button
           onClick={onDelete}
@@ -261,7 +273,7 @@ function ContextMenu({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender, onReportScam }: Props) {
   const isOut = message.is_outgoing
   // Lazy photo download: if media_type is photo but media_url is missing, download it
   const [lazyPhotoUrl, setLazyPhotoUrl] = useState<string | null>(null)
@@ -429,6 +441,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
+                  onReportScam={onReportScam ? () => { setShowContextMenu(false); onReportScam(message) } : undefined}
                   onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
                   onCopy={message.text ? () => { setShowContextMenu(false); navigator.clipboard.writeText(message.text!) } : undefined}
                 />
@@ -725,6 +738,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   onDelete={() => { setShowContextMenu(false); onDelete?.(message) }}
                   onForward={() => { setShowContextMenu(false); onForward?.(message) }}
                   onCheckScam={() => { setShowContextMenu(false); handleCheckScam() }}
+                  onReportScam={onReportScam ? () => { setShowContextMenu(false); onReportScam(message) } : undefined}
                   onTranslate={message.text ? () => { setShowContextMenu(false); handleTranslate() } : undefined}
                   onCopy={message.text ? () => { setShowContextMenu(false); navigator.clipboard.writeText(message.text!) } : undefined}
                 />

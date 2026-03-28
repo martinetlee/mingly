@@ -566,6 +566,124 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
     return synced
 
 
+async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 48) -> int:
+    """Scan recent messages that haven't been scam-checked yet.
+
+    Called after bulk_sync to catch messages that arrived while the app was closed.
+    Skips first-time sync (when the DB had no messages before sync started).
+    Groups messages by chat to reduce LLM calls.
+    """
+    from datetime import timedelta
+    from backend.db.models import Message, Chat, Contact
+    from backend.scam.service import get_scam_service
+
+    scam_svc = get_scam_service()
+    if not scam_svc:
+        return 0
+
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    scanned = 0
+
+    async with AsyncSessionLocal() as db:
+        # Check if this is a first-time sync by looking for any message older than the cutoff
+        # If no old messages exist, this is likely initial onboarding — skip bulk scanning
+        old_msg_result = await db.execute(
+            select(Message.id).where(Message.date < cutoff).limit(1)
+        )
+        if old_msg_result.scalar() is None:
+            logger.info("scan_unscanned_messages: no messages older than %dh — likely first sync, skipping", max_age_hours)
+            return 0
+
+        # Find recent incoming messages with no scam_score
+        result = await db.execute(
+            select(Message).where(
+                Message.scam_score.is_(None),
+                Message.is_outgoing == False,
+                Message.text.isnot(None),
+                Message.text != "",
+                Message.date >= cutoff,
+            ).order_by(Message.date.desc()).limit(max_messages)
+        )
+        unscanned = result.scalars().all()
+
+        if not unscanned:
+            logger.info("scan_unscanned_messages: no unscanned messages found")
+            return 0
+
+        logger.info("scan_unscanned_messages: found %d unscanned messages to check", len(unscanned))
+
+        # Group by chat for batch processing
+        by_chat: dict[int, list] = {}
+        for m in unscanned:
+            by_chat.setdefault(m.chat_id, []).append(m)
+
+        # Resolve chat names
+        chat_ids = list(by_chat.keys())
+        chat_result = await db.execute(
+            select(Chat).where(Chat.telegram_id.in_(chat_ids))
+        )
+        chat_map = {c.telegram_id: c for c in chat_result.scalars().all()}
+
+        # Resolve contact status for senders
+        sender_ids = list({m.sender_id for m in unscanned if m.sender_id})
+        contact_ids: set[int] = set()
+        if sender_ids:
+            contact_result = await db.execute(
+                select(Contact.telegram_id).where(Contact.telegram_id.in_(sender_ids))
+            )
+            contact_ids = {row[0] for row in contact_result.fetchall()}
+
+    # Process each chat group (outside the DB session to avoid long transactions)
+    import asyncio as _asyncio
+    for chat_id, msgs in by_chat.items():
+        chat = chat_map.get(chat_id)
+        chat_metadata = {
+            "chat_id": chat_id,
+            "name": chat.name if chat else "Unknown",
+            "type": chat.type if chat else "private",
+        }
+
+        # Build profiles from the messages' senders
+        seen_senders: set[int] = set()
+        profiles = []
+        for m in msgs:
+            if m.sender_id and m.sender_id not in seen_senders:
+                seen_senders.add(m.sender_id)
+                profiles.append({
+                    "telegram_id": m.sender_id,
+                    "name": m.sender_name,
+                    "bio": "",
+                    "is_contact": m.sender_id in contact_ids,
+                })
+
+        messages_payload = [
+            {
+                "message_id": m.tg_message_id,
+                "sender_id": m.sender_id,
+                "sender_name": m.sender_name,
+                "text": m.text,
+                "date": str(m.date) if m.date else None,
+            }
+            for m in msgs
+        ]
+
+        # Fire-and-forget per chat (don't block other chats)
+        async def _check(cid, mp, pr, cm):
+            try:
+                await scam_svc.check_messages_for_scam(
+                    chat_id=cid, messages=mp, user_telegram_id=0,
+                    profiles=pr, chat_metadata=cm,
+                )
+            except Exception:
+                logger.exception("scan_unscanned_messages: failed for chat %s", cid)
+
+        _asyncio.create_task(_check(chat_id, messages_payload, profiles, chat_metadata))
+        scanned += len(msgs)
+
+    logger.info("scan_unscanned_messages: queued %d messages across %d chats for scanning", scanned, len(by_chat))
+    return scanned
+
+
 def _pick_thumb(msg):
     """Pick the smallest thumbnail that's at least 600px wide (Telegram 'x' size)."""
     from telethon.tl.types import PhotoSize

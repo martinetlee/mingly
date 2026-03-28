@@ -7,12 +7,13 @@ from backend.api.router import create_app
 from backend.config import API_HOST, API_PORT
 from backend.db.database import init_db
 from backend.telegram.client import has_credentials, init_client
-from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers, sync_global_mentions
+from backend.telegram.sync import sync_dialogs, bulk_sync, register_event_handlers, sync_global_mentions, scan_unscanned_messages
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
 from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
-from backend.scam.client import ExternalScamAPIClient, MockScamAPIClient
+from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
+from backend.scam.pipeline import init_pipeline_manager
 from backend.scam.service import init_scam_service, get_scam_service
 
 app = create_app()
@@ -35,7 +36,9 @@ async def on_startup():
     # Start the catch-up summary scheduler
     start_catchup_summary_scheduler()
 
-    # Initialize scam detection service from saved preferences
+    # Initialize pipeline and scam detection service
+    pipeline_mgr = init_pipeline_manager()
+
     from backend.api.settings import get_scam_detection_settings
     scam_settings = get_scam_detection_settings()
     if scam_settings["mode"] == "external" and scam_settings["api_url"]:
@@ -44,7 +47,8 @@ async def on_startup():
             api_key=scam_settings["api_key"],
         )
     else:
-        scam_client = MockScamAPIClient()
+        max_tokens = scam_settings.get("max_tokens", 200)
+        scam_client = LocalPipelineClient(pipeline_mgr.get_config(), max_tokens=max_tokens)
     scam_svc = init_scam_service(scam_client)
     asyncio.create_task(scam_svc.resume_pending_requests())
 
@@ -54,7 +58,11 @@ async def on_startup():
     if authenticated:
         await sync_dialogs()
         await register_event_handlers()
-        asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+        async def _sync_then_scan():
+            await bulk_sync(n_chats=50, messages_per_chat=30)
+            await scan_unscanned_messages()
+
+        asyncio.create_task(_sync_then_scan())
         asyncio.create_task(sync_global_mentions(days=30))
 
 

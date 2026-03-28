@@ -114,7 +114,8 @@ class ScamDetectionService:
                 request_id, messages, user_telegram_id, profiles or [], chat_metadata or {}
             )
             if result.error:
-                # Client returned an error result — broadcast it so frontend knows
+                # Client returned an error result — still store the trace for debugging
+                await self._apply_message_result(request_id, chat_id, msg_ids, sender_ids, result)
                 await self._broadcast_error(chat_id, msg_ids, result.error)
                 await self._mark_request(request_id, "failed")
             else:
@@ -245,12 +246,24 @@ class ScamDetectionService:
                 )
                 if existing.scalars().first():
                     continue
+                # Find a recent message from this user to record as trigger
+                trigger_msg = None
+                trigger_result = await db.execute(
+                    select(Message).where(
+                        Message.sender_id == tid,
+                    ).order_by(Message.date.desc()).limit(1)
+                )
+                trigger_msg = trigger_result.scalars().first()
                 flag = ScamFlag(
                     telegram_id=tid,
-                    source="external_api",
+                    source="cloud",
                     confidence=result.confidence,
                     reason=result.reason,
+                    category=result.category,
                     request_id=request_id,
+                    flagged_message_text=(trigger_msg.text or "")[:500] if trigger_msg else None,
+                    flagged_message_chat_id=trigger_msg.chat_id if trigger_msg else None,
+                    flagged_message_id=trigger_msg.tg_message_id if trigger_msg else None,
                     flagged_at=now,
                 )
                 db.add(flag)
@@ -279,14 +292,16 @@ class ScamDetectionService:
         async with AsyncSessionLocal() as db:
             if msg_ids and chat_id:
                 # Always store the score + LLM trace (for both scam and safe verdicts)
+                reason = result.reason
+                if result.error and not reason:
+                    reason = result.error
                 values: dict = {
                     "scam_score": result.confidence,
-                    "scam_reason": result.reason,
+                    "scam_reason": reason,
+                    "scam_category": result.category,
+                    "scam_llm_prompt": result.llm_prompt,
+                    "scam_llm_response": result.llm_response,
                 }
-                if result.llm_prompt:
-                    values["scam_llm_prompt"] = result.llm_prompt
-                if result.llm_response:
-                    values["scam_llm_response"] = result.llm_response
 
                 update_result = await db.execute(
                     update(Message)
@@ -303,18 +318,34 @@ class ScamDetectionService:
 
                 # Flag senders (only for scam verdicts)
                 if result.is_scam:
+                    # Find the triggering message (first message from the flagged sender)
                     for sid in sender_ids:
                         existing = await db.execute(
                             select(ScamFlag).where(ScamFlag.telegram_id == sid)
                         )
                         if existing.scalars().first():
                             continue
+                        # Get the triggering message for this sender
+                        trigger_msg = None
+                        if chat_id and msg_ids:
+                            trigger_result = await db.execute(
+                                select(Message).where(
+                                    Message.chat_id == chat_id,
+                                    Message.tg_message_id.in_(msg_ids),
+                                    Message.sender_id == sid,
+                                ).limit(1)
+                            )
+                            trigger_msg = trigger_result.scalars().first()
                         flag = ScamFlag(
                             telegram_id=sid,
-                            source="local_llm",
+                            source="local",
                             confidence=result.confidence,
                             reason=result.reason,
+                            category=result.category,
                             request_id=request_id,
+                            flagged_message_text=(trigger_msg.text or "")[:500] if trigger_msg else None,
+                            flagged_message_chat_id=chat_id,
+                            flagged_message_id=trigger_msg.tg_message_id if trigger_msg else None,
                             flagged_at=now,
                         )
                         db.add(flag)
@@ -345,6 +376,7 @@ class ScamDetectionService:
                 "sender_ids": sender_ids,
                 "confidence": result.confidence,
                 "reason": result.reason,
+                "category": result.category,
             })
 
             # Check if senders are known scammers in the external API

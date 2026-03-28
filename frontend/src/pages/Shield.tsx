@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown } from 'lucide-react'
-import type { ScamFlag, ScannedMessage, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, getScamDetectionSettings, setScamDetectionSettings } from '../api/client'
+import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText } from 'lucide-react'
+import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function timeAgo(iso: string): string {
@@ -34,7 +34,7 @@ function ConfidencePill({ value }: { value: number | null }) {
   )
 }
 
-type Tab = 'flagged' | 'scanned'
+type Tab = 'flagged' | 'scanned' | 'reports'
 
 export default function Shield() {
   const navigate = useNavigate()
@@ -50,12 +50,17 @@ export default function Shield() {
   const [scamOnly, setScamOnly] = useState(false)
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null) // "chatId-msgId"
 
+  // Reports
+  const [reports, setReports] = useState<ScamReport[]>([])
+  const [loadingReports, setLoadingReports] = useState(true)
+
   // Detection settings
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [scamMode, setScamMode] = useState<'local_llm' | 'external'>('local_llm')
   const [scamApiUrl, setScamApiUrl] = useState('')
   const [scamApiKeySet, setScamApiKeySet] = useState(false)
   const [scamApiKey, setScamApiKey] = useState('')
+  const [scamMaxTokens, setScamMaxTokens] = useState(200)
   const [scamSaving, setScamSaving] = useState(false)
   const [scamSaveMsg, setScamSaveMsg] = useState<string | null>(null)
 
@@ -73,17 +78,26 @@ export default function Shield() {
       .finally(() => setLoadingScanned(false))
   }, [])
 
+  const loadReports = useCallback(() => {
+    getScamReports()
+      .then((data) => setReports(data.reports))
+      .catch(() => {})
+      .finally(() => setLoadingReports(false))
+  }, [])
+
   useEffect(() => {
     loadFlags()
     loadScanned()
+    loadReports()
     getScamDetectionSettings()
       .then((s) => {
         setScamMode(s.mode as 'local_llm' | 'external')
         setScamApiUrl(s.api_url)
         setScamApiKeySet(s.api_key_set)
+        setScamMaxTokens(s.max_tokens || 200)
       })
       .catch(() => {})
-  }, [loadFlags, loadScanned])
+  }, [loadFlags, loadScanned, loadReports])
 
   useWebSocket(useCallback((event: WSEvent) => {
     if (event.type === 'scam_users_flagged' || event.type === 'scam_detected') {
@@ -140,6 +154,20 @@ export default function Shield() {
                 <option value="local_llm">Local LLM</option>
                 <option value="external">External API</option>
               </select>
+              {scamMode === 'local_llm' && (
+                <div className="flex items-center gap-1.5">
+                  <label className="text-[10px] text-slate-500 whitespace-nowrap">Max tokens</label>
+                  <input
+                    type="number"
+                    min={50}
+                    max={2000}
+                    step={50}
+                    value={scamMaxTokens}
+                    onChange={(e) => { setScamMaxTokens(Number(e.target.value)); setScamSaveMsg(null) }}
+                    className="w-20 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              )}
               {scamMode === 'external' && (
                 <>
                   <input
@@ -163,7 +191,7 @@ export default function Shield() {
                 onClick={async () => {
                   setScamSaving(true); setScamSaveMsg(null)
                   try {
-                    await setScamDetectionSettings(scamMode, scamApiUrl, scamApiKey)
+                    await setScamDetectionSettings(scamMode, scamApiUrl, scamApiKey, scamMaxTokens)
                     setScamSaveMsg('Saved')
                     if (scamApiKey) setScamApiKeySet(true)
                     setScamApiKey('')
@@ -211,6 +239,19 @@ export default function Shield() {
             <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{scanned.length}</span>
           )}
         </button>
+        <button
+          onClick={() => setTab('reports')}
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+            tab === 'reports'
+              ? 'border-amber-400 text-amber-400'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Reports
+          {reports.length > 0 && (
+            <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{reports.length}</span>
+          )}
+        </button>
 
         {/* Scam-only filter for scanned tab */}
         {tab === 'scanned' && (
@@ -242,9 +283,8 @@ export default function Shield() {
               <thead className="sticky top-0 z-10 bg-slate-900 border-b border-slate-700">
                 <tr className="text-[10px] uppercase tracking-wider text-slate-500">
                   <th className="px-6 py-2 font-medium">User</th>
-                  <th className="px-3 py-2 font-medium">Last Active Chat</th>
-                  <th className="px-3 py-2 font-medium">Last Active</th>
-                  <th className="px-3 py-2 font-medium">Last Message</th>
+                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 font-medium">Flagged Message</th>
                   <th className="px-3 py-2 font-medium">Reason</th>
                   <th className="px-3 py-2 font-medium">Confidence</th>
                   <th className="px-3 py-2 font-medium w-8"></th>
@@ -262,25 +302,26 @@ export default function Shield() {
                       </div>
                     </td>
                     <td className="px-3 py-2.5">
-                      {flag.last_chat_name ? (
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        flag.source === 'cloud' ? 'bg-purple-500/20 text-purple-300' :
+                        flag.source === 'manual' ? 'bg-amber-500/20 text-amber-300' :
+                        'bg-blue-500/20 text-blue-300'
+                      }`}>
+                        {flag.source === 'cloud' ? 'Cloud' : flag.source === 'manual' ? 'Manual' : 'Local'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {flag.flagged_message_text ? (
                         <button
-                          onClick={() => goToMessage(flag.last_chat_id!, flag.last_message_id!)}
-                          className="text-xs text-indigo-400 hover:text-indigo-300 truncate max-w-[160px] block text-left"
-                          title={flag.last_chat_name}
+                          onClick={() => flag.flagged_message_chat_id && flag.flagged_message_id && goToMessage(flag.flagged_message_chat_id, flag.flagged_message_id)}
+                          className="text-xs text-slate-400 hover:text-slate-200 truncate max-w-[220px] block text-left transition-colors"
+                          title={flag.flagged_message_text}
                         >
-                          {flag.last_chat_name}
+                          {flag.flagged_message_text}
                         </button>
                       ) : (
                         <span className="text-xs text-slate-500">—</span>
                       )}
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-slate-400 whitespace-nowrap">
-                      {flag.last_active ? timeAgo(flag.last_active) : '—'}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <span className="text-xs text-slate-400 truncate max-w-[200px] block" title={flag.last_message || undefined}>
-                        {flag.last_message || '—'}
-                      </span>
                     </td>
                     <td className="px-3 py-2.5">
                       <span className="text-xs text-slate-400 truncate max-w-[200px] block" title={flag.reason || undefined}>
@@ -426,6 +467,64 @@ export default function Shield() {
                     </>
                   )
                 })}
+              </tbody>
+            </table>
+          )
+        )}
+
+        {tab === 'reports' && (
+          loadingReports ? (
+            <div className="p-6 text-xs text-slate-500">Loading...</div>
+          ) : reports.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20">
+              <FileText size={32} className="mb-3 text-slate-600" />
+              <p className="text-sm font-medium text-slate-400">No reports submitted</p>
+              <p className="mt-1 text-xs text-slate-500">Use "Report scam" on messages in Chats to submit reports.</p>
+            </div>
+          ) : (
+            <table className="w-full text-left">
+              <thead className="sticky top-0 z-10 bg-slate-900 border-b border-slate-700">
+                <tr className="text-[10px] uppercase tracking-wider text-slate-500">
+                  <th className="px-6 py-2 font-medium">Reported User</th>
+                  <th className="px-3 py-2 font-medium">Chat</th>
+                  <th className="px-3 py-2 font-medium">Category</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Date</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {reports.map((r) => (
+                  <tr key={r.report_id} className="hover:bg-slate-800/50 transition-colors">
+                    <td className="px-6 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <Flag size={12} className="flex-shrink-0 text-red-400" />
+                        <span className="text-xs font-medium text-slate-200 truncate max-w-[140px]">
+                          {r.reported_sender_name || `ID: ${r.reported_telegram_id}`}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-xs text-slate-400 truncate max-w-[160px] block">{r.chat_name}</span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-xs text-slate-400">
+                        {r.custom_category || r.scam_category || '—'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        r.status === 'confirmed' ? 'bg-red-500/20 text-red-300' :
+                        r.status === 'false_positive' ? 'bg-emerald-500/20 text-emerald-300' :
+                        'bg-amber-500/20 text-amber-300'
+                      }`}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-slate-400 whitespace-nowrap">
+                      {r.created_at ? timeAgo(r.created_at) : '—'}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           )

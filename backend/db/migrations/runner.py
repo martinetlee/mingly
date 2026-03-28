@@ -342,6 +342,41 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN scam_llm_response TEXT",
         ],
     ),
+    (
+        33,
+        "Add scam category support and create scam_reports table",
+        [
+            "ALTER TABLE messages ADD COLUMN scam_category TEXT",
+            "ALTER TABLE scam_flags ADD COLUMN category TEXT",
+            """CREATE TABLE IF NOT EXISTS scam_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id TEXT UNIQUE NOT NULL,
+                reported_telegram_id INTEGER NOT NULL,
+                reported_in_chat_id INTEGER NOT NULL,
+                chat_type TEXT,
+                reporter_verdict TEXT NOT NULL,
+                scam_category TEXT,
+                custom_category TEXT,
+                messages_json TEXT NOT NULL,
+                local_detection_json TEXT,
+                status TEXT NOT NULL DEFAULT 'submitted',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )""",
+        ],
+    ),
+    (
+        34,
+        "Add triggering message fields to scam_flags and normalize source values",
+        [
+            "ALTER TABLE scam_flags ADD COLUMN flagged_message_text TEXT",
+            "ALTER TABLE scam_flags ADD COLUMN flagged_message_chat_id INTEGER",
+            "ALTER TABLE scam_flags ADD COLUMN flagged_message_id INTEGER",
+            # Normalize source values: local_llm → local, external_api → cloud
+            "UPDATE scam_flags SET source = 'local' WHERE source = 'local_llm'",
+            "UPDATE scam_flags SET source = 'cloud' WHERE source = 'external_api'",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

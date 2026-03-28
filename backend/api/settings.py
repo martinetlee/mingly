@@ -307,6 +307,7 @@ class ScamDetectionSettingsRequest(BaseModel):
     mode: str  # 'local_llm' | 'external'
     api_url: str = ""
     api_key: str = ""
+    max_tokens: int = 200
 
 
 def get_scam_detection_settings() -> dict:
@@ -316,6 +317,7 @@ def get_scam_detection_settings() -> dict:
         "mode": prefs.get("scam_detection_mode", "local_llm"),
         "api_url": prefs.get("scam_detection_api_url", ""),
         "api_key": prefs.get("scam_detection_api_key", ""),
+        "max_tokens": prefs.get("scam_detection_max_tokens", 200),
     }
 
 
@@ -346,6 +348,7 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
     prefs = _load_prefs()
     prefs["scam_detection_mode"] = req.mode
     prefs["scam_detection_api_url"] = req.api_url.strip()
+    prefs["scam_detection_max_tokens"] = max(50, min(2000, req.max_tokens))
     # Only update API key if provided (non-empty), otherwise keep existing
     if req.api_key:
         prefs["scam_detection_api_key"] = req.api_key
@@ -362,7 +365,8 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
 
 def _reconfigure_scam_service(prefs: dict) -> None:
     """Swap the scam detection client based on current preferences."""
-    from backend.scam.client import ExternalScamAPIClient, MockScamAPIClient
+    from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
+    from backend.scam.pipeline import get_pipeline_manager
     from backend.scam.service import get_scam_service
 
     svc = get_scam_service()
@@ -375,4 +379,9 @@ def _reconfigure_scam_service(prefs: dict) -> None:
         api_key = prefs.get("scam_detection_api_key", "")
         svc._client = ExternalScamAPIClient(base_url=api_url, api_key=api_key)
     else:
-        svc._client = MockScamAPIClient()
+        max_tokens = prefs.get("scam_detection_max_tokens", 200)
+        mgr = get_pipeline_manager()
+        if not mgr:
+            from backend.scam.pipeline import init_pipeline_manager
+            mgr = init_pipeline_manager()
+        svc._client = LocalPipelineClient(mgr.get_config(), max_tokens=max_tokens)

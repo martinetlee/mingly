@@ -69,6 +69,7 @@ class Message(Base):
     scam_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_llm_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_llm_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_category: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -216,11 +217,33 @@ class ScamFlag(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    source: Mapped[str] = mapped_column(String, nullable=False)  # external_api, local_llm, manual
+    source: Mapped[str] = mapped_column(String, nullable=False)  # local, cloud, manual
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    flagged_message_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    flagged_message_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    flagged_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ScamReport(Base):
+    __tablename__ = "scam_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    reported_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reported_in_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    reporter_verdict: Mapped[str] = mapped_column(String, nullable=False)
+    scam_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    custom_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    messages_json: Mapped[str] = mapped_column(Text, nullable=False)
+    local_detection_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="submitted")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class BriefingEntry(Base):

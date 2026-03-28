@@ -100,7 +100,7 @@ export interface Message {
 export interface ScamFlag {
   telegram_id: number
   sender_name?: string | null
-  source: 'external_api' | 'local_llm' | 'manual'
+  source: 'local' | 'cloud' | 'manual'
   confidence: number | null
   reason: string | null
   flagged_at: string
@@ -109,6 +109,10 @@ export interface ScamFlag {
   last_message_id?: number | null
   last_active?: string | null
   last_message?: string | null
+  category?: string | null
+  flagged_message_text?: string | null
+  flagged_message_chat_id?: number | null
+  flagged_message_id?: number | null
 }
 
 export interface ScannedMessage {
@@ -121,8 +125,40 @@ export interface ScannedMessage {
   date: string | null
   scam_score: number
   scam_reason: string | null
+  scam_category: string | null
   llm_prompt: string | null
   llm_response: string | null
+}
+
+export interface ScamCategory {
+  id: string
+  label: string
+  description: string
+}
+
+export interface ReportContextMessage {
+  tg_message_id: number
+  sender_id: number | null
+  sender_name: string | null
+  text: string | null
+  date: string | null
+  is_outgoing: boolean
+  scam_score: number | null
+}
+
+export interface ScamReport {
+  id: number
+  report_id: string
+  reported_telegram_id: number
+  reported_sender_name: string | null
+  reported_in_chat_id: number
+  chat_name: string
+  chat_type: string | null
+  reporter_verdict: string
+  scam_category: string | null
+  custom_category: string | null
+  status: 'submitted' | 'confirmed' | 'false_positive'
+  created_at: string
 }
 
 export interface PinnedMessage {
