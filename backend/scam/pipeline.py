@@ -17,7 +17,7 @@ from backend.config import DATA_DIR, BASE_DIR
 logger = logging.getLogger(__name__)
 
 _PIPELINE_FILE = DATA_DIR / "scam_pipeline.json"
-_DEFAULT_PIPELINE_FILE = BASE_DIR / "data" / "scam_pipeline.json"
+_DEFAULT_PIPELINE_FILE = Path(__file__).parent / "default_pipeline.json"
 
 # Minimal embedded fallback so detection works even if the JSON file is missing
 _FALLBACK_SYSTEM_PROMPT = (

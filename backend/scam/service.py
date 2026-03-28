@@ -295,8 +295,10 @@ class ScamDetectionService:
                 reason = result.reason
                 if result.error and not reason:
                     reason = result.error
+                # scam_score represents "how scammy": high when is_scam=true, low when false
+                scam_score = result.confidence if result.is_scam else (1.0 - result.confidence)
                 values: dict = {
-                    "scam_score": result.confidence,
+                    "scam_score": scam_score,
                     "scam_reason": reason,
                     "scam_category": result.category,
                     "scam_llm_prompt": result.llm_prompt,

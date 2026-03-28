@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-28T00:00:00Z",
+
+  "system_prompt": "You are a scam detection assistant analyzing Telegram messages.\nDetermine if the messages show signs of being a scam.\n\nScam categories:\n{{categories}}\n\nConsider:\n- Urgency or pressure tactics\n- Requests for money, crypto, personal info, or credentials\n- Too-good-to-be-true offers\n- Impersonation of known entities\n- Suspicious links or redirects\n- Mismatch between claimed identity and profile data\n\nRespond ONLY with valid JSON:\n{\"is_scam\": <bool>, \"confidence\": <float 0.0-1.0>, \"category\": \"<category_id or null>\", \"reason\": \"<one sentence explanation>\"}",
+
+  "categories": [
+    {"id": "phishing", "label": "Phishing", "description": "Attempts to steal credentials, passwords, or personal information through deceptive messages or links"},
+    {"id": "social_engineering", "label": "Social Engineering", "description": "Manipulating users into performing actions or divulging information through psychological tactics"},
+    {"id": "investment_scam", "label": "Investment Scam", "description": "Fake investment opportunities, Ponzi schemes, or fraudulent financial products"},
+    {"id": "romance_scam", "label": "Romance Scam", "description": "Building fake romantic or emotional relationships to extract money or information"},
+    {"id": "fake_giveaway", "label": "Fake Giveaway", "description": "Too-good-to-be-true offers, fake airdrops, or fraudulent prize claims"},
+    {"id": "impersonation", "label": "Impersonation", "description": "Pretending to be a known person, organization, or authority figure"},
+    {"id": "malware_link", "label": "Malware / Suspicious Link", "description": "Messages containing links to malicious websites, malware downloads, or phishing pages"},
+    {"id": "other", "label": "Other", "description": "Other scam type not covered by the categories above"}
+  ],
+
+  "few_shot_examples": [
+    {
+      "messages": [
+        {"sender": "CryptoKing_Official", "text": "Congratulations! You've been selected for our exclusive airdrop. Send 0.5 ETH to 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18 and receive 5 ETH back within 24 hours! Limited spots available!"}
+      ],
+      "verdict": {"is_scam": true, "confidence": 0.95, "category": "fake_giveaway", "reason": "Classic advance-fee scam disguised as a crypto airdrop, requesting ETH to receive a larger amount back"}
+    },
+    {
+      "messages": [
+        {"sender": "TechSupport_Admin", "text": "URGENT: Your Telegram account has been flagged for suspicious activity. Click here to verify your account immediately or it will be suspended: t.me/verify-now-2024"}
+      ],
+      "verdict": {"is_scam": true, "confidence": 0.92, "category": "phishing", "reason": "Fake urgency about account suspension combined with a suspicious verification link, classic phishing pattern"}
+    },
+    {
+      "messages": [
+        {"sender": "Alice", "text": "Hey, are we still on for dinner tomorrow?"},
+        {"sender": "Bob", "text": "Yes! 7pm at the usual place?"},
+        {"sender": "Alice", "text": "Perfect, see you there!"}
+      ],
+      "verdict": {"is_scam": false, "confidence": 0.02, "category": null, "reason": "Normal social conversation about meeting plans, no suspicious elements"}
+    },
+    {
+      "messages": [
+        {"sender": "InvestorPro", "text": "I've been making $5000/day with this new AI trading bot. Want me to show you? My mentor taught me everything."},
+        {"sender": "User", "text": "Sounds interesting, how does it work?"},
+        {"sender": "InvestorPro", "text": "Just deposit $500 into this platform and I'll guide you. Here's the link: ai-trading-guaranteed.com. My results speak for themselves!"}
+      ],
+      "verdict": {"is_scam": true, "confidence": 0.93, "category": "investment_scam", "reason": "Unrealistic profit claims, pressure to deposit money into an unknown platform, and use of fake social proof"}
+    }
+  ],
+
+  "signatures": {
+    "domains": [],
+    "wallets": [],
+    "patterns": [],
+    "telegram_ids": []
+  }
+}
