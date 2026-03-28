@@ -99,10 +99,30 @@ export interface Message {
 
 export interface ScamFlag {
   telegram_id: number
+  sender_name?: string | null
   source: 'external_api' | 'local_llm' | 'manual'
   confidence: number | null
   reason: string | null
   flagged_at: string
+  last_chat_id?: number | null
+  last_chat_name?: string | null
+  last_message_id?: number | null
+  last_active?: string | null
+  last_message?: string | null
+}
+
+export interface ScannedMessage {
+  tg_message_id: number
+  chat_id: number
+  chat_name: string
+  sender_id: number | null
+  sender_name: string | null
+  text: string
+  date: string | null
+  scam_score: number
+  scam_reason: string | null
+  llm_prompt: string | null
+  llm_response: string | null
 }
 
 export interface PinnedMessage {

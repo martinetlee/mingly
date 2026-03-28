@@ -67,6 +67,8 @@ class Message(Base):
     is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
     scam_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     scam_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_llm_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_llm_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

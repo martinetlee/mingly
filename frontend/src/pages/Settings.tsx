@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations, getScamDetectionSettings, setScamDetectionSettings } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
 
@@ -498,14 +498,6 @@ export default function Settings() {
     localStorage.setItem('shortcuts_enabled', String(enabled))
   }, [])
 
-  // Scam detection settings
-  const [scamMode, setScamMode] = useState<'local_llm' | 'external'>('local_llm')
-  const [scamApiUrl, setScamApiUrl] = useState('')
-  const [scamApiKeySet, setScamApiKeySet] = useState(false)
-  const [scamApiKey, setScamApiKey] = useState('')
-  const [scamSaving, setScamSaving] = useState(false)
-  const [scamSaveMsg, setScamSaveMsg] = useState<string | null>(null)
-
   // Ollama models already downloaded on disk
   const [downloadedModels, setDownloadedModels] = useState<string[]>([])
 
@@ -561,15 +553,6 @@ export default function Settings() {
       .catch(() => {})
     getUserOrganizations()
       .then(({ organizations }) => setUserOrgs(organizations))
-      .catch(() => {})
-
-    // Load scam detection settings
-    getScamDetectionSettings()
-      .then((s) => {
-        setScamMode(s.mode as 'local_llm' | 'external')
-        setScamApiUrl(s.api_url)
-        setScamApiKeySet(s.api_key_set)
-      })
       .catch(() => {})
 
     // Check Ollama status on mount
@@ -1183,85 +1166,6 @@ export default function Settings() {
                     Selected: {userOrgs.join(', ')}
                   </p>
                 )}
-              </div>
-            </section>
-
-            {/* ── Scam Detection ── */}
-            <section className="mt-8 max-w-xl">
-              <h2 className="mb-1 text-sm font-medium text-slate-300">Scam Detection</h2>
-              <p className="mb-4 text-xs text-slate-400">
-                Incoming messages are automatically checked for scam patterns. Choose between the local LLM or an external API.
-              </p>
-              <div className="space-y-4 rounded-xl border border-slate-700 bg-slate-800 p-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Detection mode</label>
-                  <select
-                    value={scamMode}
-                    onChange={(e) => {
-                      setScamMode(e.target.value as 'local_llm' | 'external')
-                      setScamSaveMsg(null)
-                    }}
-                    className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
-                  >
-                    <option value="local_llm">Local LLM (uses your configured AI model)</option>
-                    <option value="external">External API</option>
-                  </select>
-                </div>
-
-                {scamMode === 'external' && (
-                  <>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-1">API endpoint URL</label>
-                      <input
-                        type="url"
-                        placeholder="https://api.example.com/scam"
-                        value={scamApiUrl}
-                        onChange={(e) => { setScamApiUrl(e.target.value); setScamSaveMsg(null) }}
-                        className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-1">
-                        API key {scamApiKeySet && !scamApiKey && <span className="text-emerald-400">(set)</span>}
-                      </label>
-                      <input
-                        type="password"
-                        placeholder={scamApiKeySet ? '••••••••' : 'Bearer token'}
-                        value={scamApiKey}
-                        onChange={(e) => { setScamApiKey(e.target.value); setScamSaveMsg(null) }}
-                        className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
-                      />
-                    </div>
-                  </>
-                )}
-
-                <div className="flex items-center gap-3">
-                  <button
-                    disabled={scamSaving || (scamMode === 'external' && !scamApiUrl.trim())}
-                    onClick={async () => {
-                      setScamSaving(true)
-                      setScamSaveMsg(null)
-                      try {
-                        await setScamDetectionSettings(scamMode, scamApiUrl, scamApiKey)
-                        setScamSaveMsg('Saved')
-                        if (scamApiKey) setScamApiKeySet(true)
-                        setScamApiKey('')
-                      } catch (err) {
-                        setScamSaveMsg(err instanceof Error ? err.message : 'Failed to save')
-                      } finally {
-                        setScamSaving(false)
-                      }
-                    }}
-                    className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-                  >
-                    {scamSaving ? 'Saving...' : 'Save'}
-                  </button>
-                  {scamSaveMsg && (
-                    <span className={`text-xs ${scamSaveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {scamSaveMsg}
-                    </span>
-                  )}
-                </div>
               </div>
             </section>
 

@@ -277,37 +277,47 @@ class ScamDetectionService:
         """Apply scam verdict to messages and flag senders if scam detected."""
         now = datetime.utcnow()
         async with AsyncSessionLocal() as db:
-            if result.is_scam and msg_ids and chat_id:
-                # Update scam_score on the checked messages
+            if msg_ids and chat_id:
+                # Always store the score + LLM trace (for both scam and safe verdicts)
+                values: dict = {
+                    "scam_score": result.confidence,
+                    "scam_reason": result.reason,
+                }
+                if result.llm_prompt:
+                    values["scam_llm_prompt"] = result.llm_prompt
+                if result.llm_response:
+                    values["scam_llm_response"] = result.llm_response
+
                 update_result = await db.execute(
                     update(Message)
                     .where(
                         Message.chat_id == chat_id,
                         Message.tg_message_id.in_(msg_ids),
                     )
-                    .values(scam_score=result.confidence, scam_reason=result.reason)
+                    .values(**values)
                 )
                 logger.info(
-                    "Scam score update: chat_id=%s msg_ids=%s confidence=%s rows_matched=%s",
-                    chat_id, msg_ids, result.confidence, update_result.rowcount,
+                    "Scam score update: chat_id=%s msg_ids=%s is_scam=%s confidence=%s rows_matched=%s",
+                    chat_id, msg_ids, result.is_scam, result.confidence, update_result.rowcount,
                 )
 
-                # Flag senders
-                for sid in sender_ids:
-                    existing = await db.execute(
-                        select(ScamFlag).where(ScamFlag.telegram_id == sid)
-                    )
-                    if existing.scalars().first():
-                        continue
-                    flag = ScamFlag(
-                        telegram_id=sid,
-                        source="local_llm",
-                        confidence=result.confidence,
-                        reason=result.reason,
-                        request_id=request_id,
-                        flagged_at=now,
-                    )
-                    db.add(flag)
+                # Flag senders (only for scam verdicts)
+                if result.is_scam:
+                    for sid in sender_ids:
+                        existing = await db.execute(
+                            select(ScamFlag).where(ScamFlag.telegram_id == sid)
+                        )
+                        if existing.scalars().first():
+                            continue
+                        flag = ScamFlag(
+                            telegram_id=sid,
+                            source="local_llm",
+                            confidence=result.confidence,
+                            reason=result.reason,
+                            request_id=request_id,
+                            flagged_at=now,
+                        )
+                        db.add(flag)
 
             # Mark request completed
             req_result = await db.execute(

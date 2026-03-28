@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -765,6 +765,12 @@ export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[
     method: 'POST',
     body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
   })
+
+export const getScannedMessages = () =>
+  request<{ messages: ScannedMessage[] }>('/api/scam/scanned-messages')
+
+export const clearMessageScam = (chatId: number, tgMessageId: number) =>
+  request<{ status: string }>(`/api/scam/scanned-messages/${chatId}/${tgMessageId}`, { method: 'DELETE' })
 
 // ── Translation ──
 

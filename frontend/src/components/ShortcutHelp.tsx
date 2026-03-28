@@ -8,7 +8,7 @@ const GROUPS: ShortcutGroup[] = [
     title: 'Global',
     shortcuts: [
       { keys: '⌘K', description: 'Open global search' },
-      { keys: '⌘1-8', description: 'Navigate to sidebar pages' },
+      { keys: '⌘1-9', description: 'Navigate to sidebar pages' },
       { keys: 'Esc', description: 'Close modal / panel' },
       { keys: '?', description: 'Show this help' },
     ],

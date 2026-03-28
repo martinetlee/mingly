@@ -13,6 +13,7 @@ import Settings from './pages/Settings'
 import Tracked from './pages/Tracked'
 import Intelligence from './pages/Intelligence'
 import Profile from './pages/Profile'
+import Shield from './pages/Shield'
 
 type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'app'
 
@@ -90,6 +91,7 @@ export default function App() {
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
           <Route path="tracked" element={<Tracked />} />
+          <Route path="shield" element={<Shield />} />
           <Route path="briefing" element={<Navigate to="/intelligence?tab=briefing" replace />} />
           <Route path="intelligence" element={<Intelligence />} />
           <Route path="profile/:userId" element={<Profile />} />

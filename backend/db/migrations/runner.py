@@ -334,6 +334,14 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        32,
+        "Add scam LLM prompt and raw response columns to messages for audit trail",
+        [
+            "ALTER TABLE messages ADD COLUMN scam_llm_prompt TEXT",
+            "ALTER TABLE messages ADD COLUMN scam_llm_response TEXT",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

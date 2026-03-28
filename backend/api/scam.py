@@ -136,35 +136,125 @@ async def scam_callback(request_id: str, payload: CallbackPayload):
 
 @router.get("/flags")
 async def list_flags():
-    """List all scam-flagged users and which chats they appear in."""
+    """List all scam-flagged users with last-active info."""
     async with AsyncSessionLocal() as db:
+        from sqlalchemy import distinct, func
+        from backend.db.models import Chat
+
         result = await db.execute(select(ScamFlag).order_by(ScamFlag.flagged_at.desc()))
         flags = result.scalars().all()
 
-        # Find chat IDs containing flagged senders
         flagged_tids = [f.telegram_id for f in flags]
         flagged_chat_ids: list[int] = []
+        # Per-flag: sender_name, last_active chat/time/message
+        sender_info: dict[int, dict] = {}
+
         if flagged_tids:
-            from sqlalchemy import distinct
-            chat_result = await db.execute(
+            # Backward compat flat list for Chats.tsx
+            chat_id_result = await db.execute(
                 select(distinct(Message.chat_id)).where(
                     Message.sender_id.in_(flagged_tids)
                 )
             )
-            flagged_chat_ids = [row[0] for row in chat_result.fetchall()]
+            flagged_chat_ids = [row[0] for row in chat_id_result.fetchall()]
+
+            # Get the most recent message per flagged sender (for last-active info)
+            # Use a subquery to get max date per sender, then fetch the actual message
+            latest_sub = (
+                select(
+                    Message.sender_id,
+                    func.max(Message.date).label("max_date"),
+                )
+                .where(Message.sender_id.in_(flagged_tids))
+                .group_by(Message.sender_id)
+                .subquery()
+            )
+            latest_result = await db.execute(
+                select(Message)
+                .join(latest_sub, (Message.sender_id == latest_sub.c.sender_id) & (Message.date == latest_sub.c.max_date))
+            )
+            latest_msgs = latest_result.scalars().all()
+
+            # Resolve chat names for these messages
+            latest_chat_ids = list({m.chat_id for m in latest_msgs})
+            chat_id_to_name: dict[int, str] = {}
+            if latest_chat_ids:
+                cn_result = await db.execute(
+                    select(Chat.telegram_id, Chat.name).where(Chat.telegram_id.in_(latest_chat_ids))
+                )
+                chat_id_to_name = {row[0]: row[1] or "Unknown" for row in cn_result.fetchall()}
+
+            for m in latest_msgs:
+                sender_info[m.sender_id] = {
+                    "sender_name": m.sender_name,
+                    "last_chat_id": m.chat_id,
+                    "last_chat_name": chat_id_to_name.get(m.chat_id, "Unknown"),
+                    "last_message_id": m.tg_message_id,
+                    "last_active": m.date.isoformat() if m.date else None,
+                    "last_message": (m.text or "")[:200],
+                }
 
         return {
             "flags": [
                 {
                     "telegram_id": f.telegram_id,
+                    "sender_name": sender_info.get(f.telegram_id, {}).get("sender_name"),
                     "source": f.source,
                     "confidence": f.confidence,
                     "reason": f.reason,
                     "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
+                    "last_chat_id": sender_info.get(f.telegram_id, {}).get("last_chat_id"),
+                    "last_chat_name": sender_info.get(f.telegram_id, {}).get("last_chat_name"),
+                    "last_message_id": sender_info.get(f.telegram_id, {}).get("last_message_id"),
+                    "last_active": sender_info.get(f.telegram_id, {}).get("last_active"),
+                    "last_message": sender_info.get(f.telegram_id, {}).get("last_message"),
                 }
                 for f in flags
             ],
             "flagged_chat_ids": flagged_chat_ids,
+        }
+
+
+@router.get("/scanned-messages")
+async def list_scanned_messages():
+    """List all messages that have been scam-checked (have a scam_score)."""
+    async with AsyncSessionLocal() as db:
+        from backend.db.models import Chat
+
+        result = await db.execute(
+            select(Message)
+            .where(Message.scam_score.isnot(None))
+            .order_by(Message.date.desc())
+            .limit(200)
+        )
+        msgs = result.scalars().all()
+
+        # Resolve chat names
+        chat_ids = list({m.chat_id for m in msgs})
+        chat_id_to_name: dict[int, str] = {}
+        if chat_ids:
+            cn_result = await db.execute(
+                select(Chat.telegram_id, Chat.name).where(Chat.telegram_id.in_(chat_ids))
+            )
+            chat_id_to_name = {row[0]: row[1] or "Unknown" for row in cn_result.fetchall()}
+
+        return {
+            "messages": [
+                {
+                    "tg_message_id": m.tg_message_id,
+                    "chat_id": m.chat_id,
+                    "chat_name": chat_id_to_name.get(m.chat_id, "Unknown"),
+                    "sender_id": m.sender_id,
+                    "sender_name": m.sender_name,
+                    "text": (m.text or "")[:200],
+                    "date": m.date.isoformat() if m.date else None,
+                    "scam_score": m.scam_score,
+                    "scam_reason": m.scam_reason,
+                    "llm_prompt": m.scam_llm_prompt,
+                    "llm_response": m.scam_llm_response,
+                }
+                for m in msgs
+            ],
         }
 
 
@@ -187,6 +277,20 @@ async def dismiss_flag(telegram_id: int):
         )
         await db.commit()
     return {"status": "dismissed", "telegram_id": telegram_id}
+
+
+@router.delete("/scanned-messages/{chat_id}/{tg_message_id}")
+async def clear_message_scam(chat_id: int, tg_message_id: int):
+    """Clear scam score on a specific message."""
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import update
+        await db.execute(
+            update(Message)
+            .where(Message.chat_id == chat_id, Message.tg_message_id == tg_message_id)
+            .values(scam_score=None, scam_reason=None)
+        )
+        await db.commit()
+    return {"status": "cleared"}
 
 
 @router.get("/status/{chat_id}")

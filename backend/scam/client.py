@@ -40,6 +40,8 @@ class ScamCheckResult:
     reason: str
     raw_response: Optional[dict] = None
     error: Optional[str] = None
+    llm_prompt: Optional[str] = None
+    llm_response: Optional[str] = None
 
 
 @dataclass
@@ -109,23 +111,36 @@ class MockScamAPIClient(ScamAPIClient):
             text = (msg.get("text") or "")[:500]
             parts.append(f"  [{sender}]: {text}")
 
+        user_content = "\n".join(parts)
+        full_prompt = f"[system]\n{SCAM_DETECTION_PROMPT}\n\n[user]\n{user_content}"
         llm_messages = [
             ChatMessage(role="system", content=SCAM_DETECTION_PROMPT),
-            ChatMessage(role="user", content="\n".join(parts)),
+            ChatMessage(role="user", content=user_content),
         ]
 
         try:
             response = await provider.complete(llm_messages, max_tokens=150, temperature=0.1)
-            parsed = json.loads(response.content)
+            raw_content = response.content or ""
+            content = raw_content.strip()
+            if not content:
+                return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="LLM returned empty response",
+                                      llm_prompt=full_prompt, llm_response=raw_content)
+            # Strip markdown code fences if the model wrapped the JSON
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            parsed = json.loads(content)
             return ScamCheckResult(
                 is_scam=bool(parsed.get("is_scam", False)),
                 confidence=max(0.0, min(1.0, float(parsed.get("confidence", 0.0)))),
                 reason=str(parsed.get("reason", "")),
                 raw_response=parsed,
+                llm_prompt=full_prompt,
+                llm_response=raw_content,
             )
         except (json.JSONDecodeError, LLMError, Exception) as e:
-            logger.warning("Scam detection LLM call failed: %s", e)
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=f"Scam detection failed: {e}")
+            logger.warning("Scam detection LLM call failed: %s (raw: %s)", e, getattr(response, 'content', None)[:200] if hasattr(response, 'content') and response.content else 'empty')
+            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=f"Scam detection failed: {e}",
+                                  llm_prompt=full_prompt, llm_response=getattr(response, 'content', None) if 'response' in dir() else None)
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
         # Mock always returns synchronously, no polling needed
