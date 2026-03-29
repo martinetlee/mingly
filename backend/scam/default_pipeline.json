@@ -61,12 +61,5 @@
     {"id": "other", "label": "Other", "description": "Other scam type not covered by the categories above"}
   ],
 
-  "context_messages": 5,
-
-  "signatures": {
-    "domains": [],
-    "wallets": [],
-    "patterns": [],
-    "telegram_ids": []
-  }
+  "context_messages": 5
 }

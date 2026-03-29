@@ -38,7 +38,11 @@ class StepTrace:
     # LLM-specific
     model_requested: Optional[str] = None
     model_used: Optional[str] = None
+    model_name: Optional[str] = None  # actual model name e.g. "llama3.2:latest"
+    provider_name: Optional[str] = None  # e.g. "ollama", "anthropic", "openai"
     model_warning: Optional[str] = None
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
     prompt_sent: Optional[str] = None
     raw_response: Optional[str] = None
 
@@ -322,6 +326,8 @@ async def _execute_llm_node(
         return trace
 
     trace.model_used = provider.instance_name
+    trace.model_name = getattr(provider, 'model', None) or provider.instance_name
+    trace.provider_name = getattr(provider, 'provider_name', None)
 
     # Build prompt from template
     prompt_template = node_config.get("prompt", "")
@@ -331,6 +337,8 @@ async def _execute_llm_node(
     # Build LLM messages
     max_tokens = node_config.get("max_tokens", 200)
     temperature = node_config.get("temperature", 0.1)
+    trace.max_tokens = max_tokens
+    trace.temperature = temperature
 
     llm_messages: list[ChatMessage] = [
         ChatMessage(role="system", content=prompt),

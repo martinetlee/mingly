@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw } from 'lucide-react'
 import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline } from '../api/client'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function timeAgo(iso: string): string {
@@ -80,6 +80,16 @@ export default function Shield() {
   const [scamSaving, setScamSaving] = useState(false)
   const [scamSaveMsg, setScamSaveMsg] = useState<string | null>(null)
 
+  // Cloud sync
+  const [cloudUrl, setCloudUrl] = useState('')
+  const [cloudApiKey, setCloudApiKey] = useState('')
+  const [cloudKeySet, setCloudKeySet] = useState(false)
+  const [cloudLastSynced, setCloudLastSynced] = useState<string | null>(null)
+  const [cloudSaving, setCloudSaving] = useState(false)
+  const [cloudSaveMsg, setCloudSaveMsg] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<string | null>(null)
+
   const loadFlags = useCallback(() => {
     getScamFlags()
       .then((data) => setFlags(data.flags))
@@ -120,6 +130,13 @@ export default function Shield() {
         setScamApiUrl(s.api_url)
         setScamApiKeySet(s.api_key_set)
         setScamMaxTokens(s.max_tokens || 200)
+      })
+      .catch(() => {})
+    getShieldCloudSettings()
+      .then((s) => {
+        setCloudUrl(s.cloud_url)
+        setCloudKeySet(s.api_key_set)
+        setCloudLastSynced(s.last_synced_at)
       })
       .catch(() => {})
   }, [loadFlags, loadScanned, loadReports])
@@ -247,6 +264,72 @@ export default function Shield() {
                 <span className={`text-xs ${scamSaveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{scamSaveMsg}</span>
               )}
             </div>
+
+            {/* Cloud Sync */}
+            <h3 className="text-xs font-medium text-slate-400 mt-3">Cloud Sync</h3>
+            <div className="flex items-center gap-3">
+              <input
+                type="url"
+                placeholder="Cloud API URL"
+                value={cloudUrl}
+                onChange={(e) => { setCloudUrl(e.target.value); setCloudSaveMsg(null) }}
+                className="flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+              />
+              <input
+                type="password"
+                placeholder={cloudKeySet ? '••••••••' : 'API key'}
+                value={cloudApiKey}
+                onChange={(e) => { setCloudApiKey(e.target.value); setCloudSaveMsg(null) }}
+                className="w-32 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+              />
+              <button
+                disabled={cloudSaving}
+                onClick={async () => {
+                  setCloudSaving(true); setCloudSaveMsg(null)
+                  try {
+                    await setShieldCloudSettings(cloudUrl, cloudApiKey)
+                    setCloudSaveMsg('Saved')
+                    if (cloudApiKey) setCloudKeySet(true)
+                    setCloudApiKey('')
+                  } catch (err) {
+                    setCloudSaveMsg(err instanceof Error ? err.message : 'Failed')
+                  } finally { setCloudSaving(false) }
+                }}
+                className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                {cloudSaving ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                disabled={syncing || !cloudUrl}
+                onClick={async () => {
+                  setSyncing(true); setSyncResult(null)
+                  try {
+                    const r = await triggerSync()
+                    setSyncResult(r.status === 'success' ? 'Synced' : r.error || r.status)
+                    if (r.status === 'success' || r.status === 'reloaded') {
+                      setCloudLastSynced(new Date().toISOString())
+                    }
+                  } catch (err) {
+                    setSyncResult(err instanceof Error ? err.message : 'Failed')
+                  } finally { setSyncing(false) }
+                }}
+                className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+              >
+                {syncing ? 'Syncing…' : 'Sync Now'}
+              </button>
+              {cloudSaveMsg && <span className={`text-xs ${cloudSaveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{cloudSaveMsg}</span>}
+              {syncResult && <span className={`text-xs ${syncResult === 'Synced' ? 'text-emerald-400' : 'text-red-400'}`}>{syncResult}</span>}
+            </div>
+            {cloudLastSynced && (
+              <p className={`text-[10px] ${
+                (() => {
+                  const hrs = (Date.now() - new Date(cloudLastSynced.endsWith('Z') ? cloudLastSynced : cloudLastSynced + 'Z').getTime()) / 3600000
+                  return hrs > 48 ? 'text-amber-400' : 'text-slate-500'
+                })()
+              }`}>
+                Last synced: {timeAgo(cloudLastSynced)}
+              </p>
+            )}
           </div>
         </div>
       )}

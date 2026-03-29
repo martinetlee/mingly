@@ -71,6 +71,7 @@ class Message(Base):
     scam_llm_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_category: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_trace_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -227,6 +228,7 @@ class ScamFlag(Base):
     flagged_message_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     flagged_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ScamReport(Base):
@@ -245,6 +247,7 @@ class ScamReport(Base):
     status: Mapped[str] = mapped_column(String, default="submitted")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class BriefingEntry(Base):

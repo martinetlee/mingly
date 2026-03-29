@@ -384,6 +384,15 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN scam_trace_json TEXT",
         ],
     ),
+    (
+        36,
+        "Add cloud sync tracking columns",
+        [
+            "ALTER TABLE scam_reports ADD COLUMN synced_at DATETIME",
+            "ALTER TABLE scam_flags ADD COLUMN synced_to_cloud BOOLEAN DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN scam_synced_to_cloud BOOLEAN DEFAULT 0",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

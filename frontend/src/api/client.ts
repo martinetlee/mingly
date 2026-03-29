@@ -801,6 +801,23 @@ export const createScamReport = (data: {
 export const getScamReports = () =>
   request<{ reports: ScamReport[] }>('/api/scam/reports')
 
+// ── Shield Cloud Sync ──
+
+export const getShieldCloudSettings = () =>
+  request<{ cloud_url: string; api_key_set: boolean; last_synced_at: string | null }>('/api/settings/prefs/shield-cloud')
+
+export const setShieldCloudSettings = (cloudUrl: string, apiKey: string) =>
+  request<{ success: boolean }>('/api/settings/prefs/shield-cloud', {
+    method: 'POST',
+    body: JSON.stringify({ cloud_url: cloudUrl, api_key: apiKey }),
+  })
+
+export const getSyncStatus = () =>
+  request<{ configured: boolean; cloud_url: string; last_synced_at: string | null; pipeline_version: string | null }>('/api/scam/sync/status')
+
+export const triggerSync = () =>
+  request<{ status: string; error?: string; pipeline_updated?: boolean; scenarios_updated?: boolean; signatures_updated?: boolean; reports_submitted?: number }>('/api/scam/pipeline/sync', { method: 'POST' })
+
 // ── Translation ──
 
 export const openExternalUrl = (url: string) => {

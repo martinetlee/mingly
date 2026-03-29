@@ -445,13 +445,43 @@ async def get_pipeline():
 
 @router.post("/pipeline/sync")
 async def sync_pipeline():
-    """Trigger pipeline sync (stub: reloads from disk)."""
+    """Trigger cloud sync or reload from disk."""
+    from backend.scam.cloud_sync import get_cloud_sync_manager
+    sync_mgr = get_cloud_sync_manager()
+    if sync_mgr and sync_mgr.is_configured:
+        result = await sync_mgr.sync()
+        return {
+            "status": result.status,
+            "error": result.error,
+            "pipeline_updated": result.pipeline_updated,
+            "scenarios_updated": result.scenarios_updated,
+            "signatures_updated": result.signatures_updated,
+            "reports_submitted": result.reports_submitted,
+        }
+    else:
+        # No cloud configured — just reload from disk
+        from backend.scam.pipeline import get_pipeline_manager
+        mgr = get_pipeline_manager()
+        if mgr:
+            config = mgr.reload()
+            return {"status": "reloaded", "version": config.version}
+        return {"status": "no_pipeline"}
+
+
+@router.get("/sync/status")
+async def sync_status():
+    """Get cloud sync configuration and status."""
+    from backend.scam.cloud_sync import get_cloud_sync_manager
+    sync_mgr = get_cloud_sync_manager()
     from backend.scam.pipeline import get_pipeline_manager
     mgr = get_pipeline_manager()
-    if not mgr:
-        raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    config = mgr.sync()
-    return {"version": config.version, "updated_at": config.updated_at}
+
+    return {
+        "configured": sync_mgr.is_configured if sync_mgr else False,
+        "cloud_url": sync_mgr._base_url if sync_mgr else "",
+        "last_synced_at": sync_mgr.last_synced_at.isoformat() if sync_mgr and sync_mgr.last_synced_at else None,
+        "pipeline_version": mgr.get_config().version if mgr else None,
+    }
 
 
 # ---------------------------------------------------------------------------

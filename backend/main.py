@@ -36,9 +36,26 @@ async def on_startup():
     # Start the catch-up summary scheduler
     start_catchup_summary_scheduler()
 
-    # Initialize tool registry and pipeline
+    # Initialize tool registry, pipeline, and cloud sync
     import backend.scam.tools  # noqa: F401 — triggers auto-registration of tools
     pipeline_mgr = init_pipeline_manager()
+
+    from backend.scam.cloud_sync import init_cloud_sync_manager
+    cloud_sync_mgr = init_cloud_sync_manager()
+
+    # Background cloud sync: on launch + daily
+    async def _cloud_sync_loop():
+        # Initial sync on launch (non-blocking, small delay to let app settle)
+        await asyncio.sleep(5)
+        if cloud_sync_mgr.is_configured:
+            await cloud_sync_mgr.sync()
+        # Daily sync
+        while True:
+            await asyncio.sleep(86400)
+            if cloud_sync_mgr.is_configured:
+                await cloud_sync_mgr.sync()
+
+    asyncio.create_task(_cloud_sync_loop())
 
     from backend.api.settings import get_scam_detection_settings
     scam_settings = get_scam_detection_settings()

@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 _PIPELINE_FILE = DATA_DIR / "scam_pipeline.json"
 _DEFAULT_PIPELINE_FILE = Path(__file__).parent / "default_pipeline.json"
+_SIGNATURES_FILE = DATA_DIR / "scam_signatures.json"
+_DEFAULT_SIGNATURES_FILE = Path(__file__).parent / "default_signatures.json"
 
 # Minimal embedded fallback so detection works even if the JSON file is missing
 _FALLBACK_SYSTEM_PROMPT = (
@@ -187,7 +189,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         output_node = "scan"
         logger.info("Auto-converted v1 pipeline to single-node DAG")
 
-    return PipelineConfig(
+    config = PipelineConfig(
         version=data.get("version", "0.0.0"),
         updated_at=data.get("updated_at", ""),
         system_prompt=system_prompt,
@@ -199,6 +201,55 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         edges=edges,
         output=output_node,
     )
+
+    # Overlay signatures from separate file if it exists
+    _load_signatures_file(config)
+
+    return config
+
+
+def _parse_signatures(sig_data: dict) -> Signatures:
+    """Parse a signatures dict into a Signatures dataclass with compiled patterns."""
+    sigs = Signatures(
+        domains=sig_data.get("domains", []),
+        wallets=sig_data.get("wallets", []),
+        patterns=sig_data.get("patterns", []),
+        telegram_ids=sig_data.get("telegram_ids", []),
+    )
+    for pattern_str in sigs.patterns:
+        try:
+            sigs._compiled_patterns.append(re.compile(pattern_str, re.IGNORECASE))
+        except re.error as e:
+            logger.warning("Invalid scam signature pattern %r: %s", pattern_str, e)
+    return sigs
+
+
+def _load_signatures_file(config: PipelineConfig) -> None:
+    """Load signatures from the separate signatures file."""
+    if not _SIGNATURES_FILE.exists():
+        # Copy bundled default if available
+        if _DEFAULT_SIGNATURES_FILE.exists():
+            shutil.copy2(_DEFAULT_SIGNATURES_FILE, _SIGNATURES_FILE)
+            logger.info("Copied default signatures to %s", _SIGNATURES_FILE)
+        else:
+            return
+    try:
+        data = json.loads(_SIGNATURES_FILE.read_text(encoding="utf-8"))
+        config.signatures = _parse_signatures(data)
+        logger.info("Loaded signatures from %s: %d domains, %d wallets, %d patterns, %d IDs",
+                    _SIGNATURES_FILE, len(config.signatures.domains), len(config.signatures.wallets),
+                    len(config.signatures.patterns), len(config.signatures.telegram_ids))
+    except Exception as e:
+        logger.warning("Failed to load signatures file: %s", e)
+
+
+def save_signatures(sigs_data: dict) -> None:
+    """Save signatures to the separate signatures file."""
+    _SIGNATURES_FILE.write_text(
+        json.dumps(sigs_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Saved signatures to %s", _SIGNATURES_FILE)
 
 
 # ---------------------------------------------------------------------------

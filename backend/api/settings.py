@@ -363,6 +363,44 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
     return {"success": True, "mode": req.mode}
 
 
+class ShieldCloudSettingsRequest(BaseModel):
+    cloud_url: str = ""
+    api_key: str = ""
+
+
+@router.get("/prefs/shield-cloud")
+async def get_shield_cloud():
+    """Get Shield cloud sync configuration."""
+    prefs = _load_prefs()
+    api_key = prefs.get("shield_api_key", "")
+    return {
+        "cloud_url": prefs.get("shield_cloud_url", ""),
+        "api_key_set": bool(api_key),
+        "last_synced_at": prefs.get("shield_last_synced_at"),
+    }
+
+
+@router.post("/prefs/shield-cloud")
+async def set_shield_cloud(req: ShieldCloudSettingsRequest):
+    """Update Shield cloud sync configuration."""
+    prefs = _load_prefs()
+    prefs["shield_cloud_url"] = req.cloud_url.strip()
+    if req.api_key:
+        prefs["shield_api_key"] = req.api_key
+    _save_prefs(prefs)
+
+    # Reconfigure the sync manager
+    from backend.scam.cloud_sync import get_cloud_sync_manager
+    mgr = get_cloud_sync_manager()
+    if mgr:
+        mgr.configure(
+            base_url=req.cloud_url.strip(),
+            api_key=req.api_key or prefs.get("shield_api_key", ""),
+        )
+
+    return {"success": True}
+
+
 def _reconfigure_scam_service(prefs: dict) -> None:
     """Swap the scam detection client based on current preferences."""
     from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
