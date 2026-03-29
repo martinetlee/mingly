@@ -583,5 +583,6 @@ export type WSEvent =
   | { type: 'scam_users_flagged'; telegram_ids: number[] }
   | { type: 'scam_check_error'; chat_id: number; message_ids: number[]; error: string }
   | { type: 'scam_check_safe'; chat_id: number; message_ids: number[] }
+  | { type: 'messages_deleted'; chat_id: number | null; message_ids: number[] }
   | { type: 'chat_synced'; chat_id: number }
   | { type: 'bulk_sync_complete'; synced: number }

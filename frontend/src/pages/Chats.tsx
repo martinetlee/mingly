@@ -698,6 +698,12 @@ export default function Chats() {
         loadMessages(selectedChat)
       }
     }
+    if (event.type === 'messages_deleted') {
+      const deletedIds = new Set(event.message_ids as number[])
+      if (selectedChat && (event.chat_id === selectedChat.telegram_id || !event.chat_id)) {
+        setMessages((prev) => prev.filter((m) => !deletedIds.has(m.tg_message_id)))
+      }
+    }
     if (event.type === 'scam_users_flagged') {
       setFlaggedSenderIds((prev) => {
         const next = new Set(prev)
@@ -1250,7 +1256,20 @@ export default function Chats() {
                   key={`tg-${chat.telegram_id}`}
                   chat={chat}
                   selected={selectedChat?.telegram_id === chat.telegram_id}
-                  onClick={() => handleSelectChat(chat)}
+                  onClick={() => {
+                    // Ensure chat exists and is synced, then select it
+                    ensureChat(chat.telegram_id)
+                      .then((ensured) => {
+                        // Add to local chat list if not already there
+                        setChats((prev) => {
+                          if (prev.some((c) => c.telegram_id === ensured.telegram_id)) return prev
+                          return [ensured, ...prev]
+                        })
+                        setSearch('')
+                        handleSelectChat(ensured)
+                      })
+                      .catch(() => handleSelectChat(chat))
+                  }}
                   onToggleTrack={() => {}}
                   onHide={() => {}}
                   onBriefing={() => {}}

@@ -722,10 +722,18 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
     if not client:
         return
 
+    synced_tg_ids: set[int] = set()
+    oldest_synced_date = None
+
     async with AsyncSessionLocal() as db:
         async for msg in client.iter_messages(chat_telegram_id, limit=limit):
             if not msg.text and not msg.media:
                 continue
+
+            synced_tg_ids.add(msg.id)
+            msg_date = msg.date.replace(tzinfo=None)
+            if oldest_synced_date is None or msg_date < oldest_synced_date:
+                oldest_synced_date = msg_date
 
             sender = await msg.get_sender() if msg.sender_id else None
             media_path = await _download_photo(client, msg)
@@ -739,9 +747,6 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             # Determine delivery state for outgoing messages
             delivery_state = "sent"
             if msg.out:
-                # Check if the message has been read by the recipient
-                # Telethon doesn't expose per-message read state directly;
-                # we mark as 'sent' and let the read-state endpoint update later
                 delivery_state = "sent"
 
             await crud.save_message(
@@ -753,7 +758,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 text=msg.text or "",
                 text_html=text_html,
                 reactions_json=reactions_json,
-                date=msg.date.replace(tzinfo=None),
+                date=msg_date,
                 is_outgoing=msg.out,
                 media_type=_media_type(msg),
                 media_path=media_path,
@@ -766,6 +771,31 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 delivery_state=delivery_state,
                 is_edited=bool(msg.edit_date),
             )
+
+        # Delete locally stored messages that were deleted on Telegram
+        # Only within the synced date range to avoid removing older unsynced messages
+        if synced_tg_ids and oldest_synced_date:
+            from backend.db.models import Message as MsgModel
+            from sqlalchemy import delete as sa_delete
+
+            local_result = await db.execute(
+                select(MsgModel.tg_message_id).where(
+                    MsgModel.chat_id == chat_telegram_id,
+                    MsgModel.date >= oldest_synced_date,
+                )
+            )
+            local_ids = {row[0] for row in local_result.fetchall()}
+            deleted_ids = local_ids - synced_tg_ids
+
+            if deleted_ids:
+                await db.execute(
+                    sa_delete(MsgModel).where(
+                        MsgModel.chat_id == chat_telegram_id,
+                        MsgModel.tg_message_id.in_(list(deleted_ids)),
+                    )
+                )
+                await db.commit()
+                logger.info("sync_messages: removed %d deleted messages from chat %s", len(deleted_ids), chat_telegram_id)
 
         # Fetch and store pinned message id + content for the chat
         try:
@@ -991,6 +1021,44 @@ async def register_event_handlers() -> None:
                 body_text = (saved.text or "")[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
                 _send_native_notification(chat.name, body, chat_id=event.chat_id)
+
+    @client.on(events.MessageDeleted)
+    async def on_message_deleted(event):
+        """Handle message deletions — remove from local DB and notify frontend."""
+        deleted_ids = event.deleted_ids
+        chat_id = getattr(event, 'chat_id', None)
+
+        if not deleted_ids:
+            return
+
+        from backend.db.models import Message as MsgModel
+        from sqlalchemy import delete as sa_delete
+
+        async with AsyncSessionLocal() as db:
+            if chat_id:
+                # Channel/group deletion — we know the chat
+                await db.execute(
+                    sa_delete(MsgModel).where(
+                        MsgModel.chat_id == chat_id,
+                        MsgModel.tg_message_id.in_(deleted_ids),
+                    )
+                )
+            else:
+                # Private chat deletion — no chat_id, delete by message ID across all chats
+                await db.execute(
+                    sa_delete(MsgModel).where(
+                        MsgModel.tg_message_id.in_(deleted_ids),
+                    )
+                )
+            await db.commit()
+
+        logger.info("Deleted %d messages (chat_id=%s)", len(deleted_ids), chat_id)
+
+        await ws_manager.broadcast({
+            "type": "messages_deleted",
+            "chat_id": chat_id,
+            "message_ids": deleted_ids,
+        })
 
     @client.on(events.UserUpdate)
     async def on_user_update(event):
