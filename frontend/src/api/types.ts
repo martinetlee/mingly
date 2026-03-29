@@ -128,6 +128,7 @@ export interface ScannedMessage {
   scam_category: string | null
   llm_prompt: string | null
   llm_response: string | null
+  trace_json: string | null
 }
 
 export interface ScamCategory {

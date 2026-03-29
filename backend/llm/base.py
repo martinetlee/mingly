@@ -1,13 +1,22 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
 @dataclass
 class ChatMessage:
-    role: str  # "system" | "user" | "assistant"
+    role: str  # "system" | "user" | "assistant" | "tool"
     content: str
+    tool_calls: Optional[list] = None  # For assistant messages with tool calls
+    tool_call_id: Optional[str] = None  # For tool result messages
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
 
 
 @dataclass
@@ -18,6 +27,7 @@ class CompletionResponse:
     instance_name: str
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    tool_calls: Optional[list] = None
 
 
 class LLMError(Exception):
@@ -32,6 +42,7 @@ class BaseLLMProvider(ABC):
 
     provider_name: str  # class-level constant, e.g. "ollama"
     instance_name: str  # set by registry when adding
+    supports_tools: bool = False  # Whether this provider supports native function calling
 
     @abstractmethod
     async def complete(
@@ -40,6 +51,7 @@ class BaseLLMProvider(ABC):
         *,
         max_tokens: int = 1024,
         temperature: float = 0.3,
+        tools: Optional[list] = None,
     ) -> CompletionResponse:
         """Non-streaming completion. Raises LLMError on failure."""
         ...

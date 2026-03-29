@@ -78,6 +78,35 @@ async def check_messages(req: CheckMessagesRequest):
             for m in msgs
         ]
 
+        # Fetch recent context messages from the same sender(s)
+        from backend.scam.pipeline import get_pipeline_manager
+        context_limit = 5
+        mgr = get_pipeline_manager()
+        if mgr:
+            context_limit = mgr.get_config().context_messages
+        if context_limit > 0:
+            target_sender_ids = list({m.sender_id for m in msgs if m.sender_id})
+            target_msg_ids = set(req.message_telegram_ids)
+            if target_sender_ids:
+                ctx_result = await db.execute(
+                    select(Message).where(
+                        Message.chat_id == req.chat_id,
+                        Message.sender_id.in_(target_sender_ids),
+                        Message.tg_message_id.notin_(list(target_msg_ids)),
+                        Message.text.isnot(None),
+                        Message.text != "",
+                    ).order_by(Message.date.desc()).limit(context_limit)
+                )
+                ctx_msgs = ctx_result.scalars().all()
+                for m in reversed(ctx_msgs):
+                    messages.insert(0, {
+                        "message_id": m.tg_message_id,
+                        "sender_id": m.sender_id,
+                        "sender_name": m.sender_name,
+                        "text": m.text,
+                        "date": m.date.isoformat() if m.date else None,
+                    })
+
         # Build sender profiles with contact status
         sender_ids = list({m.sender_id for m in msgs if m.sender_id})
         profiles = []
@@ -221,16 +250,26 @@ async def list_flags():
 
 
 @router.get("/scanned-messages")
-async def list_scanned_messages():
-    """List all messages that have been scam-checked (have a scam_score)."""
+async def list_scanned_messages(page: int = Query(1, ge=1), page_size: int = Query(200, ge=1, le=500)):
+    """List messages that have been scam-checked, with pagination."""
     async with AsyncSessionLocal() as db:
         from backend.db.models import Chat
+        from sqlalchemy import func
 
+        # Total count
+        count_result = await db.execute(
+            select(func.count()).select_from(Message).where(Message.scam_score.isnot(None))
+        )
+        total = count_result.scalar() or 0
+
+        # Paginated results
+        offset = (page - 1) * page_size
         result = await db.execute(
             select(Message)
             .where(Message.scam_score.isnot(None))
             .order_by(Message.date.desc())
-            .limit(200)
+            .offset(offset)
+            .limit(page_size)
         )
         msgs = result.scalars().all()
 
@@ -244,6 +283,9 @@ async def list_scanned_messages():
             chat_id_to_name = {row[0]: row[1] or "Unknown" for row in cn_result.fetchall()}
 
         return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "messages": [
                 {
                     "tg_message_id": m.tg_message_id,
@@ -251,13 +293,14 @@ async def list_scanned_messages():
                     "chat_name": chat_id_to_name.get(m.chat_id, "Unknown"),
                     "sender_id": m.sender_id,
                     "sender_name": m.sender_name,
-                    "text": (m.text or "")[:200],
+                    "text": m.text or "",
                     "date": m.date.isoformat() if m.date else None,
                     "scam_score": m.scam_score,
                     "scam_reason": m.scam_reason,
                     "scam_category": m.scam_category,
                     "llm_prompt": m.scam_llm_prompt,
                     "llm_response": m.scam_llm_response,
+                    "trace_json": m.scam_trace_json,
                 }
                 for m in msgs
             ],
@@ -388,6 +431,15 @@ async def get_pipeline():
             {"id": c.id, "label": c.label, "description": c.description}
             for c in config.categories
         ],
+        "nodes": [
+            {"id": n.id, "type": n.type, "config": n.config, "short_circuit": n.short_circuit}
+            for n in config.nodes
+        ],
+        "edges": [
+            {"from": e.from_node, "to": e.to_node}
+            for e in config.edges
+        ],
+        "output": config.output,
     }
 
 

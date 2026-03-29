@@ -295,14 +295,19 @@ class ScamDetectionService:
                 reason = result.reason
                 if result.error and not reason:
                     reason = result.error
-                # scam_score represents "how scammy": high when is_scam=true, low when false
-                scam_score = result.confidence if result.is_scam else (1.0 - result.confidence)
+                # scam_score encodes both verdict and confidence:
+                # scam: 0.5 + (confidence * 0.5) → range 0.5-1.0
+                # safe: 0.5 - (confidence * 0.5) → range 0.0-0.5
+                # This preserves the >0.5 threshold for display while showing confidence
+                conf = max(0.0, min(1.0, result.confidence))
+                scam_score = 0.5 + (conf * 0.5) if result.is_scam else 0.5 - (conf * 0.5)
                 values: dict = {
                     "scam_score": scam_score,
                     "scam_reason": reason,
                     "scam_category": result.category,
                     "scam_llm_prompt": result.llm_prompt,
                     "scam_llm_response": result.llm_response,
+                    "scam_trace_json": result.trace_json,
                 }
 
                 update_result = await db.execute(

@@ -20,6 +20,7 @@ interface Props {
   loadingOlder?: boolean
   /** Set of telegram IDs flagged as scammers */
   flaggedSenderIds?: Set<number>
+  onReportScam?: (msg: Message) => void
 }
 
 /**
@@ -66,7 +67,7 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
@@ -192,8 +193,20 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
           isGroup && !msg.is_outgoing && msg.sender_name !== prevMsg?.sender_name
         const isHighlighted = highlightTelegramId != null && msg.tg_message_id === highlightTelegramId && !dimHighlight
 
+        // Date separator when day changes
+        const msgDate = new Date(msg.date + (msg.date.includes('Z') || msg.date.includes('+') ? '' : 'Z'))
+        const prevDate = prevMsg?.date ? new Date(prevMsg.date + (prevMsg.date.includes('Z') || prevMsg.date.includes('+') ? '' : 'Z')) : null
+        const showDateSep = !prevDate || msgDate.toDateString() !== prevDate.toDateString()
+
         return (
           <div key={msg.id}>
+            {showDateSep && (
+              <div className="flex items-center justify-center py-2 my-1">
+                <span className="text-[11px] font-medium text-slate-500">
+                  {msgDate.toLocaleDateString([], { day: 'numeric', month: 'long' })}
+                </span>
+              </div>
+            )}
             {unreadSeparatorIndex === idx && (
               <UnreadSeparator innerRef={unreadRef} />
             )}
@@ -210,6 +223,7 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
                 onDelete={onDelete}
                 onForward={onForward}
                 isFlaggedSender={!!msg.sender_id && !!flaggedSenderIds?.has(msg.sender_id)}
+                onReportScam={onReportScam}
               />
             </div>
           </div>

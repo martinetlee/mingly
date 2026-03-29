@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText } from 'lucide-react'
+import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw } from 'lucide-react'
 import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports } from '../api/client'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
+  // Backend stores dates as UTC without Z suffix — ensure correct parsing
+  const dateStr = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z'
+  const diff = Date.now() - new Date(dateStr).getTime()
   const mins = Math.floor(diff / 60000)
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`
@@ -34,7 +36,7 @@ function ConfidencePill({ value }: { value: number | null }) {
   )
 }
 
-type Tab = 'flagged' | 'scanned' | 'reports'
+type Tab = 'flagged' | 'scanned' | 'reports' | 'pipeline'
 
 export default function Shield() {
   const navigate = useNavigate()
@@ -49,10 +51,24 @@ export default function Shield() {
   const [loadingScanned, setLoadingScanned] = useState(true)
   const [scamOnly, setScamOnly] = useState(false)
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null) // "chatId-msgId"
+  const [scannedPage, setScannedPage] = useState(1)
+  const [scannedTotal, setScannedTotal] = useState(0)
+  const PAGE_SIZE = 200
 
   // Reports
   const [reports, setReports] = useState<ScamReport[]>([])
   const [loadingReports, setLoadingReports] = useState(true)
+
+  // Pipeline visualization
+  const [pipelineData, setPipelineData] = useState<{
+    version: string
+    updated_at: string
+    nodes: { id: string; type: string; config: Record<string, any>; short_circuit?: any }[]
+    edges: { from: string; to: string }[]
+    output: string
+  } | null>(null)
+  const [loadingPipeline, setLoadingPipeline] = useState(true)
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
 
   // Detection settings
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -71,9 +87,14 @@ export default function Shield() {
       .finally(() => setLoadingFlags(false))
   }, [])
 
-  const loadScanned = useCallback(() => {
-    getScannedMessages()
-      .then((data) => setScanned(data.messages))
+  const loadScanned = useCallback((page: number = 1) => {
+    setLoadingScanned(true)
+    getScannedMessages(page, PAGE_SIZE)
+      .then((data) => {
+        setScanned(data.messages)
+        setScannedTotal(data.total)
+        setScannedPage(data.page)
+      })
       .catch(() => {})
       .finally(() => setLoadingScanned(false))
   }, [])
@@ -89,6 +110,10 @@ export default function Shield() {
     loadFlags()
     loadScanned()
     loadReports()
+    getScamPipeline()
+      .then((data) => setPipelineData(data))
+      .catch(() => {})
+      .finally(() => setLoadingPipeline(false))
     getScamDetectionSettings()
       .then((s) => {
         setScamMode(s.mode as 'local_llm' | 'external')
@@ -114,6 +139,21 @@ export default function Shield() {
   const handleClearMessage = async (chatId: number, tgMessageId: number) => {
     setScanned((prev) => prev.filter((m) => !(m.chat_id === chatId && m.tg_message_id === tgMessageId)))
     try { await clearMessageScam(chatId, tgMessageId) } catch { loadScanned() }
+  }
+
+  const [rescanning, setRescanning] = useState<Set<string>>(new Set())
+
+  const handleRescan = async (chatId: number, tgMessageId: number) => {
+    const key = `${chatId}-${tgMessageId}`
+    setRescanning(prev => new Set(prev).add(key))
+    try {
+      await checkMessagesForScam(chatId, [tgMessageId])
+      // Result arrives via WebSocket — reload after a short delay
+      setTimeout(() => loadScanned(scannedPage), 3000)
+    } catch { /* ignore */ }
+    finally {
+      setRescanning(prev => { const next = new Set(prev); next.delete(key); return next })
+    }
   }
 
   const goToMessage = (chatId: number, messageId: number) => {
@@ -235,8 +275,8 @@ export default function Shield() {
           }`}
         >
           Scanned Messages
-          {scanned.length > 0 && (
-            <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{scanned.length}</span>
+          {scannedTotal > 0 && (
+            <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{scannedTotal}</span>
           )}
         </button>
         <button
@@ -251,6 +291,16 @@ export default function Shield() {
           {reports.length > 0 && (
             <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{reports.length}</span>
           )}
+        </button>
+        <button
+          onClick={() => setTab('pipeline')}
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+            tab === 'pipeline'
+              ? 'border-cyan-400 text-cyan-400'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Pipeline
         </button>
 
         {/* Scam-only filter for scanned tab */}
@@ -377,7 +427,8 @@ export default function Shield() {
                   const isScam = msg.scam_score > 0.5
                   const traceKey = `${msg.chat_id}-${msg.tg_message_id}`
                   const isTraceOpen = expandedTrace === traceKey
-                  const hasTrace = msg.llm_prompt || msg.llm_response
+                  const hasTrace = msg.trace_json || msg.llm_prompt || msg.llm_response
+                  const parsedTrace = msg.trace_json ? (() => { try { return JSON.parse(msg.trace_json) } catch { return null } })() : null
                   return (
                     <>
                       <tr key={traceKey} className="hover:bg-slate-800/50 transition-colors">
@@ -427,6 +478,14 @@ export default function Shield() {
                               <ChevronDown size={13} className={`transition-transform ${isTraceOpen ? 'rotate-180' : ''}`} />
                             </button>
                             <button
+                              onClick={() => handleRescan(msg.chat_id, msg.tg_message_id)}
+                              title="Rescan message"
+                              disabled={rescanning.has(`${msg.chat_id}-${msg.tg_message_id}`)}
+                              className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-indigo-400 transition-colors disabled:opacity-40"
+                            >
+                              <RefreshCw size={13} className={rescanning.has(`${msg.chat_id}-${msg.tg_message_id}`) ? 'animate-spin' : ''} />
+                            </button>
+                            <button
                               onClick={() => handleClearMessage(msg.chat_id, msg.tg_message_id)}
                               title="Clear scam flag"
                               className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-colors"
@@ -439,8 +498,101 @@ export default function Shield() {
                       {isTraceOpen && (
                         <tr key={`${traceKey}-trace`} className="bg-slate-800/30">
                           <td colSpan={6} className="px-6 py-3">
-                            {hasTrace ? (
+                            {parsedTrace ? (
                               <div className="space-y-3 max-w-4xl">
+                                {/* Pipeline header */}
+                                <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                                  <span>Pipeline v{parsedTrace.pipeline_version}</span>
+                                  <span>{parsedTrace.status}</span>
+                                  {parsedTrace.duration_ms != null && <span>{parsedTrace.duration_ms}ms</span>}
+                                </div>
+
+                                {/* Full message text */}
+                                {msg.text && (
+                                  <div>
+                                    <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Message</h4>
+                                    <pre className="whitespace-pre-wrap text-[11px] text-slate-300 bg-slate-900 rounded-lg p-3 border border-slate-700 max-h-32 overflow-y-auto">{msg.text}</pre>
+                                  </div>
+                                )}
+
+                                {/* Short-circuit info */}
+                                {parsedTrace.short_circuit && (
+                                  <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-2">
+                                    <p className="text-xs text-amber-300">
+                                      Short-circuited: {parsedTrace.short_circuit.match_type || parsedTrace.short_circuit.node_id} — {parsedTrace.short_circuit.matched_value || parsedTrace.short_circuit.condition}
+                                    </p>
+                                  </div>
+                                )}
+
+                                {/* Steps grouped by layer */}
+                                {parsedTrace.steps?.map((step: any, i: number) => (
+                                  <div key={i} className="rounded-lg border border-slate-700 bg-slate-900 p-3 space-y-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-[10px] font-medium ${
+                                        step.status === 'completed' ? 'text-emerald-400' :
+                                        step.status === 'failed' ? 'text-red-400' :
+                                        'text-slate-500'
+                                      }`}>
+                                        {step.status === 'completed' ? '\u2713' : step.status === 'failed' ? '\u2717' : '\u2014'}
+                                      </span>
+                                      <span className="text-xs font-medium text-slate-300">{step.node_id}</span>
+                                      <span className="text-[10px] text-slate-500">{step.type}</span>
+                                      {step.model_used && <span className="text-[10px] text-slate-500">{step.model_used}</span>}
+                                      {step.duration_ms != null && <span className="text-[10px] text-slate-500 ml-auto">{step.duration_ms}ms</span>}
+                                    </div>
+                                    {step.model_warning && (
+                                      <p className="text-[10px] text-amber-400">{step.model_warning}</p>
+                                    )}
+                                    {step.error && (
+                                      <p className="text-[10px] text-red-400">{step.error}</p>
+                                    )}
+                                    {step.prompt_sent && (
+                                      <details className="text-[10px]">
+                                        <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show prompt</summary>
+                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-48 overflow-y-auto">{step.prompt_sent}</pre>
+                                      </details>
+                                    )}
+                                    {step.input && (
+                                      <details className="text-[10px]">
+                                        <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show input</summary>
+                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-48 overflow-y-auto">{typeof step.input === 'string' ? step.input : JSON.stringify(step.input, null, 2)}</pre>
+                                      </details>
+                                    )}
+                                    {step.tool_calls?.length > 0 && (
+                                      <div className="space-y-1">
+                                        {step.tool_calls.map((tc: any, tci: number) => (
+                                          <details key={tci} className="text-[10px]">
+                                            <summary className="text-indigo-400 cursor-pointer hover:text-indigo-300">
+                                              Tool: {tc.tool}({typeof tc.args === 'object' ? JSON.stringify(tc.args) : tc.args}) <span className="text-slate-500">{tc.duration_ms}ms</span>
+                                            </summary>
+                                            <pre className="mt-1 whitespace-pre-wrap text-[10px] text-slate-400 bg-slate-950 rounded p-2 max-h-32 overflow-y-auto border border-indigo-500/20">{JSON.stringify(tc.result, null, 2)}</pre>
+                                          </details>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {step.raw_response && (
+                                      <details className="text-[10px]">
+                                        <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show response</summary>
+                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-32 overflow-y-auto">{step.raw_response}</pre>
+                                      </details>
+                                    )}
+                                    {step.output && (
+                                      <details className="text-[10px]">
+                                        <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show output</summary>
+                                        <pre className="mt-1 whitespace-pre-wrap text-[11px] text-emerald-400/70 bg-slate-950 rounded p-2 max-h-24 overflow-y-auto">{JSON.stringify(step.output, null, 2)}</pre>
+                                      </details>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : hasTrace ? (
+                              <div className="space-y-3 max-w-4xl">
+                                {msg.text && (
+                                  <div>
+                                    <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Message</h4>
+                                    <pre className="whitespace-pre-wrap text-[11px] text-slate-300 bg-slate-900 rounded-lg p-3 border border-slate-700 max-h-32 overflow-y-auto">{msg.text}</pre>
+                                  </div>
+                                )}
                                 {msg.llm_prompt && (
                                   <div>
                                     <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Prompt sent to LLM</h4>
@@ -470,6 +622,29 @@ export default function Shield() {
               </tbody>
             </table>
           )
+        )}
+
+        {/* Pagination for scanned messages */}
+        {tab === 'scanned' && scannedTotal > PAGE_SIZE && (
+          <div className="flex items-center justify-center gap-3 border-t border-slate-700 py-3">
+            <button
+              disabled={scannedPage <= 1}
+              onClick={() => loadScanned(scannedPage - 1)}
+              className="rounded px-3 py-1 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent"
+            >
+              Previous
+            </button>
+            <span className="text-[10px] text-slate-500">
+              Page {scannedPage} of {Math.ceil(scannedTotal / PAGE_SIZE)} ({scannedTotal} total)
+            </span>
+            <button
+              disabled={scannedPage >= Math.ceil(scannedTotal / PAGE_SIZE)}
+              onClick={() => loadScanned(scannedPage + 1)}
+              className="rounded px-3 py-1 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent"
+            >
+              Next
+            </button>
+          </div>
         )}
 
         {tab === 'reports' && (
@@ -527,6 +702,253 @@ export default function Shield() {
                 ))}
               </tbody>
             </table>
+          )
+        )}
+
+        {tab === 'pipeline' && (
+          loadingPipeline ? (
+            <div className="p-6 text-xs text-slate-500">Loading...</div>
+          ) : !pipelineData ? (
+            <div className="flex flex-col items-center justify-center py-20">
+              <GitBranch size={32} className="mb-3 text-slate-600" />
+              <p className="text-sm font-medium text-slate-400">Pipeline not loaded</p>
+            </div>
+          ) : (
+            <div className="p-4 space-y-4">
+              {/* Pipeline header + DAG flow on one line */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-slate-300">Pipeline</span>
+                <span className="rounded-full bg-cyan-500/20 px-1.5 py-0.5 text-[9px] font-medium text-cyan-300">v{pipelineData.version}</span>
+
+              </div>
+
+              {/* DAG visualization with SVG edges */}
+              {(() => {
+                const nodeMap = new Map(pipelineData.nodes.map(n => [n.id, n]))
+                const predecessors: Record<string, string[]> = {}
+                pipelineData.nodes.forEach(n => { predecessors[n.id] = [] })
+                pipelineData.edges.forEach(e => {
+                  if (e.from !== '$input' && predecessors[e.to]) predecessors[e.to].push(e.from)
+                })
+                const nodeLayer: Record<string, number> = {}
+                pipelineData.nodes.forEach(n => { if (predecessors[n.id].length === 0) nodeLayer[n.id] = 0 })
+                let changed = true
+                while (changed) {
+                  changed = false
+                  pipelineData.nodes.forEach(n => {
+                    if (nodeLayer[n.id] !== undefined) return
+                    const pl = predecessors[n.id].map(p => nodeLayer[p]).filter(l => l !== undefined)
+                    if (pl.length === predecessors[n.id].length) { nodeLayer[n.id] = Math.max(...pl) + 1; changed = true }
+                  })
+                }
+                const maxLayer = Math.max(...Object.values(nodeLayer), 0)
+                const layers: string[][] = Array.from({length: maxLayer + 1}, () => [])
+                Object.entries(nodeLayer).forEach(([nid, l]) => layers[l].push(nid))
+
+                // Layout constants
+                const nodeW = 120, nodeH = 40, layerGap = 80, nodeGap = 16, padX = 20, padY = 20
+                const maxNodesInLayer = Math.max(...layers.map(l => l.length), 1)
+
+                // Compute positions: allIds includes $input and $result
+                const allIds = ['$input', ...pipelineData.nodes.map(n => n.id), '$result']
+                const pos: Record<string, {x: number, y: number}> = {}
+                const totalLayers = maxLayer + 3 // $input + node layers + $result
+                const totalHeight = maxNodesInLayer * (nodeH + nodeGap) - nodeGap + padY * 2
+                const totalWidth = totalLayers * (nodeW + layerGap) - layerGap + padX * 2
+
+                // $input position
+                const inputY = totalHeight / 2
+                pos['$input'] = { x: padX + nodeW / 2, y: inputY }
+
+                // Node positions
+                layers.forEach((layerNodes, li) => {
+                  const x = padX + (li + 1) * (nodeW + layerGap) + nodeW / 2
+                  const layerH = layerNodes.length * (nodeH + nodeGap) - nodeGap
+                  const startY = (totalHeight - layerH) / 2 + nodeH / 2
+                  layerNodes.forEach((nid, ni) => {
+                    pos[nid] = { x, y: startY + ni * (nodeH + nodeGap) }
+                  })
+                })
+
+                // $result position
+                pos['$result'] = { x: padX + (maxLayer + 2) * (nodeW + layerGap) + nodeW / 2, y: inputY }
+
+                // Build edge list including $input→nodes and output→$result
+                const svgEdges: {from: string, to: string}[] = []
+                pipelineData.edges.forEach(e => {
+                  svgEdges.push({ from: e.from === '$input' ? '$input' : e.from, to: e.to })
+                })
+                svgEdges.push({ from: pipelineData.output, to: '$result' })
+
+                return (
+                  <div className="overflow-x-auto">
+                    <svg width={totalWidth} height={totalHeight} className="block">
+                      <defs>
+                        <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                          <path d="M0,0 L10,3 L0,6" fill="#475569" />
+                        </marker>
+                      </defs>
+
+                      {/* Edges */}
+                      {svgEdges.map((e, i) => {
+                        const from = pos[e.from]
+                        const to = pos[e.to]
+                        if (!from || !to) return null
+                        const x1 = from.x + nodeW / 2
+                        const x2 = to.x - nodeW / 2
+                        const midX = (x1 + x2) / 2
+                        return (
+                          <path
+                            key={i}
+                            d={`M${x1},${from.y} C${midX},${from.y} ${midX},${to.y} ${x2},${to.y}`}
+                            fill="none"
+                            stroke="#475569"
+                            strokeWidth={1.5}
+                            markerEnd="url(#arrow)"
+                          />
+                        )
+                      })}
+
+                      {/* $input node */}
+                      <g transform={`translate(${pos['$input'].x - nodeW/2}, ${pos['$input'].y - nodeH/2})`}>
+                        <rect width={nodeW} height={nodeH} rx={nodeH/2} fill="#1e293b" stroke="#475569" strokeWidth={1} />
+                        <text x={nodeW/2} y={nodeH/2 - 2} textAnchor="middle" dominantBaseline="middle" fill="#94a3b8" fontSize={10} fontWeight={500}>$input</text>
+                        <text x={nodeW/2} y={nodeH/2 + 10} textAnchor="middle" dominantBaseline="middle" fill="#64748b" fontSize={8}>Message</text>
+                      </g>
+
+                      {/* Pipeline nodes */}
+                      {pipelineData.nodes.map(node => {
+                        const p = pos[node.id]
+                        if (!p) return null
+                        const isSelected = selectedNode === node.id
+                        const isOutput = node.id === pipelineData.output
+                        const strokeColor = isSelected ? '#22d3ee' : isOutput ? 'rgba(34,211,238,0.5)' : '#475569'
+                        const fillColor = isSelected ? 'rgba(34,211,238,0.1)' : isOutput ? 'rgba(34,211,238,0.07)' : '#1e293b'
+                        const typeColor = node.type === 'llm' ? '#818cf8' : node.type === 'script' ? '#fbbf24' : '#34d399'
+                        return (
+                          <g
+                            key={node.id}
+                            transform={`translate(${p.x - nodeW/2}, ${p.y - nodeH/2})`}
+                            onClick={() => setSelectedNode(isSelected ? null : node.id)}
+                            className="cursor-pointer"
+                          >
+                            <rect width={nodeW} height={nodeH} rx={8} fill={fillColor} stroke={strokeColor} strokeWidth={isSelected ? 2 : 1.5} />
+                            <text x={nodeW/2} y={nodeH/2 - 4} textAnchor="middle" dominantBaseline="middle" fill="#e2e8f0" fontSize={11} fontWeight={500}>{node.id}</text>
+                            <text x={nodeW/2} y={nodeH/2 + 10} textAnchor="middle" dominantBaseline="middle" fill={typeColor} fontSize={9}>{node.type}</text>
+                          </g>
+                        )
+                      })}
+
+                      {/* $result node */}
+                      <g transform={`translate(${pos['$result'].x - nodeW/2}, ${pos['$result'].y - nodeH/2})`}>
+                        <rect width={nodeW} height={nodeH} rx={nodeH/2} fill="rgba(16,185,129,0.07)" stroke="rgba(16,185,129,0.5)" strokeWidth={1} />
+                        <text x={nodeW/2} y={nodeH/2 + 1} textAnchor="middle" dominantBaseline="middle" fill="#34d399" fontSize={10} fontWeight={500}>result</text>
+                      </g>
+                    </svg>
+                  </div>
+                )
+              })()}
+
+              {/* Selected node detail panel */}
+              {selectedNode && (() => {
+                const node = pipelineData.nodes.find(n => n.id === selectedNode)
+                if (!node) return null
+                return (
+                  <div className="rounded-lg border border-slate-700 bg-slate-800 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-slate-200">{node.id}</span>
+                      <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                        node.type === 'llm' ? 'bg-indigo-500/20 text-indigo-300' :
+                        node.type === 'script' ? 'bg-amber-500/20 text-amber-300' :
+                        'bg-emerald-500/20 text-emerald-300'
+                      }`}>{node.type}</span>
+                      {node.id === pipelineData.output && <span className="text-[10px] text-cyan-400">output node</span>}
+                      <button onClick={() => setSelectedNode(null)} className="ml-auto rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300">
+                        <X size={13} />
+                      </button>
+                    </div>
+
+                    {/* Config fields */}
+                    <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[11px]">
+                      {node.config.model && <>
+                        <span className="text-slate-500">Model</span>
+                        <span className="text-slate-300">{node.config.model}</span>
+                      </>}
+                      {node.config.max_tokens && <>
+                        <span className="text-slate-500">Max tokens</span>
+                        <span className="text-slate-300">{node.config.max_tokens}</span>
+                      </>}
+                      {node.config.temperature != null && <>
+                        <span className="text-slate-500">Temperature</span>
+                        <span className="text-slate-300">{node.config.temperature}</span>
+                      </>}
+                      {node.config.script && <>
+                        <span className="text-slate-500">Script</span>
+                        <span className="text-slate-300 font-mono">{node.config.script}</span>
+                      </>}
+                      {node.config.few_shot_examples?.length > 0 && <>
+                        <span className="text-slate-500">Few-shot examples</span>
+                        <span className="text-slate-300">{node.config.few_shot_examples.length}</span>
+                      </>}
+                    </div>
+
+                    {/* Full prompt */}
+                    {node.config.prompt && (
+                      <div>
+                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Prompt</h4>
+                        <pre className="whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-900 rounded-lg p-3 border border-slate-700 max-h-64 overflow-y-auto">{node.config.prompt}</pre>
+                      </div>
+                    )}
+
+                    {/* Few-shot examples */}
+                    {node.config.few_shot_examples?.length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Few-shot Examples</h4>
+                        <div className="space-y-2">
+                          {node.config.few_shot_examples.map((ex: any, i: number) => (
+                            <div key={i} className="rounded-lg bg-slate-900 border border-slate-700 p-2 space-y-1">
+                              <div>
+                                <span className="text-[9px] uppercase tracking-wider text-slate-500">Input</span>
+                                <pre className="whitespace-pre-wrap text-[10px] text-slate-400 mt-0.5">{ex.input}</pre>
+                              </div>
+                              <div>
+                                <span className="text-[9px] uppercase tracking-wider text-slate-500">Expected output</span>
+                                <pre className="whitespace-pre-wrap text-[10px] text-emerald-400/70 mt-0.5">{ex.output}</pre>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Short-circuit */}
+                    {node.short_circuit && (
+                      <div>
+                        <h4 className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">Short-circuit</h4>
+                        <div className="rounded-lg bg-slate-900 border border-amber-500/30 p-2 space-y-1">
+                          <div>
+                            <span className="text-[9px] text-slate-500">Condition</span>
+                            <p className="text-[11px] text-amber-300 font-mono">{node.short_circuit.condition}</p>
+                          </div>
+                          <div>
+                            <span className="text-[9px] text-slate-500">Result</span>
+                            <pre className="text-[10px] text-slate-400 mt-0.5">{typeof node.short_circuit.result === 'string' ? node.short_circuit.result : JSON.stringify(node.short_circuit.result, null, 2)}</pre>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Params for script nodes */}
+                    {node.config.params && Object.keys(node.config.params).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Parameters</h4>
+                        <pre className="whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-900 rounded-lg p-3 border border-slate-700">{JSON.stringify(node.config.params, null, 2)}</pre>
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
+            </div>
           )
         )}
       </div>

@@ -377,6 +377,13 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "UPDATE scam_flags SET source = 'cloud' WHERE source = 'external_api'",
         ],
     ),
+    (
+        35,
+        "Add scam trace JSON column for pipeline execution traces",
+        [
+            "ALTER TABLE messages ADD COLUMN scam_trace_json TEXT",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

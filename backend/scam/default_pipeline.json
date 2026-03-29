@@ -1,8 +1,54 @@
 {
-  "version": "1.0.0",
-  "updated_at": "2026-03-28T00:00:00Z",
+  "version": "2.4.0",
+  "updated_at": "2026-03-29T00:00:00Z",
 
-  "system_prompt": "You are a scam detection assistant analyzing Telegram messages.\nDetermine if the messages show signs of being a scam.\n\nScam categories:\n{{categories}}\n\nConsider:\n- Urgency or pressure tactics\n- Requests for money, crypto, personal info, or credentials\n- Too-good-to-be-true offers\n- Impersonation of known entities\n- Suspicious links or redirects\n- Mismatch between claimed identity and profile data\n\nRespond ONLY with valid JSON:\n{\"is_scam\": <bool>, \"confidence\": <float 0.0-1.0>, \"category\": \"<category_id or null>\", \"reason\": \"<one sentence explanation>\"}",
+  "nodes": [
+    {
+      "id": "classify",
+      "type": "llm",
+      "config": {
+        "prompt": "You are a message classifier for Telegram chats. Your job is to classify the message and check if it matches any known scam patterns.\n\nSTEP 1: First, briefly summarize what is happening in this conversation (who is talking, what are they asking for, what is the relationship).\n\nSTEP 2: Call search_scenarios (without scenario_id) to get the list of ALL known scam scenarios. Read the list and decide if any scenario matches the conversation.\n\nSTEP 3: If a scenario looks like a match, call search_scenarios again WITH that scenario_id to get the full indicators and conversation pattern. Check the conversation against those specific indicators.\n\nSTEP 4: Based on your analysis, classify the message.\n\nCategories:\n- normal_conversation: Regular discussion, opinions, questions, greetings, social chat\n- product_discussion: Discussing real products, services, protocols, tokens, or platforms\n- event_sharing: Sharing events, meetups, conferences, or community gatherings\n- bot_message: Automated messages from bots (CAPTCHA, welcome, verification, moderation)\n- news_or_article: Sharing news, articles, blog posts, or announcements\n- job_or_opportunity: Job postings, hiring, collaboration requests\n- suspicious: Messages matching known scam patterns or showing clear red flags\n\nIMPORTANT:\n- If a scenario's indicators match the conversation → classify as 'suspicious'\n- Most messages in group chats are NOT suspicious\n- Discussing real crypto products, fees, or services is 'product_discussion'\n- You MUST call search_scenarios for private chats with non-contacts\n\nRespond with your final answer as valid JSON:\n{\"classification\": \"<category>\", \"confidence\": <0.0-1.0>, \"reasoning\": \"<brief explanation>\", \"matched_scenario\": \"<scenario name or null>\"}",
+        "tools": ["search_scenarios"],
+        "max_tool_iterations": 3,
+        "max_tokens": 500
+      }
+    },
+    {
+      "id": "analyze_context",
+      "type": "llm",
+      "config": {
+        "prompt": "Analyze the sender profile and message context for scam risk factors.\n\nRisk factors (only flag these when they are ACTIVELY suspicious):\n- Message asks the reader to send money, crypto, or credentials\n- Message contains suspicious/unknown URLs with misleading domain names\n- Message makes unrealistic promises (guaranteed returns, free money)\n- Message pressures the reader to act urgently\n- Sender claims to be someone they're not (impersonation)\n- Conversation follows a known scam pattern (friendly reconnection → scheduling link, unsolicited job offer → deposit required)\n\nNOT risk factors (do NOT flag these):\n- Sender is not a contact — most group members aren't contacts, this is normal\n- Sender has no bio — most Telegram users don't have bios\n- Short messages like 'True', 'Yes', 'Ok', 'Nice', 'Agreed' — these are normal replies\n- Message discusses products, services, or crypto tokens without asking for money\n- Links to well-known domains (github.com, twitter.com, x.com, youtube.com, medium.com, luma.com, eventbrite.com, meetup.com, calendly.com, notion.so, docs.google.com, t.me)\n\nIMPORTANT: Being a non-contact with no bio is the DEFAULT state for most Telegram users. Only flag risk_level as 'medium' or 'high' when there are ACTIVE suspicious behaviors, not passive profile characteristics.\n\nRespond ONLY with valid JSON:\n{\"risk_factors\": [\"<factor1>\", ...], \"safe_factors\": [\"<factor1>\", ...], \"risk_level\": \"none|low|medium|high\", \"reasoning\": \"<brief explanation>\"}",
+        "max_tokens": 200
+      }
+    },
+    {
+      "id": "verdict",
+      "type": "llm",
+      "config": {
+        "prompt": "You are a scam detection assistant making a final verdict on a Telegram message.\n\nYou have these analyses:\n\n1. Classification (with scenario matching): {{classify}}\n2. Context risk analysis: {{analyze_context}}\n3. Original message: {{$message}}\n\nScam categories (use only if is_scam is true):\n- phishing, social_engineering, investment_scam, romance_scam, fake_giveaway, impersonation, malware_link, other\n\nRules:\n- If classification mentions a matched scenario → LIKELY a scam, flag it\n- If classification is 'normal_conversation' AND no scenario matches AND risk_level is 'none' or 'low' → NOT a scam\n- If classification is 'suspicious' → carefully evaluate and likely flag as scam\n- Discussing real products/services in relevant group chats is NOT a scam\n- Bot messages for moderation/verification are NOT scams\n- Be conservative when no scenarios match: when in doubt, mark as NOT scam\n\nRespond ONLY with valid JSON:\n{\"is_scam\": <bool>, \"confidence\": <0.0-1.0>, \"category\": \"<category_id or null>\", \"reason\": \"<one sentence explanation>\"}",
+        "max_tokens": 200,
+        "few_shot_examples": [
+          {
+            "input": "1. Classification: {\"classification\": \"suspicious\", \"confidence\": 0.92, \"reasoning\": \"Matches Fake Reconnection Scam pattern\", \"matched_scenario\": \"Fake Reconnection Scam\"}\n2. Context: {\"risk_level\": \"high\", \"risk_factors\": [\"Stranger in private chat\", \"Scheduling link\"]}\n3. Original: [Frank@DODO]: Hi, it's been a while... let's catch up. calendly.com/frank/30min",
+            "output": "{\"is_scam\": true, \"confidence\": 0.92, \"category\": \"social_engineering\", \"reason\": \"Matches Fake Reconnection Scam: stranger claims past connection and sends scheduling link\"}"
+          },
+          {
+            "input": "1. Classification: {\"classification\": \"product_discussion\", \"confidence\": 0.9, \"matched_scenario\": null}\n2. Context: {\"risk_level\": \"none\"}\n3. Original: [Lore]: As long as you are in Switzerland and you pay the fee, they send an armored truck.",
+            "output": "{\"is_scam\": false, \"confidence\": 0.02, \"category\": null, \"reason\": \"Legitimate product discussion comparing gold custody services\"}"
+          }
+        ]
+      }
+    }
+  ],
+
+  "edges": [
+    {"from": "$input", "to": "classify"},
+    {"from": "$input", "to": "analyze_context"},
+    {"from": "classify", "to": "verdict"},
+    {"from": "analyze_context", "to": "verdict"}
+  ],
+
+  "output": "verdict",
 
   "categories": [
     {"id": "phishing", "label": "Phishing", "description": "Attempts to steal credentials, passwords, or personal information through deceptive messages or links"},
@@ -15,36 +61,7 @@
     {"id": "other", "label": "Other", "description": "Other scam type not covered by the categories above"}
   ],
 
-  "few_shot_examples": [
-    {
-      "messages": [
-        {"sender": "CryptoKing_Official", "text": "Congratulations! You've been selected for our exclusive airdrop. Send 0.5 ETH to 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18 and receive 5 ETH back within 24 hours! Limited spots available!"}
-      ],
-      "verdict": {"is_scam": true, "confidence": 0.95, "category": "fake_giveaway", "reason": "Classic advance-fee scam disguised as a crypto airdrop, requesting ETH to receive a larger amount back"}
-    },
-    {
-      "messages": [
-        {"sender": "TechSupport_Admin", "text": "URGENT: Your Telegram account has been flagged for suspicious activity. Click here to verify your account immediately or it will be suspended: t.me/verify-now-2024"}
-      ],
-      "verdict": {"is_scam": true, "confidence": 0.92, "category": "phishing", "reason": "Fake urgency about account suspension combined with a suspicious verification link, classic phishing pattern"}
-    },
-    {
-      "messages": [
-        {"sender": "Alice", "text": "Hey, are we still on for dinner tomorrow?"},
-        {"sender": "Bob", "text": "Yes! 7pm at the usual place?"},
-        {"sender": "Alice", "text": "Perfect, see you there!"}
-      ],
-      "verdict": {"is_scam": false, "confidence": 0.02, "category": null, "reason": "Normal social conversation about meeting plans, no suspicious elements"}
-    },
-    {
-      "messages": [
-        {"sender": "InvestorPro", "text": "I've been making $5000/day with this new AI trading bot. Want me to show you? My mentor taught me everything."},
-        {"sender": "User", "text": "Sounds interesting, how does it work?"},
-        {"sender": "InvestorPro", "text": "Just deposit $500 into this platform and I'll guide you. Here's the link: ai-trading-guaranteed.com. My results speak for themselves!"}
-      ],
-      "verdict": {"is_scam": true, "confidence": 0.93, "category": "investment_scam", "reason": "Unrealistic profit claims, pressure to deposit money into an unknown platform, and use of fake social proof"}
-    }
-  ],
+  "context_messages": 5,
 
   "signatures": {
     "domains": [],

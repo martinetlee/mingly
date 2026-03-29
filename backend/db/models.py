@@ -70,6 +70,7 @@ class Message(Base):
     scam_llm_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_llm_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_category: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_trace_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

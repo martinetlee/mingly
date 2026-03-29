@@ -29,6 +29,7 @@ class ScamCheckResult:
     error: Optional[str] = None
     llm_prompt: Optional[str] = None
     llm_response: Optional[str] = None
+    trace_json: Optional[str] = None
 
 
 @dataclass
@@ -141,80 +142,7 @@ class LocalPipelineClient(ScamAPIClient):
         if not self._ensure_pipeline():
             return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="Pipeline not loaded")
 
-        # --- Step 1: Signature pre-check ---
-        sig_result = self._check_signatures(messages)
-        if sig_result is not None:
-            return sig_result
-
-        # --- Step 2: LLM analysis ---
-        return await self._llm_analyze(messages, profiles, chat_metadata)
-
-    def _check_signatures(self, messages: list[dict]) -> Optional[ScamCheckResult]:
-        """Quick check against signatures. Returns result if match found, None otherwise."""
-        sigs = self._pipeline.signatures
-        if not sigs.domains and not sigs.wallets and not sigs._compiled_patterns and not sigs.telegram_ids:
-            return None
-
-        for msg in messages:
-            text = msg.get("text") or ""
-            sender_id = msg.get("sender_id")
-
-            # Check sender against known scammer IDs
-            if sender_id and sender_id in set(sigs.telegram_ids):
-                return ScamCheckResult(
-                    is_scam=True, confidence=0.95,
-                    reason=f"Sender ID {sender_id} matches known scammer signature",
-                    category="impersonation",
-                )
-
-            if not text:
-                continue
-
-            # Check domains
-            if sigs.domains:
-                domains = _extract_domains(text)
-                for domain in domains:
-                    if domain in sigs.domains:
-                        return ScamCheckResult(
-                            is_scam=True, confidence=0.95,
-                            reason=f"Message contains known malicious domain: {domain}",
-                            category="malware_link",
-                        )
-
-            # Check wallet addresses
-            for wallet in sigs.wallets:
-                if wallet.lower() in text.lower():
-                    return ScamCheckResult(
-                        is_scam=True, confidence=0.95,
-                        reason=f"Message contains known scam wallet address",
-                        category="investment_scam",
-                    )
-
-            # Check regex patterns
-            for pattern in sigs._compiled_patterns:
-                if pattern.search(text):
-                    return ScamCheckResult(
-                        is_scam=True, confidence=0.85,
-                        reason=f"Message matches scam pattern: {pattern.pattern}",
-                        category="other",
-                    )
-
-        return None
-
-    async def _llm_analyze(
-        self,
-        messages: list[dict],
-        profiles: list[dict],
-        chat_metadata: dict,
-    ) -> ScamCheckResult:
-        """Run LLM analysis using the pipeline config."""
-        registry = get_registry()
-        provider = registry.get_any()
-        if provider is None:
-            logger.debug("No LLM provider available for scam detection")
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="No LLM provider available")
-
-        # Build context for the actual messages
+        # Build message context string for the engine
         parts = []
         if chat_metadata:
             parts.append(f"Chat: {chat_metadata.get('name', 'Unknown')} ({chat_metadata.get('type', 'unknown')})")
@@ -227,86 +155,13 @@ class LocalPipelineClient(ScamAPIClient):
             sender = msg.get("sender_name", "Unknown")
             text = (msg.get("text") or "")[:500]
             parts.append(f"  [{sender}]: {text}")
+        message_context = "\n".join(parts)
 
-        user_content = "\n".join(parts)
+        # Execute pipeline through the DAG engine
+        from backend.scam.engine import execute_pipeline
+        engine_result = await execute_pipeline(self._pipeline, message_context, messages)
+        return engine_result.scam_result
 
-        # Build LLM messages with few-shot examples
-        system_prompt = self._pipeline.format_system_prompt()
-        llm_messages: list[ChatMessage] = [
-            ChatMessage(role="system", content=system_prompt),
-        ]
-
-        # Add few-shot examples as user/assistant turn pairs (limit to 2 to save context)
-        for example in self._pipeline.few_shot_examples[:2]:
-            ex_parts = []
-            for m in example.messages:
-                ex_parts.append(f"  [{m.sender}]: {m.text}")
-            llm_messages.append(ChatMessage(role="user", content="Messages to analyze:\n" + "\n".join(ex_parts)))
-            llm_messages.append(ChatMessage(role="assistant", content=json.dumps({
-                "is_scam": example.verdict.is_scam,
-                "confidence": example.verdict.confidence,
-                "category": example.verdict.category,
-                "reason": example.verdict.reason,
-            })))
-
-        # Add actual message context
-        llm_messages.append(ChatMessage(role="user", content=user_content))
-
-        # Build full prompt string for audit trail
-        full_prompt = f"[system]\n{system_prompt}\n"
-        for m in llm_messages[1:]:
-            full_prompt += f"\n[{m.role}]\n{m.content}\n"
-
-        try:
-            response = await provider.complete(llm_messages, max_tokens=self._max_tokens, temperature=0.1)
-            raw_content = response.content or ""
-            content = raw_content.strip()
-            if not content:
-                return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="LLM returned empty response",
-                                      llm_prompt=full_prompt, llm_response=raw_content)
-            # Strip markdown code fences
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            # Try to extract JSON from the response (LLM may include extra text)
-            json_start = content.find("{")
-            json_end = content.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                content = content[json_start:json_end]
-            parsed = json.loads(content)
-
-            # Validate category
-            category = parsed.get("category")
-            valid_categories = self._pipeline.get_category_ids()
-            if category and category not in valid_categories:
-                category = "other"
-
-            return ScamCheckResult(
-                is_scam=bool(parsed.get("is_scam", False)),
-                confidence=max(0.0, min(1.0, float(parsed.get("confidence", 0.0)))),
-                reason=str(parsed.get("reason", "")),
-                category=category,
-                raw_response=parsed,
-                llm_prompt=full_prompt,
-                llm_response=raw_content,
-            )
-        except json.JSONDecodeError as e:
-            raw = ""
-            try:
-                raw = (response.content or "")[:200]
-            except Exception:
-                pass
-            logger.warning("Scam detection: LLM returned non-JSON response: %s (raw: %s)", e, raw or "empty")
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="LLM returned an invalid response — try again or use a different model",
-                                  llm_prompt=full_prompt, llm_response=raw)
-        except (LLMError, Exception) as e:
-            raw = ""
-            try:
-                raw = (response.content or "")[:200]
-            except Exception:
-                pass
-            logger.warning("Scam detection LLM call failed: %s (raw: %s)", e, raw or "empty")
-            return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=f"Scam detection failed: {e}",
-                                  llm_prompt=full_prompt, llm_response=raw)
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
         return None  # Local client executes synchronously

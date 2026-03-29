@@ -918,6 +918,8 @@ async def register_event_handlers() -> None:
             scam_svc = get_scam_service()
             if scam_svc:
                 import asyncio as _asyncio
+                from backend.scam.pipeline import get_pipeline_manager
+                from backend.db.models import Message as MsgModel
                 # Build sender profile for scam context
                 _sender_profile = []
                 if sender:
@@ -927,23 +929,59 @@ async def register_event_handlers() -> None:
                         "bio": getattr(sender, "about", None) or "",
                         "is_contact": getattr(sender, "contact", False) or False,
                     }]
+
+                # Fetch recent messages from the same sender for context
+                context_limit = 5
+                mgr = get_pipeline_manager()
+                if mgr:
+                    context_limit = mgr.get_config().context_messages
+
+                _saved_msg = saved  # capture for closure
+                _chat_id = event.chat_id
+                _chat_name = chat.name
+                _chat_type = chat.type
+
                 async def _run_scam_check():
                     try:
+                        # Fetch recent messages from same sender in same chat
+                        scan_messages = [{
+                            "message_id": _saved_msg.tg_message_id,
+                            "sender_id": _saved_msg.sender_id,
+                            "sender_name": _saved_msg.sender_name,
+                            "text": _saved_msg.text,
+                            "date": str(_saved_msg.date),
+                        }]
+                        if context_limit > 0 and _saved_msg.sender_id:
+                            async with AsyncSessionLocal() as ctx_db:
+                                ctx_result = await ctx_db.execute(
+                                    select(MsgModel).where(
+                                        MsgModel.chat_id == _chat_id,
+                                        MsgModel.sender_id == _saved_msg.sender_id,
+                                        MsgModel.tg_message_id != _saved_msg.tg_message_id,
+                                        MsgModel.text.isnot(None),
+                                        MsgModel.text != "",
+                                    ).order_by(MsgModel.date.desc()).limit(context_limit)
+                                )
+                                ctx_msgs = ctx_result.scalars().all()
+                                # Prepend context messages (oldest first)
+                                for m in reversed(ctx_msgs):
+                                    scan_messages.insert(0, {
+                                        "message_id": m.tg_message_id,
+                                        "sender_id": m.sender_id,
+                                        "sender_name": m.sender_name,
+                                        "text": m.text,
+                                        "date": str(m.date) if m.date else None,
+                                    })
+
                         await scam_svc.check_messages_for_scam(
-                            chat_id=event.chat_id,
-                            messages=[{
-                                "message_id": saved.tg_message_id,
-                                "sender_id": saved.sender_id,
-                                "sender_name": saved.sender_name,
-                                "text": saved.text,
-                                "date": str(saved.date),
-                            }],
+                            chat_id=_chat_id,
+                            messages=scan_messages,
                             user_telegram_id=0,
                             profiles=_sender_profile,
-                            chat_metadata={"chat_id": event.chat_id, "name": chat.name, "type": chat.type},
+                            chat_metadata={"chat_id": _chat_id, "name": _chat_name, "type": _chat_type},
                         )
                     except Exception:
-                        logger.exception("Scam check failed for chat %s msg %s", event.chat_id, saved.tg_message_id)
+                        logger.exception("Scam check failed for chat %s msg %s", _chat_id, _saved_msg.tg_message_id)
                 _asyncio.create_task(_run_scam_check())
 
         if not saved.is_outgoing:

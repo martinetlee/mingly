@@ -13,6 +13,7 @@ import ForumTopicsPanel from '../components/ForumTopicsPanel'
 import ChatPickerDialog from '../components/ChatPickerDialog'
 import DeleteConfirmDialog from '../components/DeleteConfirmDialog'
 import NewChatDialog from '../components/NewChatDialog'
+import ReportScamDialog from '../components/ReportScamDialog'
 
 import { authenticatedMediaUrl } from '../api/session'
 
@@ -331,6 +332,7 @@ export default function Chats() {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Message | null>(null)
   const [forwardTarget, setForwardTarget] = useState<Message | null>(null)
+  const [reportTarget, setReportTarget] = useState<Message | null>(null)
 
   // Pinned message for the selected chat
   const [pinnedMessage, setPinnedMessage] = useState<PinnedMessage | null>(null)
@@ -1601,6 +1603,7 @@ export default function Chats() {
                     loadingOlder={loadingMore}
                     onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
                     flaggedSenderIds={flaggedSenderIds}
+                    onReportScam={setReportTarget}
                   />
                 </div>
               )}
@@ -1671,6 +1674,16 @@ export default function Chats() {
         onClose={() => setShowNewChat(false)}
         onChatCreated={handleChatCreated}
       />
+
+      {/* Report Scam Dialog */}
+      {reportTarget && selectedChat && (
+        <ReportScamDialog
+          chatId={selectedChat.telegram_id}
+          targetMessageId={reportTarget.tg_message_id}
+          targetSenderId={reportTarget.sender_id || 0}
+          onClose={() => setReportTarget(null)}
+        />
+      )}
     </div>
   )
 }

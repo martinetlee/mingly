@@ -36,7 +36,8 @@ async def on_startup():
     # Start the catch-up summary scheduler
     start_catchup_summary_scheduler()
 
-    # Initialize pipeline and scam detection service
+    # Initialize tool registry and pipeline
+    import backend.scam.tools  # noqa: F401 — triggers auto-registration of tools
     pipeline_mgr = init_pipeline_manager()
 
     from backend.api.settings import get_scam_detection_settings

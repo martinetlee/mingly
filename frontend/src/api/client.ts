@@ -766,14 +766,21 @@ export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[
     body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
   })
 
-export const getScannedMessages = () =>
-  request<{ messages: ScannedMessage[] }>('/api/scam/scanned-messages')
+export const getScannedMessages = (page: number = 1, pageSize: number = 200) =>
+  request<{ messages: ScannedMessage[]; total: number; page: number; page_size: number }>(`/api/scam/scanned-messages?page=${page}&page_size=${pageSize}`)
 
 export const clearMessageScam = (chatId: number, tgMessageId: number) =>
   request<{ status: string }>(`/api/scam/scanned-messages/${chatId}/${tgMessageId}`, { method: 'DELETE' })
 
 export const getScamPipeline = () =>
-  request<{ version: string; updated_at: string; categories: ScamCategory[] }>('/api/scam/pipeline')
+  request<{
+    version: string
+    updated_at: string
+    categories: ScamCategory[]
+    nodes: { id: string; type: string; config: Record<string, any>; short_circuit?: any }[]
+    edges: { from: string; to: string }[]
+    output: string
+  }>('/api/scam/pipeline')
 
 export const getReportContext = (chatId: number, targetMessageId: number) =>
   request<{ messages: ReportContextMessage[] }>(`/api/scam/reports/context?chat_id=${chatId}&target_message_id=${targetMessageId}`)

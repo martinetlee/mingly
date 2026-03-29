@@ -1,0 +1,117 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-29T00:00:00Z",
+  "scenarios": [
+    {
+      "id": "fake_reconnection",
+      "name": "Fake Reconnection Scam",
+      "description": "Stranger pretends to know you from the past. Sends a friendly 'long time no see' or 'hope you're doing well' message. Builds brief rapport, then quickly moves to scheduling a call or meeting via an external link (Calendly, Zoom, Google Meet). Often impersonates someone from the same industry, crypto space, or professional network. The goal is to get you on a call where they pitch a scam investment, fake partnership, or extract information.",
+      "indicators": [
+        "Claims past connection without specifics ('it's been a while', 'long time')",
+        "Generic friendly greeting with compliments",
+        "Private message, not in a group",
+        "Quickly proposes a call or video meeting",
+        "Sends scheduling link (Calendly, Zoom, etc.)",
+        "Vague about how they know you",
+        "Profile may look professional but is newly created"
+      ],
+      "conversation_pattern": [
+        "Friendly greeting claiming past connection",
+        "Asks what you're up to / how things are going",
+        "Brief small talk (1-2 exchanges)",
+        "Proposes catching up via call",
+        "Sends meeting link"
+      ],
+      "risk": "high",
+      "category": "social_engineering"
+    },
+    {
+      "id": "pig_butchering",
+      "name": "Pig Butchering / Romance Investment Scam",
+      "description": "Builds a personal or romantic relationship over days or weeks through regular friendly messages. Eventually introduces a 'great investment opportunity', trading platform, or crypto scheme. Gains deep trust before asking for money. Often operates from organized scam farms.",
+      "indicators": [
+        "Unsolicited friendly DM from attractive profile",
+        "Personal questions about life, work, hobbies",
+        "Mentions investment success casually in conversation",
+        "Introduces a specific platform or trading opportunity after trust is built",
+        "Conversation spans multiple days or weeks before the pitch",
+        "May share 'screenshots' of profits"
+      ],
+      "conversation_pattern": [
+        "Initial friendly contact (may claim wrong number or random connection)",
+        "Regular personal conversations over days",
+        "Casual mention of financial success",
+        "Introduction of investment platform",
+        "Encouragement to deposit money",
+        "Increasing deposit requests"
+      ],
+      "risk": "high",
+      "category": "investment_scam"
+    },
+    {
+      "id": "fake_job_offer",
+      "name": "Fake Job / Task Scam",
+      "description": "Offers a remote job or task-based work opportunity with unusually high pay for simple work. Requires an upfront deposit, platform registration fee, or 'activation payment'. Common in Russian and Chinese language Telegram groups.",
+      "indicators": [
+        "Unsolicited job offer in group chat or DM",
+        "Unrealistically high pay for simple tasks",
+        "Asks to DM for details",
+        "Requires upfront payment or deposit to start",
+        "Vague job description",
+        "Claims 'many vacancies available'",
+        "Promises remote work with flexible hours"
+      ],
+      "conversation_pattern": [
+        "Posts job ad in group or sends DM",
+        "Promises high pay for easy remote work",
+        "Directs to DM or external platform",
+        "Requires registration fee or deposit",
+        "Assigns simple 'trial tasks'",
+        "Asks for larger deposits to 'unlock' higher pay"
+      ],
+      "risk": "high",
+      "category": "social_engineering"
+    },
+    {
+      "id": "fake_admin_support",
+      "name": "Fake Admin / Support Scam",
+      "description": "Impersonates a group admin or project support staff. Reaches out via DM after the victim asks a question in a group chat. Offers to 'help' with wallet connection, token issues, or technical support, then directs to a phishing site or asks for seed phrases.",
+      "indicators": [
+        "DM from someone claiming to be admin/support shortly after group post",
+        "Username similar to real admin but slightly different",
+        "Asks to connect wallet via a link",
+        "Requests seed phrase or private key for 'verification'",
+        "Claims urgency ('your funds are at risk')"
+      ],
+      "conversation_pattern": [
+        "Victim posts question in group",
+        "Scammer DMs claiming to be support",
+        "Offers to help with the issue",
+        "Sends a phishing link or asks for credentials",
+        "Creates urgency if victim hesitates"
+      ],
+      "risk": "high",
+      "category": "phishing"
+    },
+    {
+      "id": "airdrop_scam",
+      "name": "Fake Airdrop / Giveaway",
+      "description": "Announces a fake airdrop, token giveaway, or reward program. Requires connecting a wallet to a malicious site, sending crypto to 'receive' more back, or sharing personal information to 'claim' rewards.",
+      "indicators": [
+        "Announces free tokens or crypto rewards",
+        "Requires connecting wallet to unknown site",
+        "Asks to send crypto to receive more back",
+        "Creates urgency ('limited time', 'first 100 people')",
+        "Links to sites mimicking legitimate projects"
+      ],
+      "conversation_pattern": [
+        "Posts announcement about free rewards",
+        "Provides link to claim",
+        "Site asks for wallet connection or seed phrase",
+        "May ask for small 'gas fee' payment"
+      ],
+      "risk": "high",
+      "category": "fake_giveaway"
+    }
+  ]
+}

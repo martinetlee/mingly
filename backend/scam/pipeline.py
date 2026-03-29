@@ -73,13 +73,32 @@ class Signatures:
 
 
 @dataclass
+class PipelineNodeConfig:
+    id: str
+    type: str  # "llm", "script", "classifier"
+    config: dict = field(default_factory=dict)
+    short_circuit: Optional[dict] = None
+
+
+@dataclass
+class PipelineEdge:
+    from_node: str
+    to_node: str
+
+
+@dataclass
 class PipelineConfig:
     version: str
     updated_at: str
-    system_prompt: str
+    system_prompt: str  # kept for v1 compat / fallback
     categories: list[ScamCategory]
-    few_shot_examples: list[FewShotExample]
+    few_shot_examples: list[FewShotExample]  # kept for v1 compat
     signatures: Signatures
+    # v2 DAG fields
+    context_messages: int = 5  # number of recent messages from same sender to include as context
+    nodes: list[PipelineNodeConfig] = field(default_factory=list)
+    edges: list[PipelineEdge] = field(default_factory=list)
+    output: str = ""
 
     def get_category_ids(self) -> set[str]:
         return {c.id for c in self.categories}
@@ -90,6 +109,9 @@ class PipelineConfig:
             f"- {c.id}: {c.label} — {c.description}" for c in self.categories
         )
         return self.system_prompt.replace("{{categories}}", cat_lines)
+
+    def is_v2(self) -> bool:
+        return bool(self.nodes and self.edges and self.output)
 
 
 def _parse_pipeline(data: dict) -> PipelineConfig:
@@ -126,13 +148,56 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         except re.error as e:
             logger.warning("Invalid scam signature pattern %r: %s", pattern_str, e)
 
+    # Parse v2 DAG fields (nodes, edges, output)
+    nodes: list[PipelineNodeConfig] = []
+    edges: list[PipelineEdge] = []
+    output_node = ""
+    system_prompt = data.get("system_prompt", "")
+
+    if "nodes" in data and "edges" in data:
+        # v2 format
+        for n in data["nodes"]:
+            nodes.append(PipelineNodeConfig(
+                id=n["id"],
+                type=n["type"],
+                config=n.get("config", {}),
+                short_circuit=n.get("short_circuit"),
+            ))
+        for e in data["edges"]:
+            edges.append(PipelineEdge(from_node=e["from"], to_node=e["to"]))
+        output_node = data.get("output", "")
+        # Extract system_prompt from the output node's config if not at top level
+        if not system_prompt and nodes:
+            for n in nodes:
+                if n.type == "llm" and n.config.get("prompt"):
+                    system_prompt = n.config["prompt"]
+                    break
+    elif system_prompt:
+        # v1 format — auto-convert to single-node DAG
+        node_config = {"prompt": system_prompt, "max_tokens": 200}
+        if few_shot_examples:
+            node_config["few_shot_examples"] = [
+                {"input": "Messages to analyze:\n" + "\n".join(f"  [{m.sender}]: {m.text}" for m in ex.messages),
+                 "output": json.dumps({"is_scam": ex.verdict.is_scam, "confidence": ex.verdict.confidence,
+                                       "category": ex.verdict.category, "reason": ex.verdict.reason})}
+                for ex in few_shot_examples
+            ]
+        nodes = [PipelineNodeConfig(id="scan", type="llm", config=node_config)]
+        edges = [PipelineEdge(from_node="$input", to_node="scan")]
+        output_node = "scan"
+        logger.info("Auto-converted v1 pipeline to single-node DAG")
+
     return PipelineConfig(
         version=data.get("version", "0.0.0"),
         updated_at=data.get("updated_at", ""),
-        system_prompt=data.get("system_prompt", ""),
+        system_prompt=system_prompt,
         categories=categories,
         few_shot_examples=few_shot_examples,
         signatures=signatures,
+        context_messages=data.get("context_messages", 5),
+        nodes=nodes,
+        edges=edges,
+        output=output_node,
     )
 
 
