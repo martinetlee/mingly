@@ -145,24 +145,36 @@ class CloudSyncManager:
                 fname = file_info.get("name", "")
                 remote_version = file_info.get("version", "")
                 endpoint = file_info.get("endpoint", "")
+                file_type = file_info.get("type", "json")
 
                 if not fname or not endpoint:
                     continue
 
-                local_version = self._get_local_version(DATA_DIR / fname)
+                # For model bundles, check version via thresholds.json inside the domain dir
+                if file_type == "model_bundle":
+                    domain = fname.replace("ml_models/", "").replace(".zip", "")
+                    local_version = self._get_local_version(DATA_DIR / "ml_models" / domain / "thresholds.json")
+                else:
+                    local_version = self._get_local_version(DATA_DIR / fname)
+
                 if remote_version == local_version:
                     continue
 
-                data = await self._download(endpoint)
-                if not data:
-                    continue
-
-                # Save to data dir
-                (DATA_DIR / fname).write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-                )
-                updated_files.append(fname)
-                logger.info("Synced %s: %s → %s", fname, local_version or "(none)", remote_version)
+                if file_type == "model_bundle":
+                    success = await self._download_model_bundle(endpoint, domain, remote_version)
+                    if success:
+                        updated_files.append(fname)
+                        logger.info("Synced model bundle %s: %s → %s", domain, local_version or "(none)", remote_version)
+                else:
+                    data = await self._download(endpoint)
+                    if data:
+                        target = DATA_DIR / fname
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(
+                            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                        )
+                        updated_files.append(fname)
+                        logger.info("Synced %s: %s → %s", fname, local_version or "(none)", remote_version)
 
             result.files_updated = updated_files
 
@@ -177,6 +189,15 @@ class CloudSyncManager:
                 if "scam_signatures.json" in updated_files and mgr:
                     from backend.scam.pipeline import _load_signatures_file
                     _load_signatures_file(mgr.get_config())
+
+                # Reload ML ensemble if any model bundles were updated
+                model_updated = any(f.startswith("ml_models/") for f in updated_files)
+                if model_updated:
+                    try:
+                        from backend.scam.tools.ml_prefilter import reload_ensemble
+                        reload_ensemble()
+                    except ImportError:
+                        pass
 
                 # Invalidate search library cache for any updated knowledge base files
                 from backend.scam.tools.search_library import invalidate_cache
@@ -287,6 +308,45 @@ class CloudSyncManager:
                 return None
         except Exception:
             return None
+
+    async def _download_model_bundle(self, path: str, domain: str, version: str) -> bool:
+        """Download a model bundle (zip) and extract to DATA_DIR/ml_models/<domain>/."""
+        import zipfile
+        import io
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(
+                    f"{self._base_url}{path}",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                if not resp.is_success:
+                    logger.warning("Model bundle download failed for %s: %d", domain, resp.status_code)
+                    return False
+
+                # Extract zip to target directory
+                target_dir = DATA_DIR / "ml_models" / domain
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    zf.extractall(target_dir)
+
+                # Write version to thresholds.json if not already there
+                thresholds_file = target_dir / "thresholds.json"
+                if thresholds_file.exists():
+                    import json as _json
+                    t = _json.loads(thresholds_file.read_text())
+                    t["version"] = version
+                    thresholds_file.write_text(_json.dumps(t, indent=2))
+                else:
+                    thresholds_file.write_text(json.dumps({"version": version}))
+
+                logger.info("Extracted model bundle for domain '%s' to %s", domain, target_dir)
+                return True
+
+        except Exception as e:
+            logger.warning("Failed to download model bundle for %s: %s", domain, e)
+            return False
 
     async def _upload_pending_reports(self) -> int:
         from backend.db.database import AsyncSessionLocal

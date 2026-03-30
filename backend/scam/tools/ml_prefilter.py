@@ -16,8 +16,25 @@ from backend.scam.tools import register_script
 
 logger = logging.getLogger(__name__)
 
-_ML_MODELS_DIR = Path(__file__).parent.parent / "ml_models"
+from backend.config import DATA_DIR
+
+_BUNDLE_MODELS_DIR = Path(__file__).parent.parent / "ml_models"  # shipped with app
+_DATA_MODELS_DIR = DATA_DIR / "ml_models"  # runtime location (writable, syncable)
 _ensemble: Optional["MLEnsemble"] = None
+
+
+def _ensure_models_in_data_dir():
+    """Copy bundled models to DATA_DIR on first launch."""
+    if not _BUNDLE_MODELS_DIR.exists():
+        return
+    import shutil
+    for domain_dir in _BUNDLE_MODELS_DIR.iterdir():
+        if not domain_dir.is_dir():
+            continue
+        target = _DATA_MODELS_DIR / domain_dir.name
+        if not target.exists():
+            shutil.copytree(domain_dir, target)
+            logger.info("Copied bundled ML model '%s' to %s", domain_dir.name, target)
 
 
 class _DomainModel:
@@ -162,8 +179,15 @@ class MLEnsemble:
 def _get_ensemble() -> MLEnsemble:
     global _ensemble
     if _ensemble is None:
-        _ensemble = MLEnsemble(_ML_MODELS_DIR)
+        _ensure_models_in_data_dir()
+        _ensemble = MLEnsemble(_DATA_MODELS_DIR)
     return _ensemble
+
+
+def reload_ensemble():
+    """Reload the ML ensemble after model sync. Called by cloud_sync."""
+    global _ensemble
+    _ensemble = None  # force re-init on next call
 
 
 @register_script("ml_ensemble")
