@@ -250,6 +250,53 @@ class ScamReport(Base):
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class ScamAnalytics(Base):
+    __tablename__ = "scam_analytics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Detection counters
+    total_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    scam_detected: Mapped[int] = mapped_column(Integer, default=0)
+    safe_detected: Mapped[int] = mapped_column(Integer, default=0)
+    short_circuited_ml: Mapped[int] = mapped_column(Integer, default=0)
+    short_circuited_signatures: Mapped[int] = mapped_column(Integer, default=0)
+    pipeline_errors: Mapped[int] = mapped_column(Integer, default=0)
+    total_pipeline_ms: Mapped[int] = mapped_column(Integer, default=0)  # sum, divide by total_scanned for avg
+
+    # Category breakdown (JSON: {"phishing": 5, ...})
+    categories_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ML prefilter breakdown
+    ml_safe: Mapped[int] = mapped_column(Integer, default=0)
+    ml_borderline: Mapped[int] = mapped_column(Integer, default=0)
+    ml_auto_scam: Mapped[int] = mapped_column(Integer, default=0)
+    ml_unavailable: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Tool usage
+    tool_calls_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # {"search_scam_scenarios": 50, ...}
+    scenarios_matched_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # {"fake_reconnection": 3, ...}
+    safe_patterns_matched_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # {"professional_title": 8, ...}
+
+    # User actions
+    flags_dismissed: Mapped[int] = mapped_column(Integer, default=0)
+    messages_unflagged: Mapped[int] = mapped_column(Integer, default=0)
+    reports_submitted: Mapped[int] = mapped_column(Integer, default=0)
+    manual_checks: Mapped[int] = mapped_column(Integer, default=0)
+    rescans: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Chat type breakdown
+    scans_private: Mapped[int] = mapped_column(Integer, default=0)
+    scans_group: Mapped[int] = mapped_column(Integer, default=0)
+    scans_channel: Mapped[int] = mapped_column(Integer, default=0)
+
+    # System info (JSON)
+    system_info_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class BriefingEntry(Base):
     __tablename__ = "briefing_entries"
 

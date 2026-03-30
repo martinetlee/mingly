@@ -151,6 +151,11 @@ async def check_messages(req: CheckMessagesRequest):
             logger.exception("Scam check task failed for chat %s", req.chat_id)
 
     asyncio.create_task(_run_check())
+
+    # Analytics
+    from backend.scam.analytics import get_analytics_tracker
+    await get_analytics_tracker().record_manual_check()
+
     return {"status": "queued", "message_count": len(messages)}
 
 
@@ -325,6 +330,11 @@ async def dismiss_flag(telegram_id: int):
             .values(scam_score=None, scam_reason=None)
         )
         await db.commit()
+
+    # Analytics
+    from backend.scam.analytics import get_analytics_tracker
+    await get_analytics_tracker().record_flag_dismissed()
+
     return {"status": "dismissed", "telegram_id": telegram_id}
 
 
@@ -339,6 +349,10 @@ async def clear_message_scam(chat_id: int, tg_message_id: int):
             .values(scam_score=None, scam_reason=None)
         )
         await db.commit()
+
+    from backend.scam.analytics import get_analytics_tracker
+    await get_analytics_tracker().record_message_unflagged()
+
     return {"status": "cleared"}
 
 
@@ -632,6 +646,10 @@ async def create_report(req: CreateReportRequest):
         )
         db.add(report)
         await db.commit()
+
+        # Analytics
+        from backend.scam.analytics import get_analytics_tracker
+        await get_analytics_tracker().record_report_submitted()
 
         return {
             "report_id": report.report_id,

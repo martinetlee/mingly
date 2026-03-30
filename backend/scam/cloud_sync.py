@@ -217,6 +217,9 @@ class CloudSyncManager:
             scans_count = await self._upload_scan_results()
             result.scan_results_submitted = scans_count
 
+            # 6. Upload analytics
+            await self._upload_analytics()
+
             # Record sync time
             self._last_synced_at = datetime.utcnow()
             self._save_sync_time()
@@ -486,6 +489,28 @@ class CloudSyncManager:
                 logger.warning("Failed to upload scan results: %s", e)
 
             return 0
+
+    async def _upload_analytics(self):
+        """Upload pending analytics periods to cloud."""
+        from backend.scam.analytics import get_analytics_tracker
+        tracker = get_analytics_tracker()
+
+        periods = await tracker.get_pending_periods()
+        if not periods:
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/analytics",
+                    json={"periods": periods},
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                if resp.is_success:
+                    await tracker.mark_synced([p["period_start"] for p in periods])
+                    logger.info("Uploaded %d analytics periods", len(periods))
+        except Exception as e:
+            logger.warning("Failed to upload analytics: %s", e)
 
     def _get_local_version(self, path) -> str:
         try:

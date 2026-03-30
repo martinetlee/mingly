@@ -393,6 +393,42 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN scam_synced_to_cloud BOOLEAN DEFAULT 0",
         ],
     ),
+    (
+        37,
+        "Create scam_analytics table for aggregated detection metrics",
+        [
+            """CREATE TABLE IF NOT EXISTS scam_analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period_start DATETIME NOT NULL,
+                period_end DATETIME,
+                synced_at DATETIME,
+                total_scanned INTEGER DEFAULT 0,
+                scam_detected INTEGER DEFAULT 0,
+                safe_detected INTEGER DEFAULT 0,
+                short_circuited_ml INTEGER DEFAULT 0,
+                short_circuited_signatures INTEGER DEFAULT 0,
+                pipeline_errors INTEGER DEFAULT 0,
+                total_pipeline_ms INTEGER DEFAULT 0,
+                categories_json TEXT,
+                ml_safe INTEGER DEFAULT 0,
+                ml_borderline INTEGER DEFAULT 0,
+                ml_auto_scam INTEGER DEFAULT 0,
+                ml_unavailable INTEGER DEFAULT 0,
+                tool_calls_json TEXT,
+                scenarios_matched_json TEXT,
+                safe_patterns_matched_json TEXT,
+                flags_dismissed INTEGER DEFAULT 0,
+                messages_unflagged INTEGER DEFAULT 0,
+                reports_submitted INTEGER DEFAULT 0,
+                manual_checks INTEGER DEFAULT 0,
+                rescans INTEGER DEFAULT 0,
+                scans_private INTEGER DEFAULT 0,
+                scans_group INTEGER DEFAULT 0,
+                scans_channel INTEGER DEFAULT 0,
+                system_info_json TEXT
+            )""",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).
