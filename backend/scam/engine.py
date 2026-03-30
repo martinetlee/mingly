@@ -289,6 +289,49 @@ def _parse_text_tool_calls(text: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Short-Circuit Evaluator
+# ---------------------------------------------------------------------------
+
+def _evaluate_short_circuit(condition: str, output: dict) -> bool:
+    """Evaluate a simple short-circuit condition against a node's output.
+
+    Supports: output.field, ==, !=, >, <, >=, <=, &&, ||, true, false, null, numbers, quoted strings.
+    """
+    if not condition.strip():
+        return False
+
+    try:
+        # Replace output.X with actual values
+        import re as _re2
+        def _resolve(match):
+            path = match.group(1)
+            val = output
+            for part in path.split("."):
+                if isinstance(val, dict):
+                    val = val.get(part)
+                else:
+                    return "null"
+            if val is None:
+                return "null"
+            if isinstance(val, bool):
+                return "true" if val else "false"
+            if isinstance(val, (int, float)):
+                return str(val)
+            return f'"{val}"'
+
+        expr = _re2.sub(r'output\.(\w[\w.]*)', _resolve, condition)
+
+        # Simple expression evaluator
+        expr = expr.replace("&&", " and ").replace("||", " or ")
+        expr = expr.replace("true", "True").replace("false", "False").replace("null", "None")
+
+        return bool(eval(expr, {"__builtins__": {}}, {}))
+    except Exception as e:
+        logger.warning("Short-circuit evaluation failed for '%s': %s", condition, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Node Executors
 # ---------------------------------------------------------------------------
 
@@ -503,8 +546,11 @@ async def _execute_script_node(
     from backend.scam.tools import get_tool
     tool = get_tool(script_name)
     if not tool:
-        trace.status = "failed"
-        trace.error = f"Script '{script_name}' not found in registry — app update may be required"
+        # If the script isn't available, return a neutral result instead of failing
+        # This allows the pipeline to continue without the ML prefilter
+        logger.warning("Script '%s' not found in registry — skipping with neutral result", script_name)
+        trace.status = "completed"
+        trace.output = {"verdict": "unavailable", "risk_score": 0.0, "reason": f"Script '{script_name}' not available"}
         trace.duration_ms = int((time.monotonic() - t0) * 1000)
         trace.completed_at = datetime.now(timezone.utc).isoformat()
         return trace
@@ -691,11 +737,60 @@ async def execute_pipeline(pipeline_config, message_context: str, messages: list
                         trace=trace,
                     )
 
-                # Store output for downstream nodes
+                # Store output for downstream nodes (filtered by output_forward/output_trace_only)
                 if step.output:
-                    results[nid] = step.output
+                    node_def = node_map[nid]
+                    if node_def.output_forward is not None:
+                        # Only forward specified fields
+                        results[nid] = {k: v for k, v in step.output.items() if k in node_def.output_forward}
+                    elif node_def.output_trace_only is not None:
+                        # Forward all except trace-only fields
+                        results[nid] = {k: v for k, v in step.output.items() if k not in node_def.output_trace_only}
+                    else:
+                        # Forward everything (default)
+                        results[nid] = step.output
 
-                # TODO Phase 2: check short_circuit condition here
+                # Check short_circuit condition
+                node_sc = node_map[nid].short_circuit
+                if node_sc and step.output:
+                    sc_triggered = _evaluate_short_circuit(node_sc.get("condition", ""), step.output)
+                    if sc_triggered:
+                        # Resolve result
+                        sc_result_spec = node_sc.get("result", "output")
+                        if sc_result_spec == "output":
+                            sc_output = step.output
+                        elif isinstance(sc_result_spec, dict):
+                            sc_output = dict(sc_result_spec)
+                        else:
+                            sc_output = step.output
+
+                        trace.status = "short_circuited"
+                        trace.short_circuit = {
+                            "node_id": nid,
+                            "condition": node_sc.get("condition"),
+                            "evaluated_output": step.output,
+                            "result": sc_output,
+                        }
+                        # Mark remaining nodes as skipped
+                        for rl in layers[layer_idx + 1:]:
+                            for rn in rl:
+                                trace.steps.append(StepTrace(node_id=rn, type=node_map[rn].type, layer=0, status="skipped_short_circuit"))
+                        trace.completed_at = datetime.now(timezone.utc).isoformat()
+                        t_start = datetime.fromisoformat(trace.started_at)
+                        t_end = datetime.fromisoformat(trace.completed_at)
+                        trace.duration_ms = int((t_end - t_start).total_seconds() * 1000)
+
+                        is_scam = bool(sc_output.get("is_scam", False))
+                        confidence = max(0.0, min(1.0, float(sc_output.get("confidence", 0.0))))
+                        return EngineResult(
+                            scam_result=ScamCheckResult(
+                                is_scam=is_scam, confidence=confidence,
+                                reason=str(sc_output.get("reason", "")),
+                                category=sc_output.get("category"),
+                                trace_json=trace.to_json(),
+                            ),
+                            trace=trace,
+                        )
 
     # --- Step 4: Extract result from output node ---
     trace.status = "completed"

@@ -1,23 +1,80 @@
 {
-  "version": "2.4.0",
-  "updated_at": "2026-03-29T00:00:00Z",
+  "version": "3.1.0",
+  "updated_at": "2026-03-31T00:00:00Z",
+
+  "tools": [
+    {
+      "name": "search_scam_scenarios",
+      "script": "search_library",
+      "description": "Search known SCAM playbook patterns. Two modes:\n1. Call WITHOUT scenario_id to list all known scam scenarios.\n2. Call WITH scenario_id to get full details (indicators, conversation pattern, risk).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "description": "Optional. ID of a specific scenario to get full details for (e.g. 'fake_reconnection'). Omit to list all."
+          }
+        },
+        "required": []
+      },
+      "script_params": {
+        "filename": "scenarios.json"
+      }
+    },
+    {
+      "name": "search_safe_patterns",
+      "script": "search_library",
+      "description": "Search known SAFE / false-positive patterns. Use this to check if a message matches a known benign pattern that should NOT be flagged as a scam. Two modes:\n1. Call WITHOUT pattern_id to list all safe patterns.\n2. Call WITH pattern_id to get full details.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern_id": {
+            "type": "string",
+            "description": "Optional. ID of a specific pattern to get full details for. Omit to list all."
+          }
+        },
+        "required": []
+      },
+      "script_params": {
+        "filename": "safe_patterns.json"
+      }
+    }
+  ],
 
   "nodes": [
+    {
+      "id": "ml_prefilter",
+      "type": "script",
+      "config": {
+        "script": "ml_prefilter",
+        "params": {
+          "domains": ["sms", "phishing", "job_scams"],
+          "ensemble_low_threshold": 0.15,
+          "ensemble_high_threshold": 0.95
+        }
+      },
+      "output_forward": [],
+      "output_trace_only": ["models", "verdict", "risk_score", "top_domain"],
+      "short_circuit": {
+        "condition": "output.verdict == \"safe\"",
+        "result": {"is_scam": false, "confidence": 0.0, "category": null, "reason": "ML pre-filter: low risk score"}
+      }
+    },
     {
       "id": "classify",
       "type": "llm",
       "config": {
-        "prompt": "You are a message classifier for Telegram chats. Your job is to classify the message and check if it matches any known scam patterns.\n\nSTEP 1: First, briefly summarize what is happening in this conversation (who is talking, what are they asking for, what is the relationship).\n\nSTEP 2: Call search_scenarios (without scenario_id) to get the list of ALL known scam scenarios. Read the list and decide if any scenario matches the conversation.\n\nSTEP 3: If a scenario looks like a match, call search_scenarios again WITH that scenario_id to get the full indicators and conversation pattern. Check the conversation against those specific indicators.\n\nSTEP 4: Based on your analysis, classify the message.\n\nCategories:\n- normal_conversation: Regular discussion, opinions, questions, greetings, social chat\n- product_discussion: Discussing real products, services, protocols, tokens, or platforms\n- event_sharing: Sharing events, meetups, conferences, or community gatherings\n- bot_message: Automated messages from bots (CAPTCHA, welcome, verification, moderation)\n- news_or_article: Sharing news, articles, blog posts, or announcements\n- job_or_opportunity: Job postings, hiring, collaboration requests\n- suspicious: Messages matching known scam patterns or showing clear red flags\n\nIMPORTANT:\n- If a scenario's indicators match the conversation → classify as 'suspicious'\n- Most messages in group chats are NOT suspicious\n- Discussing real crypto products, fees, or services is 'product_discussion'\n- You MUST call search_scenarios for private chats with non-contacts\n\nRespond with your final answer as valid JSON:\n{\"classification\": \"<category>\", \"confidence\": <0.0-1.0>, \"reasoning\": \"<brief explanation>\", \"matched_scenario\": \"<scenario name or null>\"}",
-        "tools": ["search_scenarios"],
-        "max_tool_iterations": 3,
-        "max_tokens": 500
+        "prompt": "You are a message classifier for Telegram chats. Your job is to classify the message and check if it matches known patterns.\n\nYou have two search tools:\n- search_scam_scenarios: check against known SCAM playbooks\n- search_safe_patterns: check against known SAFE/false-positive patterns\n\nSTEP 1: Briefly summarize what is happening in this conversation.\n\nSTEP 2: Call search_scam_scenarios (without scenario_id) to list all known scam scenarios. Check if any match.\n\nSTEP 3: Call search_safe_patterns (without pattern_id) to list all known safe patterns. Check if any match (e.g., professional titles in names, bot messages, event links).\n\nSTEP 4: If a scam scenario looks like a match, call search_scam_scenarios WITH that scenario_id for full details.\n\nSTEP 5: If a safe pattern matches, call search_safe_patterns WITH that pattern_id for full details.\n\nSTEP 6: Based on both checks, classify the message.\n\nCategories:\n- normal_conversation: Regular discussion, opinions, questions, greetings, social chat\n- product_discussion: Discussing real products, services, protocols, tokens, or platforms\n- event_sharing: Sharing events, meetups, conferences, or community gatherings\n- bot_message: Automated messages from bots (CAPTCHA, welcome, verification, moderation)\n- news_or_article: Sharing news, articles, blog posts, or announcements\n- job_or_opportunity: Job postings, hiring, collaboration requests\n- suspicious: Messages matching known scam patterns with NO matching safe patterns\n\nIMPORTANT:\n- If a safe pattern matches → NOT suspicious, even if it superficially looks suspicious\n- If a scam scenario matches AND no safe pattern matches → suspicious\n- Most messages in group chats are NOT suspicious\n\nRespond with your final answer as valid JSON:\n{\"classification\": \"<category>\", \"confidence\": <0.0-1.0>, \"reasoning\": \"<brief explanation>\", \"matched_scenario\": \"<scenario name or null>\", \"matched_safe_pattern\": \"<pattern name or null>\"}",
+        "tools": ["search_scam_scenarios", "search_safe_patterns"],
+        "max_tool_iterations": 4,
+        "max_tokens": 300
       }
     },
     {
       "id": "analyze_context",
       "type": "llm",
       "config": {
-        "prompt": "Analyze the sender profile and message context for scam risk factors.\n\nRisk factors (only flag these when they are ACTIVELY suspicious):\n- Message asks the reader to send money, crypto, or credentials\n- Message contains suspicious/unknown URLs with misleading domain names\n- Message makes unrealistic promises (guaranteed returns, free money)\n- Message pressures the reader to act urgently\n- Sender claims to be someone they're not (impersonation)\n- Conversation follows a known scam pattern (friendly reconnection → scheduling link, unsolicited job offer → deposit required)\n\nNOT risk factors (do NOT flag these):\n- Sender is not a contact — most group members aren't contacts, this is normal\n- Sender has no bio — most Telegram users don't have bios\n- Short messages like 'True', 'Yes', 'Ok', 'Nice', 'Agreed' — these are normal replies\n- Message discusses products, services, or crypto tokens without asking for money\n- Links to well-known domains (github.com, twitter.com, x.com, youtube.com, medium.com, luma.com, eventbrite.com, meetup.com, calendly.com, notion.so, docs.google.com, t.me)\n\nIMPORTANT: Being a non-contact with no bio is the DEFAULT state for most Telegram users. Only flag risk_level as 'medium' or 'high' when there are ACTIVE suspicious behaviors, not passive profile characteristics.\n\nRespond ONLY with valid JSON:\n{\"risk_factors\": [\"<factor1>\", ...], \"safe_factors\": [\"<factor1>\", ...], \"risk_level\": \"none|low|medium|high\", \"reasoning\": \"<brief explanation>\"}",
+        "prompt": "Analyze the sender profile and message context for scam risk factors.\n\nML pre-filter result: {{ml_prefilter}}\n\nRisk factors (only flag these when they are ACTIVELY suspicious):\n- Message asks the reader to send money, crypto, or credentials\n- Message contains suspicious/unknown URLs with misleading domain names\n- Message makes unrealistic promises (guaranteed returns, free money)\n- Message pressures the reader to act urgently\n- Conversation follows a known scam pattern\n\nNOT risk factors (do NOT flag these):\n- Sender is not a contact — most group members aren't contacts, this is normal\n- Sender has no bio — most Telegram users don't have bios\n- Short messages like 'True', 'Yes', 'Ok', 'Nice' — these are normal replies\n- Message discusses products, services, or crypto tokens without asking for money\n- Links to well-known domains\n\nIMPORTANT: Being a non-contact with no bio is the DEFAULT state for most Telegram users.\n\nRespond ONLY with valid JSON:\n{\"risk_factors\": [\"<factor1>\", ...], \"safe_factors\": [\"<factor1>\", ...], \"risk_level\": \"none|low|medium|high\", \"reasoning\": \"<brief explanation>\"}",
         "max_tokens": 200
       }
     },
@@ -25,15 +82,15 @@
       "id": "verdict",
       "type": "llm",
       "config": {
-        "prompt": "You are a scam detection assistant making a final verdict on a Telegram message.\n\nYou have these analyses:\n\n1. Classification (with scenario matching): {{classify}}\n2. Context risk analysis: {{analyze_context}}\n3. Original message: {{$message}}\n\nScam categories (use only if is_scam is true):\n- phishing, social_engineering, investment_scam, romance_scam, fake_giveaway, impersonation, malware_link, other\n\nRules:\n- If classification mentions a matched scenario → LIKELY a scam, flag it\n- If classification is 'normal_conversation' AND no scenario matches AND risk_level is 'none' or 'low' → NOT a scam\n- If classification is 'suspicious' → carefully evaluate and likely flag as scam\n- Discussing real products/services in relevant group chats is NOT a scam\n- Bot messages for moderation/verification are NOT scams\n- Be conservative when no scenarios match: when in doubt, mark as NOT scam\n\nRespond ONLY with valid JSON:\n{\"is_scam\": <bool>, \"confidence\": <0.0-1.0>, \"category\": \"<category_id or null>\", \"reason\": \"<one sentence explanation>\"}",
+        "prompt": "You are a scam detection assistant making a final verdict on a Telegram message.\n\nYou have these analyses:\n\n1. ML pre-filter: {{ml_prefilter}}\n2. Classification: {{classify}}\n3. Context risk analysis: {{analyze_context}}\n4. Original message: {{$message}}\n\nScam categories (use only if is_scam is true):\n- phishing, social_engineering, investment_scam, romance_scam, fake_giveaway, impersonation, malware_link, other\n\nRules:\n- If ML pre-filter says 'auto_scam' → almost certainly a scam\n- If classification mentions a matched scenario → LIKELY a scam, flag it\n- If classification is 'normal_conversation' AND no scenario matches AND risk_level is 'none' or 'low' → NOT a scam\n- If classification is 'suspicious' → carefully evaluate and likely flag as scam\n- Discussing real products/services in relevant group chats is NOT a scam\n- Bot messages for moderation/verification are NOT scams\n- Be conservative when no scenarios match: when in doubt, mark as NOT scam\n\nRespond ONLY with valid JSON:\n{\"is_scam\": <bool>, \"confidence\": <0.0-1.0>, \"category\": \"<category_id or null>\", \"reason\": \"<one sentence explanation>\"}",
         "max_tokens": 200,
         "few_shot_examples": [
           {
-            "input": "1. Classification: {\"classification\": \"suspicious\", \"confidence\": 0.92, \"reasoning\": \"Matches Fake Reconnection Scam pattern\", \"matched_scenario\": \"Fake Reconnection Scam\"}\n2. Context: {\"risk_level\": \"high\", \"risk_factors\": [\"Stranger in private chat\", \"Scheduling link\"]}\n3. Original: [Frank@DODO]: Hi, it's been a while... let's catch up. calendly.com/frank/30min",
+            "input": "1. ML: {\"risk_score\": 0.92, \"verdict\": \"borderline\", \"top_domain\": \"phishing\"}\n2. Classification: {\"classification\": \"suspicious\", \"matched_scenario\": \"Fake Reconnection Scam\"}\n3. Context: {\"risk_level\": \"high\"}\n4. Original: [Frank@DODO]: Hi, it's been a while... calendly.com/frank/30min",
             "output": "{\"is_scam\": true, \"confidence\": 0.92, \"category\": \"social_engineering\", \"reason\": \"Matches Fake Reconnection Scam: stranger claims past connection and sends scheduling link\"}"
           },
           {
-            "input": "1. Classification: {\"classification\": \"product_discussion\", \"confidence\": 0.9, \"matched_scenario\": null}\n2. Context: {\"risk_level\": \"none\"}\n3. Original: [Lore]: As long as you are in Switzerland and you pay the fee, they send an armored truck.",
+            "input": "1. ML: {\"risk_score\": 0.02, \"verdict\": \"safe\"}\n2. Classification: {\"classification\": \"product_discussion\"}\n3. Context: {\"risk_level\": \"none\"}\n4. Original: [Lore]: As long as you are in Switzerland and you pay the fee, they send an armored truck.",
             "output": "{\"is_scam\": false, \"confidence\": 0.02, \"category\": null, \"reason\": \"Legitimate product discussion comparing gold custody services\"}"
           }
         ]
@@ -42,8 +99,9 @@
   ],
 
   "edges": [
-    {"from": "$input", "to": "classify"},
-    {"from": "$input", "to": "analyze_context"},
+    {"from": "$input", "to": "ml_prefilter"},
+    {"from": "ml_prefilter", "to": "classify"},
+    {"from": "ml_prefilter", "to": "analyze_context"},
     {"from": "classify", "to": "verdict"},
     {"from": "analyze_context", "to": "verdict"}
   ],

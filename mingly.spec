@@ -9,6 +9,10 @@ a = Analysis(
     binaries=[],
     datas=[
         ('frontend/dist', 'frontend/dist'),
+        ('backend/scam/ml_models', 'backend/scam/ml_models'),
+        ('backend/scam/scenarios.json', 'backend/scam'),
+        ('backend/scam/default_pipeline.json', 'backend/scam'),
+        ('backend/scam/default_signatures.json', 'backend/scam'),
     ],
     hiddenimports=[
         # pywebview / macOS WebKit
@@ -48,6 +52,17 @@ a = Analysis(
         'telethon.crypto',
         # python-dotenv
         'dotenv',
+        # ML pre-filter (scam detection)
+        'joblib',
+        'sklearn',
+        'sklearn.feature_extraction.text',
+        'sklearn.preprocessing',
+        'sklearn.utils',
+        'sklearn.utils._array_api',
+        'lightgbm',
+        'lightgbm.basic',
+        'scipy',
+        'scipy.sparse',
     ],
     hookspath=[],
     hooksconfig={},
@@ -66,7 +81,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Mingly',
+    name='Common Defense',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -87,17 +102,17 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Mingly',
+    name='Common Defense',
 )
 
 app = BUNDLE(
     coll,
-    name='Mingly.app',
+    name='Common Defense.app',
     icon='assets/icon.icns',
-    bundle_identifier='com.mingly.app',
+    bundle_identifier='com.commondefense.app',
     info_plist={
         'NSHighResolutionCapable': True,
-        'CFBundleDisplayName': 'Mingly',
+        'CFBundleDisplayName': 'Common Defense',
         'CFBundleShortVersionString': '0.1.0',
         'NSAppTransportSecurity': {
             'NSAllowsLocalNetworking': True,

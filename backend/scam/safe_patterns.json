@@ -1,0 +1,113 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-03-31T00:00:00Z",
+  "patterns": [
+    {
+      "id": "professional_title_in_name",
+      "name": "Professional Title in Display Name",
+      "description": "User includes their company, project, title, or role in their Telegram display name. This is standard practice in crypto, Web3, and tech communities for networking and credibility. Examples: 'Frank | DODO', 'Alex // Keyring Network', 'Sam (Quantstamp)', 'Lore | Tether Gold'.",
+      "indicators": [
+        "Display name contains a company or project name separated by |, //, (), or -",
+        "Title like CEO, CTO, Co-founder, Lead, Head of in the name",
+        "Name format matches common professional patterns",
+        "User is participating in relevant group discussion"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "bot_verification_message",
+      "name": "Bot Verification / CAPTCHA Message",
+      "description": "Automated bot message asking new members to verify themselves by solving a math problem, clicking a button, or completing a CAPTCHA. Common bots: Shieldy, Combot, Rose, ChatKeeperBot, GroupHelpBot. These are anti-spam measures set up by group admins.",
+      "indicators": [
+        "Message from a bot account (name ends in Bot)",
+        "Asks to solve arithmetic or puzzle",
+        "Mentions being kicked if not verified",
+        "Contains a time limit for verification",
+        "Powered by a known bot service"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "event_link_sharing",
+      "name": "Event / Meetup Link Sharing",
+      "description": "User sharing a link to an event, meetup, conference, or community gathering via well-known platforms. Links to luma.com, eventbrite.com, meetup.com, lu.ma, etc. are normal community activity.",
+      "indicators": [
+        "Link to known event platform (luma.com, eventbrite.com, meetup.com, lu.ma)",
+        "Context is about organizing or attending an event",
+        "Shared in a relevant community group",
+        "No request for money or personal information"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "scheduling_link_from_contact",
+      "name": "Scheduling Link from Known Contact",
+      "description": "A known contact or established group member sharing a Calendly, Cal.com, or other scheduling link for a legitimate meeting. Different from fake reconnection scams because the sender is a known contact or has an established presence.",
+      "indicators": [
+        "Sender is a known contact (is_contact: true)",
+        "Sender has been active in shared groups",
+        "Scheduling link from known platforms (calendly.com, cal.com)",
+        "Context of ongoing professional relationship"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "product_service_discussion",
+      "name": "Product / Service Discussion with Fees",
+      "description": "Users discussing real products, services, or protocols that involve fees, prices, or payments. Mentions of 'pay the fee', 'costs $X', 'deposit required' in context of legitimate product discussion are normal, not scam indicators.",
+      "indicators": [
+        "Discussion about a real, known product or service",
+        "Comparison between competing products",
+        "Mention of fees in informational context (not asking the reader to pay)",
+        "User has relevant bio or expertise",
+        "Discussion in a topic-relevant group"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "group_welcome_message",
+      "name": "Group Welcome / Rules Message",
+      "description": "Automated or admin-posted welcome messages for new group members. Often contains group rules, guidelines, or links to resources. May mention restrictions or consequences for rule violations.",
+      "indicators": [
+        "Message welcomes a new member by name",
+        "Contains group rules or guidelines",
+        "Posted by admin or bot",
+        "Mentions group-specific topics or resources"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "news_article_sharing",
+      "name": "News / Article / Thread Sharing",
+      "description": "User sharing links to news articles, blog posts, Twitter/X threads, or research. Links to known media platforms are normal information sharing.",
+      "indicators": [
+        "Link to known media platform (x.com, twitter.com, medium.com, substack.com, mirror.xyz)",
+        "User adds brief commentary about the content",
+        "Shared in relevant discussion context",
+        "No request for action from readers"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    },
+    {
+      "id": "job_posting_legitimate",
+      "name": "Legitimate Job Posting",
+      "description": "Real job posting from an established company or project. Different from fake job scams: uses known company name, links to official careers page, doesn't require upfront payment, has realistic compensation.",
+      "indicators": [
+        "Posted by or references a known company",
+        "Links to official careers page or job board",
+        "Realistic job description and compensation",
+        "No upfront payment or deposit required",
+        "Contact via official channels (email, application form)"
+      ],
+      "risk": "none",
+      "category": "not_scam"
+    }
+  ]
+}
