@@ -1,4 +1,5 @@
 {
   "low_threshold": 0.8225628140703518,
-  "high_threshold": 0.9884408277624358
+  "high_threshold": 0.9884408277624358,
+  "version": "1.0.0"
 }
