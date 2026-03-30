@@ -98,9 +98,7 @@ def init_cloud_sync_manager() -> "CloudSyncManager":
 class SyncResult:
     status: str = "pending"  # success, failed, not_configured
     error: Optional[str] = None
-    pipeline_updated: bool = False
-    scenarios_updated: bool = False
-    signatures_updated: bool = False
+    files_updated: list = None  # names of files that were updated
     reports_submitted: int = 0
     flags_submitted: int = 0
     scan_results_submitted: int = 0
@@ -139,44 +137,52 @@ class CloudSyncManager:
                 result.error = "Could not reach cloud server"
                 return result
 
-            # 2. Download changed assets
-            from backend.scam.pipeline import get_pipeline_manager
-            mgr = get_pipeline_manager()
-            local_pipeline_version = mgr.get_config().version if mgr else ""
+            # 2. Download changed files
+            files = manifest.get("files", [])
+            updated_files = []
 
-            if manifest.get("pipeline_version", "") != local_pipeline_version:
-                pipeline_data = await self._download("/sync/pipeline")
-                if pipeline_data:
-                    (DATA_DIR / "scam_pipeline.json").write_text(
-                        json.dumps(pipeline_data, indent=2, ensure_ascii=False), encoding="utf-8"
-                    )
-                    if mgr:
-                        mgr.reload()
-                    result.pipeline_updated = True
+            for file_info in files:
+                fname = file_info.get("name", "")
+                remote_version = file_info.get("version", "")
+                endpoint = file_info.get("endpoint", "")
 
-            local_scenarios_version = self._get_local_version(DATA_DIR / "scenarios.json")
-            if manifest.get("scenarios_version", "") != local_scenarios_version:
-                scenarios_data = await self._download("/sync/scenarios")
-                if scenarios_data:
-                    (DATA_DIR / "scenarios.json").write_text(
-                        json.dumps(scenarios_data, indent=2, ensure_ascii=False), encoding="utf-8"
-                    )
-                    # Invalidate cached scenarios
-                    from backend.scam.tools.search_scenarios import _load_scenarios
-                    import backend.scam.tools.search_scenarios as sc_mod
-                    sc_mod._cached_scenarios = None
-                    result.scenarios_updated = True
+                if not fname or not endpoint:
+                    continue
 
-            local_sigs_version = self._get_local_version(DATA_DIR / "scam_signatures.json")
-            if manifest.get("signatures_version", "") != local_sigs_version:
-                sigs_data = await self._download("/sync/signatures")
-                if sigs_data:
-                    from backend.scam.pipeline import save_signatures, _load_signatures_file
-                    save_signatures(sigs_data)
-                    # Reload signatures into the live pipeline config
-                    if mgr:
-                        _load_signatures_file(mgr.get_config())
-                    result.signatures_updated = True
+                local_version = self._get_local_version(DATA_DIR / fname)
+                if remote_version == local_version:
+                    continue
+
+                data = await self._download(endpoint)
+                if not data:
+                    continue
+
+                # Save to data dir
+                (DATA_DIR / fname).write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                updated_files.append(fname)
+                logger.info("Synced %s: %s → %s", fname, local_version or "(none)", remote_version)
+
+            result.files_updated = updated_files
+
+            # Post-download hooks for specific files
+            if updated_files:
+                from backend.scam.pipeline import get_pipeline_manager
+                mgr = get_pipeline_manager()
+
+                if "scam_pipeline.json" in updated_files and mgr:
+                    mgr.reload()
+
+                if "scam_signatures.json" in updated_files and mgr:
+                    from backend.scam.pipeline import _load_signatures_file
+                    _load_signatures_file(mgr.get_config())
+
+                # Invalidate search library cache for any updated knowledge base files
+                from backend.scam.tools.search_library import invalidate_cache
+                for fname in updated_files:
+                    if fname not in ("scam_pipeline.json", "scam_signatures.json"):
+                        invalidate_cache(fname)
 
             # 3. Upload pending reports
             reports_count = await self._upload_pending_reports()
@@ -194,9 +200,9 @@ class CloudSyncManager:
             self._last_synced_at = datetime.utcnow()
             self._save_sync_time()
             result.status = "success"
-            logger.info("Cloud sync completed: pipeline=%s scenarios=%s sigs=%s reports=%d flags=%d scans=%d",
-                        result.pipeline_updated, result.scenarios_updated,
-                        result.signatures_updated, result.reports_submitted, result.flags_submitted,
+            logger.info("Cloud sync completed: %d files updated (%s), reports=%d flags=%d scans=%d",
+                        len(result.files_updated or []), ", ".join(result.files_updated or []),
+                        result.reports_submitted, result.flags_submitted,
                         result.scan_results_submitted)
 
         except Exception as e:
