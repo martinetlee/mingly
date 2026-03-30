@@ -1,8 +1,8 @@
-"""ML ensemble pre-filter for scam detection.
+"""ML ensemble pre-filter script.
 
-Runs 3 domain-specific LightGBM models (sms, phishing, job_scams) in parallel
-and returns the max score across all models. Used as a fast pre-filter before
-LLM analysis — most safe messages are rejected here without any LLM call.
+Generic script that runs an ensemble of LightGBM models and returns
+the max risk score. The pipeline JSON configures which domains to run
+and the threshold values via script_params.
 """
 
 import json
@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from backend.scam.tools import register_tool
+from backend.scam.tools import register_script
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def _extract_features(texts: list[str]) -> np.ndarray:
 
 
 class MLEnsemble:
-    """Ensemble of domain-specific ML models. Returns max score across all."""
+    """Ensemble of domain-specific ML models. Returns max score across selected models."""
 
     def __init__(self, models_dir: Path):
         self._all_models: dict[str, _DomainModel] = {}
@@ -112,18 +112,9 @@ class MLEnsemble:
 
     def predict(self, texts: list[str], domains: Optional[list[str]] = None,
                 low_threshold: float = 0.30, high_threshold: float = 0.95) -> dict:
-        """Run selected models and return max score + per-domain breakdown.
-
-        Args:
-            texts: Messages to analyze
-            domains: Which domain models to run. None = all available.
-            low_threshold: Below this → safe
-            high_threshold: Above this → auto_scam
-        """
         if not self._all_models:
             return {"risk_score": 0.0, "models": [], "verdict": "no_models"}
 
-        # Select which models to run
         if domains:
             models = [self._all_models[d] for d in domains if d in self._all_models]
         else:
@@ -131,7 +122,7 @@ class MLEnsemble:
 
         if not models:
             return {"risk_score": 0.0, "models": [], "verdict": "no_models",
-                    "error": f"None of the requested domains are available. Available: {self.available_domains}"}
+                    "error": f"None of the requested domains available. Available: {self.available_domains}"}
 
         domain_results = []
         max_score = 0.0
@@ -140,7 +131,7 @@ class MLEnsemble:
         for model in models:
             try:
                 probs = model.predict_proba(texts)
-                score = float(probs.max())  # max across all input texts
+                score = float(probs.max())
                 domain_results.append({
                     "domain": model.domain,
                     "score": round(score, 4),
@@ -152,13 +143,8 @@ class MLEnsemble:
                     max_domain = model.domain
             except Exception as e:
                 logger.warning("ML model %s prediction failed: %s", model.domain, e)
-                domain_results.append({
-                    "domain": model.domain,
-                    "score": 0.0,
-                    "error": str(e),
-                })
+                domain_results.append({"domain": model.domain, "score": 0.0, "error": str(e)})
 
-        # Determine verdict using configurable ensemble thresholds
         verdict = "safe"
         if max_score >= high_threshold:
             verdict = "auto_scam"
@@ -180,31 +166,15 @@ def _get_ensemble() -> MLEnsemble:
     return _ensemble
 
 
-@register_tool(
-    name="ml_prefilter",
-    description="Run ML ensemble pre-filter on message text. Returns a risk score (0.0-1.0) and verdict (safe/borderline/auto_scam) based on 3 domain-specific models (sms, phishing, job_scams).",
-    parameters={
-        "type": "object",
-        "properties": {
-            "text": {
-                "type": "string",
-                "description": "Message text to analyze"
-            }
-        },
-        "required": ["text"]
-    }
-)
-async def ml_prefilter(args: dict) -> dict:
-    """Run the ML ensemble on text input."""
+@register_script("ml_ensemble")
+async def ml_ensemble_script(args: dict) -> dict:
+    """Generic ML ensemble script. Pipeline JSON configures domains and thresholds."""
     ensemble = _get_ensemble()
 
-    # Extract text from args — support both tool call and script node modes
+    # Extract text
     text = args.get("text", "")
     if not text and "$message" in args:
-        # Script node mode: extract message text from the $message context
         msg = args["$message"]
-        # $message is a formatted string like "Chat: ...\nMessages to analyze:\n  [sender]: text"
-        # Extract just the message lines
         if "Messages to analyze:" in msg:
             lines = msg.split("Messages to analyze:")[1].strip().split("\n")
             texts = []
@@ -221,8 +191,7 @@ async def ml_prefilter(args: dict) -> dict:
     if not text:
         return {"risk_score": 0.0, "verdict": "no_input", "models": []}
 
-    # Get config from pipeline params
-    domains = args.get("domains")  # list of domain names, or None for all
+    domains = args.get("domains")
     low_threshold = args.get("ensemble_low_threshold", 0.30)
     high_threshold = args.get("ensemble_high_threshold", 0.95)
 

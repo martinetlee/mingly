@@ -38,6 +38,26 @@
       "script_params": {
         "filename": "safe_patterns.json"
       }
+    },
+    {
+      "name": "ml_prefilter",
+      "script": "ml_ensemble",
+      "description": "Run ML ensemble pre-filter on message text. Returns a risk score (0.0-1.0) and verdict (safe/borderline/auto_scam).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Message text to analyze"
+          }
+        },
+        "required": ["text"]
+      },
+      "script_params": {
+        "domains": ["sms", "phishing", "job_scams"],
+        "ensemble_low_threshold": 0.15,
+        "ensemble_high_threshold": 0.95
+      }
     }
   ],
 
@@ -46,12 +66,7 @@
       "id": "ml_prefilter",
       "type": "script",
       "config": {
-        "script": "ml_prefilter",
-        "params": {
-          "domains": ["sms", "phishing", "job_scams"],
-          "ensemble_low_threshold": 0.15,
-          "ensemble_high_threshold": 0.95
-        }
+        "script": "ml_prefilter"
       },
       "output_forward": [],
       "output_trace_only": ["models", "verdict", "risk_score", "top_domain"],

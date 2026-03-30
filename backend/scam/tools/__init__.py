@@ -105,4 +105,4 @@ from backend.scam.tools import search_library  # noqa: F401, E402
 try:
     from backend.scam.tools import ml_prefilter  # noqa: F401, E402
 except ImportError:
-    logger.warning("ML prefilter not available — missing dependencies (joblib/scikit-learn/lightgbm)")
+    logger.warning("ML prefilter script not available — missing dependencies (joblib/scikit-learn/lightgbm)")
