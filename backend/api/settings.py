@@ -366,7 +366,7 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
 class ShieldCloudSettingsRequest(BaseModel):
     cloud_url: str = ""
     api_key: str = ""
-    sync_dismissals: bool | None = None
+    sync_dismissals: Optional[bool] = None
 
 
 @router.get("/prefs/shield-cloud")
