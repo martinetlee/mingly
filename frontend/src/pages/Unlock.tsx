@@ -49,15 +49,15 @@ export default function Unlock({ onUnlock }: Props) {
         {/* Logo + title */}
         <div className="mb-8 text-center">
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 ring-1 ring-indigo-500/30">
-            <img src={logo} alt="Mingly" className="h-10 w-10 object-contain" />
+            <img src={logo} alt="Common Defense" className="h-10 w-10 object-contain" />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Mingly</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Common Defense</h1>
           <p className="mt-1.5 text-sm text-slate-400">Enter your password to unlock</p>
         </div>
 
         {/* Card */}
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-7 shadow-2xl backdrop-blur-sm">
-          <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Unlock Mingly</h2>
+          <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Unlock Common Defense</h2>
           <p className="mb-5 text-xs text-slate-500">Your credentials are encrypted with your master password.</p>
 
           <input

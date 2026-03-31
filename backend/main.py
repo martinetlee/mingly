@@ -116,7 +116,7 @@ if __name__ == "__main__":
                 webbrowser.open(url)
 
     window = webview.create_window(
-        "Mingly",
+        "Common Defense",
         f"http://{API_HOST}:{API_PORT}",
         width=1280,
         height=800,

@@ -43,7 +43,7 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
     <aside className="flex h-screen w-[4.5rem] flex-col items-center bg-slate-950 py-4">
       {/* Logo */}
       <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
-        <img src={logo} alt="Mingly" className="h-9 w-9 object-contain" />
+        <img src={logo} alt="Common Defense" className="h-9 w-9 object-contain" />
       </div>
 
       {/* Nav */}

@@ -221,9 +221,9 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
         {/* Logo + title */}
         <div className="mb-8 text-center">
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 ring-1 ring-indigo-500/30">
-            <img src={logo} alt="Mingly" className="h-10 w-10 object-contain" />
+            <img src={logo} alt="Common Defense" className="h-10 w-10 object-contain" />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Mingly</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Common Defense</h1>
           <p className="mt-1.5 text-sm text-slate-400">Your Telegram, intelligently organised</p>
         </div>
 
@@ -248,7 +248,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
             <>
               <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Protect your data</h2>
               <p className="mb-5 text-xs text-slate-500">
-                Set a master password to encrypt your credentials locally. You'll enter this each time you open Mingly.
+                Set a master password to encrypt your credentials locally. You'll enter this each time you open Common Defense.
               </p>
 
               <div className="mb-4">

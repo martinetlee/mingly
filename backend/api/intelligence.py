@@ -226,7 +226,7 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are an intelligent assistant for Mingly, a personal Telegram relationship manager. "
+    "You are an intelligent assistant for Common Defense, a personal Telegram relationship manager. "
     "You have access to tools that let you search the user's Telegram chats and messages. "
     "Use your tools to answer questions accurately — look up information before responding. "
     "Be concise, helpful, and specific. When listing chats or messages, keep it brief and relevant."

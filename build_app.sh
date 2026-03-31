@@ -14,5 +14,5 @@ echo "==> Running PyInstaller…"
 python3 -m PyInstaller mingly.spec --noconfirm
 
 echo ""
-echo "Done! App bundle is at: dist/Mingly.app"
-echo "Run it with:  open dist/Mingly.app"
+echo "Done! App bundle is at: dist/Common Defense.app"
+echo "Run it with:  open 'dist/Common Defense.app'"

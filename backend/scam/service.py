@@ -120,6 +120,9 @@ class ScamDetectionService:
                 await self._mark_request(request_id, "failed")
             else:
                 await self._apply_message_result(request_id, chat_id, msg_ids, sender_ids, result)
+
+            # Record analytics
+            await self._record_scan_analytics(result, chat_metadata)
         except Exception as e:
             logger.error("isThisScam failed for chat %d: %s", chat_id, e)
             await self._broadcast_error(chat_id, msg_ids, f"Scam detection failed: {e}")
@@ -449,6 +452,44 @@ class ScamDetectionService:
             except Exception as e:
                 logger.error("Follow-up response failed for %s: %s", req.request_id, e)
                 await self._mark_request(req.request_id, "failed")
+
+    async def _record_scan_analytics(self, result, chat_metadata=None):
+        """Record scan analytics."""
+        try:
+            from backend.scam.analytics import get_analytics_tracker
+            tracker = get_analytics_tracker()
+
+            # Parse trace for status and ML verdict
+            trace_status = "completed"
+            ml_verdict = None
+            duration_ms = 0
+            if result.trace_json:
+                import json
+                trace = json.loads(result.trace_json)
+                trace_status = trace.get("status", "completed")
+                duration_ms = trace.get("duration_ms", 0)
+                # Find ML prefilter verdict
+                for step in trace.get("steps", []):
+                    if step.get("node_id") == "ml_prefilter" and step.get("output"):
+                        ml_verdict = step["output"].get("verdict")
+                        break
+
+            chat_type = chat_metadata.get("type") if chat_metadata else None
+
+            await tracker.record_scan(
+                is_scam=result.is_scam,
+                category=result.category,
+                duration_ms=duration_ms,
+                chat_type=chat_type,
+                trace_status=trace_status,
+                ml_verdict=ml_verdict,
+            )
+
+            if ml_verdict:
+                await tracker.record_ml_verdict(ml_verdict)
+
+        except Exception as e:
+            logger.debug("Failed to record scan analytics: %s", e)
 
     async def _broadcast_error(
         self, chat_id: Optional[int], msg_ids: list[int], error: str

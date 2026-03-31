@@ -12,6 +12,121 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ── Theme System ──
+   Default: dark mode (no attribute needed).
+   Light mode: add data-theme="light" on <html>.
+   We override Tailwind's color utilities via CSS for light mode. */
+
+/* Light mode overrides */
+[data-theme="light"] {
+  /* Backgrounds */
+  --tw-bg-override: true;
+}
+[data-theme="light"] .bg-slate-950 { background-color: #eef0f4 !important; }
+[data-theme="light"] .bg-slate-900 { background-color: #f4f5f7 !important; }
+[data-theme="light"] .bg-slate-800 { background-color: #ffffff !important; }
+[data-theme="light"] .bg-slate-800\/50 { background-color: rgba(255,255,255,0.7) !important; }
+[data-theme="light"] .bg-slate-800\/30 { background-color: rgba(255,255,255,0.5) !important; }
+[data-theme="light"] .bg-slate-700 { background-color: #f0f1f4 !important; }
+[data-theme="light"] .bg-slate-700\/50 { background-color: rgba(240,241,244,0.5) !important; }
+[data-theme="light"] .bg-slate-700\/30 { background-color: rgba(240,241,244,0.3) !important; }
+[data-theme="light"] .bg-slate-700\/80 { background-color: rgba(240,241,244,0.8) !important; }
+
+/* Text colors */
+[data-theme="light"] .text-slate-200 { color: #1a1e26 !important; }
+[data-theme="light"] .text-slate-300 { color: #374151 !important; }
+[data-theme="light"] .text-slate-400 { color: #52596a !important; }
+[data-theme="light"] .text-slate-500 { color: #8b92a3 !important; }
+[data-theme="light"] .text-slate-600 { color: #b0b8c4 !important; }
+[data-theme="light"] .text-gray-100 { color: #1a1e26 !important; }
+[data-theme="light"] .text-slate-100 { color: #1a1e26 !important; }
+[data-theme="light"] .text-gray-200 { color: #374151 !important; }
+[data-theme="light"] .text-white { color: #ffffff !important; }
+
+/* Border colors */
+[data-theme="light"] .border-slate-600 { border-color: #d8dbe1 !important; }
+[data-theme="light"] .border-slate-700 { border-color: #e2e5ea !important; }
+[data-theme="light"] .border-slate-700\/50 { border-color: rgba(226,229,234,0.5) !important; }
+[data-theme="light"] .border-slate-700\/80 { border-color: rgba(226,229,234,0.8) !important; }
+[data-theme="light"] .border-slate-800 { border-color: #e2e5ea !important; }
+
+/* Divide colors */
+[data-theme="light"] .divide-slate-800 > * + * { border-color: #e2e5ea !important; }
+[data-theme="light"] .divide-slate-700 > * + * { border-color: #e2e5ea !important; }
+
+/* Hover states */
+[data-theme="light"] .hover\:bg-slate-700:hover { background-color: #ebedf1 !important; }
+[data-theme="light"] .hover\:bg-slate-800:hover { background-color: #f0f1f4 !important; }
+[data-theme="light"] .hover\:bg-slate-800\/50:hover { background-color: rgba(240,241,244,0.7) !important; }
+[data-theme="light"] .hover\:text-slate-300:hover { color: #1a1e26 !important; }
+[data-theme="light"] .hover\:text-slate-200:hover { color: #1a1e26 !important; }
+[data-theme="light"] .hover\:border-slate-500:hover { border-color: #b0b8c4 !important; }
+[data-theme="light"] .hover\:border-slate-400:hover { border-color: #8b92a3 !important; }
+
+/* Placeholder colors */
+[data-theme="light"] .placeholder-slate-500::placeholder { color: #b0b8c4 !important; }
+
+/* Focus states */
+[data-theme="light"] .focus\:border-emerald-500:focus { border-color: #059669 !important; }
+[data-theme="light"] .focus\:border-indigo-500:focus { border-color: #6366f1 !important; }
+
+/* Message bubbles — incoming */
+[data-theme="light"] .bg-slate-700.rounded-bl-sm,
+[data-theme="light"] .rounded-2xl.rounded-bl-sm.bg-slate-700 { background-color: #f0f1f4 !important; }
+
+/* Indigo accents — slightly adjusted for light bg contrast */
+[data-theme="light"] .bg-indigo-500\/20 { background-color: rgba(99,102,241,0.1) !important; }
+[data-theme="light"] .bg-indigo-600 { background-color: #4f46e5 !important; }
+
+/* Emerald accents */
+[data-theme="light"] .bg-emerald-500\/20 { background-color: rgba(5,150,105,0.1) !important; }
+[data-theme="light"] .bg-emerald-500\/10 { background-color: rgba(5,150,105,0.06) !important; }
+
+/* Red/scam accents */
+[data-theme="light"] .bg-red-500\/20 { background-color: rgba(220,38,38,0.1) !important; }
+[data-theme="light"] .bg-red-900\/40 { background-color: rgba(220,38,38,0.08) !important; }
+[data-theme="light"] .bg-red-900\/80 { background-color: rgba(220,38,38,0.12) !important; }
+
+/* Amber accents */
+[data-theme="light"] .bg-amber-500\/20 { background-color: rgba(217,119,6,0.1) !important; }
+[data-theme="light"] .bg-amber-500\/10 { background-color: rgba(217,119,6,0.06) !important; }
+
+/* Cyan accents */
+[data-theme="light"] .bg-cyan-500\/20 { background-color: rgba(8,145,178,0.1) !important; }
+[data-theme="light"] .bg-cyan-500\/10 { background-color: rgba(8,145,178,0.06) !important; }
+
+/* Purple accents */
+[data-theme="light"] .bg-purple-500\/20 { background-color: rgba(147,51,234,0.1) !important; }
+
+/* Shadow additions for light mode cards */
+[data-theme="light"] .shadow-xl { box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important; }
+[data-theme="light"] .shadow-2xl { box-shadow: 0 8px 24px rgba(0,0,0,0.1) !important; }
+
+/* Scrollbar for light mode */
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c4c9d4;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Active nav / selected items — reduce intensity on light bg */
+[data-theme="light"] .bg-indigo-500\/15 { background-color: rgba(99,102,241,0.08) !important; }
+[data-theme="light"] .bg-indigo-500\/20 { background-color: rgba(99,102,241,0.08) !important; }
+[data-theme="light"] .bg-indigo-600 { background-color: #4f46e5 !important; }
+[data-theme="light"] .hover\:bg-indigo-500:hover { background-color: #4338ca !important; }
+
+/* Outgoing message bubble — keep indigo readable */
+[data-theme="light"] .bg-indigo-600.text-white { color: #ffffff !important; }
+
+/* Black overlay for modals */
+[data-theme="light"] .bg-black\/60 { background-color: rgba(0,0,0,0.3) !important; }
+
+/* SVG in pipeline visualization */
+[data-theme="light"] svg text { fill: #1a1e26; }
+[data-theme="light"] svg rect[fill="#1e293b"] { fill: #ffffff; }
+[data-theme="light"] svg path[stroke="#475569"] { stroke: #d8dbe1; }
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -51,6 +166,9 @@ body {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.85em;
 }
+[data-theme="light"] .formatted-text code {
+  background: rgba(0, 0, 0, 0.06);
+}
 .formatted-text pre {
   background: rgba(0, 0, 0, 0.3);
   padding: 8px 10px;
@@ -61,6 +179,9 @@ body {
   font-size: 0.85em;
   white-space: pre-wrap;
 }
+[data-theme="light"] .formatted-text pre {
+  background: rgba(0, 0, 0, 0.04);
+}
 .formatted-text a {
   text-decoration: underline;
 }
@@ -70,11 +191,23 @@ body {
 .formatted-out a:hover {
   color: #fff;
 }
+[data-theme="light"] .formatted-out a {
+  color: #4f46e5;
+}
+[data-theme="light"] .formatted-out a:hover {
+  color: #3730a3;
+}
 .formatted-in a {
   color: #818cf8; /* indigo-400 */
 }
 .formatted-in a:hover {
   color: #a5b4fc;
+}
+[data-theme="light"] .formatted-in a {
+  color: #4f46e5;
+}
+[data-theme="light"] .formatted-in a:hover {
+  color: #3730a3;
 }
 .formatted-text a[data-mention] {
   text-decoration: none;
@@ -83,8 +216,14 @@ body {
 .formatted-out a[data-mention] {
   color: #c4b5fd; /* purple-300 */
 }
+[data-theme="light"] .formatted-out a[data-mention] {
+  color: #7c3aed;
+}
 .formatted-in a[data-mention] {
   color: #a78bfa; /* purple-400 */
+}
+[data-theme="light"] .formatted-in a[data-mention] {
+  color: #7c3aed;
 }
 .formatted-text .spoiler {
   background: #475569;
@@ -92,6 +231,9 @@ body {
   border-radius: 2px;
   cursor: pointer;
   transition: color 0.2s;
+}
+[data-theme="light"] .formatted-text .spoiler {
+  background: #e2e5ea;
 }
 .formatted-text .spoiler:hover,
 .formatted-text .spoiler:active {

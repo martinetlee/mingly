@@ -836,7 +836,8 @@ export default function Shield() {
                 const allIds = ['$input', ...pipelineData.nodes.map(n => n.id), '$result']
                 const pos: Record<string, {x: number, y: number}> = {}
                 const totalLayers = maxLayer + 3 // $input + node layers + $result
-                const totalHeight = maxNodesInLayer * (nodeH + nodeGap) - nodeGap + padY * 2
+                const hasShortCircuit = pipelineData.nodes.some(n => n.short_circuit)
+                const totalHeight = maxNodesInLayer * (nodeH + nodeGap) - nodeGap + padY * 2 + (hasShortCircuit ? 50 : 0)
                 const totalWidth = totalLayers * (nodeW + layerGap) - layerGap + padX * 2
 
                 // $input position
@@ -870,6 +871,9 @@ export default function Shield() {
                         <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
                           <path d="M0,0 L10,3 L0,6" fill="#475569" />
                         </marker>
+                        <marker id="arrow-sc" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                          <path d="M0,0 L10,3 L0,6" fill="#fbbf24" />
+                        </marker>
                       </defs>
 
                       {/* Edges */}
@@ -899,13 +903,37 @@ export default function Shield() {
                         <text x={nodeW/2} y={nodeH/2 + 10} textAnchor="middle" dominantBaseline="middle" fill="#64748b" fontSize={8}>Message</text>
                       </g>
 
+                      {/* Short-circuit bypass arrows (dashed, routed below the graph) */}
+                      {pipelineData.nodes.map(node => {
+                        if (!node.short_circuit) return null
+                        const from = pos[node.id]
+                        const to = pos['$result']
+                        if (!from || !to) return null
+                        const x1 = from.x
+                        const y1 = from.y + nodeH / 2
+                        const x2 = to.x
+                        const y2 = to.y + nodeH / 2
+                        const bypassY = totalHeight - 12
+                        return (
+                          <g key={`sc-${node.id}`}>
+                            <path
+                              d={`M${x1},${y1} L${x1},${bypassY - 8} Q${x1},${bypassY} ${x1 + 8},${bypassY} L${x2 - 8},${bypassY} Q${x2},${bypassY} ${x2},${bypassY - 8} L${x2},${y2}`}
+                              fill="none" stroke="#fbbf24" strokeWidth={1.2} strokeDasharray="4,3"
+                              markerEnd="url(#arrow-sc)"
+                            />
+                            <text x={(x1 + x2) / 2} y={bypassY - 4} textAnchor="middle" fill="#fbbf24" fontSize={7}>short-circuit</text>
+                          </g>
+                        )
+                      })}
+
                       {/* Pipeline nodes */}
                       {pipelineData.nodes.map(node => {
                         const p = pos[node.id]
                         if (!p) return null
                         const isSelected = selectedNode === node.id
                         const isOutput = node.id === pipelineData.output
-                        const strokeColor = isSelected ? '#22d3ee' : isOutput ? 'rgba(34,211,238,0.5)' : '#475569'
+                        const hasShortCircuit = !!node.short_circuit
+                        const strokeColor = isSelected ? '#22d3ee' : isOutput ? 'rgba(34,211,238,0.5)' : hasShortCircuit ? 'rgba(251,191,36,0.5)' : '#475569'
                         const fillColor = isSelected ? 'rgba(34,211,238,0.1)' : isOutput ? 'rgba(34,211,238,0.07)' : '#1e293b'
                         const typeColor = node.type === 'llm' ? '#818cf8' : node.type === 'script' ? '#fbbf24' : '#34d399'
                         return (
@@ -916,8 +944,11 @@ export default function Shield() {
                             className="cursor-pointer"
                           >
                             <rect width={nodeW} height={nodeH} rx={8} fill={fillColor} stroke={strokeColor} strokeWidth={isSelected ? 2 : 1.5} />
-                            <text x={nodeW/2} y={nodeH/2 - 4} textAnchor="middle" dominantBaseline="middle" fill="#e2e8f0" fontSize={11} fontWeight={500}>{node.id}</text>
-                            <text x={nodeW/2} y={nodeH/2 + 10} textAnchor="middle" dominantBaseline="middle" fill={typeColor} fontSize={9}>{node.type}</text>
+                            <text x={nodeW/2} y={hasShortCircuit ? nodeH/2 - 8 : nodeH/2 - 4} textAnchor="middle" dominantBaseline="middle" fill="#e2e8f0" fontSize={11} fontWeight={500}>{node.id}</text>
+                            <text x={nodeW/2} y={hasShortCircuit ? nodeH/2 + 4 : nodeH/2 + 10} textAnchor="middle" dominantBaseline="middle" fill={typeColor} fontSize={9}>{node.type}</text>
+                            {hasShortCircuit && (
+                              <text x={nodeW/2} y={nodeH/2 + 16} textAnchor="middle" dominantBaseline="middle" fill="#fbbf24" fontSize={7}>⚡ short-circuit</text>
+                            )}
                           </g>
                         )
                       })}
@@ -975,6 +1006,33 @@ export default function Shield() {
                       </>}
                     </div>
 
+                    {/* Params for script nodes — show right after config fields */}
+                    {node.config.params && Object.keys(node.config.params).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Parameters</h4>
+                        <div className="rounded-lg bg-slate-900 border border-slate-700 p-3 space-y-1.5">
+                          {Object.entries(node.config.params).map(([key, val]) => (
+                            <div key={key} className="flex items-start gap-2">
+                              <span className="text-[11px] text-slate-500 font-mono whitespace-nowrap">{key}:</span>
+                              <span className="text-[11px] text-slate-300">
+                                {Array.isArray(val) ? (
+                                  <span className="flex flex-wrap gap-1">
+                                    {(val as string[]).map((v, i) => (
+                                      <span key={i} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono">{String(v)}</span>
+                                    ))}
+                                  </span>
+                                ) : typeof val === 'number' ? (
+                                  <span className="font-mono">{val}</span>
+                                ) : (
+                                  String(val)
+                                )}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Full prompt */}
                     {node.config.prompt && (
                       <div>
@@ -1021,13 +1079,6 @@ export default function Shield() {
                       </div>
                     )}
 
-                    {/* Params for script nodes */}
-                    {node.config.params && Object.keys(node.config.params).length > 0 && (
-                      <div>
-                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Parameters</h4>
-                        <pre className="whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-900 rounded-lg p-3 border border-slate-700">{JSON.stringify(node.config.params, null, 2)}</pre>
-                      </div>
-                    )}
                   </div>
                 )
               })()}

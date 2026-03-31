@@ -98,9 +98,7 @@ def init_cloud_sync_manager() -> "CloudSyncManager":
 class SyncResult:
     status: str = "pending"  # success, failed, not_configured
     error: Optional[str] = None
-    pipeline_updated: bool = False
-    scenarios_updated: bool = False
-    signatures_updated: bool = False
+    files_updated: list = None  # names of files that were updated
     reports_submitted: int = 0
     flags_submitted: int = 0
     scan_results_submitted: int = 0
@@ -139,44 +137,73 @@ class CloudSyncManager:
                 result.error = "Could not reach cloud server"
                 return result
 
-            # 2. Download changed assets
-            from backend.scam.pipeline import get_pipeline_manager
-            mgr = get_pipeline_manager()
-            local_pipeline_version = mgr.get_config().version if mgr else ""
+            # 2. Download changed files
+            files = manifest.get("files", [])
+            updated_files = []
 
-            if manifest.get("pipeline_version", "") != local_pipeline_version:
-                pipeline_data = await self._download("/sync/pipeline")
-                if pipeline_data:
-                    (DATA_DIR / "scam_pipeline.json").write_text(
-                        json.dumps(pipeline_data, indent=2, ensure_ascii=False), encoding="utf-8"
-                    )
-                    if mgr:
-                        mgr.reload()
-                    result.pipeline_updated = True
+            for file_info in files:
+                fname = file_info.get("name", "")
+                remote_version = file_info.get("version", "")
+                endpoint = file_info.get("endpoint", "")
+                file_type = file_info.get("type", "json")
 
-            local_scenarios_version = self._get_local_version(DATA_DIR / "scenarios.json")
-            if manifest.get("scenarios_version", "") != local_scenarios_version:
-                scenarios_data = await self._download("/sync/scenarios")
-                if scenarios_data:
-                    (DATA_DIR / "scenarios.json").write_text(
-                        json.dumps(scenarios_data, indent=2, ensure_ascii=False), encoding="utf-8"
-                    )
-                    # Invalidate cached scenarios
-                    from backend.scam.tools.search_scenarios import _load_scenarios
-                    import backend.scam.tools.search_scenarios as sc_mod
-                    sc_mod._cached_scenarios = None
-                    result.scenarios_updated = True
+                if not fname or not endpoint:
+                    continue
 
-            local_sigs_version = self._get_local_version(DATA_DIR / "scam_signatures.json")
-            if manifest.get("signatures_version", "") != local_sigs_version:
-                sigs_data = await self._download("/sync/signatures")
-                if sigs_data:
-                    from backend.scam.pipeline import save_signatures, _load_signatures_file
-                    save_signatures(sigs_data)
-                    # Reload signatures into the live pipeline config
-                    if mgr:
-                        _load_signatures_file(mgr.get_config())
-                    result.signatures_updated = True
+                # For model bundles, check version via thresholds.json inside the domain dir
+                if file_type == "model_bundle":
+                    domain = fname.replace("ml_models/", "").replace(".zip", "")
+                    local_version = self._get_local_version(DATA_DIR / "ml_models" / domain / "thresholds.json")
+                else:
+                    local_version = self._get_local_version(DATA_DIR / fname)
+
+                if remote_version == local_version:
+                    continue
+
+                if file_type == "model_bundle":
+                    success = await self._download_model_bundle(endpoint, domain, remote_version)
+                    if success:
+                        updated_files.append(fname)
+                        logger.info("Synced model bundle %s: %s → %s", domain, local_version or "(none)", remote_version)
+                else:
+                    data = await self._download(endpoint)
+                    if data:
+                        target = DATA_DIR / fname
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(
+                            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                        )
+                        updated_files.append(fname)
+                        logger.info("Synced %s: %s → %s", fname, local_version or "(none)", remote_version)
+
+            result.files_updated = updated_files
+
+            # Post-download hooks for specific files
+            if updated_files:
+                from backend.scam.pipeline import get_pipeline_manager
+                mgr = get_pipeline_manager()
+
+                if "scam_pipeline.json" in updated_files and mgr:
+                    mgr.reload()
+
+                if "scam_signatures.json" in updated_files and mgr:
+                    from backend.scam.pipeline import _load_signatures_file
+                    _load_signatures_file(mgr.get_config())
+
+                # Reload ML ensemble if any model bundles were updated
+                model_updated = any(f.startswith("ml_models/") for f in updated_files)
+                if model_updated:
+                    try:
+                        from backend.scam.tools.ml_prefilter import reload_ensemble
+                        reload_ensemble()
+                    except ImportError:
+                        pass
+
+                # Invalidate search library cache for any updated knowledge base files
+                from backend.scam.tools.search_library import invalidate_cache
+                for fname in updated_files:
+                    if fname not in ("scam_pipeline.json", "scam_signatures.json"):
+                        invalidate_cache(fname)
 
             # 3. Upload pending reports
             reports_count = await self._upload_pending_reports()
@@ -190,13 +217,16 @@ class CloudSyncManager:
             scans_count = await self._upload_scan_results()
             result.scan_results_submitted = scans_count
 
+            # 6. Upload analytics
+            await self._upload_analytics()
+
             # Record sync time
             self._last_synced_at = datetime.utcnow()
             self._save_sync_time()
             result.status = "success"
-            logger.info("Cloud sync completed: pipeline=%s scenarios=%s sigs=%s reports=%d flags=%d scans=%d",
-                        result.pipeline_updated, result.scenarios_updated,
-                        result.signatures_updated, result.reports_submitted, result.flags_submitted,
+            logger.info("Cloud sync completed: %d files updated (%s), reports=%d flags=%d scans=%d",
+                        len(result.files_updated or []), ", ".join(result.files_updated or []),
+                        result.reports_submitted, result.flags_submitted,
                         result.scan_results_submitted)
 
         except Exception as e:
@@ -281,6 +311,45 @@ class CloudSyncManager:
                 return None
         except Exception:
             return None
+
+    async def _download_model_bundle(self, path: str, domain: str, version: str) -> bool:
+        """Download a model bundle (zip) and extract to DATA_DIR/ml_models/<domain>/."""
+        import zipfile
+        import io
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(
+                    f"{self._base_url}{path}",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                if not resp.is_success:
+                    logger.warning("Model bundle download failed for %s: %d", domain, resp.status_code)
+                    return False
+
+                # Extract zip to target directory
+                target_dir = DATA_DIR / "ml_models" / domain
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    zf.extractall(target_dir)
+
+                # Write version to thresholds.json if not already there
+                thresholds_file = target_dir / "thresholds.json"
+                if thresholds_file.exists():
+                    import json as _json
+                    t = _json.loads(thresholds_file.read_text())
+                    t["version"] = version
+                    thresholds_file.write_text(_json.dumps(t, indent=2))
+                else:
+                    thresholds_file.write_text(json.dumps({"version": version}))
+
+                logger.info("Extracted model bundle for domain '%s' to %s", domain, target_dir)
+                return True
+
+        except Exception as e:
+            logger.warning("Failed to download model bundle for %s: %s", domain, e)
+            return False
 
     async def _upload_pending_reports(self) -> int:
         from backend.db.database import AsyncSessionLocal
@@ -420,6 +489,28 @@ class CloudSyncManager:
                 logger.warning("Failed to upload scan results: %s", e)
 
             return 0
+
+    async def _upload_analytics(self):
+        """Upload pending analytics periods to cloud."""
+        from backend.scam.analytics import get_analytics_tracker
+        tracker = get_analytics_tracker()
+
+        periods = await tracker.get_pending_periods()
+        if not periods:
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/analytics",
+                    json={"periods": periods},
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                if resp.is_success:
+                    await tracker.mark_synced([p["period_start"] for p in periods])
+                    logger.info("Uploaded %d analytics periods", len(periods))
+        except Exception as e:
+            logger.warning("Failed to upload analytics: %s", e)
 
     def _get_local_version(self, path) -> str:
         try:

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'reac
 import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
+import { useTheme } from '../hooks/useTheme'
 
 // ---------------------------------------------------------------------------
 // API helpers (self-contained so we can handle SSE streaming)
@@ -456,6 +457,7 @@ function TagsManager() {
 // ---------------------------------------------------------------------------
 
 export default function Settings() {
+  const themeHook = useTheme()
   // Tab state
   const [settingsTab, setSettingsTab] = useState<'general' | 'tags'>('general')
 
@@ -843,7 +845,7 @@ export default function Settings() {
             <section className="mb-8 max-w-xl">
               <h2 className="mb-1 text-sm font-medium text-slate-300">AI Models</h2>
               <p className="mb-4 text-xs text-slate-400">
-                Select the orchestrator model that powers AI features in Mingly.
+                Select the orchestrator model that powers AI features in Common Defense.
               </p>
 
               <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
@@ -1166,6 +1168,36 @@ export default function Settings() {
                     Selected: {userOrgs.join(', ')}
                   </p>
                 )}
+              </div>
+            </section>
+
+            {/* ── Appearance ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Appearance</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Choose between dark and light mode.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => themeHook.setTheme('dark')}
+                  className={`rounded-lg px-4 py-2 text-xs font-medium transition-colors ${
+                    themeHook.theme === 'dark'
+                      ? 'bg-indigo-600 text-white'
+                      : 'border border-slate-600 bg-slate-700 text-slate-300 hover:bg-slate-600'
+                  }`}
+                >
+                  Dark
+                </button>
+                <button
+                  onClick={() => themeHook.setTheme('light')}
+                  className={`rounded-lg px-4 py-2 text-xs font-medium transition-colors ${
+                    themeHook.theme === 'light'
+                      ? 'bg-indigo-600 text-white'
+                      : 'border border-slate-600 bg-slate-700 text-slate-300 hover:bg-slate-600'
+                  }`}
+                >
+                  Light
+                </button>
               </div>
             </section>
 

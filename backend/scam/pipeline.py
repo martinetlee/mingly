@@ -80,6 +80,8 @@ class PipelineNodeConfig:
     type: str  # "llm", "script", "classifier"
     config: dict = field(default_factory=dict)
     short_circuit: Optional[dict] = None
+    output_forward: Optional[list] = None  # fields to forward to downstream nodes (None = all)
+    output_trace_only: Optional[list] = None  # fields to keep in trace only (not forwarded)
 
 
 @dataclass
@@ -164,6 +166,8 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
                 type=n["type"],
                 config=n.get("config", {}),
                 short_circuit=n.get("short_circuit"),
+                output_forward=n.get("output_forward"),
+                output_trace_only=n.get("output_trace_only"),
             ))
         for e in data["edges"]:
             edges.append(PipelineEdge(from_node=e["from"], to_node=e["to"]))
@@ -293,9 +297,11 @@ class PipelineManager:
         try:
             raw = json.loads(_PIPELINE_FILE.read_text(encoding="utf-8"))
             self._config = _parse_pipeline(raw)
-            logger.info("Loaded scam pipeline v%s (%d categories, %d examples, %d signature patterns)",
-                        self._config.version, len(self._config.categories),
-                        len(self._config.few_shot_examples), len(self._config.signatures.patterns))
+            logger.info("Loaded scam pipeline v%s (%d categories, %d nodes)",
+                        self._config.version, len(self._config.categories), len(self._config.nodes))
+            # Register tools defined in the pipeline JSON
+            from backend.scam.tools import register_tools_from_pipeline
+            register_tools_from_pipeline(raw)
         except Exception as e:
             logger.error("Failed to load pipeline: %s", e)
             self._config = _parse_pipeline({})
