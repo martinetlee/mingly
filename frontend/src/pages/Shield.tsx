@@ -5,6 +5,15 @@ import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types
 import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
+function stripFormatting(text: string): string {
+  return text
+    .replace(/\[(\*{0,2})(.*?)\1\]\([^)]*\)/g, '$2')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/[*_~`]/g, '')
+}
+
 function timeAgo(iso: string): string {
   // Backend stores dates as UTC without Z suffix — ensure correct parsing
   const dateStr = iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z'
@@ -547,6 +556,9 @@ export default function Shield() {
                   const isTraceOpen = expandedTrace === traceKey
                   const hasTrace = msg.trace_json || msg.llm_prompt || msg.llm_response
                   const parsedTrace = msg.trace_json ? (() => { try { return JSON.parse(msg.trace_json) } catch { return null } })() : null
+                  const isFailed = parsedTrace?.status === 'failed'
+                  const isShortCircuited = parsedTrace?.status === 'short_circuited'
+                  const shortCircuitNode = parsedTrace?.short_circuit?.node_id
                   return (
                     <>
                       <tr key={traceKey} className="hover:bg-slate-800/50 transition-colors">
@@ -568,23 +580,39 @@ export default function Shield() {
                           </button>
                         </td>
                         <td className="px-3 py-2.5">
-                          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                            isScam ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'
-                          }`}>
-                            {isScam ? (
-                              <><ShieldAlert size={10} /> Scam</>
-                            ) : (
-                              <><ShieldCheck size={10} /> Safe</>
-                            )}
+                          {isFailed ? (
+                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-500/20 text-orange-300">
+                              Scan Failed
+                            </span>
+                          ) : isShortCircuited ? (
+                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-300">
+                              ⚡ {shortCircuitNode || 'short-circuit'}
+                            </span>
+                          ) : (
+                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                              isScam ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'
+                            }`}>
+                              {isScam ? (
+                                <><ShieldAlert size={10} /> Scam</>
+                              ) : (
+                                <><ShieldCheck size={10} /> Safe</>
+                              )}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className="text-xs text-slate-400 truncate max-w-[280px] block" title={msg.text ? stripFormatting(msg.text) : undefined}>
+                            {msg.text ? (() => { const t = stripFormatting(msg.text); return t.length > 80 ? t.slice(0, 80) + '…' : t })() : '—'}
                           </span>
                         </td>
                         <td className="px-3 py-2.5">
-                          <span className="text-xs text-slate-400 truncate max-w-[280px] block" title={msg.text || undefined}>
-                            {msg.text ? (msg.text.length > 80 ? msg.text.slice(0, 80) + '…' : msg.text) : '—'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <ConfidencePill value={msg.scam_score} />
+                          {isFailed ? (
+                            <span className="text-[10px] text-orange-400">—</span>
+                          ) : isShortCircuited ? (
+                            <span className="text-[10px] text-amber-400">⚡</span>
+                          ) : (
+                            <ConfidencePill value={msg.scam_score} />
+                          )}
                         </td>
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-0.5">
