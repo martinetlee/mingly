@@ -801,6 +801,9 @@ export const createScamReport = (data: {
 export const getScamReports = () =>
   request<{ reports: ScamReport[] }>('/api/scam/reports')
 
+export const triggerMassScan = (maxMessages: number = 200, maxAgeHours: number = 48) =>
+  request<{ status: string; messages_queued: number }>(`/api/scam/mass-scan?max_messages=${maxMessages}&max_age_hours=${maxAgeHours}`, { method: 'POST' })
+
 // ── Shield Cloud Sync ──
 
 export const getShieldCloudSettings = () =>

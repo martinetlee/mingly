@@ -430,6 +430,15 @@ async def list_requests(status: Optional[str] = None):
 # Pipeline
 # ---------------------------------------------------------------------------
 
+@router.post("/mass-scan")
+async def mass_scan(max_messages: int = Query(200), max_age_hours: int = Query(48)):
+    """Trigger scam scan on recent unscanned messages. Developer mode only."""
+    from backend.telegram.sync import scan_unscanned_messages
+    import asyncio
+    count = await scan_unscanned_messages(max_messages=max_messages, max_age_hours=max_age_hours)
+    return {"status": "queued", "messages_queued": count}
+
+
 def _get_pipeline_tools() -> list:
     """Read tools array from the raw pipeline JSON file."""
     from backend.config import DATA_DIR

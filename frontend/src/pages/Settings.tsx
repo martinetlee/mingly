@@ -1201,6 +1201,28 @@ export default function Settings() {
               </div>
             </section>
 
+            {/* ── Developer Mode ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Developer Mode</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Enable advanced features for debugging and testing the scam detection pipeline.
+              </p>
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={localStorage.getItem('developer_mode') === 'true'}
+                  onChange={(e) => {
+                    localStorage.setItem('developer_mode', String(e.target.checked))
+                    // Force re-render
+                    window.dispatchEvent(new Event('developer_mode_changed'))
+                    setSettingsTab(settingsTab)
+                  }}
+                  className="rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-0 h-4 w-4"
+                />
+                <span className="text-xs text-slate-300">Enable developer mode</span>
+              </label>
+            </section>
+
             {/* ── Keyboard Shortcuts ── */}
             <section className="mt-8 max-w-xl">
               <h2 className="mb-1 text-sm font-medium text-slate-300">Keyboard Shortcuts</h2>

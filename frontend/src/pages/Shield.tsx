@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw } from 'lucide-react'
 import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync } from '../api/client'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function timeAgo(iso: string): string {
@@ -41,6 +41,14 @@ type Tab = 'flagged' | 'scanned' | 'reports' | 'pipeline'
 export default function Shield() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('flagged')
+  const [devMode, setDevMode] = useState(() => localStorage.getItem('developer_mode') === 'true')
+
+  // Listen for developer mode changes from Settings
+  useEffect(() => {
+    const handler = () => setDevMode(localStorage.getItem('developer_mode') === 'true')
+    window.addEventListener('developer_mode_changed', handler)
+    return () => window.removeEventListener('developer_mode_changed', handler)
+  }, [])
 
   // Flagged scammers
   const [flags, setFlags] = useState<ScamFlag[]>([])
@@ -160,6 +168,8 @@ export default function Shield() {
   }
 
   const [rescanning, setRescanning] = useState<Set<string>>(new Set())
+  const [massScanning, setMassScanning] = useState(false)
+  const [massScanResult, setMassScanResult] = useState<string | null>(null)
 
   const handleRescan = async (chatId: number, tgMessageId: number) => {
     const key = `${chatId}-${tgMessageId}`
@@ -376,28 +386,52 @@ export default function Shield() {
             <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{reports.length}</span>
           )}
         </button>
-        <button
-          onClick={() => setTab('pipeline')}
-          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
-            tab === 'pipeline'
-              ? 'border-cyan-400 text-cyan-400'
-              : 'border-transparent text-slate-500 hover:text-slate-300'
-          }`}
-        >
-          Pipeline
-        </button>
+        {devMode && (
+          <button
+            onClick={() => setTab('pipeline')}
+            className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+              tab === 'pipeline'
+                ? 'border-cyan-400 text-cyan-400'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            Pipeline
+          </button>
+        )}
 
-        {/* Scam-only filter for scanned tab */}
+        {/* Scam-only filter + mass scan for scanned tab */}
         {tab === 'scanned' && (
-          <label className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={scamOnly}
-              onChange={(e) => setScamOnly(e.target.checked)}
-              className="rounded border-slate-600 bg-slate-700 text-red-500 focus:ring-0 focus:ring-offset-0 h-3 w-3"
-            />
-            Scam only ({scamCount})
-          </label>
+          <div className="ml-auto flex items-center gap-3">
+            {devMode && (
+              <>
+                <button
+                  disabled={massScanning}
+                  onClick={async () => {
+                    setMassScanning(true); setMassScanResult(null)
+                    try {
+                      const r = await triggerMassScan()
+                      setMassScanResult(`${r.messages_queued} messages queued`)
+                      setTimeout(() => loadScanned(scannedPage), 5000)
+                    } catch { setMassScanResult('Failed') }
+                    finally { setMassScanning(false) }
+                  }}
+                  className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                >
+                  {massScanning ? 'Scanning…' : 'Mass Scan'}
+                </button>
+                {massScanResult && <span className="text-[10px] text-slate-400">{massScanResult}</span>}
+              </>
+            )}
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={scamOnly}
+                onChange={(e) => setScamOnly(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-700 text-red-500 focus:ring-0 focus:ring-offset-0 h-3 w-3"
+              />
+              Scam only ({scamCount})
+            </label>
+          </div>
         )}
       </div>
 
@@ -501,7 +535,7 @@ export default function Shield() {
                   <th className="px-6 py-2 font-medium">Sent By</th>
                   <th className="px-3 py-2 font-medium">Chat</th>
                   <th className="px-3 py-2 font-medium">Verdict</th>
-                  <th className="px-3 py-2 font-medium">Reason</th>
+                  <th className="px-3 py-2 font-medium">Message</th>
                   <th className="px-3 py-2 font-medium">Confidence</th>
                   <th className="px-3 py-2 font-medium w-8"></th>
                 </tr>
@@ -545,8 +579,8 @@ export default function Shield() {
                           </span>
                         </td>
                         <td className="px-3 py-2.5">
-                          <span className="text-xs text-slate-400 truncate max-w-[220px] block" title={msg.scam_reason || undefined}>
-                            {msg.scam_reason || '—'}
+                          <span className="text-xs text-slate-400 truncate max-w-[280px] block" title={msg.text || undefined}>
+                            {msg.text ? (msg.text.length > 80 ? msg.text.slice(0, 80) + '…' : msg.text) : '—'}
                           </span>
                         </td>
                         <td className="px-3 py-2.5">
@@ -599,6 +633,14 @@ export default function Shield() {
                                   </div>
                                 )}
 
+                                {/* Reason */}
+                                {msg.scam_reason && (
+                                  <div>
+                                    <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Reason</h4>
+                                    <p className="text-xs text-slate-400">{msg.scam_reason}</p>
+                                  </div>
+                                )}
+
                                 {/* Short-circuit info */}
                                 {parsedTrace.short_circuit && (
                                   <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-2">
@@ -630,13 +672,13 @@ export default function Shield() {
                                     {step.error && (
                                       <p className="text-[10px] text-red-400">{step.error}</p>
                                     )}
-                                    {step.prompt_sent && (
+                                    {devMode && step.prompt_sent && (
                                       <details className="text-[10px]">
                                         <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show prompt</summary>
                                         <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-48 overflow-y-auto">{step.prompt_sent}</pre>
                                       </details>
                                     )}
-                                    {step.input && (
+                                    {devMode && step.input && (
                                       <details className="text-[10px]">
                                         <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show input</summary>
                                         <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-48 overflow-y-auto">{typeof step.input === 'string' ? step.input : JSON.stringify(step.input, null, 2)}</pre>
@@ -654,13 +696,13 @@ export default function Shield() {
                                         ))}
                                       </div>
                                     )}
-                                    {step.raw_response && (
+                                    {devMode && step.raw_response && (
                                       <details className="text-[10px]">
                                         <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show response</summary>
                                         <pre className="mt-1 whitespace-pre-wrap text-[11px] text-slate-400 bg-slate-950 rounded p-2 max-h-32 overflow-y-auto">{step.raw_response}</pre>
                                       </details>
                                     )}
-                                    {step.output && (
+                                    {devMode && step.output && (
                                       <details className="text-[10px]">
                                         <summary className="text-slate-500 cursor-pointer hover:text-slate-400">Show output</summary>
                                         <pre className="mt-1 whitespace-pre-wrap text-[11px] text-emerald-400/70 bg-slate-950 rounded p-2 max-h-24 overflow-y-auto">{JSON.stringify(step.output, null, 2)}</pre>
