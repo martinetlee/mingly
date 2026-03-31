@@ -91,6 +91,17 @@ if _NS_AVAILABLE:
         _center.setDelegate_(_delegate)
 
 
+def _strip_formatting(text: str) -> str:
+    """Strip Telegram markdown/HTML formatting to plain text for previews."""
+    import re as _re
+    text = _re.sub(r'\[(\*{0,2})(.*?)\1\]\([^)]*\)', r'\2', text)  # [**text**](url) → text
+    text = _re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **bold**
+    text = _re.sub(r'__(.*?)__', r'\1', text)  # __italic__
+    text = _re.sub(r'`([^`]*)`', r'\1', text)  # `code`
+    text = _re.sub(r'[*_~`]', '', text)  # leftover chars
+    return text
+
+
 def _send_native_notification(
     title: str, body: str, chat_id: Optional[int] = None
 ) -> None:
@@ -1034,7 +1045,7 @@ async def register_event_handlers() -> None:
             from backend.api.settings import get_notif_pref
             pref = get_notif_pref()
             if pref == "all" or (pref == "tracked" and chat.is_tracked):
-                body_text = (saved.text or "")[:100]
+                body_text = _strip_formatting((saved.text or ""))[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
                 _send_native_notification(chat.name, body, chat_id=event.chat_id)
 

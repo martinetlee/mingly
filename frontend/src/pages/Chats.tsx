@@ -52,6 +52,20 @@ function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName:
   )
 }
 
+/** Strip Telegram markdown/HTML formatting to plain text for previews. */
+function stripFormatting(text: string): string {
+  return text
+    // [**text**](url) or [text](url) → text
+    .replace(/\[(\*{0,2})(.*?)\1\]\([^)]*\)/g, '$2')
+    // **bold** or __italic__
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    // `code`
+    .replace(/`([^`]*)`/g, '$1')
+    // Remove leftover markdown chars
+    .replace(/[*_~`]/g, '')
+}
+
 function fmtDate(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
@@ -228,7 +242,7 @@ function ChatItem({
               {chat.last_message.sender_name && (
                 <span className="text-slate-400">{chat.last_message.sender_name}: </span>
               )}
-              {chat.last_message.text || '[media]'}
+              {chat.last_message.text ? stripFormatting(chat.last_message.text) : '[media]'}
             </p>
           )}
         </div>
