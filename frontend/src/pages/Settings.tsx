@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations, getShieldCloudSettings, setShieldCloudSettings, getScamDetectionSettings, setScamDetectionSettings, triggerSync } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { Tag } from '../api/types'
 import { useTheme } from '../hooks/useTheme'
@@ -408,8 +408,22 @@ function TagsManager() {
 export default function Settings() {
   const themeHook = useTheme()
   const [devMode, setDevMode] = useState(() => localStorage.getItem('developer_mode') === 'true')
+
+  // Shield cloud sync state
+  const [shieldCloudUrl, setShieldCloudUrl] = useState('')
+  const [shieldApiKey, setShieldApiKey] = useState('')
+  const [shieldKeySet, setShieldKeySet] = useState(false)
+  const [shieldLastSynced, setShieldLastSynced] = useState<string | null>(null)
+  const [shieldSaving, setShieldSaving] = useState(false)
+  const [shieldSaveMsg, setShieldSaveMsg] = useState<string | null>(null)
+  const [shieldSyncing, setShieldSyncing] = useState(false)
+  const [shieldSyncResult, setShieldSyncResult] = useState<string | null>(null)
+
+  // Shield detection settings state
+  const [shieldMaxTokens, setShieldMaxTokens] = useState(200)
+
   // Tab state
-  const [settingsTab, setSettingsTab] = useState<'general' | 'tags'>('general')
+  const [settingsTab, setSettingsTab] = useState<'general' | 'tags' | 'shield'>('general')
 
   // Orchestrator state
   const [orchestratorId, setOrchestratorId] = useState<string | null>(null)
@@ -509,6 +523,20 @@ export default function Settings() {
 
     // Check Ollama status on mount
     refreshOllamaStatus()
+
+    // Load Shield cloud settings
+    getShieldCloudSettings()
+      .then((s) => {
+        setShieldCloudUrl(s.cloud_url)
+        setShieldKeySet(s.api_key_set)
+        setShieldLastSynced(s.last_synced_at)
+      })
+      .catch(() => {})
+    getScamDetectionSettings()
+      .then((s) => {
+        setShieldMaxTokens(s.max_tokens || 200)
+      })
+      .catch(() => {})
   }, [refreshOllamaStatus])
 
   // ── Orchestrator selection ──────────────────────────────────────────────
@@ -771,7 +799,7 @@ export default function Settings() {
         <h1 className="mb-4 text-lg font-semibold text-slate-100">Settings</h1>
         {/* Tab bar */}
         <div className="flex gap-1">
-          {(['general', 'tags'] as const).map((tab) => (
+          {(['general', 'tags', 'shield'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setSettingsTab(tab)}
@@ -1205,6 +1233,119 @@ export default function Settings() {
               Manage tags for organizing chats. Tags can be assigned to chats from the chat info panel.
             </p>
             <TagsManager />
+          </>
+        )}
+
+        {settingsTab === 'shield' && (
+          <>
+            {/* Cloud Sync */}
+            <section className="mb-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Cloud Sync</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Connect to the Common Defense cloud to receive pipeline updates, scam signatures, and scenario libraries. Your scan results and reports will be synced to improve detection for all users.
+              </p>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">Cloud API endpoint</label>
+                  <input
+                    type="url"
+                    placeholder="https://api.shield.commondefense.app/v1"
+                    value={shieldCloudUrl}
+                    onChange={(e) => { setShieldCloudUrl(e.target.value); setShieldSaveMsg(null) }}
+                    className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1">
+                    API key {shieldKeySet && !shieldApiKey && <span className="text-emerald-400">(set)</span>}
+                  </label>
+                  <input
+                    type="password"
+                    placeholder={shieldKeySet ? '••••••••' : 'Enter your API key'}
+                    value={shieldApiKey}
+                    onChange={(e) => { setShieldApiKey(e.target.value); setShieldSaveMsg(null) }}
+                    className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    disabled={shieldSaving}
+                    onClick={async () => {
+                      setShieldSaving(true); setShieldSaveMsg(null)
+                      try {
+                        await setShieldCloudSettings(shieldCloudUrl, shieldApiKey)
+                        setShieldSaveMsg('Saved')
+                        if (shieldApiKey) setShieldKeySet(true)
+                        setShieldApiKey('')
+                      } catch (err) {
+                        setShieldSaveMsg(err instanceof Error ? err.message : 'Failed')
+                      } finally { setShieldSaving(false) }
+                    }}
+                    className="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+                  >
+                    {shieldSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button
+                    disabled={shieldSyncing || !shieldCloudUrl}
+                    onClick={async () => {
+                      setShieldSyncing(true); setShieldSyncResult(null)
+                      try {
+                        const r = await triggerSync()
+                        setShieldSyncResult(r.status === 'success' ? 'Synced successfully' : r.error || r.status)
+                        if (r.status === 'success' || r.status === 'reloaded') {
+                          setShieldLastSynced(new Date().toISOString())
+                        }
+                      } catch (err) {
+                        setShieldSyncResult(err instanceof Error ? err.message : 'Failed')
+                      } finally { setShieldSyncing(false) }
+                    }}
+                    className="rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    {shieldSyncing ? 'Syncing…' : 'Sync Now'}
+                  </button>
+                  {shieldSaveMsg && <span className={`text-xs ${shieldSaveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{shieldSaveMsg}</span>}
+                  {shieldSyncResult && <span className={`text-xs ${shieldSyncResult.includes('success') ? 'text-emerald-400' : 'text-red-400'}`}>{shieldSyncResult}</span>}
+                </div>
+                {shieldLastSynced && (
+                  <p className="text-xs text-slate-500">
+                    Last synced: {new Date(shieldLastSynced.endsWith('Z') ? shieldLastSynced : shieldLastSynced + 'Z').toLocaleString()}
+                  </p>
+                )}
+              </div>
+            </section>
+
+            {/* Detection Settings */}
+            <section className="mb-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">Detection Settings</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Configure how the local scam detection pipeline runs.
+              </p>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-slate-400">Max tokens per LLM call</label>
+                  <input
+                    type="number"
+                    min={50}
+                    max={2000}
+                    step={50}
+                    value={shieldMaxTokens}
+                    onChange={(e) => setShieldMaxTokens(Number(e.target.value))}
+                    className="w-24 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={async () => {
+                      try {
+                        await setScamDetectionSettings('local_llm', '', '', shieldMaxTokens)
+                        setShieldSaveMsg('Detection settings saved')
+                      } catch { setShieldSaveMsg('Failed to save') }
+                    }}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            </section>
           </>
         )}
       </div>
