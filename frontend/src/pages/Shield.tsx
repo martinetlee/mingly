@@ -63,9 +63,10 @@ export default function Shield() {
   const [pipelineData, setPipelineData] = useState<{
     version: string
     updated_at: string
-    nodes: { id: string; type: string; config: Record<string, any>; short_circuit?: any }[]
+    nodes: { id: string; type: string; config: Record<string, any>; short_circuit?: any; output_forward?: string[]; output_trace_only?: string[] }[]
     edges: { from: string; to: string }[]
     output: string
+    tools?: { name: string; script: string; description?: string; script_params?: Record<string, any> }[]
   } | null>(null)
   const [loadingPipeline, setLoadingPipeline] = useState(true)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
@@ -1006,32 +1007,38 @@ export default function Shield() {
                       </>}
                     </div>
 
-                    {/* Params for script nodes — show right after config fields */}
-                    {node.config.params && Object.keys(node.config.params).length > 0 && (
-                      <div>
-                        <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Parameters</h4>
-                        <div className="rounded-lg bg-slate-900 border border-slate-700 p-3 space-y-1.5">
-                          {Object.entries(node.config.params).map(([key, val]) => (
-                            <div key={key} className="flex items-start gap-2">
-                              <span className="text-[11px] text-slate-500 font-mono whitespace-nowrap">{key}:</span>
-                              <span className="text-[11px] text-slate-300">
-                                {Array.isArray(val) ? (
-                                  <span className="flex flex-wrap gap-1">
-                                    {(val as string[]).map((v, i) => (
-                                      <span key={i} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono">{String(v)}</span>
-                                    ))}
-                                  </span>
-                                ) : typeof val === 'number' ? (
-                                  <span className="font-mono">{val}</span>
-                                ) : (
-                                  String(val)
-                                )}
-                              </span>
-                            </div>
-                          ))}
+                    {/* Params — from node config.params OR tool definition's script_params */}
+                    {(() => {
+                      const nodeParams = node.config.params && Object.keys(node.config.params).length > 0 ? node.config.params : null
+                      const toolDef = pipelineData.tools?.find(t => t.name === node.config.script)
+                      const params = nodeParams || toolDef?.script_params
+                      if (!params || Object.keys(params).length === 0) return null
+                      return (
+                        <div>
+                          <h4 className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Parameters</h4>
+                          <div className="rounded-lg bg-slate-900 border border-slate-700 p-3 space-y-1.5">
+                            {Object.entries(params).map(([key, val]) => (
+                              <div key={key} className="flex items-start gap-2">
+                                <span className="text-[11px] text-slate-500 font-mono whitespace-nowrap">{key}:</span>
+                                <span className="text-[11px] text-slate-300">
+                                  {Array.isArray(val) ? (
+                                    <span className="flex flex-wrap gap-1">
+                                      {(val as string[]).map((v, i) => (
+                                        <span key={i} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono">{String(v)}</span>
+                                      ))}
+                                    </span>
+                                  ) : typeof val === 'number' ? (
+                                    <span className="font-mono">{val}</span>
+                                  ) : (
+                                    String(val)
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )
+                    })()}
 
                     {/* Full prompt */}
                     {node.config.prompt && (

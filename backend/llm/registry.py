@@ -29,6 +29,13 @@ class LLMRegistry:
             raise KeyError(f"LLM instance {name!r} not registered")
         return self._instances[name]
 
+    def get_by_model(self, model_name: str) -> Optional[BaseLLMProvider]:
+        """Find an instance by its model name (e.g., 'qwen2.5:7b'). Returns None if not found."""
+        for cfg_name, cfg in self._configs.items():
+            if cfg.model == model_name:
+                return self._instances.get(cfg_name)
+        return None
+
     def get_any(self) -> Optional[BaseLLMProvider]:
         """Return any registered instance, or None."""
         for instance in self._instances.values():

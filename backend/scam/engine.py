@@ -353,7 +353,7 @@ async def _execute_llm_node(
     registry = get_registry()
     provider = None
     if model_requested:
-        provider = registry.get_by_name(model_requested) if hasattr(registry, 'get_by_name') else None
+        provider = registry.get_by_model(model_requested)
         if not provider:
             provider = registry.get_any()
             if provider:

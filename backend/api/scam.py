@@ -430,6 +430,17 @@ async def list_requests(status: Optional[str] = None):
 # Pipeline
 # ---------------------------------------------------------------------------
 
+def _get_pipeline_tools() -> list:
+    """Read tools array from the raw pipeline JSON file."""
+    from backend.config import DATA_DIR
+    import json as _json
+    try:
+        raw = _json.loads((DATA_DIR / "scam_pipeline.json").read_text(encoding="utf-8"))
+        return raw.get("tools", [])
+    except Exception:
+        return []
+
+
 @router.get("/pipeline")
 async def get_pipeline():
     """Return pipeline metadata and categories."""
@@ -446,9 +457,11 @@ async def get_pipeline():
             for c in config.categories
         ],
         "nodes": [
-            {"id": n.id, "type": n.type, "config": n.config, "short_circuit": n.short_circuit}
+            {"id": n.id, "type": n.type, "config": n.config, "short_circuit": n.short_circuit,
+             "output_forward": n.output_forward, "output_trace_only": n.output_trace_only}
             for n in config.nodes
         ],
+        "tools": _get_pipeline_tools(),
         "edges": [
             {"from": e.from_node, "to": e.to_node}
             for e in config.edges
