@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Outlet, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import ShortcutHelp from './ShortcutHelp'
 import GlobalSearch from './GlobalSearch'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import { useWebSocket } from '../hooks/useWebSocket'
+import type { WSEvent } from '../api/types'
 
 const NAV_ROUTES = ['/home', '/chats', '/contacts', '/organizations', '/tracked', '/shield', '/intelligence?tab=briefing', '/intelligence', '/settings']
 
@@ -31,6 +33,13 @@ export default function Layout() {
   )
 
   useKeyboardShortcuts(shortcuts)
+
+  // Handle global WebSocket events (e.g., notification clicks)
+  useWebSocket(useCallback((event: WSEvent) => {
+    if (event.type === 'navigate_to_chat') {
+      navigate(`/chats?chatId=${event.chat_id}`)
+    }
+  }, [navigate]))
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-900">

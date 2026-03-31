@@ -38,6 +38,34 @@ def set_webview_window(window):
     _webview_window = window
 
 
+def _handle_notification_click(chat_id):
+    """Handle notification click: bring app to front and navigate to chat via WebSocket."""
+    # Bring app window to front
+    try:
+        from AppKit import NSApplication
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+    # Navigate via WebSocket broadcast (thread-safe, works with React Router)
+    if chat_id:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(ws_manager.broadcast({
+                    "type": "navigate_to_chat",
+                    "chat_id": int(chat_id),
+                }))
+            else:
+                loop.run_until_complete(ws_manager.broadcast({
+                    "type": "navigate_to_chat",
+                    "chat_id": int(chat_id),
+                }))
+        except Exception:
+            pass
+
+
 if _NS_AVAILABLE:
     NSUserNotificationCenter = objc.lookUpClass("NSUserNotificationCenter")
     NSUserNotification = objc.lookUpClass("NSUserNotification")
@@ -53,23 +81,9 @@ if _NS_AVAILABLE:
         def userNotificationCenter_didActivateNotification_(
             self, center, notification
         ):
-            # Bring app window to front
-            try:
-                from AppKit import NSApplication
-                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            except Exception:
-                pass
-
             user_info = notification.userInfo()
             chat_id = user_info.get("chat_id") if user_info else None
-            if chat_id and _webview_window:
-                try:
-                    _webview_window.evaluate_js(
-                        f"window.history.pushState(null, '', '/chats?chatId={chat_id}');"
-                        f"window.dispatchEvent(new PopStateEvent('popstate'));"
-                    )
-                except Exception:
-                    pass
+            _handle_notification_click(chat_id)
 
     _delegate = _NotificationDelegate.alloc().init()
     _center = NSUserNotificationCenter.defaultUserNotificationCenter()

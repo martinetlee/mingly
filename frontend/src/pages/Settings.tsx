@@ -458,6 +458,7 @@ function TagsManager() {
 
 export default function Settings() {
   const themeHook = useTheme()
+  const [devMode, setDevMode] = useState(() => localStorage.getItem('developer_mode') === 'true')
   // Tab state
   const [settingsTab, setSettingsTab] = useState<'general' | 'tags'>('general')
 
@@ -1210,12 +1211,12 @@ export default function Settings() {
               <label className="flex items-center gap-3 cursor-pointer select-none">
                 <input
                   type="checkbox"
-                  checked={localStorage.getItem('developer_mode') === 'true'}
+                  checked={devMode}
                   onChange={(e) => {
-                    localStorage.setItem('developer_mode', String(e.target.checked))
-                    // Force re-render
+                    const checked = e.target.checked
+                    setDevMode(checked)
+                    localStorage.setItem('developer_mode', String(checked))
                     window.dispatchEvent(new Event('developer_mode_changed'))
-                    setSettingsTab(settingsTab)
                   }}
                   className="rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-0 h-4 w-4"
                 />
