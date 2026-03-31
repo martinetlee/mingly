@@ -68,6 +68,16 @@ def _extract_models_used(trace_json: Optional[str]) -> Optional[list]:
         return None
 
 
+def _extract_scan_status(trace_json: Optional[str]) -> str:
+    """Extract pipeline status (completed/failed/short_circuited) from trace."""
+    if not trace_json:
+        return "unknown"
+    try:
+        return json.loads(trace_json).get("status", "unknown")
+    except Exception:
+        return "unknown"
+
+
 _manager: Optional["CloudSyncManager"] = None
 
 
@@ -448,9 +458,13 @@ class CloudSyncManager:
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
+            from sqlalchemy import or_
             result = await db.execute(
                 select(Message).where(
-                    Message.scam_score.isnot(None),
+                    or_(
+                        Message.scam_score.isnot(None),
+                        Message.scam_trace_json.isnot(None),
+                    ),
                     Message.scam_synced_to_cloud == False,
                 ).order_by(Message.date.desc()).limit(100)
             )
@@ -466,6 +480,7 @@ class CloudSyncManager:
                     "scam_score": m.scam_score,
                     "scam_reason": m.scam_reason,
                     "scam_category": m.scam_category,
+                    "scan_status": _extract_scan_status(m.scam_trace_json),
                     "date": m.date.isoformat() if m.date else None,
                     "pipeline_version": _extract_pipeline_version(m.scam_trace_json),
                     "pipeline_input": _extract_pipeline_input(m.scam_trace_json),
