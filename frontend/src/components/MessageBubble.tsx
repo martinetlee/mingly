@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Clock, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy, User, MessageSquare, AtSign, Tag, ShieldBan } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
@@ -27,6 +27,11 @@ interface Props {
   /** Whether the sender is a known flagged scammer */
   isFlaggedSender?: boolean
   onReportScam?: (msg: Message) => void
+  /** Avatar context menu callbacks */
+  onOpenProfile?: (senderId: number) => void
+  onSendMessage?: (senderId: number) => void
+  onMention?: (senderId: number, senderName: string) => void
+  onRestrict?: (senderId: number) => void
 }
 
 // Common quick-reaction emojis (mirrors Telegram's default set)
@@ -161,6 +166,87 @@ function EmojiPicker({
 }
 
 /** Context menu dropdown for message actions */
+function AvatarContextMenu({
+  x,
+  y,
+  senderId,
+  senderName,
+  onClose,
+  onOpenProfile,
+  onSendMessage,
+  onMention,
+  onRestrict,
+}: {
+  x: number
+  y: number
+  senderId: number
+  senderName: string
+  onClose: () => void
+  onOpenProfile?: (senderId: number) => void
+  onSendMessage?: (senderId: number) => void
+  onMention?: (senderId: number, senderName: string) => void
+  onRestrict?: (senderId: number) => void
+}) {
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onClose])
+
+  // Adjust position so the menu doesn't overflow viewport
+  useEffect(() => {
+    const el = menuRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    if (rect.bottom > window.innerHeight) {
+      el.style.top = `${y - rect.height}px`
+    }
+    if (rect.right > window.innerWidth) {
+      el.style.left = `${x - rect.width}px`
+    }
+  }, [x, y])
+
+  const itemCls = "flex w-full items-center gap-2.5 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors"
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-[100] min-w-[170px] rounded-xl border border-slate-600 bg-slate-800 shadow-2xl py-1.5 animate-in fade-in zoom-in-95 duration-100"
+      style={{ left: x, top: y }}
+    >
+      {onOpenProfile && (
+        <button onClick={() => { onClose(); onOpenProfile(senderId) }} className={itemCls}>
+          <User size={14} /> Open Profile
+        </button>
+      )}
+      {onSendMessage && (
+        <button onClick={() => { onClose(); onSendMessage(senderId) }} className={itemCls}>
+          <MessageSquare size={14} /> Send Message
+        </button>
+      )}
+      {onMention && (
+        <button onClick={() => { onClose(); onMention(senderId, senderName) }} className={itemCls}>
+          <AtSign size={14} /> Mention
+        </button>
+      )}
+      {onRestrict && (
+        <>
+          <div className="my-1 border-t border-slate-700" />
+          <button onClick={() => { onClose(); onRestrict(senderId) }} className="flex w-full items-center gap-2.5 px-3 py-2 text-xs text-red-400 hover:bg-slate-700 transition-colors">
+            <ShieldBan size={14} /> Restrict
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ContextMenu({
   isOut,
   canEdit,
@@ -273,7 +359,7 @@ function ContextMenu({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender, onReportScam }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender, onReportScam, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
   const isOut = message.is_outgoing
   // Lazy photo download: if media_type is photo but media_url is missing, download it
   const [lazyPhotoUrl, setLazyPhotoUrl] = useState<string | null>(null)
@@ -307,6 +393,8 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [scamInfoExpanded, setScamInfoExpanded] = useState(false)
   const [translation, setTranslation] = useState<string | null>(null)
   const [translating, setTranslating] = useState(false)
+  const [showAvatarMenu, setShowAvatarMenu] = useState(false)
+  const [avatarMenuPos, setAvatarMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
 
   const handleCheckScam = useCallback(async () => {
     setScamChecking(true)
@@ -386,7 +474,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     <div
       className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 group/bubble ${highlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''}`}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setShowPicker(false); setShowContextMenu(false) }}
+      onMouseLeave={() => { setHovered(false); setShowPicker(false); setShowContextMenu(false); setShowAvatarMenu(false) }}
       onContextMenu={(e) => {
         if (onEdit || onDelete || onForward) {
           e.preventDefault()
@@ -455,12 +543,37 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
       {showAvatarColumn && (
         <div className="w-7 flex-shrink-0 mr-2 self-end">
           {showAvatar ? (
-            <SenderAvatar senderId={message.sender_id} senderName={message.sender_name} size={28} />
+            <SenderAvatar
+              senderId={message.sender_id}
+              senderName={message.sender_name}
+              size={28}
+              onContextMenu={message.sender_id ? (e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setAvatarMenuPos({ x: e.clientX, y: e.clientY })
+                setShowAvatarMenu(true)
+              } : undefined}
+            />
           ) : (
             /* Transparent spacer to keep messages aligned */
             <div className="w-7" />
           )}
         </div>
+      )}
+
+      {/* Avatar right-click context menu (portal to body to avoid clipping) */}
+      {showAvatarMenu && message.sender_id && (
+        <AvatarContextMenu
+          x={avatarMenuPos.x}
+          y={avatarMenuPos.y}
+          senderId={message.sender_id}
+          senderName={message.sender_name || `ID: ${message.sender_id}`}
+          onClose={() => setShowAvatarMenu(false)}
+          onOpenProfile={onOpenProfile}
+          onSendMessage={onSendMessage}
+          onMention={onMention}
+          onRestrict={isGroupChat ? onRestrict : undefined}
+        />
       )}
 
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>

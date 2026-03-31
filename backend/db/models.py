@@ -250,6 +250,20 @@ class ScamReport(Base):
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class ScamFeedback(Base):
+    __tablename__ = "scam_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feedback_type: Mapped[str] = mapped_column(String, nullable=False)  # general, false_positive, missed_scam, feature_request, bug
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    related_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    related_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    related_flag_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending, synced
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ScamAnalytics(Base):
     __tablename__ = "scam_analytics"
 

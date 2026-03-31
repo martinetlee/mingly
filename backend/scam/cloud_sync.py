@@ -101,6 +101,9 @@ def init_cloud_sync_manager() -> "CloudSyncManager":
             _manager._last_synced_at = datetime.fromisoformat(last_synced)
         except (ValueError, TypeError):
             pass
+    _manager._last_sync_status = prefs.get("shield_last_sync_status")
+    _manager._last_sync_error = prefs.get("shield_last_sync_error")
+    _manager._last_sync_details = prefs.get("shield_last_sync_details")
     return _manager
 
 
@@ -119,6 +122,9 @@ class CloudSyncManager:
         self._base_url: str = ""
         self._api_key: str = ""
         self._last_synced_at: Optional[datetime] = None
+        self._last_sync_status: Optional[str] = None  # success, failed
+        self._last_sync_error: Optional[str] = None
+        self._last_sync_details: Optional[dict] = None  # files_updated, reports, flags, scans counts
 
     def configure(self, base_url: str, api_key: str):
         self._base_url = base_url.rstrip("/") if base_url else ""
@@ -232,8 +238,16 @@ class CloudSyncManager:
 
             # Record sync time
             self._last_synced_at = datetime.utcnow()
-            self._save_sync_time()
             result.status = "success"
+            self._last_sync_status = "success"
+            self._last_sync_error = None
+            self._last_sync_details = {
+                "files_updated": result.files_updated or [],
+                "reports_submitted": result.reports_submitted,
+                "flags_submitted": result.flags_submitted,
+                "scan_results_submitted": result.scan_results_submitted,
+            }
+            self._save_sync_state()
             logger.info("Cloud sync completed: %d files updated (%s), reports=%d flags=%d scans=%d",
                         len(result.files_updated or []), ", ".join(result.files_updated or []),
                         result.reports_submitted, result.flags_submitted,
@@ -242,6 +256,10 @@ class CloudSyncManager:
         except Exception as e:
             result.status = "failed"
             result.error = str(e)
+            self._last_sync_status = "failed"
+            self._last_sync_error = str(e)
+            self._last_sync_details = None
+            self._save_sync_state()
             logger.warning("Cloud sync failed: %s", e)
 
         return result
@@ -291,6 +309,66 @@ class CloudSyncManager:
 
         except Exception as e:
             logger.warning("Failed to upload report %s: %s", report_id, e)
+
+    async def upload_dismissal(self, dismissal_data: dict):
+        """Upload a dismissal event (flag dismissed or scan cleared) to cloud."""
+        if not self.is_configured:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/dismissals",
+                    json={"dismissals": [dismissal_data]},
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                if resp.is_success:
+                    logger.info("Dismissal synced to cloud: %s", dismissal_data.get("telegram_id") or dismissal_data.get("tg_message_id"))
+        except Exception as e:
+            logger.warning("Failed to upload dismissal: %s", e)
+
+    async def upload_feedback(self, feedback_id: int):
+        """Try to upload a single feedback item immediately."""
+        if not self.is_configured:
+            return
+        try:
+            from backend.db.database import AsyncSessionLocal
+            from backend.db.models import ScamFeedback
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(ScamFeedback).where(ScamFeedback.id == feedback_id)
+                )
+                fb = result.scalars().first()
+                if not fb:
+                    return
+
+                payload = {
+                    "feedback": [{
+                        "id": fb.id,
+                        "feedback_type": fb.feedback_type,
+                        "message": fb.message,
+                        "related_chat_id": fb.related_chat_id,
+                        "related_message_id": fb.related_message_id,
+                        "related_flag_telegram_id": fb.related_flag_telegram_id,
+                        "created_at": fb.created_at.isoformat() if fb.created_at else None,
+                    }]
+                }
+
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        f"{self._base_url}/sync/feedback",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                    )
+                    if resp.is_success:
+                        fb.status = "synced"
+                        fb.synced_at = datetime.utcnow()
+                        await db.commit()
+                        logger.info("Feedback %d synced to cloud", feedback_id)
+
+        except Exception as e:
+            logger.warning("Failed to upload feedback %d: %s", feedback_id, e)
 
     # --- Internal helpers ---
 
@@ -534,8 +612,11 @@ class CloudSyncManager:
         except Exception:
             return ""
 
-    def _save_sync_time(self):
+    def _save_sync_state(self):
         from backend.api.settings import _load_prefs, _save_prefs
         prefs = _load_prefs()
         prefs["shield_last_synced_at"] = self._last_synced_at.isoformat() if self._last_synced_at else None
+        prefs["shield_last_sync_status"] = self._last_sync_status
+        prefs["shield_last_sync_error"] = self._last_sync_error
+        prefs["shield_last_sync_details"] = self._last_sync_details
         _save_prefs(prefs)

@@ -18,6 +18,9 @@ interface Props {
   onCancelEdit?: () => void
   onTyping?: () => void
   uploadProgress?: number | null // 0-1 fraction, null when not uploading
+  /** When set, this text is appended to the compose field and the value is cleared via onInsertConsumed */
+  insertText?: string | null
+  onInsertConsumed?: () => void
 }
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB per file
@@ -46,6 +49,8 @@ export default function ComposeBar({
   onCancelEdit,
   onTyping,
   uploadProgress,
+  insertText,
+  onInsertConsumed,
 }: Props) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
@@ -74,6 +79,15 @@ export default function ComposeBar({
       textareaRef.current?.focus()
     }
   }, [editingMessage])
+
+  // Insert text from external trigger (e.g. mention from avatar menu)
+  useEffect(() => {
+    if (insertText) {
+      setText((prev) => (prev ? prev + ' ' : '') + insertText)
+      textareaRef.current?.focus()
+      onInsertConsumed?.()
+    }
+  }, [insertText, onInsertConsumed])
 
   // Clean up preview URLs on unmount
   useEffect(() => {

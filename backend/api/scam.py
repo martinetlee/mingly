@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, Message, ScamCheckRequest, ScamFlag, ScamReport
+from backend.db.models import Chat, Message, ScamCheckRequest, ScamFeedback, ScamFlag, ScamReport
 from backend.scam.service import get_scam_service
 
 logger = logging.getLogger(__name__)
@@ -242,6 +242,7 @@ async def list_flags():
                     "flagged_message_chat_id": f.flagged_message_chat_id,
                     "flagged_message_id": f.flagged_message_id,
                     "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
+                    "synced_to_cloud": f.synced_to_cloud or False,
                     "last_chat_id": sender_info.get(f.telegram_id, {}).get("last_chat_id"),
                     "last_chat_name": sender_info.get(f.telegram_id, {}).get("last_chat_name"),
                     "last_message_id": sender_info.get(f.telegram_id, {}).get("last_message_id"),
@@ -306,6 +307,7 @@ async def list_scanned_messages(page: int = Query(1, ge=1), page_size: int = Que
                     "llm_prompt": m.scam_llm_prompt,
                     "llm_response": m.scam_llm_response,
                     "trace_json": m.scam_trace_json,
+                    "synced_to_cloud": m.scam_synced_to_cloud or False,
                 }
                 for m in msgs
             ],
@@ -315,14 +317,28 @@ async def list_scanned_messages(page: int = Query(1, ge=1), page_size: int = Que
 @router.delete("/flags/{telegram_id}")
 async def dismiss_flag(telegram_id: int):
     """Dismiss/clear a scam flag for a user."""
+    # Capture flag data before deletion (for cloud sync of dismissals)
+    dismissed_flag_data = None
     async with AsyncSessionLocal() as db:
+        flag_result = await db.execute(
+            select(ScamFlag).where(ScamFlag.telegram_id == telegram_id)
+        )
+        flag = flag_result.scalars().first()
+        if flag:
+            dismissed_flag_data = {
+                "telegram_id": flag.telegram_id,
+                "source": flag.source,
+                "confidence": flag.confidence,
+                "reason": flag.reason,
+                "category": flag.category,
+                "flagged_message_text": flag.flagged_message_text,
+                "flagged_at": flag.flagged_at.isoformat() if flag.flagged_at else None,
+            }
+
         await db.execute(
             delete(ScamFlag).where(ScamFlag.telegram_id == telegram_id)
         )
         # Also clear scam_score on messages from this sender
-        await db.execute(
-            select(Message).where(Message.sender_id == telegram_id)
-        )
         from sqlalchemy import update
         await db.execute(
             update(Message)
@@ -335,13 +351,55 @@ async def dismiss_flag(telegram_id: int):
     from backend.scam.analytics import get_analytics_tracker
     await get_analytics_tracker().record_flag_dismissed()
 
+    # Sync dismissal to cloud if enabled
+    if dismissed_flag_data:
+        from backend.api.settings import _load_prefs
+        prefs = _load_prefs()
+        if prefs.get("shield_sync_dismissals", False):
+            from backend.scam.cloud_sync import get_cloud_sync_manager
+            sync_mgr = get_cloud_sync_manager()
+            if sync_mgr and sync_mgr.is_configured:
+                try:
+                    await sync_mgr.upload_dismissal(dismissed_flag_data)
+                except Exception:
+                    pass  # Best-effort — will not block the dismissal
+
     return {"status": "dismissed", "telegram_id": telegram_id}
 
 
 @router.delete("/scanned-messages/{chat_id}/{tg_message_id}")
 async def clear_message_scam(chat_id: int, tg_message_id: int):
     """Clear scam score on a specific message."""
+    # Capture message scam data before clearing (for cloud sync of dismissals)
+    dismissed_scan_data = None
     async with AsyncSessionLocal() as db:
+        msg_result = await db.execute(
+            select(Message).where(
+                Message.chat_id == chat_id, Message.tg_message_id == tg_message_id
+            )
+        )
+        msg = msg_result.scalars().first()
+        if msg and msg.scam_score is not None:
+            # Parse trace JSON to include full pipeline execution details
+            trace_data = None
+            if msg.scam_trace_json:
+                try:
+                    trace_data = json.loads(msg.scam_trace_json)
+                except (json.JSONDecodeError, TypeError):
+                    trace_data = None
+
+            dismissed_scan_data = {
+                "chat_id": chat_id,
+                "tg_message_id": tg_message_id,
+                "sender_id": msg.sender_id,
+                "scam_score": msg.scam_score,
+                "scam_reason": msg.scam_reason,
+                "scam_category": msg.scam_category,
+                "llm_prompt": msg.scam_llm_prompt,
+                "llm_response": msg.scam_llm_response,
+                "trace": trace_data,
+            }
+
         from sqlalchemy import update
         await db.execute(
             update(Message)
@@ -352,6 +410,19 @@ async def clear_message_scam(chat_id: int, tg_message_id: int):
 
     from backend.scam.analytics import get_analytics_tracker
     await get_analytics_tracker().record_message_unflagged()
+
+    # Sync dismissal to cloud if enabled
+    if dismissed_scan_data:
+        from backend.api.settings import _load_prefs
+        prefs = _load_prefs()
+        if prefs.get("shield_sync_dismissals", False):
+            from backend.scam.cloud_sync import get_cloud_sync_manager
+            sync_mgr = get_cloud_sync_manager()
+            if sync_mgr and sync_mgr.is_configured:
+                try:
+                    await sync_mgr.upload_dismissal(dismissed_scan_data)
+                except Exception:
+                    pass
 
     return {"status": "cleared"}
 
@@ -518,6 +589,59 @@ async def sync_status():
         "last_synced_at": sync_mgr.last_synced_at.isoformat() if sync_mgr and sync_mgr.last_synced_at else None,
         "pipeline_version": mgr.get_config().version if mgr else None,
     }
+
+
+@router.get("/sync/history")
+async def sync_history():
+    """Get sync status summary — counts of synced vs unsynced items."""
+    from sqlalchemy import func, or_
+
+    async with AsyncSessionLocal() as db:
+        # Flags: synced vs total
+        flags_total_r = await db.execute(select(func.count()).select_from(ScamFlag))
+        flags_total = flags_total_r.scalar() or 0
+        flags_synced_r = await db.execute(
+            select(func.count()).select_from(ScamFlag).where(ScamFlag.synced_to_cloud == True)
+        )
+        flags_synced = flags_synced_r.scalar() or 0
+
+        # Reports: synced vs total
+        reports_total_r = await db.execute(select(func.count()).select_from(ScamReport))
+        reports_total = reports_total_r.scalar() or 0
+        reports_synced_r = await db.execute(
+            select(func.count()).select_from(ScamReport).where(ScamReport.synced_at.isnot(None))
+        )
+        reports_synced = reports_synced_r.scalar() or 0
+
+        # Scanned messages: synced vs total
+        scans_total_r = await db.execute(
+            select(func.count()).select_from(Message).where(
+                or_(Message.scam_score.isnot(None), Message.scam_trace_json.isnot(None))
+            )
+        )
+        scans_total = scans_total_r.scalar() or 0
+        scans_synced_r = await db.execute(
+            select(func.count()).select_from(Message).where(
+                or_(Message.scam_score.isnot(None), Message.scam_trace_json.isnot(None)),
+                Message.scam_synced_to_cloud == True,
+            )
+        )
+        scans_synced = scans_synced_r.scalar() or 0
+
+        # Last synced timestamp and status
+        from backend.scam.cloud_sync import get_cloud_sync_manager
+        sync_mgr = get_cloud_sync_manager()
+        last_synced = sync_mgr.last_synced_at.isoformat() if sync_mgr and sync_mgr.last_synced_at else None
+
+        return {
+            "last_synced_at": last_synced,
+            "last_sync_status": sync_mgr._last_sync_status if sync_mgr else None,
+            "last_sync_error": sync_mgr._last_sync_error if sync_mgr else None,
+            "last_sync_details": sync_mgr._last_sync_details if sync_mgr else None,
+            "flags": {"total": flags_total, "synced": flags_synced, "pending": flags_total - flags_synced},
+            "reports": {"total": reports_total, "synced": reports_synced, "pending": reports_total - reports_synced},
+            "scans": {"total": scans_total, "synced": scans_synced, "pending": scans_total - scans_synced},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -726,8 +850,84 @@ async def list_reports():
                     "scam_category": r.scam_category,
                     "custom_category": r.custom_category,
                     "status": r.status,
+                    "synced_at": r.synced_at.isoformat() if r.synced_at else None,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
                 for r in reports
+            ],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+class CreateFeedbackRequest(BaseModel):
+    feedback_type: str  # general, false_positive, missed_scam, feature_request, bug
+    message: str
+    related_chat_id: Optional[int] = None
+    related_message_id: Optional[int] = None
+    related_flag_telegram_id: Optional[int] = None
+
+
+@router.post("/feedback")
+async def submit_feedback(req: CreateFeedbackRequest):
+    """Submit user feedback about scam detection."""
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Feedback message cannot be empty")
+
+    now = datetime.utcnow()
+    async with AsyncSessionLocal() as db:
+        feedback = ScamFeedback(
+            feedback_type=req.feedback_type,
+            message=req.message.strip(),
+            related_chat_id=req.related_chat_id,
+            related_message_id=req.related_message_id,
+            related_flag_telegram_id=req.related_flag_telegram_id,
+            status="pending",
+            created_at=now,
+        )
+        db.add(feedback)
+        await db.commit()
+        await db.refresh(feedback)
+
+    # Try to sync immediately if cloud is configured
+    from backend.scam.cloud_sync import get_cloud_sync_manager
+    sync_mgr = get_cloud_sync_manager()
+    if sync_mgr and sync_mgr.is_configured:
+        try:
+            await sync_mgr.upload_feedback(feedback.id)
+        except Exception:
+            pass  # Will be picked up on next full sync
+
+    return {
+        "id": feedback.id,
+        "status": "submitted",
+        "created_at": feedback.created_at.isoformat(),
+    }
+
+
+@router.get("/feedback")
+async def list_feedback():
+    """List all submitted feedback."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ScamFeedback).order_by(ScamFeedback.created_at.desc()).limit(50)
+        )
+        items = result.scalars().all()
+        return {
+            "feedback": [
+                {
+                    "id": f.id,
+                    "feedback_type": f.feedback_type,
+                    "message": f.message,
+                    "related_chat_id": f.related_chat_id,
+                    "related_message_id": f.related_message_id,
+                    "related_flag_telegram_id": f.related_flag_telegram_id,
+                    "status": f.status,
+                    "synced_at": f.synced_at.isoformat() if f.synced_at else None,
+                    "created_at": f.created_at.isoformat() if f.created_at else None,
+                }
+                for f in items
             ],
         }

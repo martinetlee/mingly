@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert } from 'lucide-react'
 import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
 import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags, searchChatsLocal, searchChatsTelegram, searchMessagesGlobal } from '../api/client'
@@ -290,10 +290,12 @@ function ChatItem({
 
 export default function Chats() {
   const location = useLocation()
+  const navigate = useNavigate()
   const [chats, setChats] = useState<Chat[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
   const [selectedFolder, setSelectedFolder] = useState<number | null>(null)
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
+  const [mentionInsert, setMentionInsert] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -1051,6 +1053,51 @@ export default function Chats() {
     setForwardTarget(null)
   }
 
+  // Avatar context menu handlers
+  const handleAvatarOpenProfile = useCallback((senderId: number) => {
+    navigate(`/profile/${senderId}`)
+  }, [navigate])
+
+  const handleAvatarSendMessage = useCallback(async (senderId: number) => {
+    // Open DM with this user — ensure chat exists then navigate
+    try {
+      const chat = await ensureChat(senderId)
+      if (chat?.telegram_id) {
+        navigate(`/chats?chatId=${chat.telegram_id}`)
+      }
+    } catch {
+      // fallback — just navigate to profile
+      navigate(`/profile/${senderId}`)
+    }
+  }, [navigate])
+
+  const handleAvatarMention = useCallback((_senderId: number, senderName: string) => {
+    // Extract first name for mention
+    const mention = `@${senderName.replace(/\s+/g, '_')} `
+    setMentionInsert(mention)
+  }, [])
+
+  const handleAvatarRestrict = useCallback(async (senderId: number) => {
+    if (!selectedChat) return
+    const ok = window.confirm(`Restrict this user from sending messages in ${selectedChat.name}?`)
+    if (!ok) return
+    try {
+      const { restrictMember } = await import('../api/client')
+      await restrictMember(selectedChat.telegram_id, senderId, {
+        send_messages: false,
+        send_media: false,
+        send_stickers: false,
+        send_gifs: false,
+        send_games: false,
+        send_inline: false,
+        embed_links: false,
+        send_polls: false,
+      })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to restrict user')
+    }
+  }, [selectedChat])
+
   const folderFiltered = selectedFolder === null
     ? chats
     : (() => {
@@ -1637,6 +1684,10 @@ export default function Chats() {
                     onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
                     flaggedSenderIds={flaggedSenderIds}
                     onReportScam={setReportTarget}
+                    onOpenProfile={handleAvatarOpenProfile}
+                    onSendMessage={handleAvatarSendMessage}
+                    onMention={handleAvatarMention}
+                    onRestrict={selectedChat.type === 'group' ? handleAvatarRestrict : undefined}
                   />
                 </div>
               )}
@@ -1665,6 +1716,8 @@ export default function Chats() {
                 onCancelEdit={() => setEditingMessage(null)}
                 onTyping={handleTyping}
                 uploadProgress={uploadProgress}
+                insertText={mentionInsert}
+                onInsertConsumed={() => setMentionInsert(null)}
               />
             </>
           ) : (

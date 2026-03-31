@@ -366,6 +366,7 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
 class ShieldCloudSettingsRequest(BaseModel):
     cloud_url: str = ""
     api_key: str = ""
+    sync_dismissals: bool | None = None
 
 
 @router.get("/prefs/shield-cloud")
@@ -377,6 +378,7 @@ async def get_shield_cloud():
         "cloud_url": prefs.get("shield_cloud_url", ""),
         "api_key_set": bool(api_key),
         "last_synced_at": prefs.get("shield_last_synced_at"),
+        "sync_dismissals": prefs.get("shield_sync_dismissals", False),
     }
 
 
@@ -387,6 +389,8 @@ async def set_shield_cloud(req: ShieldCloudSettingsRequest):
     prefs["shield_cloud_url"] = req.cloud_url.strip()
     if req.api_key:
         prefs["shield_api_key"] = req.api_key
+    if req.sync_dismissals is not None:
+        prefs["shield_sync_dismissals"] = req.sync_dismissals
     _save_prefs(prefs)
 
     # Reconfigure the sync manager

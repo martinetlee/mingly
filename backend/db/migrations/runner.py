@@ -429,6 +429,23 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             )""",
         ],
     ),
+    (
+        38,
+        "Add scam_feedback table for user feedback",
+        [
+            """CREATE TABLE IF NOT EXISTS scam_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feedback_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                related_chat_id BIGINT,
+                related_message_id BIGINT,
+                related_flag_telegram_id BIGINT,
+                status TEXT DEFAULT 'pending',
+                synced_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

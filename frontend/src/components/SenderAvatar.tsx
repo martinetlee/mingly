@@ -20,9 +20,10 @@ interface SenderAvatarProps {
   senderId: number | null
   senderName: string | null
   size?: number
+  onContextMenu?: (e: React.MouseEvent) => void
 }
 
-export default function SenderAvatar({ senderId, senderName, size = 28 }: SenderAvatarProps) {
+export default function SenderAvatar({ senderId, senderName, size = 28, onContextMenu }: SenderAvatarProps) {
   const [imgFailed, setImgFailed] = useState(false)
 
   const initial = (senderName || '?')[0].toUpperCase()
@@ -43,6 +44,7 @@ export default function SenderAvatar({ senderId, senderName, size = 28 }: Sender
     <div
       className="relative flex-shrink-0"
       style={{ width: size, height: size }}
+      onContextMenu={onContextMenu}
     >
       {/* Fallback initial — always rendered underneath */}
       <div
@@ -67,7 +69,7 @@ export default function SenderAvatar({ senderId, senderName, size = 28 }: Sender
 
   if (senderId != null) {
     return (
-      <Link to={`/profile/${senderId}`} className="flex-shrink-0">
+      <Link to={`/profile/${senderId}`} className="flex-shrink-0" onContextMenu={onContextMenu}>
         {avatar}
       </Link>
     )

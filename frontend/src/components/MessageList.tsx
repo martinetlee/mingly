@@ -21,6 +21,11 @@ interface Props {
   /** Set of telegram IDs flagged as scammers */
   flaggedSenderIds?: Set<number>
   onReportScam?: (msg: Message) => void
+  /** Avatar context menu callbacks */
+  onOpenProfile?: (senderId: number) => void
+  onSendMessage?: (senderId: number) => void
+  onMention?: (senderId: number, senderName: string) => void
+  onRestrict?: (senderId: number) => void
 }
 
 /**
@@ -67,7 +72,7 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(0)
@@ -224,6 +229,10 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
                 onForward={onForward}
                 isFlaggedSender={!!msg.sender_id && !!flaggedSenderIds?.has(msg.sender_id)}
                 onReportScam={onReportScam}
+                onOpenProfile={onOpenProfile}
+                onSendMessage={onSendMessage}
+                onMention={onMention}
+                onRestrict={onRestrict}
               />
             </div>
           </div>

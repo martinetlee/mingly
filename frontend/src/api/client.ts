@@ -807,12 +807,12 @@ export const triggerMassScan = (maxMessages: number = 200, maxAgeHours: number =
 // ── Shield Cloud Sync ──
 
 export const getShieldCloudSettings = () =>
-  request<{ cloud_url: string; api_key_set: boolean; last_synced_at: string | null }>('/api/settings/prefs/shield-cloud')
+  request<{ cloud_url: string; api_key_set: boolean; last_synced_at: string | null; sync_dismissals: boolean }>('/api/settings/prefs/shield-cloud')
 
-export const setShieldCloudSettings = (cloudUrl: string, apiKey: string) =>
+export const setShieldCloudSettings = (cloudUrl: string, apiKey: string, syncDismissals?: boolean) =>
   request<{ success: boolean }>('/api/settings/prefs/shield-cloud', {
     method: 'POST',
-    body: JSON.stringify({ cloud_url: cloudUrl, api_key: apiKey }),
+    body: JSON.stringify({ cloud_url: cloudUrl, api_key: apiKey, sync_dismissals: syncDismissals }),
   })
 
 export const getSyncStatus = () =>
@@ -820,6 +820,24 @@ export const getSyncStatus = () =>
 
 export const triggerSync = () =>
   request<{ status: string; error?: string; pipeline_updated?: boolean; scenarios_updated?: boolean; signatures_updated?: boolean; reports_submitted?: number }>('/api/scam/pipeline/sync', { method: 'POST' })
+
+export const getSyncHistory = () =>
+  request<import('./types').SyncHistoryStats>('/api/scam/sync/history')
+
+export const submitFeedback = (data: {
+  feedback_type: string
+  message: string
+  related_chat_id?: number
+  related_message_id?: number
+  related_flag_telegram_id?: number
+}) =>
+  request<{ id: number; status: string; created_at: string }>('/api/scam/feedback', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const getFeedbackList = () =>
+  request<{ feedback: import('./types').ScamFeedback[] }>('/api/scam/feedback')
 
 // ── Translation ──
 

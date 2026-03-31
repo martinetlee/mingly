@@ -14,8 +14,9 @@ import Tracked from './pages/Tracked'
 import Intelligence from './pages/Intelligence'
 import Profile from './pages/Profile'
 import Shield from './pages/Shield'
+import LlmSetup from './pages/LlmSetup'
 
-type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'app'
+type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'llm-setup' | 'app'
 
 export default function App() {
   const [state, setState] = useState<AppState>('loading')
@@ -70,7 +71,7 @@ export default function App() {
   }
 
   if (state === 'vault-unset') {
-    return <Onboarding needsVaultSetup onComplete={() => setState('app')} />
+    return <Onboarding needsVaultSetup onComplete={() => setState('llm-setup')} />
   }
 
   if (state === 'vault-locked') {
@@ -78,7 +79,11 @@ export default function App() {
   }
 
   if (state === 'onboarding') {
-    return <Onboarding onComplete={() => setState('app')} />
+    return <Onboarding onComplete={() => setState('llm-setup')} />
+  }
+
+  if (state === 'llm-setup') {
+    return <LlmSetup onComplete={() => setState('app')} />
   }
 
   return (

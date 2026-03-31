@@ -113,6 +113,7 @@ export interface ScamFlag {
   flagged_message_text?: string | null
   flagged_message_chat_id?: number | null
   flagged_message_id?: number | null
+  synced_to_cloud?: boolean
 }
 
 export interface ScannedMessage {
@@ -129,6 +130,7 @@ export interface ScannedMessage {
   llm_prompt: string | null
   llm_response: string | null
   trace_json: string | null
+  synced_to_cloud?: boolean
 }
 
 export interface ScamCategory {
@@ -159,7 +161,35 @@ export interface ScamReport {
   scam_category: string | null
   custom_category: string | null
   status: 'submitted' | 'confirmed' | 'false_positive'
+  synced_at: string | null
   created_at: string
+}
+
+export interface SyncHistoryStats {
+  last_synced_at: string | null
+  last_sync_status: 'success' | 'failed' | null
+  last_sync_error: string | null
+  last_sync_details: {
+    files_updated: string[]
+    reports_submitted: number
+    flags_submitted: number
+    scan_results_submitted: number
+  } | null
+  flags: { total: number; synced: number; pending: number }
+  reports: { total: number; synced: number; pending: number }
+  scans: { total: number; synced: number; pending: number }
+}
+
+export interface ScamFeedback {
+  id: number
+  feedback_type: string
+  message: string
+  related_chat_id: number | null
+  related_message_id: number | null
+  related_flag_telegram_id: number | null
+  status: string
+  synced_at: string | null
+  created_at: string | null
 }
 
 export interface PinnedMessage {

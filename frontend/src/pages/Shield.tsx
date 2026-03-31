@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw } from 'lucide-react'
-import type { ScamFlag, ScannedMessage, ScamReport, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan } from '../api/client'
+import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw, Cloud, CloudOff, History, MessageSquare, Send } from 'lucide-react'
+import type { ScamFlag, ScannedMessage, ScamReport, SyncHistoryStats, WSEvent } from '../api/types'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan, getSyncHistory, submitFeedback } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function stripFormatting(text: string): string {
@@ -45,7 +45,19 @@ function ConfidencePill({ value }: { value: number | null }) {
   )
 }
 
-type Tab = 'flagged' | 'scanned' | 'reports' | 'pipeline'
+function SyncBadge({ synced }: { synced: boolean }) {
+  return synced ? (
+    <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-400" title="Synced to cloud">
+      <Cloud size={10} />
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-600" title="Not synced">
+      <CloudOff size={10} />
+    </span>
+  )
+}
+
+type Tab = 'flagged' | 'scanned' | 'reports' | 'sync' | 'pipeline'
 
 export default function Shield() {
   const navigate = useNavigate()
@@ -98,11 +110,23 @@ export default function Shield() {
   const [scamSaving, setScamSaving] = useState(false)
   const [scamSaveMsg, setScamSaveMsg] = useState<string | null>(null)
 
+  // Sync history
+  const [syncStats, setSyncStats] = useState<SyncHistoryStats | null>(null)
+  const [loadingSyncStats, setLoadingSyncStats] = useState(true)
+
+  // Feedback
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [feedbackType, setFeedbackType] = useState('general')
+  const [feedbackMsg, setFeedbackMsg] = useState('')
+  const [feedbackSending, setFeedbackSending] = useState(false)
+  const [feedbackResult, setFeedbackResult] = useState<string | null>(null)
+
   // Cloud sync
   const [cloudUrl, setCloudUrl] = useState('')
   const [cloudApiKey, setCloudApiKey] = useState('')
   const [cloudKeySet, setCloudKeySet] = useState(false)
   const [cloudLastSynced, setCloudLastSynced] = useState<string | null>(null)
+  const [syncDismissals, setSyncDismissals] = useState(false)
   const [cloudSaving, setCloudSaving] = useState(false)
   const [cloudSaveMsg, setCloudSaveMsg] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
@@ -155,8 +179,13 @@ export default function Shield() {
         setCloudUrl(s.cloud_url)
         setCloudKeySet(s.api_key_set)
         setCloudLastSynced(s.last_synced_at)
+        setSyncDismissals(s.sync_dismissals ?? false)
       })
       .catch(() => {})
+    getSyncHistory()
+      .then(setSyncStats)
+      .catch(() => {})
+      .finally(() => setLoadingSyncStats(false))
   }, [loadFlags, loadScanned, loadReports])
 
   useWebSocket(useCallback((event: WSEvent) => {
@@ -207,6 +236,13 @@ export default function Shield() {
         <ShieldAlert size={18} className="text-red-400" />
         <h1 className="text-sm font-semibold text-slate-200">Shield</h1>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => { setFeedbackOpen((v) => !v); setFeedbackResult(null) }}
+            className={`rounded-lg p-1.5 transition-colors ${feedbackOpen ? 'bg-slate-700 text-slate-200' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
+            title="Send feedback"
+          >
+            <MessageSquare size={15} />
+          </button>
           <button
             onClick={() => setSettingsOpen((v) => !v)}
             className={`rounded-lg p-1.5 transition-colors ${settingsOpen ? 'bg-slate-700 text-slate-200' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
@@ -350,6 +386,76 @@ export default function Shield() {
                 Last synced: {timeAgo(cloudLastSynced)}
               </p>
             )}
+            <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={syncDismissals}
+                onChange={async (e) => {
+                  const val = e.target.checked
+                  setSyncDismissals(val)
+                  try {
+                    await setShieldCloudSettings(cloudUrl, '', val)
+                  } catch {
+                    setSyncDismissals(!val) // revert on failure
+                  }
+                }}
+                className="rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-0 focus:ring-offset-0 h-3 w-3"
+              />
+              <span className="text-[11px] text-slate-400">Sync dismissed scam flags to cloud</span>
+              <span className="text-[10px] text-slate-600" title="When enabled, dismissing a scam flag or clearing a scanned message will notify the cloud so the detection model can learn from false positives.">?</span>
+            </label>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback panel (collapsible) */}
+      {feedbackOpen && (
+        <div className="border-b border-slate-700 bg-slate-800/50 px-6 py-4">
+          <div className="max-w-xl space-y-3">
+            <h3 className="text-xs font-medium text-slate-400">Send Feedback</h3>
+            <div className="flex items-center gap-3">
+              <select
+                value={feedbackType}
+                onChange={(e) => setFeedbackType(e.target.value)}
+                className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="general">General</option>
+                <option value="false_positive">False Positive</option>
+                <option value="missed_scam">Missed Scam</option>
+                <option value="feature_request">Feature Request</option>
+                <option value="bug">Bug Report</option>
+              </select>
+            </div>
+            <textarea
+              value={feedbackMsg}
+              onChange={(e) => { setFeedbackMsg(e.target.value); setFeedbackResult(null) }}
+              placeholder="Describe your feedback — e.g. a scam that was missed, a false positive, or how we can improve detection…"
+              rows={3}
+              className="w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:border-emerald-500 focus:outline-none resize-none"
+            />
+            <div className="flex items-center gap-3">
+              <button
+                disabled={feedbackSending || !feedbackMsg.trim()}
+                onClick={async () => {
+                  setFeedbackSending(true); setFeedbackResult(null)
+                  try {
+                    await submitFeedback({ feedback_type: feedbackType, message: feedbackMsg })
+                    setFeedbackResult('Sent — thank you!')
+                    setFeedbackMsg('')
+                    setFeedbackType('general')
+                  } catch (err) {
+                    setFeedbackResult(err instanceof Error ? err.message : 'Failed to send')
+                  } finally { setFeedbackSending(false) }
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+              >
+                <Send size={12} />
+                {feedbackSending ? 'Sending…' : 'Send Feedback'}
+              </button>
+              {feedbackResult && (
+                <span className={`text-xs ${feedbackResult.startsWith('Sent') ? 'text-emerald-400' : 'text-red-400'}`}>{feedbackResult}</span>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -394,6 +500,16 @@ export default function Shield() {
           {reports.length > 0 && (
             <span className="ml-1.5 rounded-full bg-slate-700 px-1.5 py-0.5 text-[10px]">{reports.length}</span>
           )}
+        </button>
+        <button
+          onClick={() => setTab('sync')}
+          className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+            tab === 'sync'
+              ? 'border-emerald-400 text-emerald-400'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Sync History
         </button>
         {devMode && (
           <button
@@ -464,6 +580,7 @@ export default function Shield() {
                   <th className="px-3 py-2 font-medium">Flagged Message</th>
                   <th className="px-3 py-2 font-medium">Reason</th>
                   <th className="px-3 py-2 font-medium">Confidence</th>
+                  <th className="px-2 py-2 font-medium w-8" title="Cloud sync status"><Cloud size={10} /></th>
                   <th className="px-3 py-2 font-medium w-8"></th>
                 </tr>
               </thead>
@@ -508,6 +625,9 @@ export default function Shield() {
                     <td className="px-3 py-2.5">
                       <ConfidencePill value={flag.confidence} />
                     </td>
+                    <td className="px-2 py-2.5 text-center">
+                      <SyncBadge synced={flag.synced_to_cloud || false} />
+                    </td>
                     <td className="px-3 py-2.5">
                       <button
                         onClick={() => handleDismissFlag(flag.telegram_id)}
@@ -546,6 +666,7 @@ export default function Shield() {
                   <th className="px-3 py-2 font-medium">Verdict</th>
                   <th className="px-3 py-2 font-medium">Message</th>
                   <th className="px-3 py-2 font-medium">Confidence</th>
+                  <th className="px-2 py-2 font-medium w-8" title="Cloud sync status"><Cloud size={10} /></th>
                   <th className="px-3 py-2 font-medium w-8"></th>
                 </tr>
               </thead>
@@ -614,6 +735,9 @@ export default function Shield() {
                             <ConfidencePill value={msg.scam_score} />
                           )}
                         </td>
+                        <td className="px-2 py-2.5 text-center">
+                          <SyncBadge synced={msg.synced_to_cloud || false} />
+                        </td>
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-0.5">
                             <button
@@ -643,7 +767,7 @@ export default function Shield() {
                       </tr>
                       {isTraceOpen && (
                         <tr key={`${traceKey}-trace`} className="bg-slate-800/30">
-                          <td colSpan={6} className="px-6 py-3">
+                          <td colSpan={7} className="px-6 py-3">
                             {parsedTrace ? (
                               <div className="space-y-3 max-w-4xl">
                                 {/* Pipeline header */}
@@ -818,6 +942,7 @@ export default function Shield() {
                   <th className="px-3 py-2 font-medium">Chat</th>
                   <th className="px-3 py-2 font-medium">Category</th>
                   <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-2 py-2 font-medium w-8" title="Cloud sync status"><Cloud size={10} /></th>
                   <th className="px-3 py-2 font-medium">Date</th>
                 </tr>
               </thead>
@@ -849,6 +974,9 @@ export default function Shield() {
                         {r.status}
                       </span>
                     </td>
+                    <td className="px-2 py-2.5 text-center">
+                      <SyncBadge synced={!!r.synced_at} />
+                    </td>
                     <td className="px-3 py-2.5 text-xs text-slate-400 whitespace-nowrap">
                       {r.created_at ? timeAgo(r.created_at) : '—'}
                     </td>
@@ -856,6 +984,164 @@ export default function Shield() {
                 ))}
               </tbody>
             </table>
+          )
+        )}
+
+        {tab === 'sync' && (
+          loadingSyncStats ? (
+            <div className="p-6 text-xs text-slate-500">Loading…</div>
+          ) : !syncStats ? (
+            <div className="flex flex-col items-center justify-center py-20">
+              <Cloud size={32} className="mb-3 text-slate-600" />
+              <p className="text-sm font-medium text-slate-400">Sync data unavailable</p>
+            </div>
+          ) : (
+            <div className="p-6 max-w-2xl space-y-6">
+              {/* Last sync time + status */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-3">
+                  <History size={14} className={syncStats.last_sync_status === 'failed' ? 'text-red-400' : 'text-slate-500'} />
+                  <span className="text-xs text-slate-400">
+                    Last synced: {syncStats.last_synced_at ? timeAgo(syncStats.last_synced_at) : 'Never'}
+                  </span>
+                  {syncStats.last_sync_status === 'success' && (
+                    <span className="inline-flex items-center rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">Success</span>
+                  )}
+                  {syncStats.last_sync_status === 'failed' && (
+                    <span className="inline-flex items-center rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-medium text-red-300">Failed</span>
+                  )}
+                  <button
+                    disabled={syncing || !cloudUrl}
+                    onClick={async () => {
+                      setSyncing(true); setSyncResult(null)
+                      try {
+                        const r = await triggerSync()
+                        setSyncResult(r.status === 'success' ? 'Synced' : r.error || r.status)
+                        if (r.status === 'success' || r.status === 'reloaded') {
+                          setCloudLastSynced(new Date().toISOString())
+                        }
+                        getSyncHistory().then(setSyncStats).catch(() => {})
+                      } catch (err) {
+                        setSyncResult(err instanceof Error ? err.message : 'Failed')
+                        getSyncHistory().then(setSyncStats).catch(() => {})
+                      } finally { setSyncing(false) }
+                    }}
+                    className="rounded-lg bg-indigo-600 px-3 py-1 text-[10px] font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    {syncing ? 'Syncing…' : 'Sync Now'}
+                  </button>
+                  {syncResult && <span className={`text-[10px] ${syncResult === 'Synced' ? 'text-emerald-400' : 'text-red-400'}`}>{syncResult}</span>}
+                </div>
+
+                {/* Failed sync error */}
+                {syncStats.last_sync_status === 'failed' && syncStats.last_sync_error && (
+                  <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2">
+                    <p className="text-xs text-red-300">Sync failed: {syncStats.last_sync_error}</p>
+                  </div>
+                )}
+
+                {/* Last successful sync details */}
+                {syncStats.last_sync_status === 'success' && syncStats.last_sync_details && (
+                  <div className="text-[10px] text-slate-500 flex items-center gap-3 flex-wrap">
+                    {syncStats.last_sync_details.flags_submitted > 0 && <span>{syncStats.last_sync_details.flags_submitted} flags uploaded</span>}
+                    {syncStats.last_sync_details.reports_submitted > 0 && <span>{syncStats.last_sync_details.reports_submitted} reports uploaded</span>}
+                    {syncStats.last_sync_details.scan_results_submitted > 0 && <span>{syncStats.last_sync_details.scan_results_submitted} scans uploaded</span>}
+                    {syncStats.last_sync_details.files_updated.length > 0 && <span>{syncStats.last_sync_details.files_updated.length} files downloaded</span>}
+                    {syncStats.last_sync_details.flags_submitted === 0 && syncStats.last_sync_details.reports_submitted === 0 && syncStats.last_sync_details.scan_results_submitted === 0 && syncStats.last_sync_details.files_updated.length === 0 && (
+                      <span>Nothing new to sync</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Stats cards */}
+              <div className="grid grid-cols-3 gap-4">
+                {([
+                  { label: 'Flagged Scammers', data: syncStats.flags, color: 'red' },
+                  { label: 'Scam Reports', data: syncStats.reports, color: 'amber' },
+                  { label: 'Scanned Messages', data: syncStats.scans, color: 'indigo' },
+                ] as const).map(({ label, data, color }) => {
+                  const pct = data.total > 0 ? Math.round((data.synced / data.total) * 100) : 0
+                  return (
+                    <div key={label} className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 space-y-3">
+                      <h3 className="text-xs font-medium text-slate-300">{label}</h3>
+                      <div className="flex items-end gap-2">
+                        <span className="text-2xl font-bold text-slate-200">{data.synced}</span>
+                        <span className="text-xs text-slate-500 mb-0.5">/ {data.total}</span>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              color === 'red' ? 'bg-red-500' : color === 'amber' ? 'bg-amber-500' : 'bg-indigo-500'
+                            }`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-emerald-400">{pct}% synced</span>
+                          {data.pending > 0 && (
+                            <span className="text-slate-500">{data.pending} pending</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Summary insights */}
+              <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 space-y-2">
+                <h3 className="text-xs font-medium text-slate-300">Insights</h3>
+                <ul className="space-y-1.5 text-xs text-slate-400">
+                  {syncStats.flags.pending > 0 && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-red-400 flex-shrink-0" />
+                      {syncStats.flags.pending} flagged scammer{syncStats.flags.pending !== 1 ? 's' : ''} not yet synced to cloud
+                    </li>
+                  )}
+                  {syncStats.reports.pending > 0 && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                      {syncStats.reports.pending} report{syncStats.reports.pending !== 1 ? 's' : ''} awaiting upload
+                    </li>
+                  )}
+                  {syncStats.scans.pending > 0 && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 flex-shrink-0" />
+                      {syncStats.scans.pending} scan result{syncStats.scans.pending !== 1 ? 's' : ''} pending sync
+                    </li>
+                  )}
+                  {syncStats.flags.pending === 0 && syncStats.reports.pending === 0 && syncStats.scans.pending === 0 && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 flex-shrink-0" />
+                      All data synced to cloud — nothing pending
+                    </li>
+                  )}
+                  {syncStats.last_sync_status === 'failed' && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-red-400 flex-shrink-0" />
+                      Last sync failed — pending items will be retried on next sync attempt
+                    </li>
+                  )}
+                  {!syncStats.last_synced_at && (
+                    <li className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-slate-500 flex-shrink-0" />
+                      Cloud sync has never run. Configure cloud settings and sync to start sharing data.
+                    </li>
+                  )}
+                  {syncStats.last_synced_at && (() => {
+                    const hrs = (Date.now() - new Date(syncStats.last_synced_at.endsWith('Z') ? syncStats.last_synced_at : syncStats.last_synced_at + 'Z').getTime()) / 3600000
+                    return hrs > 48 ? (
+                      <li className="flex items-center gap-2">
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                        Last sync was {Math.floor(hrs / 24)} days ago — consider syncing to keep cloud data up to date
+                      </li>
+                    ) : null
+                  })()}
+                </ul>
+              </div>
+            </div>
           )
         )}
 
