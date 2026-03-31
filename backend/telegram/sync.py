@@ -72,7 +72,9 @@ if _NS_AVAILABLE:
                     pass
 
     _delegate = _NotificationDelegate.alloc().init()
-    NSUserNotificationCenter.defaultUserNotificationCenter().setDelegate_(_delegate)
+    _center = NSUserNotificationCenter.defaultUserNotificationCenter()
+    if _center is not None:
+        _center.setDelegate_(_delegate)
 
 
 def _send_native_notification(
