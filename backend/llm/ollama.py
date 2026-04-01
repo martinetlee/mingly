@@ -40,28 +40,33 @@ class OllamaProvider(BaseLLMProvider):
         temperature: float = 0.3,
         tools: Optional[list] = None,
     ) -> CompletionResponse:
+        # Use native Ollama API (/api/chat) with think:false to avoid
+        # thinking-mode models (e.g. Qwen 3.5) spending all tokens on
+        # internal reasoning and returning empty content.
         request_body: dict = {
             "model": self.model,
             "messages": [self._serialize_message(m) for m in messages],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
             "stream": False,
+            "think": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            },
         }
         if tools:
             request_body["tools"] = tools
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
-                f"{self.base_url}/chat/completions",
+                f"{self._ollama_base}/api/chat",
                 json=request_body,
             )
         if resp.status_code != 200:
             raise LLMError(resp.text, provider=self.provider_name, status_code=resp.status_code)
         data = resp.json()
-        usage = data.get("usage", {})
 
         # Parse tool calls from response
-        message_data = data["choices"][0]["message"]
+        message_data = data.get("message", {})
         parsed_tool_calls = None
         raw_tool_calls = message_data.get("tool_calls")
         if raw_tool_calls:
@@ -80,13 +85,17 @@ class OllamaProvider(BaseLLMProvider):
                     arguments=args,
                 ))
 
+        # Native API reports tokens in top-level fields
+        prompt_tokens = data.get("prompt_eval_count")
+        completion_tokens = data.get("eval_count")
+
         return CompletionResponse(
             content=message_data.get("content") or "",
             model=self.model,
             provider=self.provider_name,
             instance_name=self.instance_name,
-            input_tokens=usage.get("prompt_tokens"),
-            output_tokens=usage.get("completion_tokens"),
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
             tool_calls=parsed_tool_calls,
         )
 
@@ -100,24 +109,27 @@ class OllamaProvider(BaseLLMProvider):
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
-                f"{self.base_url}/chat/completions",
+                f"{self._ollama_base}/api/chat",
                 json={
                     "model": self.model,
                     "messages": [self._serialize_message(m) for m in messages],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
                     "stream": True,
+                    "think": False,
+                    "options": {
+                        "num_predict": max_tokens,
+                        "temperature": temperature,
+                    },
                 },
             ) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
                     raise LLMError(body.decode(), provider=self.provider_name, status_code=resp.status_code)
                 async for line in resp.aiter_lines():
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        chunk = json.loads(line[6:])
-                        delta = chunk["choices"][0]["delta"].get("content", "")
-                        if delta:
-                            yield delta
+                    if line:
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            yield content
 
     async def health_check(self) -> bool:
         """Check if Ollama process is listening — fast, no model load."""
