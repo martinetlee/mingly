@@ -167,7 +167,7 @@ export interface ScamReport {
 
 export interface SyncHistoryStats {
   last_synced_at: string | null
-  last_sync_status: 'success' | 'failed' | null
+  last_sync_status: 'success' | 'partial' | 'failed' | null
   last_sync_error: string | null
   last_sync_details: {
     files_updated: string[]
