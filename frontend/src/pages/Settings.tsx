@@ -94,12 +94,12 @@ interface ModelDef {
 
 const MODELS: ModelDef[] = [
   {
-    id: 'qwen25-7b',
-    name: 'Qwen 2.5 · 7B',
-    detail: '7B · Q4_K_M · Runs locally · ~4 GB download',
+    id: 'qwen35-4b',
+    name: 'Qwen 3.5 · 4B',
+    detail: '4B · Runs locally · ~3.2 GB download',
     type: 'local',
     provider: 'ollama',
-    ollamaModel: 'qwen2.5:7b',
+    ollamaModel: 'qwen3.5:4b',
     available: true,
   },
 ]

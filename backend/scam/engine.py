@@ -517,7 +517,7 @@ async def _execute_llm_node(
             trace.raw_response = response.content
     except (LLMError, Exception) as e:
         trace.status = "failed"
-        trace.error = str(e)
+        trace.error = str(e) or f"{type(e).__name__} (no message)"
 
     trace.duration_ms = int((time.monotonic() - t0) * 1000)
     trace.completed_at = datetime.now(timezone.utc).isoformat()

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, Message, ScamCheckRequest, ScamFeedback, ScamFlag, ScamReport
+from backend.db.models import Chat, Message, ScamAnalytics, ScamCheckRequest, ScamDismissal, ScamFeedback, ScamFlag, ScamReport
 from backend.scam.service import get_scam_service
 
 logger = logging.getLogger(__name__)
@@ -351,18 +351,17 @@ async def dismiss_flag(telegram_id: int):
     from backend.scam.analytics import get_analytics_tracker
     await get_analytics_tracker().record_flag_dismissed()
 
-    # Sync dismissal to cloud if enabled
+    # Queue dismissal for cloud sync if enabled
     if dismissed_flag_data:
         from backend.api.settings import _load_prefs
         prefs = _load_prefs()
         if prefs.get("shield_sync_dismissals", False):
-            from backend.scam.cloud_sync import get_cloud_sync_manager
-            sync_mgr = get_cloud_sync_manager()
-            if sync_mgr and sync_mgr.is_configured:
-                try:
-                    await sync_mgr.upload_dismissal(dismissed_flag_data)
-                except Exception:
-                    pass  # Best-effort — will not block the dismissal
+            async with AsyncSessionLocal() as db:
+                db.add(ScamDismissal(
+                    dismissal_type="scammer",
+                    payload_json=json.dumps(dismissed_flag_data, default=str),
+                ))
+                await db.commit()
 
     return {"status": "dismissed", "telegram_id": telegram_id}
 
@@ -411,18 +410,17 @@ async def clear_message_scam(chat_id: int, tg_message_id: int):
     from backend.scam.analytics import get_analytics_tracker
     await get_analytics_tracker().record_message_unflagged()
 
-    # Sync dismissal to cloud if enabled
+    # Queue dismissal for cloud sync if enabled
     if dismissed_scan_data:
         from backend.api.settings import _load_prefs
         prefs = _load_prefs()
         if prefs.get("shield_sync_dismissals", False):
-            from backend.scam.cloud_sync import get_cloud_sync_manager
-            sync_mgr = get_cloud_sync_manager()
-            if sync_mgr and sync_mgr.is_configured:
-                try:
-                    await sync_mgr.upload_dismissal(dismissed_scan_data)
-                except Exception:
-                    pass
+            async with AsyncSessionLocal() as db:
+                db.add(ScamDismissal(
+                    dismissal_type="scan",
+                    payload_json=json.dumps(dismissed_scan_data, default=str),
+                ))
+                await db.commit()
 
     return {"status": "cleared"}
 
@@ -613,20 +611,89 @@ async def sync_history():
         )
         reports_synced = reports_synced_r.scalar() or 0
 
-        # Scanned messages: synced vs total
-        scans_total_r = await db.execute(
+        # Scan results breakdown
+        from sqlalchemy import and_
+
+        # Total scanned
+        scans_total_scanned_r = await db.execute(
             select(func.count()).select_from(Message).where(
                 or_(Message.scam_score.isnot(None), Message.scam_trace_json.isnot(None))
             )
         )
-        scans_total = scans_total_r.scalar() or 0
+        scans_total_scanned = scans_total_scanned_r.scalar() or 0
+
+        # Scam detected (score > 0.5)
+        scans_scam_r = await db.execute(
+            select(func.count()).select_from(Message).where(Message.scam_score > 0.5)
+        )
+        scans_scam = scans_scam_r.scalar() or 0
+
+        # Failed scans
+        scans_failed_r = await db.execute(
+            select(func.count()).select_from(Message).where(
+                Message.scam_trace_json.isnot(None),
+                Message.scam_trace_json.contains('"status": "failed"'),
+            )
+        )
+        scans_failed = scans_failed_r.scalar() or 0
+
+        # Syncable = scam + failed (what gets uploaded)
+        scans_syncable = scans_scam + scans_failed
+
+        # Synced count (among syncable)
         scans_synced_r = await db.execute(
             select(func.count()).select_from(Message).where(
-                or_(Message.scam_score.isnot(None), Message.scam_trace_json.isnot(None)),
+                or_(
+                    Message.scam_score > 0.5,
+                    and_(
+                        Message.scam_trace_json.isnot(None),
+                        Message.scam_trace_json.contains('"status": "failed"'),
+                    ),
+                ),
                 Message.scam_synced_to_cloud == True,
             )
         )
         scans_synced = scans_synced_r.scalar() or 0
+
+        # Analytics: synced vs total periods
+        analytics_total_r = await db.execute(
+            select(func.count()).select_from(ScamAnalytics).where(ScamAnalytics.total_scanned > 0)
+        )
+        analytics_total = analytics_total_r.scalar() or 0
+        analytics_synced_r = await db.execute(
+            select(func.count()).select_from(ScamAnalytics).where(
+                ScamAnalytics.total_scanned > 0,
+                ScamAnalytics.synced_at.isnot(None),
+            )
+        )
+        analytics_synced = analytics_synced_r.scalar() or 0
+
+        # Dismissals queue
+        dismissals_total_r = await db.execute(
+            select(func.count()).select_from(ScamDismissal)
+        )
+        dismissals_total = dismissals_total_r.scalar() or 0
+        dismissals_synced_r = await db.execute(
+            select(func.count()).select_from(ScamDismissal).where(ScamDismissal.synced_at.isnot(None))
+        )
+        dismissals_synced = dismissals_synced_r.scalar() or 0
+
+        # Latest analytics period summary
+        latest_analytics_r = await db.execute(
+            select(ScamAnalytics).where(ScamAnalytics.total_scanned > 0)
+            .order_by(ScamAnalytics.period_start.desc()).limit(1)
+        )
+        latest_period = latest_analytics_r.scalars().first()
+        latest_analytics_summary = None
+        if latest_period:
+            latest_analytics_summary = {
+                "period_start": latest_period.period_start.isoformat(),
+                "total_scanned": latest_period.total_scanned,
+                "scam_detected": latest_period.scam_detected,
+                "safe_detected": latest_period.safe_detected,
+                "pipeline_errors": latest_period.pipeline_errors,
+                "avg_pipeline_ms": round(latest_period.total_pipeline_ms / max(latest_period.total_scanned, 1)),
+            }
 
         # Last synced timestamp and status
         from backend.scam.cloud_sync import get_cloud_sync_manager
@@ -640,7 +707,25 @@ async def sync_history():
             "last_sync_details": sync_mgr._last_sync_details if sync_mgr else None,
             "flags": {"total": flags_total, "synced": flags_synced, "pending": flags_total - flags_synced},
             "reports": {"total": reports_total, "synced": reports_synced, "pending": reports_total - reports_synced},
-            "scans": {"total": scans_total, "synced": scans_synced, "pending": scans_total - scans_synced},
+            "scans": {
+                "total": scans_syncable,
+                "synced": scans_synced,
+                "pending": scans_syncable - scans_synced,
+                "total_scanned": scans_total_scanned,
+                "scam_detected": scans_scam,
+                "failed": scans_failed,
+            },
+            "dismissals": {
+                "total": dismissals_total,
+                "synced": dismissals_synced,
+                "pending": dismissals_total - dismissals_synced,
+            },
+            "analytics": {
+                "total": analytics_total,
+                "synced": analytics_synced,
+                "pending": analytics_total - analytics_synced,
+                "latest": latest_analytics_summary,
+            },
         }
 
 

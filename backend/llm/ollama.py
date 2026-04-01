@@ -15,7 +15,7 @@ class OllamaProvider(BaseLLMProvider):
     def __init__(
         self,
         base_url: str = "http://localhost:11434/v1",
-        model: str = "qwen2.5:7b",
+        model: str = "qwen3.5:4b",
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -50,7 +50,7 @@ class OllamaProvider(BaseLLMProvider):
         if tools:
             request_body["tools"] = tools
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{self.base_url}/chat/completions",
                 json=request_body,

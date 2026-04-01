@@ -174,10 +174,25 @@ export interface SyncHistoryStats {
     reports_submitted: number
     flags_submitted: number
     scan_results_submitted: number
+    dismissals_submitted?: number
   } | null
   flags: { total: number; synced: number; pending: number }
   reports: { total: number; synced: number; pending: number }
-  scans: { total: number; synced: number; pending: number }
+  scans: { total: number; synced: number; pending: number; total_scanned: number; scam_detected: number; failed: number }
+  dismissals: { total: number; synced: number; pending: number }
+  analytics: {
+    total: number
+    synced: number
+    pending: number
+    latest: {
+      period_start: string
+      total_scanned: number
+      scam_detected: number
+      safe_detected: number
+      pipeline_errors: number
+      avg_pipeline_ms: number
+    } | null
+  }
 }
 
 export interface ScamFeedback {

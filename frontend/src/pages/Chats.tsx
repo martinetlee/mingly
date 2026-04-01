@@ -703,7 +703,8 @@ export default function Chats() {
       window.dispatchEvent(new CustomEvent('scam_check_safe', { detail: event }))
     }
     if (event.type === 'chat_synced') {
-      // Background sync finished — reload messages if viewing this chat
+      // Background sync finished — reload chat list + messages if viewing this chat
+      loadChats()
       if (selectedChat && event.chat_id === selectedChat.telegram_id) {
         loadMessages(selectedChat)
       }

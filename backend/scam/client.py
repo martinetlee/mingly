@@ -151,7 +151,7 @@ class LocalPipelineClient(ScamAPIClient):
             is_contact = profile.get('is_contact', False)
             parts.append(f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}, Bio:{bio}, Is contact:{is_contact}")
         parts.append("\nMessages to analyze:")
-        for msg in messages[:20]:
+        for msg in messages[:5]:
             sender = msg.get("sender_name", "Unknown")
             text = (msg.get("text") or "")[:500]
             parts.append(f"  [{sender}]: {text}")

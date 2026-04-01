@@ -446,6 +446,19 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             )""",
         ],
     ),
+    (
+        39,
+        "Add scam_dismissals table for queued dismissal sync",
+        [
+            """CREATE TABLE IF NOT EXISTS scam_dismissals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dismissal_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                synced_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

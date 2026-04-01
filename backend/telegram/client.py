@@ -41,6 +41,7 @@ async def init_client() -> bool:
         StringSession(session_string),
         api_id,
         api_hash,
+        receive_updates=True,
     )
     await _client.connect()
     return await _client.is_user_authorized()

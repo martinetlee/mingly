@@ -238,19 +238,177 @@ async def search_chats(q: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/search/telegram")
 async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
-    """Search all synced chats by name (covers all dialogs from sync_dialogs)."""
+    """Search chats via Telegram API (finds chats not yet in local DB)."""
     if not q.strip():
         return []
-    from sqlalchemy import select as sa_sel
-    from backend.db.models import Chat
-    # Search all chats in DB (sync_dialogs imports all user's dialogs)
-    result = await db.execute(
-        sa_sel(Chat)
-        .where(Chat.name.ilike(f"%{q}%"))
-        .order_by(Chat.last_activity_at.desc().nullslast())
-        .limit(20)
-    )
-    return [_chat_dict(c) for c in result.scalars().all()]
+    client = get_client()
+    if not client:
+        # Fallback to local DB search if client unavailable
+        from sqlalchemy import select as sa_sel
+        from backend.db.models import Chat
+        result = await db.execute(
+            sa_sel(Chat)
+            .where(Chat.name.ilike(f"%{q}%"))
+            .order_by(Chat.last_activity_at.desc().nullslast())
+            .limit(20)
+        )
+        return [_chat_dict(c) for c in result.scalars().all()]
+
+    try:
+        from telethon.tl.functions.contacts import SearchRequest
+        chats_found = []
+        seen_ids = set()
+
+        # 1. Search messages globally — finds chats including contact requests
+        #    that don't appear in regular dialog lists
+        try:
+            from telethon.tl.functions.messages import SearchGlobalRequest
+            from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty, PeerUser, PeerChat, PeerChannel
+            global_result = await client(SearchGlobalRequest(
+                q=q,
+                filter=InputMessagesFilterEmpty(),
+                min_date=None,
+                max_date=None,
+                offset_rate=0,
+                offset_peer=InputPeerEmpty(),
+                offset_id=0,
+                limit=20,
+            ))
+            user_map = {u.id: u for u in getattr(global_result, 'users', [])}
+            chat_map = {c.id: c for c in getattr(global_result, 'chats', [])}
+            for msg in getattr(global_result, 'messages', []):
+                peer_id = getattr(msg, 'peer_id', None)
+                if not peer_id:
+                    continue
+                if isinstance(peer_id, PeerUser):
+                    tid = peer_id.user_id
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+                    user = user_map.get(tid)
+                    name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip() if user else str(tid)
+                    chats_found.append({
+                        "id": 0, "telegram_id": tid, "name": name, "type": "private",
+                        "username": getattr(user, "username", None) if user else None,
+                        "is_monitored": False, "is_hidden": False, "is_briefing": False,
+                        "is_tracked": False, "is_pinned": False, "is_archived": False,
+                        "is_muted": False, "muted_until": None, "is_marked_unread": False,
+                        "last_synced_at": None, "last_activity_at": None, "last_message": None,
+                    })
+                elif isinstance(peer_id, (PeerChat, PeerChannel)):
+                    tid = peer_id.chat_id if isinstance(peer_id, PeerChat) else peer_id.channel_id
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+                    chat_ent = chat_map.get(tid)
+                    ctype = "channel" if getattr(chat_ent, "broadcast", False) else "group"
+                    chats_found.append({
+                        "id": 0, "telegram_id": tid,
+                        "name": getattr(chat_ent, "title", str(tid)) if chat_ent else str(tid),
+                        "type": ctype,
+                        "username": getattr(chat_ent, "username", None) if chat_ent else None,
+                        "is_monitored": False, "is_hidden": False, "is_briefing": False,
+                        "is_tracked": False, "is_pinned": False, "is_archived": False,
+                        "is_muted": False, "muted_until": None, "is_marked_unread": False,
+                        "last_synced_at": None, "last_activity_at": None, "last_message": None,
+                    })
+        except Exception as e:
+            logger.warning("Global message search failed: %s", e)
+
+        # 2. Also search dialogs (main + archived/contact requests folder)
+        from backend.telegram.sync import _chat_type
+        q_lower = q.lower()
+        for folder in [None, 1]:
+            try:
+                async for dialog in client.iter_dialogs(limit=200, folder=folder):
+                    if q_lower in (dialog.name or "").lower():
+                        if dialog.id in seen_ids:
+                            continue
+                        seen_ids.add(dialog.id)
+                        entity = dialog.entity
+                        chats_found.append({
+                            "id": 0, "telegram_id": dialog.id,
+                            "name": dialog.name or str(dialog.id),
+                            "type": _chat_type(entity),
+                            "username": getattr(entity, "username", None),
+                            "is_monitored": False, "is_hidden": False, "is_briefing": False,
+                            "is_tracked": False, "is_pinned": False, "is_archived": False,
+                            "is_muted": False, "muted_until": None, "is_marked_unread": False,
+                            "unread_count": dialog.unread_count,
+                            "last_synced_at": None,
+                            "last_activity_at": getattr(dialog, "date", None).isoformat() if getattr(dialog, "date", None) else None,
+                            "last_message": None,
+                        })
+                        if len(chats_found) >= 20:
+                            break
+            except Exception:
+                pass
+
+        # 2. Also search Telegram's global contacts/channels directory
+        result = await client(SearchRequest(q=q, limit=20))
+        # Process users
+        for user in result.users:
+            if user.id in seen_ids:
+                continue
+            seen_ids.add(user.id)
+            name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip() or str(user.id)
+            chats_found.append({
+                "id": 0,
+                "telegram_id": user.id,
+                "name": name,
+                "type": "private",
+                "username": getattr(user, "username", None),
+                "is_monitored": False,
+                "is_hidden": False,
+                "is_briefing": False,
+                "is_tracked": False,
+                "is_pinned": False,
+                "is_archived": False,
+                "is_muted": False,
+                "muted_until": None,
+                "is_marked_unread": False,
+                "last_synced_at": None,
+                "last_activity_at": None,
+                "last_message": None,
+            })
+        # Process chats/channels
+        for chat in result.chats:
+            if chat.id in seen_ids:
+                continue
+            seen_ids.add(chat.id)
+            chat_type = "channel" if getattr(chat, "broadcast", False) else "group"
+            chats_found.append({
+                "id": 0,
+                "telegram_id": chat.id,
+                "name": getattr(chat, "title", str(chat.id)),
+                "type": chat_type,
+                "username": getattr(chat, "username", None),
+                "is_monitored": False,
+                "is_hidden": False,
+                "is_briefing": False,
+                "is_tracked": False,
+                "is_pinned": False,
+                "is_archived": False,
+                "is_muted": False,
+                "muted_until": None,
+                "is_marked_unread": False,
+                "last_synced_at": None,
+                "last_activity_at": None,
+                "last_message": None,
+            })
+        return chats_found
+    except Exception as e:
+        logger.warning("Telegram search failed: %s", e)
+        # Fallback to local DB search
+        from sqlalchemy import select as sa_sel
+        from backend.db.models import Chat
+        result = await db.execute(
+            sa_sel(Chat)
+            .where(Chat.name.ilike(f"%{q}%"))
+            .order_by(Chat.last_activity_at.desc().nullslast())
+            .limit(20)
+        )
+        return [_chat_dict(c) for c in result.scalars().all()]
 
 
 @router.get("/search/messages")

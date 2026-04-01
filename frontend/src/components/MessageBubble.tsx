@@ -55,9 +55,16 @@ function safeHref(url: string): string {
   return /^https?:\/\//i.test(trimmed) ? url : '#'
 }
 
-/** Sanitize all href attributes in an HTML string to block dangerous schemes. */
+/** Sanitize all href attributes and add title tooltip showing the URL on hover. */
 function sanitizeHrefs(html: string): string {
-  return html.replace(/href="([^"]*)"/g, (_, url) => `href="${safeHref(url)}"`)
+  return html.replace(/<a\s([^>]*?)href="([^"]*)"([^>]*)>/g, (match, before, url, after) => {
+    const safe = safeHref(url)
+    // Show URL tooltip on hover for http links (not for internal /profile links or mentions)
+    if (safe.startsWith('http') && !match.includes('data-mention')) {
+      return `<a ${before}href="${safe}" title="${safe}"${after}>`
+    }
+    return `<a ${before}href="${safe}"${after}>`
+  })
 }
 
 function simpleMarkdownToHtml(text: string): string {

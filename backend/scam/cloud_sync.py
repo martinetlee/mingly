@@ -115,6 +115,7 @@ class SyncResult:
     reports_submitted: int = 0
     flags_submitted: int = 0
     scan_results_submitted: int = 0
+    dismissals_submitted: int = 0
 
 
 class CloudSyncManager:
@@ -233,7 +234,15 @@ class CloudSyncManager:
             scans_count = await self._upload_scan_results()
             result.scan_results_submitted = scans_count
 
-            # 6. Upload analytics
+            # 6. Upload queued dismissals (if sync_dismissals enabled)
+            from backend.api.settings import _load_prefs
+            prefs = _load_prefs()
+            dismissals_count = 0
+            if prefs.get("shield_sync_dismissals", False):
+                dismissals_count = await self._upload_pending_dismissals()
+            result.dismissals_submitted = dismissals_count
+
+            # 7. Upload analytics
             await self._upload_analytics()
 
             # Record sync time
@@ -246,6 +255,7 @@ class CloudSyncManager:
                 "reports_submitted": result.reports_submitted,
                 "flags_submitted": result.flags_submitted,
                 "scan_results_submitted": result.scan_results_submitted,
+                "dismissals_submitted": result.dismissals_submitted,
             }
             self._save_sync_state()
             logger.info("Cloud sync completed: %d files updated (%s), reports=%d flags=%d scans=%d",
@@ -310,21 +320,94 @@ class CloudSyncManager:
         except Exception as e:
             logger.warning("Failed to upload report %s: %s", report_id, e)
 
-    async def upload_dismissal(self, dismissal_data: dict):
-        """Upload a dismissal event (flag dismissed or scan cleared) to cloud."""
-        if not self.is_configured:
-            return
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    f"{self._base_url}/sync/dismissals",
-                    json={"dismissals": [dismissal_data]},
-                    headers={"Authorization": f"Bearer {self._api_key}"},
-                )
-                if resp.is_success:
-                    logger.info("Dismissal synced to cloud: %s", dismissal_data.get("telegram_id") or dismissal_data.get("tg_message_id"))
-        except Exception as e:
-            logger.warning("Failed to upload dismissal: %s", e)
+    async def _upload_pending_dismissals(self) -> int:
+        """Upload queued dismissals (flags and scans) to cloud."""
+        from backend.db.database import AsyncSessionLocal
+        from backend.db.models import ScamDismissal
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ScamDismissal).where(
+                    ScamDismissal.synced_at.is_(None),
+                ).order_by(ScamDismissal.created_at.asc()).limit(50)
+            )
+            dismissals = result.scalars().all()
+            if not dismissals:
+                return 0
+
+            # Split into scammer dismissals and scan dismissals
+            scammer_items = []
+            scan_items = []
+            for d in dismissals:
+                data = json.loads(d.payload_json)
+                if d.dismissal_type == "scammer":
+                    scammer_items.append((d, data))
+                else:
+                    scan_items.append((d, data))
+
+            synced_count = 0
+
+            # Upload scammer dismissals via /sync/dismissals
+            if scammer_items:
+                payload = {"dismissals": [data for _, data in scammer_items]}
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.post(
+                            f"{self._base_url}/sync/dismissals",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {self._api_key}"},
+                        )
+                        if resp.is_success:
+                            now = datetime.utcnow()
+                            for d, _ in scammer_items:
+                                d.synced_at = now
+                            synced_count += len(scammer_items)
+                except Exception as e:
+                    logger.warning("Failed to upload scammer dismissals: %s", e)
+
+            # Upload scan dismissals via /sync/scan-results (same endpoint)
+            if scan_items:
+                scan_results = []
+                for _, data in scan_items:
+                    trace = data.get("trace")
+                    trace_json_str = json.dumps(trace) if trace else None
+                    scan_results.append({
+                        "chat_id": data.get("chat_id"),
+                        "tg_message_id": data.get("tg_message_id"),
+                        "sender_id": data.get("sender_id"),
+                        "scam_score": data.get("scam_score"),
+                        "scam_reason": data.get("scam_reason"),
+                        "scam_category": data.get("scam_category"),
+                        "scan_status": "dismissed",
+                        "dismissed": True,
+                        "pipeline_version": trace.get("pipeline_version") if trace else None,
+                        "pipeline_input": _extract_pipeline_input(trace_json_str),
+                        "models_used": _extract_models_used(trace_json_str),
+                        "llm_prompt": data.get("llm_prompt"),
+                        "llm_response": data.get("llm_response"),
+                        "trace": trace,
+                    })
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        resp = await client.post(
+                            f"{self._base_url}/sync/scan-results",
+                            json={"scan_results": scan_results},
+                            headers={"Authorization": f"Bearer {self._api_key}"},
+                        )
+                        if resp.is_success:
+                            now = datetime.utcnow()
+                            for d, _ in scan_items:
+                                d.synced_at = now
+                            synced_count += len(scan_items)
+                except Exception as e:
+                    logger.warning("Failed to upload scan dismissals: %s", e)
+
+            if synced_count > 0:
+                await db.commit()
+            logger.info("Uploaded %d dismissals (%d scammer, %d scan)",
+                        synced_count, len(scammer_items), len(scan_items))
+            return synced_count
 
     async def upload_feedback(self, feedback_id: int):
         """Try to upload a single feedback item immediately."""
@@ -536,12 +619,16 @@ class CloudSyncManager:
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
-            from sqlalchemy import or_
+            from sqlalchemy import or_, and_
+            # Upload scam-detected messages (score > 0.5) and failed scans
             result = await db.execute(
                 select(Message).where(
                     or_(
-                        Message.scam_score.isnot(None),
-                        Message.scam_trace_json.isnot(None),
+                        Message.scam_score > 0.5,
+                        and_(
+                            Message.scam_trace_json.isnot(None),
+                            Message.scam_trace_json.contains('"status": "failed"'),
+                        ),
                     ),
                     Message.scam_synced_to_cloud == False,
                 ).order_by(Message.date.desc()).limit(100)

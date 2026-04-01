@@ -76,12 +76,30 @@ async def on_startup():
     if authenticated:
         await sync_dialogs()
         await register_event_handlers()
+        # Catch up on updates missed while disconnected (must be after handlers are registered)
+        from backend.telegram.client import get_client
+        tg_client = get_client()
+        if tg_client:
+            try:
+                await tg_client.catch_up()
+            except Exception:
+                pass  # Not fatal — periodic sync will cover gaps
         async def _sync_then_scan():
             await bulk_sync(n_chats=50, messages_per_chat=30)
             await scan_unscanned_messages()
 
         asyncio.create_task(_sync_then_scan())
         asyncio.create_task(sync_global_mentions(days=30))
+
+        # Periodic dialog re-sync to catch missed messages/chats + contact requests
+        async def _periodic_dialog_sync():
+            while True:
+                await asyncio.sleep(120)  # every 2 minutes
+                try:
+                    await sync_dialogs(limit=100, include_archived=True)
+                except Exception:
+                    pass
+        asyncio.create_task(_periodic_dialog_sync())
 
 
 if __name__ == "__main__":

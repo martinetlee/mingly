@@ -78,7 +78,7 @@ export default function Shield() {
   // Scanned messages
   const [scanned, setScanned] = useState<ScannedMessage[]>([])
   const [loadingScanned, setLoadingScanned] = useState(true)
-  const [scamOnly, setScamOnly] = useState(false)
+  const [scanFilter, setScanFilter] = useState<'all' | 'scam' | 'failed'>('all')
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null) // "chatId-msgId"
   const [scannedPage, setScannedPage] = useState(1)
   const [scannedTotal, setScannedTotal] = useState(0)
@@ -226,8 +226,13 @@ export default function Shield() {
     navigate(`/chats?chatId=${chatId}&msgId=${messageId}`)
   }
 
-  const filteredScanned = scamOnly ? scanned.filter((m) => m.scam_score > 0.5) : scanned
+  const filteredScanned = scanFilter === 'scam'
+    ? scanned.filter((m) => m.scam_score > 0.5)
+    : scanFilter === 'failed'
+    ? scanned.filter((m) => { try { return JSON.parse(m.trace_json || '{}').status === 'failed' } catch { return false } })
+    : scanned
   const scamCount = scanned.filter((m) => m.scam_score > 0.5).length
+  const failedCount = scanned.filter((m) => { try { return JSON.parse(m.trace_json || '{}').status === 'failed' } catch { return false } }).length
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden">
@@ -547,15 +552,25 @@ export default function Shield() {
                 {massScanResult && <span className="text-[10px] text-slate-400">{massScanResult}</span>}
               </>
             )}
-            <label className="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={scamOnly}
-                onChange={(e) => setScamOnly(e.target.checked)}
-                className="rounded border-slate-600 bg-slate-700 text-red-500 focus:ring-0 focus:ring-offset-0 h-3 w-3"
-              />
-              Scam only ({scamCount})
-            </label>
+            <div className="flex items-center gap-1 rounded-lg bg-slate-800 p-0.5">
+              {([
+                { value: 'all' as const, label: 'All' },
+                { value: 'scam' as const, label: `Scam (${scamCount})` },
+                { value: 'failed' as const, label: `Failed (${failedCount})` },
+              ]).map(({ value, label }) => (
+                <button
+                  key={value}
+                  onClick={() => setScanFilter(value)}
+                  className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    scanFilter === value
+                      ? 'bg-slate-700 text-slate-200'
+                      : 'text-slate-500 hover:text-slate-400'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -651,10 +666,10 @@ export default function Shield() {
             <div className="flex flex-col items-center justify-center py-20">
               <ShieldIcon size={32} className="mb-3 text-slate-600" />
               <p className="text-sm font-medium text-slate-400">
-                {scamOnly ? 'No scam messages found' : 'No scanned messages yet'}
+                {scanFilter === 'scam' ? 'No scam messages found' : scanFilter === 'failed' ? 'No failed scans' : 'No scanned messages yet'}
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                {scamOnly ? 'Try disabling the filter to see all scanned messages.' : 'Use "Check for scam" on messages in Chats to start scanning.'}
+                {scanFilter !== 'all' ? 'Try switching the filter to "All" to see all scanned messages.' : 'Use "Check for scam" on messages in Chats to start scanning.'}
               </p>
             </div>
           ) : (
@@ -678,6 +693,8 @@ export default function Shield() {
                   const hasTrace = msg.trace_json || msg.llm_prompt || msg.llm_response
                   const parsedTrace = msg.trace_json ? (() => { try { return JSON.parse(msg.trace_json) } catch { return null } })() : null
                   const isFailed = parsedTrace?.status === 'failed'
+                  const failedStep = isFailed ? parsedTrace?.steps?.find((s: any) => s.status === 'failed') : null
+                  const failedError = failedStep?.error || parsedTrace?.error || null
                   const isShortCircuited = parsedTrace?.status === 'short_circuited'
                   const shortCircuitNode = parsedTrace?.short_circuit?.node_id
                   return (
@@ -702,7 +719,7 @@ export default function Shield() {
                         </td>
                         <td className="px-3 py-2.5">
                           {isFailed ? (
-                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-500/20 text-orange-300">
+                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-500/20 text-orange-300" title={failedError || undefined}>
                               Scan Failed
                             </span>
                           ) : isShortCircuited ? (
@@ -1046,6 +1063,7 @@ export default function Shield() {
                     {syncStats.last_sync_details.flags_submitted > 0 && <span>{syncStats.last_sync_details.flags_submitted} flags uploaded</span>}
                     {syncStats.last_sync_details.reports_submitted > 0 && <span>{syncStats.last_sync_details.reports_submitted} reports uploaded</span>}
                     {syncStats.last_sync_details.scan_results_submitted > 0 && <span>{syncStats.last_sync_details.scan_results_submitted} scans uploaded</span>}
+                    {(syncStats.last_sync_details.dismissals_submitted ?? 0) > 0 && <span>{syncStats.last_sync_details.dismissals_submitted} dismissals uploaded</span>}
                     {syncStats.last_sync_details.files_updated.length > 0 && <span>{syncStats.last_sync_details.files_updated.length} files downloaded</span>}
                     {syncStats.last_sync_details.flags_submitted === 0 && syncStats.last_sync_details.reports_submitted === 0 && syncStats.last_sync_details.scan_results_submitted === 0 && syncStats.last_sync_details.files_updated.length === 0 && (
                       <span>Nothing new to sync</span>
@@ -1055,11 +1073,10 @@ export default function Shield() {
               </div>
 
               {/* Stats cards */}
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                 {([
                   { label: 'Flagged Scammers', data: syncStats.flags, color: 'red' },
                   { label: 'Scam Reports', data: syncStats.reports, color: 'amber' },
-                  { label: 'Scanned Messages', data: syncStats.scans, color: 'indigo' },
                 ] as const).map(({ label, data, color }) => {
                   const pct = data.total > 0 ? Math.round((data.synced / data.total) * 100) : 0
                   return (
@@ -1073,7 +1090,7 @@ export default function Shield() {
                         <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
                           <div
                             className={`h-full rounded-full transition-all ${
-                              color === 'red' ? 'bg-red-500' : color === 'amber' ? 'bg-amber-500' : 'bg-indigo-500'
+                              color === 'red' ? 'bg-red-500' : 'bg-amber-500'
                             }`}
                             style={{ width: `${pct}%` }}
                           />
@@ -1088,6 +1105,113 @@ export default function Shield() {
                     </div>
                   )
                 })}
+
+                {/* Scan Results card — scam + failed are synced */}
+                {(() => {
+                  const { total, synced, pending, total_scanned, scam_detected, failed } = syncStats.scans
+                  const pct = total > 0 ? Math.round((synced / total) * 100) : 0
+                  return (
+                    <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 space-y-3">
+                      <h3 className="text-xs font-medium text-slate-300">Scan Results</h3>
+                      <div className="flex items-end gap-2">
+                        <span className="text-2xl font-bold text-slate-200">{synced}</span>
+                        <span className="text-xs text-slate-500 mb-0.5">/ {total} to sync</span>
+                      </div>
+                      <div className="flex flex-col gap-0.5 text-[10px]">
+                        <span className="text-red-400">{scam_detected} scam detected</span>
+                        {failed > 0 && <span className="text-orange-400">{failed} scan failed</span>}
+                        {syncStats.dismissals.total > 0 && (
+                          <span className="flex items-center gap-1 text-slate-400">
+                            {syncStats.dismissals.synced}/{syncStats.dismissals.total} dismissed
+                            {syncDismissals ? (
+                              <span className="text-emerald-400" title="Dismissals are being synced">✓</span>
+                            ) : (
+                              <span className="text-slate-600" title="Enable 'Sync dismissed scam flags' to upload these">✗</span>
+                            )}
+                            {syncStats.dismissals.pending > 0 && syncDismissals && (
+                              <span className="text-slate-500">({syncStats.dismissals.pending} pending)</span>
+                            )}
+                          </span>
+                        )}
+                        <span className="text-slate-600">{total_scanned} scanned total</span>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-indigo-500 transition-all"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-emerald-400">{pct}% synced</span>
+                          {pending > 0 && (
+                            <span className="text-slate-500">{pending} pending</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* Analytics card */}
+                {(() => {
+                  const { total, synced, pending, latest } = syncStats.analytics
+                  const pct = total > 0 ? Math.round((synced / total) * 100) : 0
+                  return (
+                    <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 space-y-3">
+                      <h3 className="text-xs font-medium text-slate-300">Analytics</h3>
+                      <div className="flex items-end gap-2">
+                        <span className="text-2xl font-bold text-slate-200">{synced}</span>
+                        <span className="text-xs text-slate-500 mb-0.5">/ {total} period{total !== 1 ? 's' : ''}</span>
+                      </div>
+                      {latest && (
+                        <div className="flex flex-col gap-0.5 text-[10px]">
+                          <span className="text-slate-500">Latest: {new Date(latest.period_start + 'Z').toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                          <span className="text-slate-400">{latest.total_scanned} scanned · {latest.scam_detected} scam · {latest.pipeline_errors} errors</span>
+                          <span className="text-slate-500">avg {latest.avg_pipeline_ms}ms/scan</span>
+                        </div>
+                      )}
+                      <div className="space-y-1">
+                        <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-cyan-500 transition-all"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-emerald-400">{pct}% synced</span>
+                          {pending > 0 && (
+                            <span className="text-slate-500">{pending} pending</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+
+              {/* Dismissal sync setting */}
+              <div className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 space-y-2">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={syncDismissals}
+                    onChange={async (e) => {
+                      const val = e.target.checked
+                      setSyncDismissals(val)
+                      try {
+                        await setShieldCloudSettings(cloudUrl, '', val)
+                      } catch {
+                        setSyncDismissals(!val)
+                      }
+                    }}
+                    className="rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5"
+                  />
+                  <div>
+                    <p className="text-xs font-medium text-slate-300">Sync dismissed scam flags</p>
+                    <p className="text-[10px] text-slate-500">When you dismiss a scam flag or clear a scanned message, send that to the cloud so the detection model can learn from false positives.</p>
+                  </div>
+                </label>
               </div>
 
               {/* Summary insights */}

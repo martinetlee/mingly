@@ -250,6 +250,16 @@ class ScamReport(Base):
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class ScamDismissal(Base):
+    __tablename__ = "scam_dismissals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dismissal_type: Mapped[str] = mapped_column(String, nullable=False)  # scammer, scan
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)  # full captured data as JSON
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ScamFeedback(Base):
     __tablename__ = "scam_feedback"
 

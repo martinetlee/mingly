@@ -181,22 +181,22 @@ export default function LlmSetup({ onComplete }: Props) {
       let needsPull = true
       try {
         const { models } = await apiFetch<{ models: { name: string }[] }>('GET', '/api/llm/ollama/models', undefined, signal)
-        needsPull = !models.some((m) => m.name === 'qwen2.5:7b' || m.name.startsWith('qwen2.5:7b'))
+        needsPull = !models.some((m) => m.name === 'qwen3.5:4b' || m.name.startsWith('qwen3.5:4b'))
       } catch {
         // assume needs pull
       }
 
       // 5. Pull model if needed
       if (needsPull) {
-        update('pull-model', 'Downloading Qwen 2.5 7B model…', 0)
+        update('pull-model', 'Downloading Qwen 3.5 4B model…', 0)
         const { job_id: pullId } = await apiFetch<{ job_id: number }>(
-          'POST', '/api/llm/ollama/pull', { model: 'qwen2.5:7b' }, signal,
+          'POST', '/api/llm/ollama/pull', { model: 'qwen3.5:4b' }, signal,
         )
         for await (const ev of streamSSE(`/api/llm/jobs/${pullId}`, signal)) {
           if (ev.status === 'error')
             throw new Error((ev.error as string) || 'Model download failed')
           if (typeof ev.total === 'number' && ev.total > 0 && typeof ev.completed === 'number') {
-            update('pull-model', 'Downloading Qwen 2.5 7B model…',
+            update('pull-model', 'Downloading Qwen 3.5 4B model…',
               Math.round((ev.completed / ev.total) * 100))
           }
           if (ev.status === 'done') break
@@ -209,7 +209,7 @@ export default function LlmSetup({ onComplete }: Props) {
         await apiFetch('POST', '/api/llm/instances', {
           name: 'local',
           provider: 'ollama',
-          model: 'qwen2.5:7b',
+          model: 'qwen3.5:4b',
           base_url: 'http://localhost:11434/v1',
         }, signal)
       } catch (e) {
@@ -289,7 +289,7 @@ export default function LlmSetup({ onComplete }: Props) {
                     <Sparkles size={16} className="mt-0.5 flex-shrink-0 text-amber-400" />
                     <div>
                       <p className="text-xs font-medium text-slate-300">100% Private</p>
-                      <p className="text-[11px] text-slate-500">Qwen 2.5 7B runs entirely on your computer. Your messages never leave your device for AI processing.</p>
+                      <p className="text-[11px] text-slate-500">Qwen 3.5 4B runs entirely on your computer. Your messages never leave your device for AI processing.</p>
                     </div>
                   </div>
                 </div>
@@ -299,10 +299,10 @@ export default function LlmSetup({ onComplete }: Props) {
               <div className="rounded-lg bg-indigo-500/10 border border-indigo-500/20 px-3 py-2.5">
                 <div className="flex items-center gap-2">
                   <Cpu size={14} className="text-indigo-400" />
-                  <span className="text-xs font-medium text-indigo-300">Qwen 2.5 · 7B</span>
+                  <span className="text-xs font-medium text-indigo-300">Qwen 3.5 · 4B</span>
                 </div>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  ~4 GB download · Runs locally via Ollama · Q4 quantized for efficiency
+                  ~3.2 GB download · Runs locally via Ollama · Q4 quantized for efficiency
                 </p>
               </div>
 
@@ -424,7 +424,7 @@ export default function LlmSetup({ onComplete }: Props) {
                 </div>
                 <h2 className="text-lg font-semibold text-slate-200">AI is Ready</h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  Qwen 2.5 7B is running locally. Scam detection, summaries, and briefings are now enabled.
+                  Qwen 3.5 4B is running locally. Scam detection, summaries, and briefings are now enabled.
                 </p>
               </div>
               <button

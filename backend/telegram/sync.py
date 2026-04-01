@@ -11,7 +11,7 @@ from sqlalchemy import select
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db import crud
-from backend.db.models import Chat, CatchUpItem
+from backend.db.models import Chat, CatchUpItem, Message
 
 logger = logging.getLogger(__name__)
 from backend.telegram.client import get_client
@@ -355,12 +355,13 @@ async def _download_chat_photo(client, entity, dialog_id: int) -> None:
         pass
 
 
-async def sync_dialogs(limit: Optional[int] = None) -> None:
+async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = False) -> None:
     """Fetch dialogs and upsert into the chats table.
 
     Args:
-        limit: Max dialogs to fetch. None = all dialogs.
+        limit: Max dialogs to fetch per folder. None = all dialogs.
                Dialogs are returned most-recent-first by Telegram.
+        include_archived: Also scan the archived/contact-requests folder.
     """
     client = get_client()
     if not client:
@@ -368,45 +369,84 @@ async def sync_dialogs(limit: Optional[int] = None) -> None:
 
     entities_to_download = []
     chats_with_unread_mentions = []
+    new_chat_ids = []
+
+    folders = [None]
+    if include_archived:
+        folders.append(1)
 
     async with AsyncSessionLocal() as db:
-        async for dialog in client.iter_dialogs(limit=limit):
-            entity = dialog.entity
-            username = getattr(entity, "username", None)
-            # dialog.name can be empty for old/inactive users → fall back
-            name = dialog.name
-            if not name or name == str(dialog.id):
-                name = (
-                    username
-                    or getattr(entity, "title", None)
-                    or str(dialog.id)
+        for folder in folders:
+            async for dialog in client.iter_dialogs(limit=limit, folder=folder):
+                entity = dialog.entity
+                username = getattr(entity, "username", None)
+                # dialog.name can be empty for old/inactive users → fall back
+                name = dialog.name
+                if not name or name == str(dialog.id):
+                    name = (
+                        username
+                        or getattr(entity, "title", None)
+                        or str(dialog.id)
+                    )
+                # dialog.date is the timestamp of the last message in this chat
+                last_msg_date = getattr(dialog, "date", None)
+                if last_msg_date and hasattr(last_msg_date, "replace"):
+                    last_msg_date = last_msg_date.replace(tzinfo=None)
+
+                # Check if this is a new chat we haven't seen before
+                existing = await crud.get_chat_by_telegram_id(db, dialog.id)
+
+                await crud.upsert_chat(
+                    db,
+                    telegram_id=dialog.id,
+                    name=name,
+                    chat_type=_chat_type(entity),
+                    username=username,
+                    unread_count=dialog.unread_count,
+                    members_count=getattr(entity, "participants_count", None),
+                    is_forum=getattr(entity, "forum", False) or False,
+                    slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
+                    last_message_date=last_msg_date,
                 )
-            # dialog.date is the timestamp of the last message in this chat
-            last_msg_date = getattr(dialog, "date", None)
-            if last_msg_date and hasattr(last_msg_date, "replace"):
-                last_msg_date = last_msg_date.replace(tzinfo=None)
 
-            await crud.upsert_chat(
-                db,
-                telegram_id=dialog.id,
-                name=name,
-                chat_type=_chat_type(entity),
-                username=username,
-                unread_count=dialog.unread_count,
-                members_count=getattr(entity, "participants_count", None),
-                is_forum=getattr(entity, "forum", False) or False,
-                slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
-                last_message_date=last_msg_date,
-            )
+                if not existing:
+                    new_chat_ids.append({
+                        "chat_id": dialog.id,
+                        "name": name,
+                        "unread_count": dialog.unread_count or 0,
+                    })
 
-            # Track chats with unread mentions for priority sync
-            unread_mentions = getattr(dialog, "unread_mentions_count", 0) or 0
-            if unread_mentions > 0:
-                chats_with_unread_mentions.append((dialog.id, name, unread_mentions))
+                # Track chats with unread mentions for priority sync
+                unread_mentions = getattr(dialog, "unread_mentions_count", 0) or 0
+                if unread_mentions > 0:
+                    chats_with_unread_mentions.append((dialog.id, name, unread_mentions))
 
-            # Queue photo download (don't block dialog sync)
-            if getattr(entity, "photo", None):
-                entities_to_download.append((entity, dialog.id))
+                # Queue photo download (don't block dialog sync)
+                if getattr(entity, "photo", None):
+                    entities_to_download.append((entity, dialog.id))
+
+    # Notify frontend about newly discovered chats
+    if new_chat_ids:
+        logger.info("Discovered %d new chats during dialog sync", len(new_chat_ids))
+        from backend.api.ws import ws_manager
+        # Trigger chat list reload
+        await ws_manager.broadcast({
+            "type": "chat_synced",
+            "chat_id": new_chat_ids[0]["chat_id"],
+        })
+        # Send new_message event for each new chat with unreads (triggers notification)
+        for info in new_chat_ids:
+            if info["unread_count"] > 0:
+                await ws_manager.broadcast({
+                    "type": "new_message",
+                    "chat_id": info["chat_id"],
+                    "message_id": 0,
+                    "chat_name": info["name"],
+                    "sender_name": info["name"],
+                    "text": "",
+                    "is_tracked": False,
+                    "is_outgoing": False,
+                })
 
     # Priority-sync chats with unread mentions (deep sync to catch mention messages)
     if chats_with_unread_mentions:
@@ -1048,6 +1088,80 @@ async def register_event_handlers() -> None:
                 body_text = _strip_formatting((saved.text or ""))[:100]
                 body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
                 _send_native_notification(chat.name, body, chat_id=event.chat_id)
+
+    @client.on(events.Raw)
+    async def on_raw_update(event):
+        """Catch raw updates for messages from unknown users that NewMessage might miss."""
+        from telethon.tl.types import (
+            UpdateShortMessage, UpdateNewMessage,
+            PeerUser,
+        )
+        # UpdateShortMessage: Telegram sends this for DMs from unknown users
+        if isinstance(event, UpdateShortMessage):
+            if event.out:
+                return  # skip outgoing
+            user_id = event.user_id
+            # Check if we already have this message (NewMessage handler got it)
+            async with AsyncSessionLocal() as db:
+                existing_msg = await db.execute(
+                    select(Message).where(
+                        Message.tg_message_id == event.id,
+                        Message.chat_id == user_id,
+                    ).limit(1)
+                )
+                if existing_msg.scalars().first():
+                    return  # already handled by NewMessage
+
+                # Resolve the sender entity
+                try:
+                    entity = await client.get_entity(user_id)
+                except Exception:
+                    logger.warning("Raw handler: could not resolve entity for user %s", user_id)
+                    return
+
+                name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or str(user_id)
+                username = getattr(entity, "username", None)
+
+                # Ensure chat exists
+                chat = await crud.get_chat_by_telegram_id(db, user_id)
+                if not chat:
+                    chat = await crud.upsert_chat(
+                        db, user_id, name, "private",
+                        username=username,
+                        last_message_date=event.date.replace(tzinfo=None) if event.date else None,
+                    )
+                    await db.commit()
+                    logger.info("Raw handler: auto-created chat for user %s (%s)", name, user_id)
+
+                # Save the message
+                saved = await crud.save_message(
+                    db,
+                    tg_message_id=event.id,
+                    chat_id=user_id,
+                    sender_id=user_id,
+                    sender_name=name,
+                    text=event.message or "",
+                    text_html="",
+                    reactions_json=None,
+                    date=event.date.replace(tzinfo=None) if event.date else None,
+                    is_outgoing=False,
+                    media_type=None,
+                    media_path=None,
+                )
+
+            # Broadcast to frontend
+            from backend.api.ws import ws_manager
+            await ws_manager.broadcast({
+                "type": "new_message",
+                "chat_id": user_id,
+                "message_id": saved.id,
+                "chat_name": name,
+                "sender_name": name,
+                "text": (event.message or "")[:120],
+                "is_tracked": False,
+                "is_outgoing": False,
+            })
+            logger.info("Raw handler: captured message from unknown user %s (%s)", name, user_id)
 
     @client.on(events.MessageDeleted)
     async def on_message_deleted(event):
