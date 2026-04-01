@@ -17,6 +17,22 @@ from backend.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Like resp.raise_for_status() but includes the response body in the error."""
+    if resp.is_success:
+        return
+    try:
+        detail = resp.json()
+    except Exception:
+        detail = resp.text[:500]
+    raise httpx.HTTPStatusError(
+        f"{resp.status_code} {resp.reason_phrase} — {detail}",
+        request=resp.request,
+        response=resp,
+    )
+
+
 def _extract_pipeline_version(trace_json: Optional[str]) -> Optional[str]:
     """Extract pipeline_version from a trace JSON string."""
     if not trace_json:
@@ -109,8 +125,9 @@ def init_cloud_sync_manager() -> "CloudSyncManager":
 
 @dataclass
 class SyncResult:
-    status: str = "pending"  # success, failed, not_configured
+    status: str = "pending"  # success, partial, failed, not_configured
     error: Optional[str] = None
+    errors: list = None  # per-category error messages
     files_updated: list = None  # names of files that were updated
     reports_submitted: int = 0
     flags_submitted: int = 0
@@ -222,34 +239,68 @@ class CloudSyncManager:
                     if fname not in ("scam_pipeline.json", "scam_signatures.json"):
                         invalidate_cache(fname)
 
+            # 3-6. Upload all pending data in loops until drained
+            sync_errors = []
+
             # 3. Upload pending reports
-            reports_count = await self._upload_pending_reports()
-            result.reports_submitted = reports_count
+            try:
+                while True:
+                    batch = await self._upload_pending_reports()
+                    result.reports_submitted += batch
+                    if batch == 0:
+                        break
+            except Exception as e:
+                sync_errors.append(f"reports: {e}")
 
             # 4. Upload unsent flags
-            flags_count = await self._upload_unsent_flags()
-            result.flags_submitted = flags_count
+            try:
+                while True:
+                    batch = await self._upload_unsent_flags()
+                    result.flags_submitted += batch
+                    if batch == 0:
+                        break
+            except Exception as e:
+                sync_errors.append(f"flags: {e}")
 
             # 5. Upload unsynced scan results
-            scans_count = await self._upload_scan_results()
-            result.scan_results_submitted = scans_count
+            try:
+                while True:
+                    batch = await self._upload_scan_results()
+                    result.scan_results_submitted += batch
+                    if batch == 0:
+                        break
+            except Exception as e:
+                sync_errors.append(f"scan results: {e}")
 
             # 6. Upload queued dismissals (if sync_dismissals enabled)
             from backend.api.settings import _load_prefs
             prefs = _load_prefs()
-            dismissals_count = 0
             if prefs.get("shield_sync_dismissals", False):
-                dismissals_count = await self._upload_pending_dismissals()
-            result.dismissals_submitted = dismissals_count
+                try:
+                    while True:
+                        batch = await self._upload_pending_dismissals()
+                        result.dismissals_submitted += batch
+                        if batch == 0:
+                            break
+                except Exception as e:
+                    sync_errors.append(f"dismissals: {e}")
 
             # 7. Upload analytics
-            await self._upload_analytics()
+            try:
+                await self._upload_analytics()
+            except Exception as e:
+                sync_errors.append(f"analytics: {e}")
 
-            # Record sync time
+            # Record sync time and determine status
             self._last_synced_at = datetime.utcnow()
-            result.status = "success"
-            self._last_sync_status = "success"
-            self._last_sync_error = None
+            result.errors = sync_errors if sync_errors else None
+            if sync_errors:
+                result.status = "partial"
+                result.error = "; ".join(sync_errors)
+            else:
+                result.status = "success"
+            self._last_sync_status = result.status
+            self._last_sync_error = result.error
             self._last_sync_details = {
                 "files_updated": result.files_updated or [],
                 "reports_submitted": result.reports_submitted,
@@ -351,20 +402,17 @@ class CloudSyncManager:
             # Upload scammer dismissals via /sync/dismissals
             if scammer_items:
                 payload = {"dismissals": [data for _, data in scammer_items]}
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        resp = await client.post(
-                            f"{self._base_url}/sync/dismissals",
-                            json=payload,
-                            headers={"Authorization": f"Bearer {self._api_key}"},
-                        )
-                        if resp.is_success:
-                            now = datetime.utcnow()
-                            for d, _ in scammer_items:
-                                d.synced_at = now
-                            synced_count += len(scammer_items)
-                except Exception as e:
-                    logger.warning("Failed to upload scammer dismissals: %s", e)
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        f"{self._base_url}/sync/dismissals",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                    )
+                    _raise_for_status(resp)
+                    now = datetime.utcnow()
+                    for d, _ in scammer_items:
+                        d.synced_at = now
+                    synced_count += len(scammer_items)
 
             # Upload scan dismissals via /sync/scan-results (same endpoint)
             if scan_items:
@@ -388,20 +436,17 @@ class CloudSyncManager:
                         "llm_response": data.get("llm_response"),
                         "trace": trace,
                     })
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        resp = await client.post(
-                            f"{self._base_url}/sync/scan-results",
-                            json={"scan_results": scan_results},
-                            headers={"Authorization": f"Bearer {self._api_key}"},
-                        )
-                        if resp.is_success:
-                            now = datetime.utcnow()
-                            for d, _ in scan_items:
-                                d.synced_at = now
-                            synced_count += len(scan_items)
-                except Exception as e:
-                    logger.warning("Failed to upload scan dismissals: %s", e)
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        f"{self._base_url}/sync/scan-results",
+                        json={"scan_results": scan_results},
+                        headers={"Authorization": f"Bearer {self._api_key}"},
+                    )
+                    _raise_for_status(resp)
+                    now = datetime.utcnow()
+                    for d, _ in scan_items:
+                        d.synced_at = now
+                    synced_count += len(scan_items)
 
             if synced_count > 0:
                 await db.commit()
@@ -409,49 +454,46 @@ class CloudSyncManager:
                         synced_count, len(scammer_items), len(scan_items))
             return synced_count
 
-    async def upload_feedback(self, feedback_id: int):
-        """Try to upload a single feedback item immediately."""
+    async def upload_feedback(self, feedback_id: int) -> bool:
+        """Try to upload a single feedback item immediately. Returns True if synced."""
         if not self.is_configured:
-            return
-        try:
-            from backend.db.database import AsyncSessionLocal
-            from backend.db.models import ScamFeedback
-            from sqlalchemy import select
+            return False
+        from backend.db.database import AsyncSessionLocal
+        from backend.db.models import ScamFeedback
+        from sqlalchemy import select
 
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(ScamFeedback).where(ScamFeedback.id == feedback_id)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(ScamFeedback).where(ScamFeedback.id == feedback_id)
+            )
+            fb = result.scalars().first()
+            if not fb:
+                return False
+
+            payload = {
+                "feedback": [{
+                    "id": fb.id,
+                    "feedback_type": fb.feedback_type,
+                    "message": fb.message,
+                    "related_chat_id": fb.related_chat_id,
+                    "related_message_id": fb.related_message_id,
+                    "related_flag_telegram_id": fb.related_flag_telegram_id,
+                    "created_at": fb.created_at.isoformat() if fb.created_at else None,
+                }]
+            }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/feedback",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
                 )
-                fb = result.scalars().first()
-                if not fb:
-                    return
-
-                payload = {
-                    "feedback": [{
-                        "id": fb.id,
-                        "feedback_type": fb.feedback_type,
-                        "message": fb.message,
-                        "related_chat_id": fb.related_chat_id,
-                        "related_message_id": fb.related_message_id,
-                        "related_flag_telegram_id": fb.related_flag_telegram_id,
-                        "created_at": fb.created_at.isoformat() if fb.created_at else None,
-                    }]
-                }
-
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self._base_url}/sync/feedback",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                    )
-                    if resp.is_success:
-                        fb.status = "synced"
-                        fb.synced_at = datetime.utcnow()
-                        await db.commit()
-                        logger.info("Feedback %d synced to cloud", feedback_id)
-
-        except Exception as e:
-            logger.warning("Failed to upload feedback %d: %s", feedback_id, e)
+                _raise_for_status(resp)
+                fb.status = "synced"
+                fb.synced_at = datetime.utcnow()
+                await db.commit()
+                logger.info("Feedback %d synced to cloud", feedback_id)
+                return True
 
     # --- Internal helpers ---
 
@@ -553,23 +595,18 @@ class CloudSyncManager:
                 } for r in reports]
             }
 
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self._base_url}/sync/reports",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                    )
-                    if resp.is_success:
-                        now = datetime.utcnow()
-                        for r in reports:
-                            r.synced_at = now
-                        await db.commit()
-                        return len(reports)
-            except Exception as e:
-                logger.warning("Failed to upload reports: %s", e)
-
-            return 0
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/reports",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                _raise_for_status(resp)
+                now = datetime.utcnow()
+                for r in reports:
+                    r.synced_at = now
+                await db.commit()
+                return len(reports)
 
     async def _upload_unsent_flags(self) -> int:
         from backend.db.database import AsyncSessionLocal
@@ -590,28 +627,23 @@ class CloudSyncManager:
                     "source": f.source,
                     "confidence": f.confidence,
                     "reason": f.reason,
-                    "category": f.category,
+                    "category": f.category or "unknown",
                     "flagged_message_text": f.flagged_message_text,
                     "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
                 } for f in flags]
             }
 
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self._base_url}/sync/flags",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                    )
-                    if resp.is_success:
-                        for f in flags:
-                            f.synced_to_cloud = True
-                        await db.commit()
-                        return len(flags)
-            except Exception as e:
-                logger.warning("Failed to upload flags: %s", e)
-
-            return 0
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/flags",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                _raise_for_status(resp)
+                for f in flags:
+                    f.synced_to_cloud = True
+                await db.commit()
+                return len(flags)
 
     async def _upload_scan_results(self) -> int:
         from backend.db.database import AsyncSessionLocal
@@ -653,22 +685,17 @@ class CloudSyncManager:
                 } for m in msgs]
             }
 
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self._base_url}/sync/scan-results",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                    )
-                    if resp.is_success:
-                        for m in msgs:
-                            m.scam_synced_to_cloud = True
-                        await db.commit()
-                        return len(msgs)
-            except Exception as e:
-                logger.warning("Failed to upload scan results: %s", e)
-
-            return 0
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/sync/scan-results",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+                _raise_for_status(resp)
+                for m in msgs:
+                    m.scam_synced_to_cloud = True
+                await db.commit()
+                return len(msgs)
 
     async def _upload_analytics(self):
         """Upload pending analytics periods to cloud."""

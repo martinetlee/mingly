@@ -548,6 +548,17 @@ async def get_pipeline():
     }
 
 
+@router.post("/pipeline/reload")
+async def reload_pipeline():
+    """Force reload pipeline from disk."""
+    from backend.scam.pipeline import get_pipeline_manager
+    mgr = get_pipeline_manager()
+    if not mgr:
+        raise HTTPException(status_code=503, detail="Pipeline not initialized")
+    config = mgr.reload()
+    return {"status": "reloaded", "version": config.version}
+
+
 @router.post("/pipeline/sync")
 async def sync_pipeline():
     """Trigger cloud sync or reload from disk."""
@@ -558,10 +569,12 @@ async def sync_pipeline():
         return {
             "status": result.status,
             "error": result.error,
-            "pipeline_updated": result.pipeline_updated,
-            "scenarios_updated": result.scenarios_updated,
-            "signatures_updated": result.signatures_updated,
+            "errors": result.errors,
+            "files_updated": result.files_updated,
             "reports_submitted": result.reports_submitted,
+            "flags_submitted": result.flags_submitted,
+            "scan_results_submitted": result.scan_results_submitted,
+            "dismissals_submitted": result.dismissals_submitted,
         }
     else:
         # No cloud configured — just reload from disk
@@ -977,17 +990,20 @@ async def submit_feedback(req: CreateFeedbackRequest):
         await db.refresh(feedback)
 
     # Try to sync immediately if cloud is configured
+    synced = False
+    sync_error = None
     from backend.scam.cloud_sync import get_cloud_sync_manager
     sync_mgr = get_cloud_sync_manager()
     if sync_mgr and sync_mgr.is_configured:
         try:
-            await sync_mgr.upload_feedback(feedback.id)
-        except Exception:
-            pass  # Will be picked up on next full sync
+            synced = await sync_mgr.upload_feedback(feedback.id)
+        except Exception as e:
+            sync_error = str(e)
 
     return {
         "id": feedback.id,
-        "status": "submitted",
+        "status": "synced" if synced else "saved_locally",
+        "sync_error": sync_error,
         "created_at": feedback.created_at.isoformat(),
     }
 

@@ -782,6 +782,9 @@ export const getScamPipeline = () =>
     output: string
   }>('/api/scam/pipeline')
 
+export const reloadScamPipeline = () =>
+  request<{ status: string; version: string }>('/api/scam/pipeline/reload', { method: 'POST' })
+
 export const getReportContext = (chatId: number, targetMessageId: number) =>
   request<{ messages: ReportContextMessage[] }>(`/api/scam/reports/context?chat_id=${chatId}&target_message_id=${targetMessageId}`)
 
@@ -831,7 +834,7 @@ export const submitFeedback = (data: {
   related_message_id?: number
   related_flag_telegram_id?: number
 }) =>
-  request<{ id: number; status: string; created_at: string }>('/api/scam/feedback', {
+  request<{ id: number; status: string; sync_error: string | null; created_at: string }>('/api/scam/feedback', {
     method: 'POST',
     body: JSON.stringify(data),
   })

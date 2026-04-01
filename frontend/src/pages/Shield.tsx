@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw, Cloud, CloudOff, History, MessageSquare, Send } from 'lucide-react'
 import type { ScamFlag, ScannedMessage, ScamReport, SyncHistoryStats, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan, getSyncHistory, submitFeedback } from '../api/client'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, reloadScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan, getSyncHistory, submitFeedback } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function stripFormatting(text: string): string {
@@ -192,6 +192,31 @@ export default function Shield() {
     if (event.type === 'scam_users_flagged' || event.type === 'scam_detected') {
       loadFlags()
       loadScanned()
+      // Clear rescanning spinners for completed messages
+      const msgIds = (event as any).message_ids as number[] | undefined
+      if (msgIds) {
+        setRescanning(prev => {
+          const next = new Set(prev)
+          for (const key of prev) {
+            const tgId = parseInt(key.split('-')[1])
+            if (msgIds.includes(tgId)) next.delete(key)
+          }
+          return next
+        })
+      }
+    } else if (event.type === 'scam_check_safe') {
+      loadScanned()
+      const msgIds = (event as any).message_ids as number[] | undefined
+      if (msgIds) {
+        setRescanning(prev => {
+          const next = new Set(prev)
+          for (const key of prev) {
+            const tgId = parseInt(key.split('-')[1])
+            if (msgIds.includes(tgId)) next.delete(key)
+          }
+          return next
+        })
+      }
     }
   }, [loadFlags, loadScanned]))
 
@@ -214,12 +239,8 @@ export default function Shield() {
     setRescanning(prev => new Set(prev).add(key))
     try {
       await checkMessagesForScam(chatId, [tgMessageId])
-      // Result arrives via WebSocket — reload after a short delay
-      setTimeout(() => loadScanned(scannedPage), 3000)
+      // Result arrives via WebSocket which triggers loadScanned
     } catch { /* ignore */ }
-    finally {
-      setRescanning(prev => { const next = new Set(prev); next.delete(key); return next })
-    }
   }
 
   const goToMessage = (chatId: number, messageId: number) => {
@@ -444,8 +465,14 @@ export default function Shield() {
                 onClick={async () => {
                   setFeedbackSending(true); setFeedbackResult(null)
                   try {
-                    await submitFeedback({ feedback_type: feedbackType, message: feedbackMsg })
-                    setFeedbackResult('Sent — thank you!')
+                    const res = await submitFeedback({ feedback_type: feedbackType, message: feedbackMsg })
+                    if (res.status === 'synced') {
+                      setFeedbackResult('Sent — thank you!')
+                    } else if (res.sync_error) {
+                      setFeedbackResult('Saved locally — cloud sync failed')
+                    } else {
+                      setFeedbackResult('Saved locally — will sync later')
+                    }
                     setFeedbackMsg('')
                     setFeedbackType('general')
                   } catch (err) {
@@ -458,7 +485,7 @@ export default function Shield() {
                 {feedbackSending ? 'Sending…' : 'Send Feedback'}
               </button>
               {feedbackResult && (
-                <span className={`text-xs ${feedbackResult.startsWith('Sent') ? 'text-emerald-400' : 'text-red-400'}`}>{feedbackResult}</span>
+                <span className={`text-xs ${feedbackResult.startsWith('Sent') ? 'text-emerald-400' : feedbackResult.startsWith('Saved') ? 'text-amber-400' : 'text-red-400'}`}>{feedbackResult}</span>
               )}
             </div>
           </div>
@@ -1024,6 +1051,9 @@ export default function Shield() {
                   {syncStats.last_sync_status === 'success' && (
                     <span className="inline-flex items-center rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">Success</span>
                   )}
+                  {syncStats.last_sync_status === 'partial' && (
+                    <span className="inline-flex items-center rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-300">Partial</span>
+                  )}
                   {syncStats.last_sync_status === 'failed' && (
                     <span className="inline-flex items-center rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-medium text-red-300">Failed</span>
                   )}
@@ -1033,8 +1063,8 @@ export default function Shield() {
                       setSyncing(true); setSyncResult(null)
                       try {
                         const r = await triggerSync()
-                        setSyncResult(r.status === 'success' ? 'Synced' : r.error || r.status)
-                        if (r.status === 'success' || r.status === 'reloaded') {
+                        setSyncResult(r.status === 'success' ? 'Synced' : r.status === 'partial' ? 'Partial sync — some uploads failed' : r.error || r.status)
+                        if (r.status === 'success' || r.status === 'reloaded' || r.status === 'partial') {
                           setCloudLastSynced(new Date().toISOString())
                         }
                         getSyncHistory().then(setSyncStats).catch(() => {})
@@ -1047,7 +1077,7 @@ export default function Shield() {
                   >
                     {syncing ? 'Syncing…' : 'Sync Now'}
                   </button>
-                  {syncResult && <span className={`text-[10px] ${syncResult === 'Synced' ? 'text-emerald-400' : 'text-red-400'}`}>{syncResult}</span>}
+                  {syncResult && <span className={`text-[10px] ${syncResult === 'Synced' ? 'text-emerald-400' : syncResult.startsWith('Partial') ? 'text-amber-400' : 'text-red-400'}`}>{syncResult}</span>}
                 </div>
 
                 {/* Failed sync error */}
@@ -1057,8 +1087,15 @@ export default function Shield() {
                   </div>
                 )}
 
-                {/* Last successful sync details */}
-                {syncStats.last_sync_status === 'success' && syncStats.last_sync_details && (
+                {/* Partial sync error */}
+                {syncStats.last_sync_status === 'partial' && syncStats.last_sync_error && (
+                  <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
+                    <p className="text-xs text-amber-300">Some uploads failed: {syncStats.last_sync_error}</p>
+                  </div>
+                )}
+
+                {/* Last sync details (success or partial) */}
+                {(syncStats.last_sync_status === 'success' || syncStats.last_sync_status === 'partial') && syncStats.last_sync_details && (
                   <div className="text-[10px] text-slate-500 flex items-center gap-3 flex-wrap">
                     {syncStats.last_sync_details.flags_submitted > 0 && <span>{syncStats.last_sync_details.flags_submitted} flags uploaded</span>}
                     {syncStats.last_sync_details.reports_submitted > 0 && <span>{syncStats.last_sync_details.reports_submitted} reports uploaded</span>}
@@ -1283,7 +1320,23 @@ export default function Shield() {
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-medium text-slate-300">Pipeline</span>
                 <span className="rounded-full bg-cyan-500/20 px-1.5 py-0.5 text-[9px] font-medium text-cyan-300">v{pipelineData.version}</span>
-
+                <button
+                  onClick={async () => {
+                    setLoadingPipeline(true)
+                    try {
+                      await reloadScamPipeline()
+                      const data = await getScamPipeline()
+                      setPipelineData(data)
+                    } catch (err) {
+                      console.error('Failed to reload pipeline', err)
+                    } finally {
+                      setLoadingPipeline(false)
+                    }
+                  }}
+                  className="ml-auto flex items-center gap-1 rounded-md bg-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-600"
+                >
+                  <RefreshCw size={10} /> Reload from disk
+                </button>
               </div>
 
               {/* DAG visualization with SVG edges */}

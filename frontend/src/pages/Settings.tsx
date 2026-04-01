@@ -102,6 +102,15 @@ const MODELS: ModelDef[] = [
     ollamaModel: 'qwen3.5:4b',
     available: true,
   },
+  {
+    id: 'qwen25-7b',
+    name: 'Qwen 2.5 · 7B',
+    detail: '7B · Runs locally · ~4.7 GB download',
+    type: 'local',
+    provider: 'ollama',
+    ollamaModel: 'qwen2.5:7b',
+    available: true,
+  },
 ]
 
 // ---------------------------------------------------------------------------

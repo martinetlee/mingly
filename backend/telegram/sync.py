@@ -1093,7 +1093,7 @@ async def register_event_handlers() -> None:
     async def on_raw_update(event):
         """Catch raw updates for messages from unknown users that NewMessage might miss."""
         from telethon.tl.types import (
-            UpdateShortMessage, UpdateNewMessage,
+            UpdateShortMessage, UpdateNewMessage, UpdateNewChannelMessage,
             PeerUser,
         )
         # UpdateShortMessage: Telegram sends this for DMs from unknown users

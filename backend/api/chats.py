@@ -315,10 +315,13 @@ async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
         except Exception as e:
             logger.warning("Global message search failed: %s", e)
 
-        # 2. Also search dialogs (main + archived/contact requests folder)
+        # 2. Also search dialogs across all folders (main, archived, custom filters)
         from backend.telegram.sync import _chat_type
         q_lower = q.lower()
-        for folder in [None, 1]:
+
+        folder_ids = [None, 1]  # None = main, 1 = archived/contact requests
+
+        for folder in folder_ids:
             try:
                 async for dialog in client.iter_dialogs(limit=200, folder=folder):
                     if q_lower in (dialog.name or "").lower():
@@ -341,8 +344,8 @@ async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
                         })
                         if len(chats_found) >= 20:
                             break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Dialog search folder %s failed: %s", folder, e)
 
         # 2. Also search Telegram's global contacts/channels directory
         result = await client(SearchRequest(q=q, limit=20))
@@ -398,7 +401,7 @@ async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
             })
         return chats_found
     except Exception as e:
-        logger.warning("Telegram search failed: %s", e)
+        logger.warning("Telegram search failed: %s", e, exc_info=True)
         # Fallback to local DB search
         from sqlalchemy import select as sa_sel
         from backend.db.models import Chat

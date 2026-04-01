@@ -73,9 +73,10 @@ async def _run_briefing_background(days: int) -> None:
     collected: list[dict] = []
 
     async with AsyncSessionLocal() as db:
-        tracked = await crud.get_tracked_chats(db)
-        briefing = await crud.get_briefing_chats(db)
-        all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
+        tracked_rows = await crud.get_tracked_chats(db)
+        briefing_rows = await crud.get_briefing_chats(db)
+        # get_tracked_chats/get_briefing_chats return (Chat, last_text, last_sender, last_date) tuples
+        all_chats = [("tracked", row[0]) for row in tracked_rows] + [("briefing", row[0]) for row in briefing_rows]
         important_contacts = await crud.get_important_contacts(db)
 
         async with httpx.AsyncClient(timeout=120.0) as client:
