@@ -398,6 +398,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
   const [scamCheckDone, setScamCheckDone] = useState<'safe' | 'scam' | 'error' | null>(null)
   const [scamError, setScamError] = useState<string | null>(null)
   const [scamInfoExpanded, setScamInfoExpanded] = useState(false)
+  const [scamDismissed, setScamDismissed] = useState(false)
   const [translation, setTranslation] = useState<string | null>(null)
   const [translating, setTranslating] = useState(false)
   const [showAvatarMenu, setShowAvatarMenu] = useState(false)
@@ -474,7 +475,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     onReact?.(message, emoji)
   }
 
-  const isScam = message.scam_score != null && message.scam_score > 0.5
+  const isScam = !scamDismissed && message.scam_score != null && message.scam_score > 0.5
   const showAvatarColumn = isGroupChat && !isOut
 
   return (
@@ -759,7 +760,10 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      if (message.sender_id) dismissScamFlag(message.sender_id).catch(() => {})
+                      if (message.sender_id) {
+                        setScamDismissed(true)
+                        dismissScamFlag(message.sender_id).catch(() => setScamDismissed(false))
+                      }
                     }}
                     className="text-red-400 hover:text-red-200 underline"
                   >
