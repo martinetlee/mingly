@@ -95,6 +95,7 @@ export interface Message {
   is_edited?: boolean
   scam_score?: number | null
   scam_reason?: string | null
+  scam_manual_verdict?: 'scam' | 'not_scam' | null
 }
 
 export interface ScamFlag {
@@ -131,6 +132,7 @@ export interface ScannedMessage {
   llm_response: string | null
   trace_json: string | null
   synced_to_cloud?: boolean
+  scam_manual_verdict?: 'scam' | 'not_scam' | null
 }
 
 export interface ScamCategory {

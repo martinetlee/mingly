@@ -255,27 +255,76 @@ async def list_flags():
         }
 
 
+def _scanned_message_filters(
+    sender_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    min_members: Optional[int] = None,
+    verdict_filter: Optional[str] = None,
+):
+    """Build SQLAlchemy filter conditions for scanned messages."""
+    conditions = [Message.scam_score.isnot(None)]
+    if sender_id is not None:
+        conditions.append(Message.sender_id == sender_id)
+    if chat_id is not None:
+        conditions.append(Message.chat_id == chat_id)
+    if min_members is not None:
+        conditions.append(Message.chat_id.in_(
+            select(Chat.telegram_id).where(Chat.members_count >= min_members)
+        ))
+    if verdict_filter == "unmarked":
+        conditions.append(Message.scam_manual_verdict == "not_scam")
+    elif verdict_filter == "scam":
+        conditions.append(Message.scam_score > 0.5)
+    elif verdict_filter == "failed":
+        conditions.append(Message.scam_trace_json.contains('"status": "failed"'))
+    return conditions
+
+
+def _serialize_scanned_message(m: Message, chat_name: str) -> dict:
+    return {
+        "tg_message_id": m.tg_message_id,
+        "chat_id": m.chat_id,
+        "chat_name": chat_name,
+        "sender_id": m.sender_id,
+        "sender_name": m.sender_name,
+        "text": m.text or "",
+        "date": m.date.isoformat() if m.date else None,
+        "scam_score": m.scam_score,
+        "scam_reason": m.scam_reason,
+        "scam_category": m.scam_category,
+        "scam_manual_verdict": m.scam_manual_verdict,
+        "llm_prompt": m.scam_llm_prompt,
+        "llm_response": m.scam_llm_response,
+        "trace_json": m.scam_trace_json,
+        "synced_to_cloud": m.scam_synced_to_cloud or False,
+    }
+
+
 @router.get("/scanned-messages")
-async def list_scanned_messages(page: int = Query(1, ge=1), page_size: int = Query(200, ge=1, le=500)):
-    """List messages that have been scam-checked, with pagination."""
+async def list_scanned_messages(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=500),
+    sender_id: Optional[int] = Query(None),
+    chat_id: Optional[int] = Query(None),
+    min_members: Optional[int] = Query(None),
+    verdict_filter: Optional[str] = Query(None),
+):
+    """List messages that have been scam-checked, with pagination and filters."""
     async with AsyncSessionLocal() as db:
-        from backend.db.models import Chat
         from sqlalchemy import func
 
+        conditions = _scanned_message_filters(sender_id, chat_id, min_members, verdict_filter)
+
         # Total count
-        count_result = await db.execute(
-            select(func.count()).select_from(Message).where(Message.scam_score.isnot(None))
-        )
-        total = count_result.scalar() or 0
+        count_q = select(func.count()).select_from(Message).where(*conditions)
+        total = (await db.execute(count_q)).scalar() or 0
 
         # Paginated results
         offset = (page - 1) * page_size
         result = await db.execute(
-            select(Message)
-            .where(Message.scam_score.isnot(None))
+            select(Message).where(*conditions)
             .order_by(Message.date.desc())
-            .offset(offset)
-            .limit(page_size)
+            .offset(offset).limit(page_size)
         )
         msgs = result.scalars().all()
 
@@ -293,25 +342,119 @@ async def list_scanned_messages(page: int = Query(1, ge=1), page_size: int = Que
             "page": page,
             "page_size": page_size,
             "messages": [
-                {
-                    "tg_message_id": m.tg_message_id,
-                    "chat_id": m.chat_id,
-                    "chat_name": chat_id_to_name.get(m.chat_id, "Unknown"),
-                    "sender_id": m.sender_id,
-                    "sender_name": m.sender_name,
-                    "text": m.text or "",
-                    "date": m.date.isoformat() if m.date else None,
-                    "scam_score": m.scam_score,
-                    "scam_reason": m.scam_reason,
-                    "scam_category": m.scam_category,
-                    "llm_prompt": m.scam_llm_prompt,
-                    "llm_response": m.scam_llm_response,
-                    "trace_json": m.scam_trace_json,
-                    "synced_to_cloud": m.scam_synced_to_cloud or False,
-                }
+                _serialize_scanned_message(m, chat_id_to_name.get(m.chat_id, "Unknown"))
                 for m in msgs
             ],
         }
+
+
+class SetVerdictRequest(BaseModel):
+    messages: list[dict]  # [{"chat_id": int, "tg_message_id": int}]
+    verdict: Optional[str] = None  # "scam", "not_scam", or null to clear
+
+
+@router.put("/scanned-messages/verdict")
+async def set_message_verdict(req: SetVerdictRequest):
+    """Set manual verdict on one or more scanned messages."""
+    if req.verdict not in ("scam", "not_scam", None):
+        raise HTTPException(status_code=400, detail="verdict must be 'scam', 'not_scam', or null")
+    from sqlalchemy import update, and_, or_
+    async with AsyncSessionLocal() as db:
+        for item in req.messages:
+            await db.execute(
+                update(Message)
+                .where(Message.chat_id == item["chat_id"], Message.tg_message_id == item["tg_message_id"])
+                .values(scam_manual_verdict=req.verdict)
+            )
+        await db.commit()
+    return {"status": "updated", "count": len(req.messages), "verdict": req.verdict}
+
+
+@router.get("/scanned-messages/export")
+async def export_scanned_messages(
+    sender_id: Optional[int] = Query(None),
+    chat_id: Optional[int] = Query(None),
+    min_members: Optional[int] = Query(None),
+    verdict_filter: Optional[str] = Query(None),
+):
+    """Export scanned messages as JSON for download."""
+    from fastapi.responses import Response
+
+    async with AsyncSessionLocal() as db:
+        conditions = _scanned_message_filters(sender_id, chat_id, min_members, verdict_filter)
+        result = await db.execute(
+            select(Message).where(*conditions)
+            .order_by(Message.date.desc())
+            .limit(10000)
+        )
+        msgs = result.scalars().all()
+
+        # Resolve chat names
+        chat_ids = list({m.chat_id for m in msgs})
+        chat_id_to_name: dict[int, str] = {}
+        if chat_ids:
+            cn_result = await db.execute(
+                select(Chat.telegram_id, Chat.name).where(Chat.telegram_id.in_(chat_ids))
+            )
+            chat_id_to_name = {row[0]: row[1] or "Unknown" for row in cn_result.fetchall()}
+
+        rows = []
+        for m in msgs:
+            # Extract pipeline input from trace
+            pipeline_input = None
+            if m.scam_trace_json:
+                try:
+                    trace = json.loads(m.scam_trace_json)
+                    pipeline_input = trace.get("input")
+                    # Fallback for old traces without top-level input
+                    if not pipeline_input and trace.get("steps"):
+                        for step in trace["steps"]:
+                            if step.get("input") and "$message" in step["input"]:
+                                pipeline_input = step["input"]["$message"]
+                                break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            rows.append({
+                "sender_id": m.sender_id,
+                "sender_name": m.sender_name,
+                "chat_id": m.chat_id,
+                "chat_name": chat_id_to_name.get(m.chat_id, "Unknown"),
+                "tg_message_id": m.tg_message_id,
+                "message_text": m.text or "",
+                "pipeline_input": pipeline_input,
+                "pipeline_score": m.scam_score,
+                "pipeline_verdict": (m.scam_score or 0) > 0.5,
+                "pipeline_category": m.scam_category,
+                "manual_verdict": m.scam_manual_verdict,
+                "date": m.date.isoformat() if m.date else None,
+            })
+
+    # Write to temp file and return the path
+    from backend.config import DATA_DIR
+    import os
+    exports_dir = DATA_DIR / "exports"
+    exports_dir.mkdir(exist_ok=True)
+    filename = f"shield_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    filepath = exports_dir / filename
+    filepath.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"temp_path": str(filepath.resolve()), "filename": filename, "count": len(rows)}
+
+
+@router.get("/scanned-messages/export/download")
+async def download_export_file(path: str = Query(...)):
+    """Serve a previously exported file for browser download."""
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    filepath = Path(path)
+    # Security: only allow files from our exports directory
+    from backend.config import DATA_DIR
+    exports_dir = (DATA_DIR / "exports").resolve()
+    if not filepath.resolve().is_relative_to(exports_dir):
+        raise HTTPException(status_code=403, detail="Invalid export path")
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Export file not found")
+    return FileResponse(str(filepath), filename=filepath.name, media_type="application/json")
 
 
 @router.delete("/flags/{telegram_id}")
@@ -338,12 +481,12 @@ async def dismiss_flag(telegram_id: int):
         await db.execute(
             delete(ScamFlag).where(ScamFlag.telegram_id == telegram_id)
         )
-        # Also clear scam_score on messages from this sender
+        # Mark all messages from this sender as manually safe and clear scam_score
         from sqlalchemy import update
         await db.execute(
             update(Message)
             .where(Message.sender_id == telegram_id)
-            .values(scam_score=None, scam_reason=None)
+            .values(scam_score=None, scam_reason=None, scam_manual_verdict="not_scam")
         )
         await db.commit()
 
@@ -403,7 +546,7 @@ async def clear_message_scam(chat_id: int, tg_message_id: int):
         await db.execute(
             update(Message)
             .where(Message.chat_id == chat_id, Message.tg_message_id == tg_message_id)
-            .values(scam_score=None, scam_reason=None)
+            .values(scam_score=None, scam_reason=None, scam_manual_verdict="not_scam")
         )
         await db.commit()
 

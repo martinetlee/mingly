@@ -766,11 +766,64 @@ export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[
     body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
   })
 
-export const getScannedMessages = (page: number = 1, pageSize: number = 200) =>
-  request<{ messages: ScannedMessage[]; total: number; page: number; page_size: number }>(`/api/scam/scanned-messages?page=${page}&page_size=${pageSize}`)
+export const getScannedMessages = (
+  page: number = 1,
+  pageSize: number = 200,
+  filters?: { sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string },
+) => {
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+  if (filters?.sender_id) params.set('sender_id', String(filters.sender_id))
+  if (filters?.chat_id) params.set('chat_id', String(filters.chat_id))
+  if (filters?.min_members) params.set('min_members', String(filters.min_members))
+  if (filters?.verdict_filter) params.set('verdict_filter', filters.verdict_filter)
+  return request<{ messages: ScannedMessage[]; total: number; page: number; page_size: number }>(`/api/scam/scanned-messages?${params}`)
+}
 
 export const clearMessageScam = (chatId: number, tgMessageId: number) =>
   request<{ status: string }>(`/api/scam/scanned-messages/${chatId}/${tgMessageId}`, { method: 'DELETE' })
+
+export const setMessageVerdict = (
+  messages: { chat_id: number; tg_message_id: number }[],
+  verdict: 'scam' | 'not_scam' | null,
+) =>
+  request<{ status: string; count: number; verdict: string | null }>('/api/scam/scanned-messages/verdict', {
+    method: 'PUT',
+    body: JSON.stringify({ messages, verdict }),
+  })
+
+export const exportScannedMessages = async (
+  filters?: { sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string },
+) => {
+  const params = new URLSearchParams()
+  if (filters?.sender_id) params.set('sender_id', String(filters.sender_id))
+  if (filters?.chat_id) params.set('chat_id', String(filters.chat_id))
+  if (filters?.min_members) params.set('min_members', String(filters.min_members))
+  if (filters?.verdict_filter) params.set('verdict_filter', filters.verdict_filter)
+
+  // Backend writes to temp file and returns path
+  const result = await request<{ temp_path: string; filename: string; count: number }>(
+    `/api/scam/scanned-messages/export?${params}`,
+  )
+
+  // In pywebview: open native save dialog
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.save_file_dialog) {
+    const saved = await pywebview.api.save_file_dialog(result.temp_path, result.filename)
+    return { saved: !!saved, count: result.count, path: saved }
+  }
+
+  // Dev mode (browser): download the temp file via a download endpoint
+  const dlResp = await fetch(`/api/scam/scanned-messages/export/download?path=${encodeURIComponent(result.temp_path)}`, {
+    headers: { 'X-Session-Token': sessionStorage.getItem('mingly_session_token') || '' },
+  })
+  const blob = await dlResp.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = result.filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+  return { saved: true, count: result.count, path: null }
+}
 
 export const getScamPipeline = () =>
   request<{

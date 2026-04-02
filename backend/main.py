@@ -133,6 +133,22 @@ if __name__ == "__main__":
             if url and (url.startswith("http://") or url.startswith("https://")):
                 webbrowser.open(url)
 
+        def save_file_dialog(self, temp_path, suggested_name):
+            """Open a native save dialog, copy temp file to user-chosen location."""
+            import shutil
+            try:
+                result = window.create_file_dialog(
+                    webview.SAVE_DIALOG,
+                    save_filename=suggested_name,
+                )
+                if result:
+                    dest = result if isinstance(result, str) else result[0]
+                    shutil.copy2(temp_path, dest)
+                    return dest
+            except Exception as e:
+                print(f"Save dialog error: {e}")
+            return None
+
     window = webview.create_window(
         "Common Defense",
         f"http://{API_HOST}:{API_PORT}",

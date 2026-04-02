@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield as ShieldIcon, ShieldAlert, ShieldCheck, X, ExternalLink, Settings, ChevronDown, Flag, FileText, GitBranch, RefreshCw, Cloud, CloudOff, History, MessageSquare, Send } from 'lucide-react'
 import type { ScamFlag, ScannedMessage, ScamReport, SyncHistoryStats, WSEvent } from '../api/types'
-import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, reloadScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan, getSyncHistory, submitFeedback } from '../api/client'
+import { getScamFlags, dismissScamFlag, getScannedMessages, clearMessageScam, checkMessagesForScam, getScamDetectionSettings, setScamDetectionSettings, getScamReports, getScamPipeline, reloadScamPipeline, getShieldCloudSettings, setShieldCloudSettings, triggerSync, triggerMassScan, getSyncHistory, submitFeedback, setMessageVerdict, exportScannedMessages } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 function stripFormatting(text: string): string {
@@ -57,7 +57,7 @@ function SyncBadge({ synced }: { synced: boolean }) {
   )
 }
 
-type Tab = 'flagged' | 'scanned' | 'reports' | 'sync' | 'pipeline'
+type Tab = 'flagged' | 'scanned' | 'reports' | 'sync' | 'pipeline' | 'unmarked'
 
 export default function Shield() {
   const navigate = useNavigate()
@@ -71,6 +71,7 @@ export default function Shield() {
     return () => window.removeEventListener('developer_mode_changed', handler)
   }, [])
 
+
   // Flagged scammers
   const [flags, setFlags] = useState<ScamFlag[]>([])
   const [loadingFlags, setLoadingFlags] = useState(true)
@@ -79,10 +80,33 @@ export default function Shield() {
   const [scanned, setScanned] = useState<ScannedMessage[]>([])
   const [loadingScanned, setLoadingScanned] = useState(true)
   const [scanFilter, setScanFilter] = useState<'all' | 'scam' | 'failed'>('all')
+  const scanFilterRef = useRef<'all' | 'scam' | 'failed'>('all')
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null) // "chatId-msgId"
   const [scannedPage, setScannedPage] = useState(1)
+  const scannedPageRef = useRef(1)
   const [scannedTotal, setScannedTotal] = useState(0)
   const PAGE_SIZE = 200
+
+  // Multi-select & context menu
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; msgs: ScannedMessage[] } | null>(null)
+
+  // Dev mode filters
+  const [filterSenderId, setFilterSenderId] = useState('')
+  const [filterChatId, setFilterChatId] = useState('')
+  const [filterMinMembers, setFilterMinMembers] = useState('')
+
+  // Unmarked tab
+  const [unmarked, setUnmarked] = useState<ScannedMessage[]>([])
+  const [loadingUnmarked, setLoadingUnmarked] = useState(false)
+
+  // Close context menu on click outside
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = () => setContextMenu(null)
+    window.addEventListener('click', handler)
+    return () => window.removeEventListener('click', handler)
+  }, [contextMenu])
 
   // Reports
   const [reports, setReports] = useState<ScamReport[]>([])
@@ -139,16 +163,25 @@ export default function Shield() {
       .finally(() => setLoadingFlags(false))
   }, [])
 
-  const loadScanned = useCallback((page: number = 1) => {
+  const loadScanned = useCallback((page: number = 1, filters?: { sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string }) => {
     setLoadingScanned(true)
-    getScannedMessages(page, PAGE_SIZE)
+    getScannedMessages(page, PAGE_SIZE, filters)
       .then((data) => {
         setScanned(data.messages)
         setScannedTotal(data.total)
         setScannedPage(data.page)
+        scannedPageRef.current = data.page
       })
       .catch(() => {})
       .finally(() => setLoadingScanned(false))
+  }, [])
+
+  const loadUnmarked = useCallback(() => {
+    setLoadingUnmarked(true)
+    getScannedMessages(1, 500, { verdict_filter: 'unmarked' })
+      .then((data) => setUnmarked(data.messages))
+      .catch(() => {})
+      .finally(() => setLoadingUnmarked(false))
   }, [])
 
   const loadReports = useCallback(() => {
@@ -191,7 +224,7 @@ export default function Shield() {
   useWebSocket(useCallback((event: WSEvent) => {
     if (event.type === 'scam_users_flagged' || event.type === 'scam_detected') {
       loadFlags()
-      loadScanned()
+      loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined)
       // Clear rescanning spinners for completed messages
       const msgIds = (event as any).message_ids as number[] | undefined
       if (msgIds) {
@@ -205,7 +238,7 @@ export default function Shield() {
         })
       }
     } else if (event.type === 'scam_check_safe') {
-      loadScanned()
+      loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined)
       const msgIds = (event as any).message_ids as number[] | undefined
       if (msgIds) {
         setRescanning(prev => {
@@ -227,7 +260,7 @@ export default function Shield() {
 
   const handleClearMessage = async (chatId: number, tgMessageId: number) => {
     setScanned((prev) => prev.filter((m) => !(m.chat_id === chatId && m.tg_message_id === tgMessageId)))
-    try { await clearMessageScam(chatId, tgMessageId) } catch { loadScanned() }
+    try { await clearMessageScam(chatId, tgMessageId) } catch { loadScanned(scannedPage, getActiveFilters()) }
   }
 
   const [rescanning, setRescanning] = useState<Set<string>>(new Set())
@@ -247,13 +280,70 @@ export default function Shield() {
     navigate(`/chats?chatId=${chatId}&msgId=${messageId}`)
   }
 
-  const filteredScanned = scanFilter === 'scam'
-    ? scanned.filter((m) => m.scam_score > 0.5)
-    : scanFilter === 'failed'
-    ? scanned.filter((m) => { try { return JSON.parse(m.trace_json || '{}').status === 'failed' } catch { return false } })
-    : scanned
-  const scamCount = scanned.filter((m) => m.scam_score > 0.5).length
-  const failedCount = scanned.filter((m) => { try { return JSON.parse(m.trace_json || '{}').status === 'failed' } catch { return false } }).length
+  const lastClickedIndexRef = useRef<number | null>(null)
+
+  const toggleSelect = (msg: ScannedMessage) => {
+    const key = `${msg.chat_id}-${msg.tg_message_id}`
+    setSelected(prev => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next })
+  }
+
+  const handleRowClick = (e: React.MouseEvent, msg: ScannedMessage, index: number) => {
+    // Don't interfere with interactive elements
+    const target = e.target as HTMLElement
+    if (target.closest('button, a, input')) return
+
+    const key = `${msg.chat_id}-${msg.tg_message_id}`
+    if (e.shiftKey && lastClickedIndexRef.current !== null) {
+      // Range select
+      const start = Math.min(lastClickedIndexRef.current, index)
+      const end = Math.max(lastClickedIndexRef.current, index)
+      const rangeKeys = filteredScanned.slice(start, end + 1).map(m => `${m.chat_id}-${m.tg_message_id}`)
+      setSelected(prev => {
+        const next = new Set(prev)
+        rangeKeys.forEach(k => next.add(k))
+        return next
+      })
+    } else {
+      setSelected(prev => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next })
+    }
+    lastClickedIndexRef.current = index
+  }
+
+  const toggleSelectAll = () => {
+    if (selected.size === filteredScanned.length) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(filteredScanned.map(m => `${m.chat_id}-${m.tg_message_id}`)))
+    }
+  }
+
+  const handleSetVerdict = async (msgs: ScannedMessage[], verdict: 'scam' | 'not_scam' | null) => {
+    setContextMenu(null)
+    try {
+      await setMessageVerdict(
+        msgs.map(m => ({ chat_id: m.chat_id, tg_message_id: m.tg_message_id })),
+        verdict,
+      )
+      setScanned(prev => prev.map(m => {
+        if (msgs.some(s => s.chat_id === m.chat_id && s.tg_message_id === m.tg_message_id)) {
+          return { ...m, scam_manual_verdict: verdict }
+        }
+        return m
+      }))
+      setSelected(new Set())
+    } catch { loadScanned(scannedPage, getActiveFilters()) }
+  }
+
+  const getActiveFilters = () => {
+    const f: { sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string } = {}
+    if (filterSenderId) f.sender_id = parseInt(filterSenderId)
+    if (filterChatId) f.chat_id = parseInt(filterChatId)
+    if (filterMinMembers) f.min_members = parseInt(filterMinMembers)
+    if (scanFilter !== 'all') f.verdict_filter = scanFilter
+    return Object.keys(f).length ? f : undefined
+  }
+
+  const filteredScanned = scanned  // filtering is now server-side
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden">
@@ -543,7 +633,7 @@ export default function Shield() {
         >
           Sync History
         </button>
-        {devMode && (
+        {devMode && (<>
           <button
             onClick={() => setTab('pipeline')}
             className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
@@ -554,7 +644,17 @@ export default function Shield() {
           >
             Pipeline
           </button>
-        )}
+          <button
+            onClick={() => { setTab('unmarked'); loadUnmarked() }}
+            className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+              tab === 'unmarked'
+                ? 'border-blue-400 text-blue-400'
+                : 'border-transparent text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            Unmarked
+          </button>
+        </>)}
 
         {/* Scam-only filter + mass scan for scanned tab */}
         {tab === 'scanned' && (
@@ -568,7 +668,7 @@ export default function Shield() {
                     try {
                       const r = await triggerMassScan()
                       setMassScanResult(`${r.messages_queued} messages queued`)
-                      setTimeout(() => loadScanned(scannedPage), 5000)
+                      setTimeout(() => loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined), 5000)
                     } catch { setMassScanResult('Failed') }
                     finally { setMassScanning(false) }
                   }}
@@ -577,17 +677,37 @@ export default function Shield() {
                   {massScanning ? 'Scanning…' : 'Mass Scan'}
                 </button>
                 {massScanResult && <span className="text-[10px] text-slate-400">{massScanResult}</span>}
+                <span className="text-slate-700">|</span>
+                <input placeholder="Sender ID" value={filterSenderId} onChange={e => setFilterSenderId(e.target.value)} className="w-20 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300 border border-slate-700 placeholder:text-slate-600" />
+                <input placeholder="Chat ID" value={filterChatId} onChange={e => setFilterChatId(e.target.value)} className="w-20 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300 border border-slate-700 placeholder:text-slate-600" />
+                <input placeholder="Min members" value={filterMinMembers} onChange={e => setFilterMinMembers(e.target.value)} className="w-24 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300 border border-slate-700 placeholder:text-slate-600" />
+                <button onClick={() => { setSelected(new Set()); loadScanned(1, getActiveFilters()) }} className="rounded bg-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-600">Apply</button>
+                {(filterSenderId || filterChatId || filterMinMembers) && (
+                  <button onClick={() => { setSelected(new Set()); setFilterSenderId(''); setFilterChatId(''); setFilterMinMembers(''); loadScanned(1) }} className="text-[10px] text-slate-500 hover:text-slate-300">Clear</button>
+                )}
+                <span className="text-slate-700">|</span>
+                <button onClick={() => exportScannedMessages(getActiveFilters())} className="rounded bg-emerald-600/80 px-2 py-0.5 text-[10px] text-white hover:bg-emerald-500">Export JSON</button>
               </>
             )}
             <div className="flex items-center gap-1 rounded-lg bg-slate-800 p-0.5">
               {([
                 { value: 'all' as const, label: 'All' },
-                { value: 'scam' as const, label: `Scam (${scamCount})` },
-                { value: 'failed' as const, label: `Failed (${failedCount})` },
+                { value: 'scam' as const, label: 'Scam' },
+                { value: 'failed' as const, label: 'Failed' },
               ]).map(({ value, label }) => (
                 <button
                   key={value}
-                  onClick={() => setScanFilter(value)}
+                  onClick={() => {
+                    setScanFilter(value)
+                    scanFilterRef.current = value
+                    setSelected(new Set())
+                    const f: any = {}
+                    if (filterSenderId) f.sender_id = parseInt(filterSenderId)
+                    if (filterChatId) f.chat_id = parseInt(filterChatId)
+                    if (filterMinMembers) f.min_members = parseInt(filterMinMembers)
+                    if (value !== 'all') f.verdict_filter = value
+                    loadScanned(1, Object.keys(f).length ? f : undefined)
+                  }}
                   className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition-colors ${
                     scanFilter === value
                       ? 'bg-slate-700 text-slate-200'
@@ -700,9 +820,23 @@ export default function Shield() {
               </p>
             </div>
           ) : (
+            <>
+            {/* Bulk action bar */}
+            {selected.size > 0 && (
+              <div className="flex items-center gap-2 bg-indigo-500/10 border-b border-indigo-500/30 px-4 py-2">
+                <span className="text-xs text-indigo-300">{selected.size} selected</span>
+                <button onClick={() => handleSetVerdict(filteredScanned.filter(m => selected.has(`${m.chat_id}-${m.tg_message_id}`)), 'scam')} className="rounded bg-red-500/20 px-2 py-1 text-[10px] font-medium text-red-300 hover:bg-red-500/30">Mark as scam</button>
+                <button onClick={() => handleSetVerdict(filteredScanned.filter(m => selected.has(`${m.chat_id}-${m.tg_message_id}`)), 'not_scam')} className="rounded bg-blue-500/20 px-2 py-1 text-[10px] font-medium text-blue-300 hover:bg-blue-500/30">Mark as not scam</button>
+                <button onClick={() => handleSetVerdict(filteredScanned.filter(m => selected.has(`${m.chat_id}-${m.tg_message_id}`)), null)} className="rounded bg-slate-700 px-2 py-1 text-[10px] font-medium text-slate-300 hover:bg-slate-600">Clear verdict</button>
+                <button onClick={() => setSelected(new Set())} className="ml-auto text-[10px] text-slate-500 hover:text-slate-300">Deselect all</button>
+              </div>
+            )}
             <table className="w-full text-left">
               <thead className="sticky top-0 z-10 bg-slate-900 border-b border-slate-700">
                 <tr className="text-[10px] uppercase tracking-wider text-slate-500">
+                  <th className="px-2 py-2 w-6">
+                    <input type="checkbox" checked={selected.size > 0 && selected.size === filteredScanned.length} onChange={toggleSelectAll} className="rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-0 h-3 w-3" />
+                  </th>
                   <th className="px-6 py-2 font-medium">Sent By</th>
                   <th className="px-3 py-2 font-medium">Chat</th>
                   <th className="px-3 py-2 font-medium">Verdict</th>
@@ -713,7 +847,7 @@ export default function Shield() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
-                {filteredScanned.map((msg) => {
+                {filteredScanned.map((msg, rowIndex) => {
                   const isScam = msg.scam_score > 0.5
                   const traceKey = `${msg.chat_id}-${msg.tg_message_id}`
                   const isTraceOpen = expandedTrace === traceKey
@@ -726,7 +860,22 @@ export default function Shield() {
                   const shortCircuitNode = parsedTrace?.short_circuit?.node_id
                   return (
                     <>
-                      <tr key={traceKey} className="hover:bg-slate-800/50 transition-colors">
+                      <tr
+                        key={traceKey}
+                        className={`hover:bg-slate-800/50 transition-colors cursor-pointer select-none ${selected.has(traceKey) ? 'bg-indigo-500/10' : ''}`}
+                        onClick={(e) => handleRowClick(e, msg, rowIndex)}
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          const isInSelection = selected.has(traceKey)
+                          const targetMsgs = isInSelection
+                            ? filteredScanned.filter(m => selected.has(`${m.chat_id}-${m.tg_message_id}`))
+                            : [msg]
+                          setContextMenu({ x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 100), msgs: targetMsgs })
+                        }}
+                      >
+                        <td className="px-2 py-2.5">
+                          <input type="checkbox" checked={selected.has(traceKey)} onChange={() => toggleSelect(msg)} className="rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-0 h-3 w-3" />
+                        </td>
                         <td className="px-6 py-2.5">
                           <span className="text-xs text-slate-200 truncate max-w-[140px] block">
                             {msg.sender_name || (msg.sender_id ? `ID: ${msg.sender_id}` : '—')}
@@ -745,25 +894,37 @@ export default function Shield() {
                           </button>
                         </td>
                         <td className="px-3 py-2.5">
-                          {isFailed ? (
-                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-500/20 text-orange-300" title={failedError || undefined}>
-                              Scan Failed
-                            </span>
-                          ) : isShortCircuited ? (
-                            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-300">
-                              ⚡ {shortCircuitNode || 'short-circuit'}
-                            </span>
-                          ) : (
-                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                              isScam ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'
-                            }`}>
-                              {isScam ? (
-                                <><ShieldAlert size={10} /> Scam</>
-                              ) : (
-                                <><ShieldCheck size={10} /> Safe</>
-                              )}
-                            </span>
-                          )}
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {isFailed ? (
+                              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-orange-500/20 text-orange-300" title={failedError || undefined}>
+                                Scan Failed
+                              </span>
+                            ) : isShortCircuited ? (
+                              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-300">
+                                ⚡ {shortCircuitNode || 'short-circuit'}
+                              </span>
+                            ) : (
+                              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                isScam ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'
+                              }`}>
+                                {isScam ? (
+                                  <><ShieldAlert size={10} /> Scam</>
+                                ) : (
+                                  <><ShieldCheck size={10} /> Safe</>
+                                )}
+                              </span>
+                            )}
+                            {msg.scam_manual_verdict === 'not_scam' && (
+                              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-500/20 text-blue-300">
+                                Marked safe
+                              </span>
+                            )}
+                            {msg.scam_manual_verdict === 'scam' && (
+                              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-red-500/20 text-red-300 border border-red-500/30">
+                                Marked scam
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-3 py-2.5">
                           <span className="text-xs text-slate-400 truncate max-w-[280px] block" title={msg.text ? stripFormatting(msg.text) : undefined}>
@@ -799,19 +960,12 @@ export default function Shield() {
                             >
                               <RefreshCw size={13} className={rescanning.has(`${msg.chat_id}-${msg.tg_message_id}`) ? 'animate-spin' : ''} />
                             </button>
-                            <button
-                              onClick={() => handleClearMessage(msg.chat_id, msg.tg_message_id)}
-                              title="Clear scam flag"
-                              className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-colors"
-                            >
-                              <X size={13} />
-                            </button>
                           </div>
                         </td>
                       </tr>
                       {isTraceOpen && (
                         <tr key={`${traceKey}-trace`} className="bg-slate-800/30">
-                          <td colSpan={7} className="px-6 py-3">
+                          <td colSpan={8} className="px-6 py-3">
                             {parsedTrace ? (
                               <div className="space-y-3 max-w-4xl">
                                 {/* Pipeline header */}
@@ -943,6 +1097,36 @@ export default function Shield() {
                 })}
               </tbody>
             </table>
+
+            {/* Context menu */}
+            {contextMenu && (
+              <div
+                className="fixed z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 min-w-[160px]"
+                style={{ top: contextMenu.y, left: contextMenu.x }}
+              >
+                <button
+                  onClick={() => handleSetVerdict(contextMenu.msgs, 'scam')}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-red-300 hover:bg-slate-700"
+                >
+                  <ShieldAlert size={12} /> Mark as scam
+                </button>
+                <button
+                  onClick={() => handleSetVerdict(contextMenu.msgs, 'not_scam')}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-blue-300 hover:bg-slate-700"
+                >
+                  <ShieldCheck size={12} /> Mark as not scam
+                </button>
+                {contextMenu.msgs.some(m => m.scam_manual_verdict) && (
+                  <button
+                    onClick={() => handleSetVerdict(contextMenu.msgs, null)}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-700"
+                  >
+                    <X size={12} /> Clear manual verdict
+                  </button>
+                )}
+              </div>
+            )}
+            </>
           )
         )}
 
@@ -951,7 +1135,7 @@ export default function Shield() {
           <div className="flex items-center justify-center gap-3 border-t border-slate-700 py-3">
             <button
               disabled={scannedPage <= 1}
-              onClick={() => loadScanned(scannedPage - 1)}
+              onClick={() => { setSelected(new Set()); loadScanned(scannedPage - 1, getActiveFilters()) }}
               className="rounded px-3 py-1 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent"
             >
               Previous
@@ -961,7 +1145,7 @@ export default function Shield() {
             </span>
             <button
               disabled={scannedPage >= Math.ceil(scannedTotal / PAGE_SIZE)}
-              onClick={() => loadScanned(scannedPage + 1)}
+              onClick={() => { setSelected(new Set()); loadScanned(scannedPage + 1, getActiveFilters()) }}
               className="rounded px-3 py-1 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent"
             >
               Next
@@ -1303,6 +1487,55 @@ export default function Shield() {
                 </ul>
               </div>
             </div>
+          )
+        )}
+
+        {tab === 'unmarked' && (
+          loadingUnmarked ? (
+            <div className="p-6 text-xs text-slate-500">Loading...</div>
+          ) : unmarked.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20">
+              <ShieldCheck size={32} className="mb-3 text-slate-600" />
+              <p className="text-sm font-medium text-slate-400">No manually unmarked messages</p>
+              <p className="mt-1 text-xs text-slate-500">Right-click scanned messages and choose "Mark as not scam" to see them here.</p>
+            </div>
+          ) : (
+            <table className="w-full text-left">
+              <thead className="sticky top-0 z-10 bg-slate-900 border-b border-slate-700">
+                <tr className="text-[10px] uppercase tracking-wider text-slate-500">
+                  <th className="px-6 py-2 font-medium">Sent By</th>
+                  <th className="px-3 py-2 font-medium">Chat</th>
+                  <th className="px-3 py-2 font-medium">Pipeline Verdict</th>
+                  <th className="px-3 py-2 font-medium">Message</th>
+                  <th className="px-3 py-2 font-medium">Score</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {unmarked.map(msg => (
+                  <tr key={`${msg.chat_id}-${msg.tg_message_id}`} className="hover:bg-slate-800/50">
+                    <td className="px-6 py-2.5">
+                      <span className="text-xs text-slate-200">{msg.sender_name || (msg.sender_id ? `ID: ${msg.sender_id}` : '—')}</span>
+                      {msg.date && <span className="block text-[10px] text-slate-500">{timeAgo(msg.date)}</span>}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <button onClick={() => goToMessage(msg.chat_id, msg.tg_message_id)} className="text-xs text-indigo-400 hover:text-indigo-300 truncate max-w-[160px] block text-left">{msg.chat_name}</button>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${msg.scam_score > 0.5 ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                        {msg.scam_score > 0.5 ? 'Scam' : 'Safe'}
+                      </span>
+                      <span className="ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-blue-500/20 text-blue-300">Marked safe</span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-xs text-slate-400 truncate max-w-[280px] block">{msg.text ? (() => { const t = stripFormatting(msg.text); return t.length > 80 ? t.slice(0, 80) + '…' : t })() : '—'}</span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="text-[10px] text-slate-400">{(msg.scam_score * 100).toFixed(0)}%</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )
         )}
 

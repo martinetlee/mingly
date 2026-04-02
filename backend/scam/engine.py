@@ -66,6 +66,7 @@ class PipelineTrace:
     status: str = "running"  # completed, failed, short_circuited
     error: Optional[str] = None
     short_circuit: Optional[dict] = None
+    input: Optional[str] = None  # the message context fed to the pipeline
     steps: list[StepTrace] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -589,6 +590,7 @@ async def execute_pipeline(pipeline_config, message_context: str, messages: list
     trace = PipelineTrace(
         pipeline_version=pipeline_config.version,
         started_at=datetime.now(timezone.utc).isoformat(),
+        input=message_context,
     )
 
     # --- Step 1: Signature check ---

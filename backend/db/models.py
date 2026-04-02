@@ -72,6 +72,7 @@ class Message(Base):
     scam_category: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_trace_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
+    scam_manual_verdict: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 'scam', 'not_scam', or NULL
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

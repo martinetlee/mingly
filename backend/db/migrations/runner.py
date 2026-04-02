@@ -459,6 +459,13 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             )""",
         ],
     ),
+    (
+        40,
+        "Add scam_manual_verdict column to messages",
+        [
+            "ALTER TABLE messages ADD COLUMN scam_manual_verdict TEXT",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

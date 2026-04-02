@@ -1,3 +1,28 @@
+# Mandatory Rules
+
+## PLAN BEFORE CODE — NO EXCEPTIONS
+Before making ANY non-trivial code change (anything beyond a single-line typo fix), you MUST:
+1. Enter plan mode with `EnterPlanMode`
+2. Explore the codebase to understand all affected code paths
+3. Present the plan with options, pros/cons, and tradeoffs
+4. Get explicit user approval via `ExitPlanMode`
+5. Only THEN write code
+
+Violating this rule wastes the user's time with rework and inconsistent UX. If you catch yourself about to edit a file without having entered plan mode first, STOP and enter plan mode.
+
+## VERIFY EVERY CHANGE
+After making code changes, always run all three checks before reporting done:
+1. `cd frontend && npx tsc --noEmit`
+2. `cd frontend && npm run build`
+3. `bash build_app.sh` (from project root)
+
+Fix any errors before presenting the change as complete.
+
+## UX CONSISTENCY
+Before implementing any feature, trace ALL user-facing code paths that touch the same concept. Every entry point for the same action must behave consistently. Check frontend components, API endpoints, WebSocket handlers, and any other triggers.
+
+---
+
 # Mingly — Telegram Relationship Manager
 
 A desktop app (macOS) for managing Telegram relationships, powered by local LLMs. Built with FastAPI + React, packaged via PyInstaller + pywebview.

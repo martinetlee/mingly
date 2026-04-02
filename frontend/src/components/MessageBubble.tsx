@@ -475,7 +475,11 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
     onReact?.(message, emoji)
   }
 
-  const isScam = !scamDismissed && message.scam_score != null && message.scam_score > 0.5
+  const isScam = message.scam_manual_verdict === 'scam'
+    ? true
+    : message.scam_manual_verdict === 'not_scam'
+    ? false
+    : (!scamDismissed && message.scam_score != null && message.scam_score > 0.5)
   const showAvatarColumn = isGroupChat && !isOut
 
   return (
@@ -751,7 +755,7 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                 className="flex w-full items-center gap-1.5 px-3 py-1.5 text-red-300 text-xs hover:bg-red-500/10 transition-colors"
               >
                 <ShieldAlert size={13} className="flex-shrink-0" />
-                <span className="flex-1 text-left">Potential scam detected</span>
+                <span className="flex-1 text-left">{message.scam_manual_verdict === 'scam' ? 'Manually marked as scam' : 'Potential scam detected'}</span>
                 <ChevronDown size={12} className={`flex-shrink-0 transition-transform ${scamInfoExpanded ? 'rotate-180' : ''}`} />
               </button>
               {scamInfoExpanded && (
@@ -762,7 +766,11 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                       e.stopPropagation()
                       if (message.sender_id) {
                         setScamDismissed(true)
-                        dismissScamFlag(message.sender_id).catch(() => setScamDismissed(false))
+                        message.scam_manual_verdict = 'not_scam'
+                        dismissScamFlag(message.sender_id).catch(() => {
+                          setScamDismissed(false)
+                          message.scam_manual_verdict = undefined
+                        })
                       }
                     }}
                     className="text-red-400 hover:text-red-200 underline"

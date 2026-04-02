@@ -118,6 +118,7 @@ def _serialize_msg(row) -> dict:
         "is_edited": m.is_edited,
         "scam_score": getattr(m, 'scam_score', None),
         "scam_reason": getattr(m, 'scam_reason', None),
+        "scam_manual_verdict": getattr(m, 'scam_manual_verdict', None),
     }
 
 
