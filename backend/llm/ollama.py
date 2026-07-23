@@ -132,13 +132,23 @@ class OllamaProvider(BaseLLMProvider):
                             yield content
 
     async def health_check(self) -> bool:
-        """Check if Ollama process is listening — fast, no model load."""
+        """Check that Ollama is listening and this instance's model is installed — fast, no model load."""
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"{self._ollama_base}/api/tags")
-                return resp.status_code == 200
+                if resp.status_code != 200:
+                    return False
+                if not self.model:
+                    # Admin provider (no model bound) — server reachability is enough
+                    return True
+                names = [m.get("name", "") for m in resp.json().get("models", [])]
+                return self._model_installed(self.model, names)
         except Exception:
             return False
+
+    @staticmethod
+    def _model_installed(model: str, installed_names: list[str]) -> bool:
+        return any(n == model or n.startswith(f"{model}:") for n in installed_names)
 
     async def list_models(self) -> list[dict]:
         """Return list of locally available Ollama models."""

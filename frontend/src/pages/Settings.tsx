@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
 import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations, getShieldCloudSettings, setShieldCloudSettings, getScamDetectionSettings, setScamDetectionSettings, triggerSync } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
-import type { Tag } from '../api/types'
+import type { OllamaStatus, Tag } from '../api/types'
 import { useTheme } from '../hooks/useTheme'
 
 // ---------------------------------------------------------------------------
@@ -445,6 +445,7 @@ export default function Settings() {
 
   // Ollama server status
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null)
+  const [missingModel, setMissingModel] = useState<string | null>(null)
   const [ollamaAction, setOllamaAction] = useState<'stopping' | 'restarting' | null>(null)
 
   // Notification preference
@@ -478,8 +479,9 @@ export default function Settings() {
 
   const refreshOllamaStatus = useCallback(async () => {
     try {
-      const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status')
+      const { running, missing_model } = await apiFetch<OllamaStatus>('GET', '/api/llm/ollama/status')
       setOllamaRunning(running)
+      setMissingModel(missing_model)
       if (running) {
         try {
           const { models } = await apiFetch<{ models: { name: string }[] }>('GET', '/api/llm/ollama/models')
@@ -490,6 +492,7 @@ export default function Settings() {
       }
     } catch {
       setOllamaRunning(false)
+      setMissingModel(null)
     }
   }, [])
 
@@ -583,7 +586,7 @@ export default function Settings() {
       // Poll until it's back up (up to 15s)
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 500))
-        const { running } = await apiFetch<{ running: boolean }>('GET', '/api/llm/ollama/status').catch(() => ({ running: false }))
+        const { running } = await apiFetch<OllamaStatus>('GET', '/api/llm/ollama/status').catch(() => ({ running: false, missing_model: null }))
         if (running) { setOllamaRunning(true); break }
       }
     } catch (e) {
@@ -719,6 +722,7 @@ export default function Settings() {
       setOrchestratorId(model.id)
       setPendingModelId(null)
       update('done', '', 100)
+      refreshOllamaStatus()
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         setSetup(null)
@@ -730,12 +734,21 @@ export default function Settings() {
         error: e instanceof Error ? e.message : 'Setup failed',
       }))
     }
-  }, [])
+  }, [refreshOllamaStatus])
 
   const handleCancelDownload = () => {
     abortRef.current?.abort()
     abortRef.current = null
     setSetup(null)
+  }
+
+  const handleDownloadMissing = () => {
+    const model = MODELS.find((m) => m.id === orchestratorId)
+    if (!model) return
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    setSetup({ phase: 'install-binary', label: 'Checking…', pct: 0 })
+    runSetup(model, ctrl.signal)
   }
 
   const handleRetrySetup = () => {
@@ -889,14 +902,26 @@ export default function Settings() {
                 {orchestratorId && !pendingModelId && (
                   <div className="mt-3 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${ollamaRunning ? 'bg-emerald-400' : 'bg-slate-500'}`} />
-                      <p className={`text-xs ${ollamaRunning ? 'text-emerald-400' : 'text-slate-500'}`}>
+                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${ollamaRunning ? (missingModel ? 'bg-amber-400' : 'bg-emerald-400') : 'bg-slate-500'}`} />
+                      <p className={`text-xs ${ollamaRunning ? (missingModel ? 'text-amber-400' : 'text-emerald-400') : 'text-slate-500'}`}>
                         {ollamaRunning
-                          ? `${MODELS.find((m) => m.id === orchestratorId)?.name} is running`
+                          ? missingModel
+                            ? `${MODELS.find((m) => m.id === orchestratorId)?.name} not downloaded`
+                            : `${MODELS.find((m) => m.id === orchestratorId)?.name} is running`
                           : 'Ollama server stopped'}
                       </p>
                     </div>
                     <div className="flex items-center gap-1.5">
+                      {ollamaRunning && missingModel && (
+                        <button
+                          onClick={handleDownloadMissing}
+                          disabled={ollamaAction !== null}
+                          title="Download the configured model"
+                          className="rounded px-2 py-1 text-xs text-amber-400 hover:bg-amber-900/30 hover:text-amber-300 disabled:opacity-40 transition-colors"
+                        >
+                          Download
+                        </button>
+                      )}
                       <button
                         onClick={handleRestartOllama}
                         disabled={ollamaAction !== null}

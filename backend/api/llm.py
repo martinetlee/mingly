@@ -380,9 +380,32 @@ async def start_ollama():
 
 @router.get("/ollama/status")
 async def ollama_status():
-    """Check if the Ollama process is reachable."""
-    running = await _get_ollama().health_check()
-    return {"running": running}
+    """Check that the Ollama process is reachable and the orchestrator's model is installed.
+
+    missing_model is the orchestrator's configured model name when the server is
+    up but that model is absent; null otherwise (including when the orchestrator
+    is not an Ollama instance).
+    """
+    provider = _get_ollama()
+    running = await provider.health_check()
+    missing_model: Optional[str] = None
+    if running:
+        cfg = _current_config()
+        orch = next(
+            (
+                inst for inst in cfg.instances
+                if inst.name == cfg.orchestrator_name and inst.provider == "ollama"
+            ),
+            None,
+        )
+        if orch and orch.model:
+            try:
+                names = [m.get("name", "") for m in await provider.list_models()]
+                if not OllamaProvider._model_installed(orch.model, names):
+                    missing_model = orch.model
+            except LLMError:
+                pass
+    return {"running": running, "missing_model": missing_model}
 
 
 @router.post("/ollama/stop")
