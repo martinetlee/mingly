@@ -86,6 +86,7 @@ async def list_conversations(db: AsyncSession = Depends(get_db)):
             ConversationMessage.conversation_id,
             func.count(ConversationMessage.id).label("cnt"),
         )
+        .where(ConversationMessage.role != "tool")  # internal tool traces aren't visible messages
         .group_by(ConversationMessage.conversation_id)
         .subquery()
     )
@@ -150,6 +151,7 @@ async def get_conversation(conv_id: int, db: AsyncSession = Depends(get_db)):
                 created_at=_fmt(m.created_at),
             )
             for m in msgs
+            if m.role != "tool"  # internal tool traces are LLM context only
         ],
     )
 
@@ -185,6 +187,7 @@ async def update_conversation_title(
                 created_at=_fmt(m.created_at),
             )
             for m in msgs
+            if m.role != "tool"  # internal tool traces are LLM context only
         ],
     )
 

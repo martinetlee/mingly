@@ -22,6 +22,8 @@ class Chat(Base):
     slow_mode_seconds: Mapped[int] = mapped_column(Integer, default=0)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Telegram group deactivated after migration to a supergroup — hidden from all lists
+    is_deactivated: Mapped[bool] = mapped_column(Boolean, default=False)
     is_muted: Mapped[bool] = mapped_column(Boolean, default=False)
     muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_marked_unread: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -94,6 +96,53 @@ class ChatTag(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # telegram_id
     tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id"), nullable=False)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    emoji: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    color: Mapped[str] = mapped_column(String, default="indigo")
+    match_mode: Mapped[str] = mapped_column(String, default="any")  # 'any' | 'all'
+    view_mode: Mapped[str] = mapped_column(String, default="list")  # 'list' | 'kanban'
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Unallocated-column cutoff: only incoming activity after this surfaces for triage
+    board_watermark: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class WorkspaceTag(Base):
+    __tablename__ = "workspace_tags"
+    __table_args__ = (UniqueConstraint("workspace_id", "tag_id", name="uq_workspace_tag"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_exclusion: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WorkspaceColumn(Base):
+    __tablename__ = "workspace_columns"
+    __table_args__ = (UniqueConstraint("workspace_id", "tag_id", name="uq_workspace_column"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)  # stage tag backing this column
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    color: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class WorkspaceChatOverride(Base):
+    __tablename__ = "workspace_chat_overrides"
+    __table_args__ = (UniqueConstraint("workspace_id", "chat_id", name="uq_workspace_chat_override"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # telegram_id
+    needs_triage_since: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    triaged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class Contact(Base):

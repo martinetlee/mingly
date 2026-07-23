@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert } from 'lucide-react'
-import type { Chat, Folder, Message, PinnedMessage, UserPresence, WSEvent } from '../api/types'
-import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags, searchChatsLocal, searchChatsTelegram, searchMessagesGlobal } from '../api/client'
+import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert, Tag as TagIcon, Columns3 } from 'lucide-react'
+import type { Chat, Folder, Message, PinnedMessage, Tag, UserPresence, WSEvent } from '../api/types'
+import { getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags, searchChatsLocal, searchChatsTelegram, searchMessagesGlobal, getTags, getChatsByIds } from '../api/client'
 import type { MessageSearchResult } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useWorkspaces } from '../context/WorkspaceContext'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import MessageList from '../components/MessageList'
 import ComposeBar from '../components/ComposeBar'
@@ -21,6 +22,21 @@ const AVATAR_COLORS = [
   'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
   'bg-violet-600', 'bg-pink-600', 'bg-teal-600', 'bg-orange-600',
 ]
+
+// Same tag color maps as ChatInfoPanel
+const TAG_COLORS: Record<string, string> = {
+  indigo:  'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
+  emerald: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30',
+  rose:    'bg-rose-500/20 text-rose-300 border border-rose-500/30',
+  amber:   'bg-amber-500/20 text-amber-300 border border-amber-500/30',
+  violet:  'bg-violet-500/20 text-violet-300 border border-violet-500/30',
+  sky:     'bg-sky-500/20 text-sky-300 border border-sky-500/30',
+  slate:   'bg-slate-500/20 text-slate-300 border border-slate-500/30',
+}
+const COLOR_DOTS: Record<string, string> = {
+  indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
+  amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
+}
 const failedChatPhotos = new Set<number>()
 
 function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName: string; size?: number }) {
@@ -310,6 +326,15 @@ export default function Chats() {
   const [searchingTelegram, setSearchingTelegram] = useState(false)
   const [searchingMessages, setSearchingMessages] = useState(false)
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Folder members fetched by id — kept separate from `chats` so list reloads can't wipe them
+  const [folderMembers, setFolderMembers] = useState<Chat[]>([])
+  const { activeWorkspace } = useWorkspaces()
+  // Tag filter (popover next to search bar)
+  const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
+  const [availableTags, setAvailableTags] = useState<Tag[]>([])
+  const [showTagPopover, setShowTagPopover] = useState(false)
+  const [tagQuery, setTagQuery] = useState('')
+  const tagPopoverRef = useRef<HTMLDivElement>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [hiddenChats, setHiddenChats] = useState<Chat[]>([])
   const [showInfo, setShowInfo] = useState(false)
@@ -364,6 +389,16 @@ export default function Chats() {
   const [togglingImportant, setTogglingImportant] = useState(false)
   // True while we're resolving a pendingNav chat (loading indicator in right pane)
   const [navigatingToChat, setNavigatingToChat] = useState(false)
+  // Chats whose background auto-sync found no retrievable history (migrated/inaccessible)
+  const [syncEmptyChats, setSyncEmptyChats] = useState<Set<number>>(new Set())
+  // Transient error toast (e.g. when a chat can't be opened from Telegram)
+  const [errorToast, setErrorToast] = useState<string | null>(null)
+  const errorToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showErrorToast = useCallback((msg: string) => {
+    setErrorToast(msg)
+    if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current)
+    errorToastTimerRef.current = setTimeout(() => setErrorToast(null), 4000)
+  }, [])
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ chat: Chat; x: number; y: number } | null>(null)
   // Archived chats panel
@@ -471,19 +506,20 @@ export default function Chats() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
+  const activeWorkspaceId = activeWorkspace?.id
   const loadChats = useCallback(async () => {
-    const data = await getChats(CHAT_PAGE, 0, sortBy)
+    const data = await getChats(CHAT_PAGE, 0, sortBy, selectedTag?.id, activeWorkspaceId)
     setChats(data)
     setChatOffset(0)
     setHasMoreChats(data.length === CHAT_PAGE)
-  }, [CHAT_PAGE, sortBy])
+  }, [CHAT_PAGE, sortBy, selectedTag, activeWorkspaceId])
 
   const loadMoreChats = useCallback(async () => {
     if (loadingMoreChats || !hasMoreChats) return
     setLoadingMoreChats(true)
     try {
       const nextOffset = chatOffset + CHAT_PAGE
-      const data = await getChats(CHAT_PAGE, nextOffset, sortBy)
+      const data = await getChats(CHAT_PAGE, nextOffset, sortBy, selectedTag?.id, activeWorkspaceId)
       setChats((prev) => {
         const existingIds = new Set(prev.map((c) => c.telegram_id))
         const newChats = data.filter((c) => !existingIds.has(c.telegram_id))
@@ -504,12 +540,52 @@ export default function Chats() {
     } finally {
       setLoadingMoreChats(false)
     }
-  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE, sortBy])
+  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE, sortBy, selectedTag, activeWorkspaceId])
 
   const loadFolders = useCallback(async () => {
     const data = await getFolders()
     setFolders(data)
   }, [])
+
+  const toggleTagPopover = useCallback(() => {
+    setShowTagPopover((prev) => {
+      if (!prev) {
+        setTagQuery('')
+        getTags().then(setAvailableTags).catch(() => {})
+      }
+      return !prev
+    })
+  }, [])
+
+  // Folder members can live far beyond the paginated recent-chats window —
+  // fetch them by id into their own state (list reloads must not wipe them;
+  // loadChats() fully replaces `chats` on every new_message/chat_synced event).
+  useEffect(() => {
+    const folder = selectedFolder === null ? undefined : folders.find((f) => f.id === selectedFolder)
+    if (!folder || folder.chat_ids.length === 0) {
+      setFolderMembers([])
+      return
+    }
+    let cancelled = false
+    getChatsByIds(folder.chat_ids)
+      .then((members) => {
+        if (!cancelled) setFolderMembers(members)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [selectedFolder, folders])
+
+  // Dismiss tag popover on click outside
+  useEffect(() => {
+    if (!showTagPopover) return
+    const handler = (e: MouseEvent) => {
+      if (tagPopoverRef.current && !tagPopoverRef.current.contains(e.target as Node)) {
+        setShowTagPopover(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showTagPopover])
 
   const loadMessages = useCallback(async (chat: Chat) => {
     setLoadingMessages(true)
@@ -564,19 +640,24 @@ export default function Chats() {
     }
   }, [selectedChat, messageOffset, loadingMore, LIMIT, noMoreRemote])
 
+  // Parse URL params for mention navigation: ?chatId=X&msgId=Y.
+  // Consumed exactly once — the params are stripped immediately so list reloads
+  // (which re-create loadChats) can never re-arm the navigation and wipe the pane.
   useEffect(() => {
-    // Parse URL params for mention navigation: ?chatId=X&msgId=Y
     const params = new URLSearchParams(location.search)
     const chatIdParam = params.get('chatId')
     const msgIdParam = params.get('msgId')
-    if (chatIdParam) {
-      const chatId = parseInt(chatIdParam, 10)
-      const msgId = msgIdParam ? parseInt(msgIdParam, 10) : 0
-      if (!isNaN(chatId)) {
-        pendingNavRef.current = { chatId, msgId }
-        setNavigatingToChat(true)
-      }
+    if (!chatIdParam) return
+    const chatId = parseInt(chatIdParam, 10)
+    const msgId = msgIdParam ? parseInt(msgIdParam, 10) : 0
+    if (!isNaN(chatId)) {
+      pendingNavRef.current = { chatId, msgId }
+      setNavigatingToChat(true)
     }
+    navigate(location.pathname, { replace: true })
+  }, [location.search, location.pathname, navigate])
+
+  useEffect(() => {
     loadChats()
     loadFolders()
     getScamFlags()
@@ -585,7 +666,7 @@ export default function Chats() {
         setFlaggedChatIds(new Set(data.flagged_chat_ids))
       })
       .catch(() => {})
-  }, [loadChats, loadFolders, location.search])
+  }, [loadChats, loadFolders])
 
   // When chats load, auto-select the chat from URL params if pending
   const retryNavRef = useRef(false)
@@ -620,10 +701,11 @@ export default function Chats() {
           })
         })
         .catch(() => {
-          // Could not fetch — give up
+          // Could not fetch — give up, but tell the user why nothing opened
           pendingNavRef.current = null
           retryNavRef.current = false
           setNavigatingToChat(false)
+          showErrorToast('Couldn’t open this chat from Telegram')
         })
     } else {
       // Already retried, chat still not found — give up
@@ -709,6 +791,14 @@ export default function Chats() {
         loadMessages(selectedChat)
       }
     }
+    if (event.type === 'chat_sync_empty') {
+      // Background sync found no retrievable history for this chat
+      setSyncEmptyChats((prev) => {
+        const next = new Set(prev)
+        next.add(event.chat_id)
+        return next
+      })
+    }
     if (event.type === 'bulk_sync_complete') {
       // Bulk sync done — reload if current chat has no messages
       if (selectedChat && messages.length === 0) {
@@ -717,7 +807,13 @@ export default function Chats() {
     }
     if (event.type === 'messages_deleted') {
       const deletedIds = new Set(event.message_ids as number[])
-      if (selectedChat && (event.chat_id === selectedChat.telegram_id || !event.chat_id)) {
+      // chat_id-less deletions are only meaningful in the shared private/basic-group
+      // id namespace — never strip messages from channels/supergroups (per-channel ids)
+      const applies = selectedChat && (
+        event.chat_id === selectedChat.telegram_id ||
+        (!event.chat_id && selectedChat.telegram_id > -1000000000000)
+      )
+      if (applies) {
         setMessages((prev) => prev.filter((m) => !deletedIds.has(m.tg_message_id)))
       }
     }
@@ -1104,7 +1200,11 @@ export default function Chats() {
     : (() => {
         const folder = folders.find((f) => f.id === selectedFolder)
         if (!folder) return chats
-        return chats.filter((c) => {
+        // Union loaded chats with separately-fetched folder members (dedupe by id,
+        // preferring the `chats` copy — it carries fresher unread/last-message data)
+        const loadedIds = new Set(chats.map((c) => c.telegram_id))
+        const pool = [...chats, ...folderMembers.filter((m) => !loadedIds.has(m.telegram_id))]
+        return pool.filter((c) => {
           if (folder.chat_ids.includes(c.telegram_id)) return true
           if (folder.include_groups && c.type === 'group') return true
           if (folder.include_channels && c.type === 'channel') return true
@@ -1208,6 +1308,12 @@ export default function Chats() {
 
   return (
     <div className="flex flex-1 overflow-hidden">
+      {/* Transient error toast */}
+      {errorToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-md border border-rose-500/30 bg-rose-500/15 px-3 py-1.5 text-xs font-medium text-rose-400 backdrop-blur-sm">
+          {errorToast}
+        </div>
+      )}
       {/* Chat list */}
       <div className="flex flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800 relative" style={{ width: sidebarWidth }}>
         {/* Drag handle */}
@@ -1259,6 +1365,73 @@ export default function Chats() {
             >
               <Plus size={16} />
             </button>
+            {activeWorkspace?.view_mode === 'kanban' && (
+              <button
+                onClick={() => navigate('/board')}
+                title={`${activeWorkspace.name} board`}
+                className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
+              >
+                <Columns3 size={16} />
+              </button>
+            )}
+            <div ref={tagPopoverRef} className="relative flex-shrink-0">
+              <button
+                onClick={toggleTagPopover}
+                title="Filter by tag"
+                className={`rounded-lg border px-2 py-1.5 transition-colors ${
+                  selectedTag || showTagPopover
+                    ? 'border-indigo-500/30 bg-indigo-500/20 text-indigo-400'
+                    : 'border-slate-600 bg-slate-700 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30'
+                }`}
+              >
+                <TagIcon size={16} />
+              </button>
+              {showTagPopover && (
+                <div className="absolute right-0 top-full mt-1 z-30 w-60 rounded-lg border border-slate-600 bg-slate-800 shadow-xl overflow-hidden">
+                  <div className="p-2 border-b border-slate-700/50">
+                    <input
+                      type="text"
+                      autoFocus
+                      placeholder="Filter tags…"
+                      value={tagQuery}
+                      onChange={(e) => setTagQuery(e.target.value)}
+                      className="w-full rounded-md border border-slate-600 bg-slate-700 px-2 py-1 text-xs text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500"
+                    />
+                  </div>
+                  <div className="max-h-64 overflow-y-auto py-1">
+                    {(() => {
+                      const q = tagQuery.trim().toLowerCase()
+                      const visible = availableTags
+                        .filter((t) => t.category !== 'stage')  // board stage tags live on boards, not here
+                        .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
+                      if (visible.length === 0) {
+                        return (
+                          <p className="px-3 py-2 text-xs text-slate-500">
+                            {availableTags.length === 0 ? 'No tags yet' : 'No matching tags'}
+                          </p>
+                        )
+                      }
+                      return visible.map((tag) => (
+                        <button
+                          key={tag.id}
+                          onClick={() => {
+                            setSelectedTag((prev) => (prev?.id === tag.id ? null : tag))
+                            setShowTagPopover(false)
+                          }}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-slate-700/50 ${
+                            selectedTag?.id === tag.id ? 'text-indigo-300' : 'text-slate-300'
+                          }`}
+                        >
+                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${COLOR_DOTS[tag.color] ?? 'bg-slate-400'}`} />
+                          <span className="min-w-0 flex-1 truncate">{tag.name}</span>
+                          <span className="text-slate-500">{tag.chat_count ?? 0}</span>
+                        </button>
+                      ))
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <div className="flex rounded-lg border border-slate-700 overflow-hidden text-[11px]">
             {(['recent', 'unread', 'alpha'] as const).map((s) => (
@@ -1276,6 +1449,18 @@ export default function Chats() {
             ))}
           </div>
         </div>
+        {selectedTag && (
+          <div className="border-b border-slate-700/50 px-3 py-1.5">
+            <button
+              onClick={() => setSelectedTag(null)}
+              title="Clear tag filter"
+              className={`inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${TAG_COLORS[selectedTag.color] ?? TAG_COLORS.slate}`}
+            >
+              <span className="truncate">{selectedTag.name}</span>
+              <X size={12} className="flex-shrink-0" />
+            </button>
+          </div>
+        )}
         <div
           ref={chatListRef}
           className="flex-1 overflow-y-auto"
@@ -1330,7 +1515,7 @@ export default function Chats() {
                         setSearch('')
                         handleSelectChat(ensured)
                       })
-                      .catch(() => handleSelectChat(chat))
+                      .catch(() => showErrorToast(`Couldn't open "${chat.name}" from Telegram`))
                   }}
                   onToggleTrack={() => {}}
                   onHide={() => {}}
@@ -1668,6 +1853,11 @@ export default function Chats() {
               {loadingMessages ? (
                 <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
                   Loading…
+                </div>
+              ) : messages.length === 0 && syncEmptyChats.has(selectedChat.telegram_id) ? (
+                <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-slate-500">
+                  No message history available — this group may have been migrated to a newer
+                  group or its history isn't accessible to this account.
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col overflow-hidden">

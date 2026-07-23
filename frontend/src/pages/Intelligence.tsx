@@ -88,7 +88,11 @@ const TOOL_LABELS: Record<string, (args: Record<string, unknown>) => string> = {
   search_messages: (a) => `Searching messages for "${a.keyword}"`,
   search_chats_by_title: (a) => `Searching chat titles for "${a.keyword}"`,
   tag_chat: (a) => `Tagging "${a.chat_name}" with "${a.tag_name}"`,
+  tag_chats_matching: (a) => `Tagging all chats matching "${a.keyword}" with "${a.tag_name}"`,
+  search_messages_in_tagged_chats: (a) => `Searching "${a.tag_name}" chats for "${a.keyword}"`,
+  sync_tagged_chats: (a) => `Syncing chats tagged "${a.tag_name}"`,
   find_chats_by_category: (a) => `Finding ${a.category} chats`,
+  find_chats_by_member_count: (a) => `Finding chats with ${String(a.operator).replace('_', ' ')} ${a.count} members`,
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,10 +1968,12 @@ export default function Intelligence() {
           const detail = await getConversation(first.id)
           if (!cancelled) {
             setMessages(
-              detail.messages.map((m) => ({
-                role: m.role as 'user' | 'assistant',
-                content: m.content,
-              }))
+              detail.messages
+                .filter((m) => m.role !== 'tool')
+                .map((m) => ({
+                  role: m.role as 'user' | 'assistant',
+                  content: m.content,
+                }))
             )
           }
         } catch {
@@ -2019,10 +2025,12 @@ export default function Intelligence() {
       try {
         const detail = await getConversation(id)
         setMessages(
-          detail.messages.map((m) => ({
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-          }))
+          detail.messages
+            .filter((m) => m.role !== 'tool')
+            .map((m) => ({
+              role: m.role as 'user' | 'assistant',
+              content: m.content,
+            }))
         )
       } catch {
         // ignore

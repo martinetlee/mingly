@@ -49,6 +49,35 @@ export interface Tag {
   color: string
   category: string | null
   is_default: boolean
+  chat_count?: number
+}
+
+export interface Workspace {
+  id: number
+  name: string
+  emoji: string | null
+  color: string
+  match_mode: 'any' | 'all'
+  view_mode: 'list' | 'kanban'
+  position: number
+  tag_ids: number[]
+  member_count: number
+  unallocated_count: number
+}
+
+export interface BoardColumn {
+  tag_id: number
+  name: string
+  color: string
+  position: number
+  chats: Chat[]
+}
+
+export interface BoardData {
+  workspace: { id: number; name: string; emoji: string | null; color: string; view_mode: string }
+  columns: BoardColumn[]
+  unallocated: Chat[]
+  backlog: { active: Chat[]; cooling: Chat[]; dormant: Chat[] }
 }
 
 export interface TagSuggestion {
@@ -633,4 +662,11 @@ export type WSEvent =
   | { type: 'messages_deleted'; chat_id: number | null; message_ids: number[] }
   | { type: 'navigate_to_chat'; chat_id: number }
   | { type: 'chat_synced'; chat_id: number }
+  | { type: 'chat_sync_empty'; chat_id: number }
   | { type: 'bulk_sync_complete'; synced: number }
+
+export interface OllamaStatus {
+  running: boolean
+  /** Orchestrator model name when the server is up but the model is not installed */
+  missing_model: string | null
+}

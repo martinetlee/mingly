@@ -407,6 +407,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
                     is_forum=getattr(entity, "forum", False) or False,
                     slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
                     last_message_date=last_msg_date,
+                    is_deactivated=_is_deactivated(entity),
                 )
 
                 if not existing:
@@ -428,7 +429,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
     # Notify frontend about newly discovered chats
     if new_chat_ids:
         logger.info("Discovered %d new chats during dialog sync", len(new_chat_ids))
-        from backend.api.ws import ws_manager
+        from backend.ws.manager import ws_manager
         # Trigger chat list reload
         await ws_manager.broadcast({
             "type": "chat_synced",
@@ -597,6 +598,11 @@ async def sync_global_mentions(days: int = 7) -> int:
     return saved_count
 
 
+def _is_deactivated(entity) -> bool:
+    """True for basic groups Telegram has deactivated (migrated to a supergroup)."""
+    return bool(getattr(entity, "deactivated", False)) or getattr(entity, "migrated_to", None) is not None
+
+
 async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
     """Sync messages for the n most recent dialogs. Returns count of chats synced."""
     client = get_client()
@@ -617,8 +623,9 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
                 members_count=getattr(entity, "participants_count", None),
                 is_forum=getattr(entity, "forum", False) or False,
                 slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
+                is_deactivated=_is_deactivated(entity),
             )
-            if chat.is_hidden or chat.is_briefing:
+            if chat.is_hidden or chat.is_briefing or chat.is_deactivated:
                 continue
             try:
                 await sync_messages(dialog.id, limit=messages_per_chat)
@@ -631,6 +638,91 @@ async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
     # Notify frontend that bulk sync is done so pages can refresh
     await ws_manager.broadcast({"type": "bulk_sync_complete", "synced": synced})
     return synced
+
+
+# ---------------------------------------------------------------------------
+# Tag-scoped background sync (singleton task, scheduler idiom)
+# ---------------------------------------------------------------------------
+
+_tag_sync_task: Optional["asyncio.Task"] = None
+_tag_sync_state: dict = {}
+
+
+def get_tag_sync_state() -> dict:
+    """Current (or last finished) tag-sync run state; empty dict if never run."""
+    return dict(_tag_sync_state)
+
+
+async def _run_tag_sync(tag_name: str, chat_ids: list[int], messages_per_chat: int) -> None:
+    import asyncio
+    from telethon.errors import FloodWaitError
+
+    global _tag_sync_task
+    client = get_client()
+    synced = 0
+    try:
+        for chat_id in chat_ids:
+            # Skip (and flag) groups Telegram has deactivated after migration —
+            # their history lives in the replacement supergroup.
+            try:
+                entity = await client.get_entity(chat_id) if client else None
+                if entity is not None and _is_deactivated(entity):
+                    async with AsyncSessionLocal() as db:
+                        chat = await crud.get_chat_by_telegram_id(db, chat_id)
+                        if chat:
+                            chat.is_deactivated = True
+                            await db.commit()
+                    _tag_sync_state["skipped"] = _tag_sync_state.get("skipped", 0) + 1
+                    continue
+            except Exception:
+                pass  # entity lookup failure is handled by sync_messages below
+
+            flood_waits = 0
+            while True:
+                try:
+                    await sync_messages(chat_id, limit=messages_per_chat)
+                    synced += 1
+                    _tag_sync_state["done"] = synced
+                    await ws_manager.broadcast({"type": "chat_synced", "chat_id": chat_id})
+                    break
+                except FloodWaitError as e:
+                    flood_waits += 1
+                    if flood_waits > 3:
+                        logger.warning("tag sync '%s': chat %s failed after 3 FloodWaits", tag_name, chat_id)
+                        _tag_sync_state["failed"] = _tag_sync_state.get("failed", 0) + 1
+                        break
+                    wait = min(e.seconds + 5, 3600)
+                    resume_at = datetime.utcnow().timestamp() + wait
+                    _tag_sync_state["waiting_until"] = datetime.utcfromtimestamp(resume_at).isoformat()
+                    logger.info("tag sync '%s': FloodWait %ss on chat %s, sleeping %ss", tag_name, e.seconds, chat_id, wait)
+                    await asyncio.sleep(wait)
+                    _tag_sync_state.pop("waiting_until", None)
+                except Exception as e:
+                    logger.warning("tag sync '%s': failed to sync chat %s: %s", tag_name, chat_id, e)
+                    _tag_sync_state["failed"] = _tag_sync_state.get("failed", 0) + 1
+                    break
+            # Throttle between chats — hundreds of sequential history fetches otherwise trip FloodWait
+            await asyncio.sleep(2.5)
+    finally:
+        _tag_sync_state["finished"] = True
+        _tag_sync_state.pop("waiting_until", None)
+        _tag_sync_task = None
+        await ws_manager.broadcast({"type": "bulk_sync_complete", "synced": synced})
+
+
+def start_tag_sync(tag_name: str, chat_ids: list[int], messages_per_chat: int = 50) -> dict:
+    """Start a background sync of the given chats unless one is already running.
+
+    Returns the run state; check 'already_running' to distinguish.
+    """
+    import asyncio
+
+    global _tag_sync_task, _tag_sync_state
+    if _tag_sync_task is not None and not _tag_sync_task.done():
+        return {**_tag_sync_state, "already_running": True}
+    _tag_sync_state = {"tag_name": tag_name, "total": len(chat_ids), "done": 0, "failed": 0, "finished": False}
+    _tag_sync_task = asyncio.create_task(_run_tag_sync(tag_name, chat_ids, messages_per_chat))
+    return {**_tag_sync_state, "already_running": False}
 
 
 async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 48) -> int:
@@ -791,6 +883,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
 
     synced_tg_ids: set[int] = set()
     oldest_synced_date = None
+    newest_incoming_date = None
 
     async with AsyncSessionLocal() as db:
         async for msg in client.iter_messages(chat_telegram_id, limit=limit):
@@ -801,6 +894,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             msg_date = msg.date.replace(tzinfo=None)
             if oldest_synced_date is None or msg_date < oldest_synced_date:
                 oldest_synced_date = msg_date
+            if not msg.out and (newest_incoming_date is None or msg_date > newest_incoming_date):
+                newest_incoming_date = msg_date
 
             sender = await msg.get_sender() if msg.sender_id else None
             media_path = await _download_photo(client, msg)
@@ -920,6 +1015,14 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
 
         await crud.update_chat_sync(db, chat_telegram_id)
 
+        # Wake-ups discovered via sync (not live events) must also surface for
+        # board triage — otherwise activity while the app was closed is silently missed.
+        if newest_incoming_date is not None:
+            try:
+                await crud.mark_workspace_triage(db, chat_telegram_id, newest_incoming_date)
+            except Exception:
+                logger.warning("workspace triage stamp failed for chat %s", chat_telegram_id, exc_info=True)
+
 
 async def register_event_handlers() -> None:
     """Register Telethon event handlers. Must be called after auth."""
@@ -945,6 +1048,7 @@ async def register_event_handlers() -> None:
                         db, event.chat_id, name, chat_type,
                         username=username,
                         last_message_date=msg.date.replace(tzinfo=None) if msg.date else None,
+                        is_deactivated=_is_deactivated(entity),
                     )
                     await db.commit()
                     logger.info("Auto-created chat %s (%s) from incoming message", name, event.chat_id)
@@ -997,6 +1101,12 @@ async def register_event_handlers() -> None:
                     catchup_item.handled_at = None
                     catchup_item.updated_at = datetime.utcnow()
                     await db.commit()
+
+                # Surface board-less workspace members in the Unallocated column
+                try:
+                    await crud.mark_workspace_triage(db, event.chat_id, saved.date)
+                except Exception:
+                    logger.warning("workspace triage stamp failed for chat %s", event.chat_id, exc_info=True)
 
         await ws_manager.broadcast({
             "type": "new_message",
@@ -1150,7 +1260,7 @@ async def register_event_handlers() -> None:
                 )
 
             # Broadcast to frontend
-            from backend.api.ws import ws_manager
+            from backend.ws.manager import ws_manager
             await ws_manager.broadcast({
                 "type": "new_message",
                 "chat_id": user_id,
@@ -1185,9 +1295,13 @@ async def register_event_handlers() -> None:
                     )
                 )
             else:
-                # Private chat deletion — no chat_id, delete by message ID across all chats
+                # No chat context: these ids live in the account-global namespace
+                # shared by private chats and basic groups ONLY. Channel/supergroup
+                # ids are per-channel — identical numbers there are different
+                # messages and must never be deleted by a bare-id match.
                 await db.execute(
                     sa_delete(MsgModel).where(
+                        MsgModel.chat_id > -1000000000000,
                         MsgModel.tg_message_id.in_(deleted_ids),
                     )
                 )

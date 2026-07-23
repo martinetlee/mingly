@@ -1,4 +1,4 @@
-import type { AdminActionLog, AdminPermissions, AuthStatus, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence } from './types'
+import type { AdminActionLog, AdminPermissions, AuthStatus, BoardColumn, BoardData, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence, Workspace } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -101,8 +101,42 @@ export const logout = () =>
 
 // --- Chats ---
 
-export const getChats = (limit = 50, offset = 0, sortBy = 'recent') =>
-  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}`)
+export const getChats = (limit = 50, offset = 0, sortBy = 'recent', tagId?: number, workspaceId?: number) =>
+  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}${tagId != null ? `&tag_id=${tagId}` : ''}${workspaceId != null ? `&workspace_id=${workspaceId}` : ''}`)
+
+// --- Workspaces ---
+
+export const getWorkspaces = () => request<Workspace[]>('/api/workspaces')
+
+export const createWorkspace = (data: { name: string; emoji?: string | null; color?: string; tag_ids: number[]; view_mode?: string }) =>
+  request<Workspace>('/api/workspaces', { method: 'POST', body: JSON.stringify(data) })
+
+export const updateWorkspace = (id: number, data: { name?: string; emoji?: string | null; color?: string; tag_ids?: number[]; view_mode?: string }) =>
+  request<{ status: string }>(`/api/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteWorkspace = (id: number) =>
+  request<void>(`/api/workspaces/${id}`, { method: 'DELETE' })
+
+export const getBoard = (workspaceId: number) =>
+  request<BoardData>(`/api/workspaces/${workspaceId}/board`)
+
+export const addBoardColumn = (workspaceId: number, name: string, color?: string) =>
+  request<BoardColumn>(`/api/workspaces/${workspaceId}/columns`, { method: 'POST', body: JSON.stringify({ name, color }) })
+
+export const updateBoardColumn = (workspaceId: number, tagId: number, data: { name?: string; color?: string; position?: number }) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/columns/${tagId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteBoardColumn = (workspaceId: number, tagId: number, removeTags = true) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/columns/${tagId}?remove_tags=${removeTags}`, { method: 'DELETE' })
+
+export const moveBoardChat = (workspaceId: number, chatId: number, toTagId: number | null) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/move`, { method: 'POST', body: JSON.stringify({ chat_id: chatId, to_tag_id: toTagId }) })
+
+export const getChatsByIds = (ids: number[]) =>
+  request<Chat[]>('/api/chats/by-ids', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  })
 
 export const searchChatsLocal = (q: string) =>
   request<{ local: Chat[] }>(`/api/chats/search?q=${encodeURIComponent(q)}`)

@@ -109,6 +109,7 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
   const [loading, setLoading] = useState(false)
   const [telegramLoading, setTelegramLoading] = useState(false)
   const [ensuring, setEnsuring] = useState(false)
+  const [ensureError, setEnsureError] = useState<string | null>(null)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -150,6 +151,7 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
       setTelegramResults([])
       setSelectedIdx(0)
       setEnsuring(false)
+      setEnsureError(null)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [open])
@@ -171,10 +173,13 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
       if (item.type === 'telegram' && item.telegramId) {
         // Ensure the chat exists locally before navigating
         setEnsuring(true)
+        setEnsureError(null)
         try {
           await ensureChat(item.telegramId)
         } catch {
-          // Still navigate — the Chats page may handle it
+          // Navigating anyway would land on a blank chat pane — surface the error instead
+          setEnsureError(`Couldn't open "${item.label}" from Telegram`)
+          return
         } finally {
           setEnsuring(false)
         }
@@ -259,6 +264,11 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
 
         {/* Results */}
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto">
+          {ensureError && (
+            <div className="mx-4 mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
+              {ensureError}
+            </div>
+          )}
           {query.length < 2 ? (
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               Type to search across chats, contacts, and messages

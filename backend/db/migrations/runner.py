@@ -466,6 +466,64 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE messages ADD COLUMN scam_manual_verdict TEXT",
         ],
     ),
+    (
+        41,
+        "Purge corrupted group/channel chat rows created under raw positive Telegram IDs "
+        "(marked IDs for groups/channels are always negative)",
+        [
+            "DELETE FROM messages WHERE chat_id IN (SELECT telegram_id FROM chats WHERE telegram_id > 0 AND type IN ('group', 'channel'))",
+            "DELETE FROM chat_tags WHERE chat_id IN (SELECT telegram_id FROM chats WHERE telegram_id > 0 AND type IN ('group', 'channel'))",
+            "DELETE FROM catchup_items WHERE chat_telegram_id IN (SELECT telegram_id FROM chats WHERE telegram_id > 0 AND type IN ('group', 'channel'))",
+            "DELETE FROM catchup_summaries WHERE chat_telegram_id IN (SELECT telegram_id FROM chats WHERE telegram_id > 0 AND type IN ('group', 'channel'))",
+            "DELETE FROM chats WHERE telegram_id > 0 AND type IN ('group', 'channel')",
+        ],
+    ),
+    (
+        42,
+        "Add is_deactivated column to chats (groups migrated to supergroups)",
+        [
+            "ALTER TABLE chats ADD COLUMN is_deactivated BOOLEAN NOT NULL DEFAULT 0",
+        ],
+    ),
+    (
+        43,
+        "Create workspaces tables (tag-scoped contexts with kanban boards)",
+        [
+            "CREATE TABLE IF NOT EXISTS workspaces ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name TEXT NOT NULL, "
+            "emoji TEXT, "
+            "color TEXT DEFAULT 'indigo', "
+            "match_mode TEXT NOT NULL DEFAULT 'any', "
+            "view_mode TEXT NOT NULL DEFAULT 'list', "
+            "position INTEGER NOT NULL DEFAULT 0, "
+            "board_watermark DATETIME, "
+            "created_at DATETIME DEFAULT (datetime('now')))",
+            "CREATE TABLE IF NOT EXISTS workspace_tags ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "workspace_id INTEGER NOT NULL, "
+            "tag_id INTEGER NOT NULL, "
+            "is_exclusion BOOLEAN NOT NULL DEFAULT 0, "
+            "UNIQUE(workspace_id, tag_id))",
+            "CREATE TABLE IF NOT EXISTS workspace_columns ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "workspace_id INTEGER NOT NULL, "
+            "tag_id INTEGER NOT NULL, "
+            "position INTEGER NOT NULL DEFAULT 0, "
+            "color TEXT, "
+            "UNIQUE(workspace_id, tag_id))",
+            "CREATE TABLE IF NOT EXISTS workspace_chat_overrides ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "workspace_id INTEGER NOT NULL, "
+            "chat_id BIGINT NOT NULL, "
+            "needs_triage_since DATETIME, "
+            "triaged_at DATETIME, "
+            "UNIQUE(workspace_id, chat_id))",
+            "CREATE INDEX IF NOT EXISTS ix_workspace_tags_workspace ON workspace_tags (workspace_id)",
+            "CREATE INDEX IF NOT EXISTS ix_workspace_columns_workspace ON workspace_columns (workspace_id)",
+            "CREATE INDEX IF NOT EXISTS ix_workspace_overrides_workspace ON workspace_chat_overrides (workspace_id)",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

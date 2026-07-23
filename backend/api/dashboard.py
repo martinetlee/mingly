@@ -56,6 +56,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             Message.date >= cutoff_24h,
             Message.is_outgoing == False,  # noqa: E712
             Chat.is_hidden == False,  # noqa: E712
+            Chat.is_deactivated == False,  # noqa: E712
             relevant_chat_filter,
         )
     )).scalar() or 0
@@ -99,6 +100,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             last_msg_subq.c.my_reaction == None,  # noqa: E711 — exclude reacted messages
             Chat.is_hidden == False,  # noqa: E712
             Chat.is_briefing == False,  # noqa: E712
+            Chat.is_deactivated == False,  # noqa: E712
             relevant_chat_filter,
         )
         .order_by(desc(last_msg_subq.c.date))

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+from telethon import utils as tl_utils
 
 from backend.config import DATA_DIR
 from backend.telegram.client import get_client, ensure_connected
@@ -29,8 +30,9 @@ async def get_profile(user_id: str):
 
     from telethon.tl.types import User, Channel, Chat as TgChat
 
+    marked_id = tl_utils.get_peer_id(entity)  # marked id, matches DB convention
     result: dict = {
-        "id": entity.id,
+        "id": marked_id,
         "type": "unknown",
     }
 
@@ -75,7 +77,7 @@ async def get_profile(user_id: str):
         pass
 
     # Profile photo path
-    photo_path = PROFILE_PHOTO_DIR / f"{entity.id}.jpg"
+    photo_path = PROFILE_PHOTO_DIR / f"{marked_id}.jpg"
     if not photo_path.exists():
         try:
             downloaded = await client.download_profile_photo(
@@ -87,7 +89,7 @@ async def get_profile(user_id: str):
             photo_path = None
 
     if photo_path and photo_path.exists():
-        result["photo_url"] = f"/api/media/profile_photos/{entity.id}.jpg"
+        result["photo_url"] = f"/api/media/profile_photos/{marked_id}.jpg"
     else:
         result["photo_url"] = None
 
@@ -97,7 +99,7 @@ async def get_profile(user_id: str):
             from telethon.tl.functions.messages import GetCommonChatsRequest
             common = await client(GetCommonChatsRequest(user_id=entity.id, max_id=0, limit=50))
             result["common_chats"] = [
-                {"id": c.id, "title": c.title}
+                {"id": tl_utils.get_peer_id(c), "title": c.title}
                 for c in common.chats
             ]
         except Exception:

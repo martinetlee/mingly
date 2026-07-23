@@ -17,7 +17,7 @@ from backend.config import DATA_DIR
 from backend.db.database import get_db
 from backend.db import crud
 from backend.telegram.client import get_client, ensure_connected
-from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract_user_status
+from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract_user_status, _is_deactivated
 
 router = APIRouter()
 
@@ -197,6 +197,7 @@ async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
                 or str(telegram_id),
             chat_type=_chat_type(entity),
             username=getattr(entity, "username", None),
+            is_deactivated=_is_deactivated(entity),
         )
 
     # Sync messages if not synced yet
@@ -212,9 +213,42 @@ async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("")
-async def list_chats(limit: int = 50, offset: int = 0, sort_by: str = "recent", db: AsyncSession = Depends(get_db)):
-    rows = await crud.get_chats(db, limit=limit, offset=offset, sort_by=sort_by)
+async def list_chats(
+    limit: int = 50,
+    offset: int = 0,
+    sort_by: str = "recent",
+    tag_id: Optional[int] = None,
+    workspace_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await crud.get_chats(db, limit=limit, offset=offset, sort_by=sort_by, tag_id=tag_id, workspace_id=workspace_id)
     return [_chat_dict(chat, last_text, last_sender, last_date) for chat, last_text, last_sender, last_date in rows]
+
+
+class ChatsByIdsRequest(BaseModel):
+    ids: List[int]
+
+
+@router.post("/by-ids")
+async def get_chats_by_ids(req: ChatsByIdsRequest, db: AsyncSession = Depends(get_db)):
+    """Fetch chats by telegram_id — used to populate folder views whose members
+    fall outside the paginated recent-chats window. Archived chats are included
+    (Telegram folders legitimately contain them); hidden/briefing/deactivated are not.
+    """
+    ids = req.ids[:500]
+    if not ids:
+        return []
+    from sqlalchemy import select as sa_sel
+    from backend.db.models import Chat
+    result = await db.execute(
+        sa_sel(Chat).where(
+            Chat.telegram_id.in_(ids),
+            Chat.is_hidden == False,  # noqa: E712
+            Chat.is_briefing == False,  # noqa: E712
+            Chat.is_deactivated == False,  # noqa: E712
+        )
+    )
+    return [_chat_dict(c) for c in result.scalars().all()]
 
 
 @router.get("/search")
@@ -229,6 +263,7 @@ async def search_chats(q: str, db: AsyncSession = Depends(get_db)):
         .where(
             Chat.name.ilike(f"%{q}%"),
             Chat.is_hidden == False,  # noqa: E712
+            Chat.is_deactivated == False,  # noqa: E712
         )
         .order_by(desc(Chat.last_activity_at))
         .limit(20)
@@ -297,11 +332,12 @@ async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
                         "last_synced_at": None, "last_activity_at": None, "last_message": None,
                     })
                 elif isinstance(peer_id, (PeerChat, PeerChannel)):
-                    tid = peer_id.chat_id if isinstance(peer_id, PeerChat) else peer_id.channel_id
+                    raw = peer_id.chat_id if isinstance(peer_id, PeerChat) else peer_id.channel_id
+                    tid = utils.get_peer_id(peer_id)  # marked id: -X (group) / -100X (channel)
                     if tid in seen_ids:
                         continue
                     seen_ids.add(tid)
-                    chat_ent = chat_map.get(tid)
+                    chat_ent = chat_map.get(raw)
                     ctype = "channel" if getattr(chat_ent, "broadcast", False) else "group"
                     chats_found.append({
                         "id": 0, "telegram_id": tid,
@@ -377,13 +413,14 @@ async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
             })
         # Process chats/channels
         for chat in result.chats:
-            if chat.id in seen_ids:
+            tid = utils.get_peer_id(chat)  # marked id, matches DB convention
+            if tid in seen_ids:
                 continue
-            seen_ids.add(chat.id)
+            seen_ids.add(tid)
             chat_type = "channel" if getattr(chat, "broadcast", False) else "group"
             chats_found.append({
                 "id": 0,
-                "telegram_id": chat.id,
+                "telegram_id": tid,
                 "name": getattr(chat, "title", str(chat.id)),
                 "type": chat_type,
                 "username": getattr(chat, "username", None),
@@ -470,7 +507,7 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
 
         results = []
         for tg_id, messages in chat_messages.items():
-            info = chats_map.get(abs(tg_id) if tg_id > 0 else abs(tg_id) - 1000000000000, {})
+            info = chats_map.get(utils.resolve_id(tg_id)[0], {})
             # Try local DB for richer chat info
             local_chat = await crud.get_chat_by_telegram_id(db, tg_id)
             results.append({
@@ -688,6 +725,7 @@ async def get_messages(
             import asyncio
 
             async def _bg_sync():
+                from backend.ws.manager import ws_manager
                 try:
                     await sync_messages(telegram_id, limit=100)
                     # If very few messages were saved (chat full of service messages),
@@ -699,13 +737,21 @@ async def get_messages(
                         )).scalar() or 0
                     if count < 5:
                         await sync_messages(telegram_id, limit=500)
-                    from backend.ws.manager import ws_manager
-                    await ws_manager.broadcast({
-                        "type": "chat_synced",
-                        "chat_id": telegram_id,
-                    })
+                        async with AsyncSessionLocal() as db3:
+                            count = (await db3.execute(
+                                sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == telegram_id)
+                            )).scalar() or 0
+                    if count == 0:
+                        # Nothing retrievable (migrated/inaccessible chat) — tell the UI
+                        await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
+                    else:
+                        await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).warning("auto-sync failed for chat %s", telegram_id, exc_info=True)
+                    try:
+                        await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
+                    except Exception:
+                        pass
 
             asyncio.create_task(_bg_sync())
 
@@ -1270,7 +1316,7 @@ async def start_private_chat(
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Could not find user: {e}")
 
-    telegram_id = entity.id
+    telegram_id = utils.get_peer_id(entity)
     name = (
         getattr(entity, "title", None)
         or f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
@@ -1320,7 +1366,7 @@ async def create_group(
 
         # Extract the created chat from the result
         created_chat = result.chats[0]
-        telegram_id = created_chat.id
+        telegram_id = utils.get_peer_id(created_chat)
         chat = await crud.upsert_chat(
             db,
             telegram_id=telegram_id,
@@ -1356,7 +1402,7 @@ async def create_channel(
         ))
 
         created_channel = result.chats[0]
-        telegram_id = created_channel.id
+        telegram_id = utils.get_peer_id(created_channel)
         chat = await crud.upsert_chat(
             db,
             telegram_id=telegram_id,
@@ -1407,7 +1453,7 @@ async def join_via_invite_link(
             result = await client(JoinChannelRequest(entity))
             joined_chat = result.chats[0] if result.chats else entity
 
-        telegram_id = joined_chat.id
+        telegram_id = utils.get_peer_id(joined_chat)
         name = getattr(joined_chat, "title", None) or str(telegram_id)
         chat = await crud.upsert_chat(
             db,
@@ -1415,6 +1461,7 @@ async def join_via_invite_link(
             name=name,
             chat_type=_chat_type(joined_chat),
             username=getattr(joined_chat, "username", None),
+            is_deactivated=_is_deactivated(joined_chat),
         )
         return _chat_dict(chat)
     except HTTPException:

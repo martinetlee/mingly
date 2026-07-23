@@ -15,6 +15,8 @@ import Intelligence from './pages/Intelligence'
 import Profile from './pages/Profile'
 import Shield from './pages/Shield'
 import LlmSetup from './pages/LlmSetup'
+import Board from './pages/Board'
+import { WorkspaceProvider } from './context/WorkspaceContext'
 
 type AppState = 'loading' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'llm-setup' | 'app'
 
@@ -89,10 +91,11 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Layout />}>
+        <Route path="/" element={<WorkspaceProvider><Layout /></WorkspaceProvider>}>
           <Route index element={<Navigate to="/home" replace />} />
           <Route path="home" element={<Home />} />
           <Route path="chats" element={<Chats />} />
+          <Route path="board" element={<Board />} />
           <Route path="contacts" element={<Contacts />} />
           <Route path="organizations" element={<Organizations />} />
           <Route path="tracked" element={<Tracked />} />

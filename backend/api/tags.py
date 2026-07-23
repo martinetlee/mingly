@@ -16,8 +16,11 @@ router = APIRouter()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tag_dict(t) -> dict:
-    return {"id": t.id, "name": t.name, "color": t.color, "category": t.category, "is_default": t.is_default}
+def _tag_dict(t, chat_count: Optional[int] = None) -> dict:
+    d = {"id": t.id, "name": t.name, "color": t.color, "category": t.category, "is_default": t.is_default}
+    if chat_count is not None:
+        d["chat_count"] = chat_count
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -38,8 +41,8 @@ class UpdateTagRequest(BaseModel):
 
 @router.get("/tags")
 async def list_tags(db: AsyncSession = Depends(get_db)):
-    tags = await crud.get_all_tags(db)
-    return [_tag_dict(t) for t in tags]
+    rows = await crud.get_all_tags_with_counts(db)
+    return [_tag_dict(t, chat_count=count) for t, count in rows]
 
 
 @router.post("/tags")

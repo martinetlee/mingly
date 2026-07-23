@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import logo from '../assets/logo.png'
 import {
   Home,
@@ -12,8 +12,16 @@ import {
   RefreshCw,
   Settings,
   Search,
+  Plus,
 } from 'lucide-react'
 import { bulkSync } from '../api/client'
+import { useWorkspaces } from '../context/WorkspaceContext'
+import WorkspaceDialog from './WorkspaceDialog'
+
+const WS_RING: Record<string, string> = {
+  indigo: 'ring-indigo-400', emerald: 'ring-emerald-400', rose: 'ring-rose-400',
+  amber: 'ring-amber-400', violet: 'ring-violet-400', sky: 'ring-sky-400', slate: 'ring-slate-400',
+}
 
 const NAV = [
   { to: '/home', icon: Home, label: 'Home' },
@@ -28,6 +36,14 @@ const NAV = [
 export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void }) {
   const location = useLocation()
   const [syncing, setSyncing] = useState(false)
+  const navigate = useNavigate()
+  const { workspaces, activeWorkspace, setActiveWorkspaceId, refreshWorkspaces } = useWorkspaces()
+  const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false)
+
+  const selectWorkspace = (id: number | null) => {
+    setActiveWorkspaceId(id)
+    navigate('/chats')
+  }
 
   const handleBulkSync = async () => {
     if (syncing) return
@@ -42,9 +58,61 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
   return (
     <aside className="flex h-screen w-[4.5rem] flex-col items-center bg-slate-950 py-4">
       {/* Logo */}
-      <div className="mb-6 flex h-9 w-9 items-center justify-center select-none">
+      <div className="mb-4 flex h-9 w-9 items-center justify-center select-none">
         <img src={logo} alt="Common Defense" className="h-9 w-9 object-contain" />
       </div>
+
+      {/* Workspace switcher */}
+      <div className="mb-3 flex max-h-56 flex-col items-center gap-1.5 overflow-y-auto">
+        <button
+          onClick={() => selectWorkspace(null)}
+          title="All chats"
+          className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-semibold transition-all ${
+            activeWorkspace === null
+              ? 'bg-indigo-500/30 text-indigo-300 ring-2 ring-indigo-400'
+              : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+          }`}
+        >
+          All
+        </button>
+        {workspaces.map((ws) => (
+          <button
+            key={ws.id}
+            onClick={() => selectWorkspace(ws.id)}
+            title={`${ws.name} — ${ws.member_count} chats${ws.unallocated_count ? `, ${ws.unallocated_count} to triage` : ''}`}
+            className={`relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm transition-all ${
+              activeWorkspace?.id === ws.id
+                ? `bg-slate-700 ring-2 ${WS_RING[ws.color] ?? 'ring-indigo-400'}`
+                : 'bg-slate-800 hover:bg-slate-700'
+            }`}
+          >
+            {ws.emoji || ws.name[0].toUpperCase()}
+            {ws.unallocated_count > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-rose-500 px-0.5 text-[8px] font-bold text-white">
+                {ws.unallocated_count > 9 ? '9+' : ws.unallocated_count}
+              </span>
+            )}
+          </button>
+        ))}
+        <button
+          onClick={() => setShowWorkspaceDialog(true)}
+          title="New workspace"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-dashed border-slate-700 text-slate-500 transition-colors hover:border-slate-500 hover:text-slate-300"
+        >
+          <Plus size={14} />
+        </button>
+      </div>
+      <div className="mb-3 h-px w-8 bg-slate-800" />
+
+      <WorkspaceDialog
+        open={showWorkspaceDialog}
+        onClose={() => setShowWorkspaceDialog(false)}
+        onSaved={(id) => {
+          setShowWorkspaceDialog(false)
+          refreshWorkspaces()
+          if (id != null) selectWorkspace(id)
+        }}
+      />
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1">

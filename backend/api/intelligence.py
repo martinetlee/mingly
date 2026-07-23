@@ -136,7 +136,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_chats_by_title",
-            "description": "Search for chats whose title/name contains a keyword.",
+            "description": (
+                "Search for chats whose title/name contains a keyword. Matching ignores "
+                "spaces and case ('ETHTaipei' also matches 'ETH Taipei'). The result reports "
+                "the total match count; only the first matches are listed if there are many."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,6 +174,79 @@ TOOLS = [
                     },
                 },
                 "required": ["chat_name", "tag_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_messages_in_tagged_chats",
+            "description": (
+                "Search message content within all chats carrying a tag, summarized per chat "
+                "(match counts and latest snippet). Use this to answer 'which chats tagged X "
+                "mention / are related to Y' — it is scoped and complete, unlike search_messages. "
+                "Also reports how many tagged chats have no synced messages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag_name": {
+                        "type": "string",
+                        "description": "Tag whose chats should be searched (e.g. 'ETHTaipei').",
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "description": "Keyword to search for in those chats' messages.",
+                    },
+                },
+                "required": ["tag_name", "keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sync_tagged_chats",
+            "description": (
+                "Download message history from Telegram for all chats carrying a tag that have "
+                "never been synced. Runs in the background and can take several minutes. Use this "
+                "when a search reports that many tagged chats have no synced messages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag_name": {
+                        "type": "string",
+                        "description": "Tag whose unsynced chats should be synced.",
+                    },
+                },
+                "required": ["tag_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tag_chats_matching",
+            "description": (
+                "Tag ALL chats whose title matches a keyword, in one operation. Matching ignores "
+                "spaces and case. If the tag does not exist it will be created. Use this when the "
+                "user asks to tag many or all chats matching a name — do NOT call tag_chat "
+                "repeatedly for that."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Keyword to match against chat titles (e.g. 'ETHTaipei').",
+                    },
+                    "tag_name": {
+                        "type": "string",
+                        "description": "Name of the tag to assign to every matching chat.",
+                    },
+                },
+                "required": ["keyword", "tag_name"],
             },
         },
     },
@@ -229,7 +306,11 @@ SYSTEM_PROMPT = (
     "You are an intelligent assistant for Common Defense, a personal Telegram relationship manager. "
     "You have access to tools that let you search the user's Telegram chats and messages. "
     "Use your tools to answer questions accurately — look up information before responding. "
-    "Be concise, helpful, and specific. When listing chats or messages, keep it brief and relevant."
+    "Be concise, helpful, and specific. When listing chats or messages, keep it brief and relevant. "
+    "When asked to tag many or all chats matching a name, use the tag_chats_matching tool once "
+    "instead of calling tag_chat repeatedly. For questions about message content within tagged "
+    "chats (e.g. 'which chats tagged X discuss Y'), use search_messages_in_tagged_chats and "
+    "always relay its note about unsynced chats to the user."
 )
 
 # ---------------------------------------------------------------------------
@@ -267,7 +348,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         elif name == "search_messages":
             keyword = args.get("keyword", "")
             limit = min(int(args.get("limit", 20)), 50)
-            rows = await crud.search_messages_by_keyword(db, keyword, limit=limit)
+            rows, total = await crud.search_messages_by_keyword(db, keyword, limit=limit)
             if not rows:
                 return f"No messages found containing '{keyword}'."
             lines = []
@@ -276,15 +357,27 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                     ts = msg.date.strftime("%Y-%m-%d %H:%M")
                     sender = msg.sender_name or "Unknown"
                     lines.append(f"[{ts}] {_qname(chat.name, str(chat.telegram_id))} — {sender}: {msg.text[:200]}")
-            return f"Messages containing '{keyword}':\n" + "\n".join(lines)
+            header = f"Found {total} messages containing '{keyword}'"
+            if total > len(rows):
+                header += (
+                    f" (showing the {len(rows)} most recent; for a per-chat overview "
+                    "within tagged chats use search_messages_in_tagged_chats)"
+                )
+            return header + ":\n" + "\n".join(lines)
 
         elif name == "search_chats_by_title":
             keyword = args.get("keyword", "")
-            chats = await crud.search_chats_by_title(db, keyword)
+            chats, total = await crud.search_chats_by_title(db, keyword, limit=50)
             if not chats:
                 return f"No chats found with title containing '{keyword}'."
             lines = [f"{_qname(c.name)} ({c.type})" for c in chats]
-            return f"Chats matching '{keyword}':\n" + "\n".join(lines)
+            header = f"Found {total} chats matching '{keyword}'"
+            if total > len(chats):
+                header += (
+                    f" (showing first {len(chats)} alphabetically; "
+                    "to tag all of them use tag_chats_matching)"
+                )
+            return header + ":\n" + "\n".join(lines)
 
         elif name == "tag_chat":
             chat_name = args.get("chat_name", "")
@@ -303,6 +396,103 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                     return f"{_qname(chat.name)} already has the tag '{tag.name}'."
                 await crud.add_tag_to_chat(write_db, chat.telegram_id, tag.id)
                 return f"Tagged {_qname(chat.name)} with '{tag.name}'."
+
+        elif name == "search_messages_in_tagged_chats":
+            tag_name = args.get("tag_name", "")
+            keyword = args.get("keyword", "")
+            if not tag_name or not keyword:
+                return "Both tag_name and keyword are required."
+            total_tagged, _with_msgs, unsynced_ids = await crud.get_tag_sync_coverage(db, tag_name)
+            if total_tagged == 0:
+                return f"No chats carry a tag matching '{tag_name}'."
+            rows = await crud.search_messages_in_tagged_chats(db, tag_name, keyword)
+            total_matches = sum(r.match_count for r in rows)
+            if not rows:
+                out = f"Among {total_tagged} chats tagged '{tag_name}', none mention '{keyword}'."
+            else:
+                shown = rows[:40]
+                lines = []
+                for r in shown:
+                    date_str = r.latest_date.strftime("%Y-%m-%d") if r.latest_date else "?"
+                    snippet = (r.latest_snippet or "").replace("\n", " ")[:100]
+                    lines.append(f"- {_qname(r.name)} — {r.match_count} matches; latest ({date_str}): \"{snippet}\"")
+                out = (
+                    f"Among {total_tagged} chats tagged '{tag_name}', {len(rows)} mention "
+                    f"'{keyword}' ({total_matches} matching messages)"
+                )
+                if len(rows) > len(shown):
+                    out += f" — showing top {len(shown)} by match count"
+                out += ":\n" + "\n".join(lines)
+            if unsynced_ids:
+                out += (
+                    f"\nNote: {len(unsynced_ids)} of {total_tagged} tagged chats have no synced "
+                    "messages and could not be searched. Use sync_tagged_chats to fetch their history."
+                )
+            return out
+
+        elif name == "sync_tagged_chats":
+            tag_name = args.get("tag_name", "")
+            if not tag_name:
+                return "tag_name is required."
+            from backend.telegram.sync import start_tag_sync, get_tag_sync_state
+
+            def _progress(state: dict) -> str:
+                msg = (
+                    f"A sync of chats tagged '{state.get('tag_name')}' is already running: "
+                    f"{state.get('done', 0)} of {state.get('total', 0)} chats done"
+                )
+                if state.get("skipped"):
+                    msg += f", {state['skipped']} skipped (deactivated groups)"
+                if state.get("failed"):
+                    msg += f", {state['failed']} failed"
+                if state.get("waiting_until"):
+                    msg += f". Currently waiting out a Telegram rate limit until {state['waiting_until']} UTC"
+                return msg + "."
+
+            running = get_tag_sync_state()
+            if running and not running.get("finished"):
+                return _progress(running)
+            total_tagged, _with_msgs, unsynced_ids = await crud.get_tag_sync_coverage(db, tag_name)
+            if total_tagged == 0:
+                return f"No chats carry a tag matching '{tag_name}'."
+            if not unsynced_ids:
+                return f"All {total_tagged} chats tagged '{tag_name}' already have synced messages."
+            state = start_tag_sync(tag_name, unsynced_ids)
+            if state.get("already_running"):
+                return _progress(state)
+            n = len(unsynced_ids)
+            return (
+                f"Started background sync of {n} unsynced chats tagged '{tag_name}' "
+                f"(roughly {max(1, n // 30)}-{max(2, n // 15)} minutes). "
+                "Tell the user to re-run their question once it completes."
+            )
+
+        elif name == "tag_chats_matching":
+            keyword = args.get("keyword", "")
+            tag_name = args.get("tag_name", "")
+            if not keyword or not tag_name:
+                return "Both keyword and tag_name are required."
+            # Use a fresh session for writes to avoid streaming session lifecycle issues
+            async with AsyncSessionLocal() as write_db:
+                from sqlalchemy import select as sa_select
+                from backend.db.models import Chat as ChatModel
+                result = await write_db.execute(
+                    sa_select(ChatModel).where(crud._title_match(keyword)).order_by(ChatModel.name)
+                )
+                chats = list(result.scalars().all())
+                if not chats:
+                    return f"No chats found with title matching '{keyword}'. Nothing was tagged."
+                all_tags = await crud.get_all_tags(write_db)
+                tag = next((t for t in all_tags if t.name.lower() == tag_name.lower()), None)
+                if not tag:
+                    tag = await crud.create_tag(write_db, name=tag_name)
+                newly = await crud.add_tag_to_chats(write_db, [c.telegram_id for c in chats], tag.id)
+                examples = ", ".join(_qname(c.name) for c in chats[:5])
+                summary = (
+                    f"Tagged {newly} chats matching '{keyword}' with '{tag.name}' "
+                    f"({len(chats) - newly} already had it; {len(chats)} match in total)."
+                )
+                return summary + f" Examples: {examples}."
 
         elif name == "find_chats_by_category":
             category = args.get("category", "")
@@ -374,12 +564,29 @@ def _get_llm_config():
 # Streaming agentic loop
 # ---------------------------------------------------------------------------
 
-async def _run_agent(messages_in: list[dict], db: AsyncSession):
+def _emit_text_chunks(content: str, chunk_size: int = 60):
+    """Split final text into small chunks for a streaming-like UX."""
+    for i in range(0, len(content), chunk_size):
+        yield content[i:i + chunk_size]
+
+
+async def _persist_tool_trace(conversation_id: Optional[int], trace: list[str]) -> None:
+    """Save a compact tool trace so follow-up turns keep the evidence in context."""
+    if not conversation_id or not trace:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            await crud.add_conversation_message(db, conversation_id, "tool", "\n".join(trace))
+    except Exception:
+        logging.getLogger(__name__).warning("Failed to persist tool trace", exc_info=True)
+
+
+async def _run_agent(messages_in: list[dict], db: AsyncSession, conversation_id: Optional[int] = None):
     """
     Agentic loop:
       1. Call LLM with tools (non-streaming).
       2. If response contains tool_calls → execute them, yield events, loop.
-      3. Otherwise stream the final text and yield done.
+      3. Otherwise emit the final text (chunked) and yield done.
     """
     base_url, model = _get_llm_config()
     if not base_url:
@@ -394,6 +601,7 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession):
         system_content += "\n\n" + org_ctx
 
     messages = [{"role": "system", "content": system_content}] + messages_in
+    trace: list[str] = []
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for _ in range(8):  # max tool-call rounds
@@ -424,34 +632,19 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession):
             tool_calls = msg.get("tool_calls") or []
 
             if not tool_calls:
-                # No more tool calls — stream the final answer
+                # No more tool calls — emit this same response's text directly.
+                # (A separate streaming call would be a different sample that
+                # could promise tool use it can no longer perform.)
                 final_content = msg.get("content") or ""
-                # Stream word by word for a nice effect, or just yield as one chunk
-                # Use streaming call for nicer UX
-                async with client.stream(
-                    "POST",
-                    f"{base_url}/chat/completions",
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "max_tokens": 2048,
-                        "temperature": 0.3,
-                        "stream": True,
-                    },
-                ) as stream_resp:
-                    if stream_resp.status_code != 200:
-                        # Fallback: send non-streamed content
-                        yield _sse("text", {"content": final_content})
-                    else:
-                        async for line in stream_resp.aiter_lines():
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                try:
-                                    chunk = json.loads(line[6:])
-                                    delta = chunk["choices"][0]["delta"].get("content", "")
-                                    if delta:
-                                        yield _sse("text", {"content": delta})
-                                except Exception:
-                                    pass
+                if not final_content.strip():
+                    final_content = (
+                        "The tool results above show what I found — ask a follow-up to continue."
+                        if trace
+                        else "I couldn't produce a response — please try rephrasing."
+                    )
+                for chunk in _emit_text_chunks(final_content):
+                    yield _sse("text", {"content": chunk})
+                await _persist_tool_trace(conversation_id, trace)
                 yield _sse("done", {})
                 return
 
@@ -473,13 +666,27 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession):
 
                 yield _sse("tool_result", {"name": tool_name, "content": result[:500]})
 
+                try:
+                    args_str = json.dumps(tool_args, ensure_ascii=False)[:150]
+                except Exception:
+                    args_str = "{}"
+                trace.append(f"{tool_name}({args_str}) → {result[:300]}")
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
 
-    yield _sse("error", {"message": "Max tool-call rounds exceeded."})
+    # Hit the per-message tool-round cap — end gracefully so the turn is
+    # displayed and persisted rather than vanishing behind a bare error.
+    for chunk in _emit_text_chunks(
+        "I hit the per-message tool limit. The results gathered so far are shown above — "
+        "ask a follow-up to continue from them."
+    ):
+        yield _sse("text", {"content": chunk})
+    await _persist_tool_trace(conversation_id, trace)
+    yield _sse("done", {})
 
 
 # ---------------------------------------------------------------------------
@@ -605,10 +812,17 @@ async def intelligence_chat(
     if req.conversation_id is not None and req.message is not None:
         # Load persisted history from DB to build context
         prior_msgs = await crud.get_conversation_messages(db, req.conversation_id)
-        messages_in = [
-            {"role": m.role, "content": m.content}
-            for m in prior_msgs
-        ]
+        messages_in = []
+        for m in prior_msgs:
+            if m.role == "tool":
+                # Persisted tool trace — replay as assistant context (we don't
+                # keep tool_call_ids, so a real 'tool' role would be malformed)
+                messages_in.append({
+                    "role": "assistant",
+                    "content": "[Tool results from my earlier turn]\n" + m.content,
+                })
+            else:
+                messages_in.append({"role": m.role, "content": m.content})
         # Append the new user message (frontend already persisted it)
         messages_in.append({"role": "user", "content": req.message})
     elif req.messages:
@@ -618,7 +832,7 @@ async def intelligence_chat(
         messages_in = []
 
     async def generate():
-        async for chunk in _run_agent(messages_in, db):
+        async for chunk in _run_agent(messages_in, db, conversation_id=req.conversation_id):
             yield chunk
 
     return StreamingResponse(generate(), media_type="text/event-stream")

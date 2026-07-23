@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, desc, or_, func, asc
 from sqlalchemy.ext.asyncio import AsyncSession
+from telethon import utils as tl_utils
 from telethon.tl.functions.contacts import SearchRequest as TgSearchRequest, GetContactsRequest
 from telethon.tl.types import User, Channel, Chat as TgChat
 
@@ -64,7 +65,7 @@ async def global_search(
     )
     chat_q = (
         select(Chat)
-        .where(Chat.is_hidden == False, Chat.name.ilike(pattern))  # noqa: E712
+        .where(Chat.is_hidden == False, Chat.is_deactivated == False, Chat.name.ilike(pattern))  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
         .order_by(desc(last_msg.c.last_date), Chat.name)
         .limit(limit)
@@ -229,7 +230,7 @@ async def telegram_search(
             _add(user.id, name, "private", getattr(user, "username", None))
         for chat in result.chats:
             _add(
-                chat.id,
+                tl_utils.get_peer_id(chat),  # marked id, matches DB convention
                 getattr(chat, "title", None) or str(chat.id),
                 _tg_chat_type(chat),
                 getattr(chat, "username", None),

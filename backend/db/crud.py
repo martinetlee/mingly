@@ -3,16 +3,30 @@ from typing import Optional
 from sqlalchemy import select, delete, desc, asc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact
+from backend.db.models import (
+    Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact,
+    Workspace, WorkspaceTag, WorkspaceColumn, WorkspaceChatOverride,
+)
 
 
 # --- Chats ---
 
-async def get_chats(db: AsyncSession, limit: int = 50, offset: int = 0, sort_by: str = "recent") -> list:
+async def get_chats(
+    db: AsyncSession,
+    limit: int = 50,
+    offset: int = 0,
+    sort_by: str = "recent",
+    tag_id: Optional[int] = None,
+    workspace_id: Optional[int] = None,
+) -> list:
     query = (
         select(Chat)
-        .where(Chat.is_hidden == False, Chat.is_briefing == False, Chat.is_archived == False)  # noqa: E712
+        .where(Chat.is_hidden == False, Chat.is_briefing == False, Chat.is_archived == False, Chat.is_deactivated == False)  # noqa: E712
     )
+    if tag_id is not None:
+        query = query.join(ChatTag, Chat.telegram_id == ChatTag.chat_id).where(ChatTag.tag_id == tag_id)
+    if workspace_id is not None:
+        query = query.where(Chat.telegram_id.in_(_workspace_member_ids(workspace_id)))
 
     if sort_by == "unread":
         query = query.order_by(desc(Chat.is_pinned), desc(Chat.unread_count), desc(Chat.last_activity_at), Chat.name)
@@ -128,6 +142,7 @@ async def upsert_chat(
     is_forum: Optional[bool] = None,
     slow_mode_seconds: Optional[int] = None,
     last_message_date: Optional[datetime] = None,
+    is_deactivated: Optional[bool] = None,
 ) -> Chat:
     chat = await get_chat_by_telegram_id(db, telegram_id)
     if chat:
@@ -144,6 +159,8 @@ async def upsert_chat(
             chat.slow_mode_seconds = slow_mode_seconds
         if last_message_date:
             chat.last_activity_at = last_message_date
+        if is_deactivated is not None:
+            chat.is_deactivated = is_deactivated
     else:
         chat = Chat(
             telegram_id=telegram_id,
@@ -155,6 +172,7 @@ async def upsert_chat(
             is_forum=is_forum if is_forum is not None else False,
             slow_mode_seconds=slow_mode_seconds if slow_mode_seconds is not None else 0,
             last_activity_at=last_message_date,
+            is_deactivated=is_deactivated if is_deactivated is not None else False,
         )
         db.add(chat)
     await db.commit()
@@ -592,6 +610,23 @@ async def get_all_tags(db: AsyncSession) -> list[Tag]:
     return list(result.scalars().all())
 
 
+async def get_all_tags_with_counts(db: AsyncSession) -> list[tuple[Tag, int]]:
+    """All tags plus the number of chats each would show in the filtered chat list.
+
+    Counts use the same exclusions as get_chats (hidden/briefing/archived).
+    """
+    result = await db.execute(
+        select(Tag, func.count(Chat.telegram_id))
+        .outerjoin(ChatTag, ChatTag.tag_id == Tag.id)
+        .outerjoin(Chat, (Chat.telegram_id == ChatTag.chat_id)
+                   & (Chat.is_hidden == False) & (Chat.is_briefing == False) & (Chat.is_archived == False)  # noqa: E712
+                   & (Chat.is_deactivated == False))  # noqa: E712
+        .group_by(Tag.id)
+        .order_by(Tag.is_default.desc(), Tag.name)
+    )
+    return [(tag, count) for tag, count in result.all()]
+
+
 async def create_tag(db: AsyncSession, name: str, color: str = "slate", category: Optional[str] = None) -> Tag:
     tag = Tag(name=name, color=color, category=category, is_default=False)
     db.add(tag)
@@ -627,11 +662,10 @@ async def delete_tag(db: AsyncSession, tag_id: int) -> bool:
     tag = result.scalar_one_or_none()
     if not tag:
         return False
-    # Remove all chat associations first
-    await db.execute(select(ChatTag).where(ChatTag.tag_id == tag_id))
-    assocs = (await db.execute(select(ChatTag).where(ChatTag.tag_id == tag_id))).scalars().all()
-    for assoc in assocs:
-        await db.delete(assoc)
+    # Remove all associations first (chats, workspace rules, board columns)
+    await db.execute(delete(ChatTag).where(ChatTag.tag_id == tag_id))
+    await db.execute(delete(WorkspaceTag).where(WorkspaceTag.tag_id == tag_id))
+    await db.execute(delete(WorkspaceColumn).where(WorkspaceColumn.tag_id == tag_id))
     await db.delete(tag)
     await db.commit()
     return True
@@ -665,6 +699,19 @@ async def add_tag_to_chat(db: AsyncSession, chat_telegram_id: int, tag_id: int) 
     return ct
 
 
+async def add_tag_to_chats(db: AsyncSession, chat_telegram_ids: list[int], tag_id: int) -> int:
+    """Bulk-assign a tag to many chats. Returns the number of chats newly tagged."""
+    if not chat_telegram_ids:
+        return 0
+    already = set((await db.execute(
+        select(ChatTag.chat_id).where(ChatTag.chat_id.in_(chat_telegram_ids), ChatTag.tag_id == tag_id)
+    )).scalars().all())
+    missing = [cid for cid in chat_telegram_ids if cid not in already]
+    db.add_all(ChatTag(chat_id=cid, tag_id=tag_id) for cid in missing)
+    await db.commit()
+    return len(missing)
+
+
 async def remove_tag_from_chat(db: AsyncSession, chat_telegram_id: int, tag_id: int) -> bool:
     result = await db.execute(
         select(ChatTag).where(ChatTag.chat_id == chat_telegram_id, ChatTag.tag_id == tag_id)
@@ -679,8 +726,15 @@ async def remove_tag_from_chat(db: AsyncSession, chat_telegram_id: int, tag_id: 
 
 # --- Intelligence tools ---
 
-async def search_messages_by_keyword(db: AsyncSession, keyword: str, limit: int = 30) -> list:
-    """Full-text search across all message text (case-insensitive LIKE)."""
+async def search_messages_by_keyword(db: AsyncSession, keyword: str, limit: int = 30) -> tuple[list, int]:
+    """Full-text search across all message text (case-insensitive LIKE).
+
+    Returns (rows, total) — rows holds at most `limit` most-recent matches,
+    total is the full match count.
+    """
+    total = (await db.execute(
+        select(func.count()).select_from(Message).where(Message.text.ilike(f"%{keyword}%"))
+    )).scalar() or 0
     result = await db.execute(
         select(Message, Chat)
         .join(Chat, Message.chat_id == Chat.telegram_id)
@@ -688,26 +742,45 @@ async def search_messages_by_keyword(db: AsyncSession, keyword: str, limit: int 
         .order_by(desc(Message.date))
         .limit(limit)
     )
-    return result.all()
+    return result.all(), total
 
 
 async def get_chat_by_name(db: AsyncSession, name: str) -> Optional[Chat]:
-    """Find a chat whose name contains the given string (case-insensitive)."""
+    """Find a chat whose name contains the given string (case-insensitive).
+
+    Prefers the most recently active live chat so name collisions (e.g. a
+    migrated group and its supergroup twin) resolve deterministically.
+    """
     result = await db.execute(
-        select(Chat).where(Chat.name.ilike(f"%{name}%")).limit(1)
+        select(Chat)
+        .where(Chat.name.ilike(f"%{name}%"), Chat.is_deactivated == False)  # noqa: E712
+        .order_by(desc(Chat.last_activity_at).nullslast())
+        .limit(1)
     )
     return result.scalar_one_or_none()
 
 
-async def search_chats_by_title(db: AsyncSession, keyword: str, limit: int = 20) -> list:
-    """Return all chats whose name contains the keyword (case-insensitive)."""
+def _title_match(keyword: str):
+    """Space- and case-insensitive title filter: 'ETHTaipei' matches 'ETH Taipei'."""
+    kw = keyword.lower().replace(" ", "")
+    return func.replace(func.lower(Chat.name), " ", "").like(f"%{kw}%")
+
+
+async def search_chats_by_title(db: AsyncSession, keyword: str, limit: int = 20) -> tuple[list, int]:
+    """Return (chats, total) whose name contains the keyword, ignoring spaces and case.
+
+    `chats` holds at most `limit` rows (alphabetical); `total` is the full match count.
+    """
+    total = (await db.execute(
+        select(func.count()).select_from(Chat).where(_title_match(keyword), Chat.is_deactivated == False)  # noqa: E712
+    )).scalar() or 0
     result = await db.execute(
         select(Chat)
-        .where(Chat.name.ilike(f"%{keyword}%"))
+        .where(_title_match(keyword), Chat.is_deactivated == False)  # noqa: E712
         .order_by(Chat.name)
         .limit(limit)
     )
-    return list(result.scalars().all())
+    return list(result.scalars().all()), total
 
 
 async def find_chats_by_member_count(
@@ -743,10 +816,402 @@ async def get_chats_by_tag_name(db: AsyncSession, tag_name: str) -> list:
         select(Chat)
         .join(ChatTag, Chat.telegram_id == ChatTag.chat_id)
         .join(Tag, ChatTag.tag_id == Tag.id)
-        .where(Tag.name.ilike(f"%{tag_name}%"))
+        .where(Tag.name.ilike(f"%{tag_name}%"), Chat.is_deactivated == False)  # noqa: E712
         .order_by(Chat.name)
     )
     return list(result.scalars().all())
+
+
+# --- Workspaces ---
+
+def _live_chat_filter():
+    """Standard visibility exclusions — must match get_chats so counts never lie."""
+    return (
+        (Chat.is_hidden == False)  # noqa: E712
+        & (Chat.is_briefing == False)  # noqa: E712
+        & (Chat.is_deactivated == False)  # noqa: E712
+    )
+
+
+def _workspace_member_ids(workspace_id: int):
+    """Scalar subquery of chat telegram_ids matching a workspace's include tags (ANY mode)."""
+    include_tags = select(WorkspaceTag.tag_id).where(
+        WorkspaceTag.workspace_id == workspace_id,
+        WorkspaceTag.is_exclusion == False,  # noqa: E712
+    )
+    return select(ChatTag.chat_id).where(ChatTag.tag_id.in_(include_tags))
+
+
+def _workspace_stage_tag_ids(workspace_id: int):
+    return select(WorkspaceColumn.tag_id).where(WorkspaceColumn.workspace_id == workspace_id)
+
+
+async def get_workspaces_with_counts(db: AsyncSession) -> list[dict]:
+    """All workspaces ordered by position, each with tag_ids, member and unallocated counts."""
+    workspaces = list((await db.execute(
+        select(Workspace).order_by(Workspace.position, Workspace.id)
+    )).scalars().all())
+    result = []
+    for ws in workspaces:
+        tag_ids = list((await db.execute(
+            select(WorkspaceTag.tag_id).where(
+                WorkspaceTag.workspace_id == ws.id,
+                WorkspaceTag.is_exclusion == False,  # noqa: E712
+            )
+        )).scalars().all())
+        member_count = (await db.execute(
+            select(func.count()).select_from(Chat).where(
+                Chat.telegram_id.in_(_workspace_member_ids(ws.id)), _live_chat_filter()
+            )
+        )).scalar() or 0
+        unallocated_count = 0
+        if ws.view_mode == "kanban":
+            unallocated_count = (await db.execute(
+                select(func.count()).select_from(Chat)
+                .join(WorkspaceChatOverride, (WorkspaceChatOverride.chat_id == Chat.telegram_id)
+                      & (WorkspaceChatOverride.workspace_id == ws.id))
+                .where(
+                    Chat.telegram_id.in_(_workspace_member_ids(ws.id)),
+                    _live_chat_filter(),
+                    WorkspaceChatOverride.needs_triage_since.isnot(None),
+                    Chat.telegram_id.notin_(
+                        select(ChatTag.chat_id).where(ChatTag.tag_id.in_(_workspace_stage_tag_ids(ws.id)))
+                    ),
+                )
+            )).scalar() or 0
+        result.append({"workspace": ws, "tag_ids": tag_ids,
+                       "member_count": member_count, "unallocated_count": unallocated_count})
+    return result
+
+
+async def create_workspace(
+    db: AsyncSession, name: str, emoji: Optional[str], color: str, tag_ids: list[int], view_mode: str = "list"
+) -> Workspace:
+    max_pos = (await db.execute(select(func.max(Workspace.position)))).scalar()
+    ws = Workspace(
+        name=name, emoji=emoji, color=color, view_mode=view_mode,
+        position=(max_pos or 0) + 1,
+        board_watermark=datetime.utcnow() if view_mode == "kanban" else None,
+    )
+    db.add(ws)
+    await db.flush()
+    for tid in tag_ids:
+        db.add(WorkspaceTag(workspace_id=ws.id, tag_id=tid))
+    await db.commit()
+    await db.refresh(ws)
+    return ws
+
+
+async def update_workspace(
+    db: AsyncSession, workspace_id: int,
+    name: Optional[str] = None, emoji: Optional[str] = None, color: Optional[str] = None,
+    tag_ids: Optional[list[int]] = None, view_mode: Optional[str] = None,
+) -> Optional[Workspace]:
+    ws = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+    if not ws:
+        return None
+    if name is not None:
+        ws.name = name
+    if emoji is not None:
+        ws.emoji = emoji
+    if color is not None:
+        ws.color = color
+    if view_mode is not None:
+        if view_mode == "kanban" and ws.view_mode != "kanban" and ws.board_watermark is None:
+            ws.board_watermark = datetime.utcnow()  # board starts clean; only future activity triages
+        ws.view_mode = view_mode
+    if tag_ids is not None:
+        await db.execute(delete(WorkspaceTag).where(
+            WorkspaceTag.workspace_id == workspace_id,
+            WorkspaceTag.is_exclusion == False,  # noqa: E712
+        ))
+        for tid in tag_ids:
+            db.add(WorkspaceTag(workspace_id=workspace_id, tag_id=tid))
+    await db.commit()
+    await db.refresh(ws)
+    return ws
+
+
+async def delete_workspace(db: AsyncSession, workspace_id: int) -> bool:
+    ws = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+    if not ws:
+        return False
+    await db.execute(delete(WorkspaceTag).where(WorkspaceTag.workspace_id == workspace_id))
+    await db.execute(delete(WorkspaceColumn).where(WorkspaceColumn.workspace_id == workspace_id))
+    await db.execute(delete(WorkspaceChatOverride).where(WorkspaceChatOverride.workspace_id == workspace_id))
+    await db.delete(ws)
+    await db.commit()
+    return True
+
+
+async def get_board(db: AsyncSession, workspace_id: int) -> Optional[dict]:
+    """Assemble the full board: stage columns, unallocated (triage), and activity-grouped backlog."""
+    ws = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+    if not ws:
+        return None
+    columns = list((await db.execute(
+        select(WorkspaceColumn, Tag)
+        .join(Tag, Tag.id == WorkspaceColumn.tag_id)
+        .where(WorkspaceColumn.workspace_id == workspace_id)
+        .order_by(WorkspaceColumn.position, WorkspaceColumn.id)
+    )).all())
+    stage_tag_ids = [col.tag_id for col, _tag in columns]
+
+    members = list((await db.execute(
+        select(Chat).where(Chat.telegram_id.in_(_workspace_member_ids(workspace_id)), _live_chat_filter())
+    )).scalars().all())
+    member_ids = [c.telegram_id for c in members]
+
+    # chat -> stage tags (within this board) in one query
+    staged: dict[int, int] = {}
+    if stage_tag_ids and member_ids:
+        rows = (await db.execute(
+            select(ChatTag.chat_id, ChatTag.tag_id).where(
+                ChatTag.tag_id.in_(stage_tag_ids), ChatTag.chat_id.in_(member_ids)
+            )
+        )).all()
+        for chat_id, tag_id in rows:
+            staged.setdefault(chat_id, tag_id)  # leftmost-wins handled by column order at render
+
+    # unallocated flags
+    triage: dict[int, datetime] = {}
+    if member_ids:
+        rows = (await db.execute(
+            select(WorkspaceChatOverride.chat_id, WorkspaceChatOverride.needs_triage_since).where(
+                WorkspaceChatOverride.workspace_id == workspace_id,
+                WorkspaceChatOverride.needs_triage_since.isnot(None),
+                WorkspaceChatOverride.chat_id.in_(member_ids),
+            )
+        )).all()
+        triage = {cid: ts for cid, ts in rows}
+
+    by_column: dict[int, list[Chat]] = {tid: [] for tid in stage_tag_ids}
+    unallocated: list[Chat] = []
+    backlog: list[Chat] = []
+    for c in members:
+        if c.telegram_id in staged:
+            by_column[staged[c.telegram_id]].append(c)
+        elif c.telegram_id in triage:
+            unallocated.append(c)
+        else:
+            backlog.append(c)
+
+    def _recent_first(chats: list[Chat]) -> list[Chat]:
+        return sorted(chats, key=lambda c: c.last_activity_at or datetime.min, reverse=True)
+
+    now = datetime.utcnow()
+    active, cooling, dormant = [], [], []
+    for c in _recent_first(backlog):
+        age = (now - c.last_activity_at).days if c.last_activity_at else None
+        if age is not None and age < 7:
+            active.append(c)
+        elif age is not None and age < 30:
+            cooling.append(c)
+        else:
+            dormant.append(c)
+
+    return {
+        "workspace": ws,
+        "columns": [
+            {"tag_id": col.tag_id, "name": tag.name, "color": col.color or tag.color,
+             "position": col.position, "chats": _recent_first(by_column[col.tag_id])}
+            for col, tag in columns
+        ],
+        "unallocated": _recent_first(unallocated),
+        "backlog": {"active": active, "cooling": cooling, "dormant": dormant},
+    }
+
+
+async def add_board_column(db: AsyncSession, workspace_id: int, name: str, color: Optional[str]) -> Optional[dict]:
+    """Attach a column backed by a stage tag (reused case-insensitively or created)."""
+    tag = (await db.execute(select(Tag).where(func.lower(Tag.name) == name.lower()))).scalar_one_or_none()
+    if not tag:
+        tag = Tag(name=name, color=color or "slate", category="stage", is_default=False)
+        db.add(tag)
+        await db.flush()
+    existing = (await db.execute(select(WorkspaceColumn).where(
+        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag.id
+    ))).scalar_one_or_none()
+    if existing:
+        await db.commit()
+        return None  # already a column on this board
+    max_pos = (await db.execute(
+        select(func.max(WorkspaceColumn.position)).where(WorkspaceColumn.workspace_id == workspace_id)
+    )).scalar()
+    col = WorkspaceColumn(workspace_id=workspace_id, tag_id=tag.id, position=(max_pos or 0) + 1, color=color)
+    db.add(col)
+    await db.commit()
+    return {"tag_id": tag.id, "name": tag.name, "color": col.color or tag.color, "position": col.position}
+
+
+async def update_board_column(
+    db: AsyncSession, workspace_id: int, tag_id: int,
+    name: Optional[str] = None, color: Optional[str] = None, position: Optional[int] = None,
+) -> str:
+    """Returns 'ok', 'not_found', or 'shared' (rename refused: tag backs another board's column)."""
+    col = (await db.execute(select(WorkspaceColumn).where(
+        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id
+    ))).scalar_one_or_none()
+    if not col:
+        return "not_found"
+    if name is not None:
+        other = (await db.execute(select(func.count()).select_from(WorkspaceColumn).where(
+            WorkspaceColumn.tag_id == tag_id, WorkspaceColumn.workspace_id != workspace_id
+        ))).scalar() or 0
+        if other:
+            return "shared"
+        tag = (await db.execute(select(Tag).where(Tag.id == tag_id))).scalar_one_or_none()
+        if tag:
+            tag.name = name
+    if color is not None:
+        col.color = color
+    if position is not None:
+        col.position = position
+    await db.commit()
+    return "ok"
+
+
+async def delete_board_column(db: AsyncSession, workspace_id: int, tag_id: int, remove_tags: bool = True) -> bool:
+    col = (await db.execute(select(WorkspaceColumn).where(
+        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id
+    ))).scalar_one_or_none()
+    if not col:
+        return False
+    if remove_tags:
+        # Return this board's cards to backlog (only member chats; the tag may be shared)
+        await db.execute(delete(ChatTag).where(
+            ChatTag.tag_id == tag_id,
+            ChatTag.chat_id.in_(_workspace_member_ids(workspace_id)),
+        ))
+    await db.delete(col)
+    await db.commit()
+    return True
+
+
+async def move_board_chat(db: AsyncSession, workspace_id: int, chat_id: int, to_tag_id: Optional[int]) -> bool:
+    """Move a chat between board columns (None = back to backlog / dismiss triage)."""
+    stage_ids = list((await db.execute(_workspace_stage_tag_ids(workspace_id))).scalars().all())
+    if to_tag_id is not None and to_tag_id not in stage_ids:
+        return False
+    if stage_ids:
+        await db.execute(delete(ChatTag).where(ChatTag.chat_id == chat_id, ChatTag.tag_id.in_(stage_ids)))
+    if to_tag_id is not None:
+        db.add(ChatTag(chat_id=chat_id, tag_id=to_tag_id))
+    override = (await db.execute(select(WorkspaceChatOverride).where(
+        WorkspaceChatOverride.workspace_id == workspace_id, WorkspaceChatOverride.chat_id == chat_id
+    ))).scalar_one_or_none()
+    if not override:
+        override = WorkspaceChatOverride(workspace_id=workspace_id, chat_id=chat_id)
+        db.add(override)
+    override.needs_triage_since = None
+    override.triaged_at = datetime.utcnow()
+    await db.commit()
+    return True
+
+
+async def mark_workspace_triage(db: AsyncSession, chat_id: int, msg_date: datetime) -> None:
+    """Surface a board-less workspace member in the Unallocated column after incoming activity.
+
+    Called from live message events and post-sync (both paths, or wake-ups
+    discovered while the app was closed would be silently missed).
+    """
+    workspaces = list((await db.execute(
+        select(Workspace).where(Workspace.view_mode == "kanban", Workspace.board_watermark.isnot(None))
+    )).scalars().all())
+    for ws in workspaces:
+        if ws.board_watermark and msg_date <= ws.board_watermark:
+            continue
+        is_member = (await db.execute(
+            select(func.count()).select_from(ChatTag).where(
+                ChatTag.chat_id == chat_id,
+                ChatTag.tag_id.in_(select(WorkspaceTag.tag_id).where(
+                    WorkspaceTag.workspace_id == ws.id,
+                    WorkspaceTag.is_exclusion == False,  # noqa: E712
+                )),
+            )
+        )).scalar() or 0
+        if not is_member:
+            continue
+        is_staged = (await db.execute(
+            select(func.count()).select_from(ChatTag).where(
+                ChatTag.chat_id == chat_id,
+                ChatTag.tag_id.in_(_workspace_stage_tag_ids(ws.id)),
+            )
+        )).scalar() or 0
+        if is_staged:
+            continue
+        override = (await db.execute(select(WorkspaceChatOverride).where(
+            WorkspaceChatOverride.workspace_id == ws.id, WorkspaceChatOverride.chat_id == chat_id
+        ))).scalar_one_or_none()
+        if override is None:
+            db.add(WorkspaceChatOverride(workspace_id=ws.id, chat_id=chat_id, needs_triage_since=msg_date))
+        elif override.needs_triage_since is None:
+            # Dismissed episodes resurface only on activity newer than the dismissal
+            if override.triaged_at is None or msg_date > override.triaged_at:
+                override.needs_triage_since = msg_date
+    await db.commit()
+
+
+async def search_messages_in_tagged_chats(db: AsyncSession, tag_name: str, keyword: str) -> list:
+    """Per-chat rollup of keyword matches within chats carrying a tag.
+
+    Returns [(chat_name, match_count, latest_snippet, latest_date)], most matches first.
+    """
+    tagged_chat_ids = (
+        select(ChatTag.chat_id)
+        .join(Tag, ChatTag.tag_id == Tag.id)
+        .where(Tag.name.ilike(f"%{tag_name}%"))
+    )
+    row_num = func.row_number().over(
+        partition_by=Message.chat_id,
+        order_by=desc(Message.date),
+    ).label("rn")
+    matches = (
+        select(
+            Message.chat_id,
+            Message.text.label("snippet"),
+            Message.date.label("msg_date"),
+            row_num,
+        )
+        .where(Message.text.ilike(f"%{keyword}%"), Message.chat_id.in_(tagged_chat_ids))
+        .subquery()
+    )
+    result = await db.execute(
+        select(
+            Chat.name,
+            func.count().label("match_count"),
+            func.max(matches.c.snippet).filter(matches.c.rn == 1).label("latest_snippet"),
+            func.max(matches.c.msg_date).label("latest_date"),
+        )
+        .select_from(matches)
+        .join(Chat, Chat.telegram_id == matches.c.chat_id)
+        .group_by(matches.c.chat_id)
+        .order_by(desc("match_count"))
+    )
+    return result.all()
+
+
+async def get_tag_sync_coverage(db: AsyncSession, tag_name: str) -> tuple[int, int, list[int]]:
+    """Sync coverage for chats carrying a tag.
+
+    Returns (total_tagged, with_messages, unsynced_chat_ids).
+    """
+    tagged = (
+        select(Chat)
+        .join(ChatTag, Chat.telegram_id == ChatTag.chat_id)
+        .join(Tag, ChatTag.tag_id == Tag.id)
+        .where(Tag.name.ilike(f"%{tag_name}%"), Chat.is_deactivated == False)  # noqa: E712
+        .subquery()
+    )
+    total = (await db.execute(select(func.count()).select_from(tagged))).scalar() or 0
+    with_messages = (await db.execute(
+        select(func.count(func.distinct(Message.chat_id)))
+        .where(Message.chat_id.in_(select(tagged.c.telegram_id)))
+    )).scalar() or 0
+    unsynced_ids = list((await db.execute(
+        select(tagged.c.telegram_id).where(tagged.c.last_synced_at.is_(None))
+    )).scalars().all())
+    return total, with_messages, unsynced_ids
 
 
 # --- Mentions ---
@@ -857,6 +1322,21 @@ async def get_conversation_messages(db: AsyncSession, conversation_id: int) -> l
         .order_by(ConversationMessage.created_at)
     )
     return list(result.scalars().all())
+
+
+async def add_conversation_message(
+    db: AsyncSession, conversation_id: int, role: str, content: str
+) -> ConversationMessage:
+    msg = ConversationMessage(conversation_id=conversation_id, role=role, content=content)
+    db.add(msg)
+    conv = (await db.execute(
+        select(Conversation).where(Conversation.id == conversation_id)
+    )).scalar_one_or_none()
+    if conv:
+        conv.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(msg)
+    return msg
 
 
 # --- Briefing History ---
