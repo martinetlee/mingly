@@ -23,7 +23,7 @@ export default function WorkspaceDialog({
 }: {
   open: boolean
   onClose: () => void
-  onSaved: (id: number | null) => void
+  onSaved: (id: number | null, viewMode?: 'list' | 'kanban') => void
   workspace?: Workspace | null
 }) {
   const [name, setName] = useState('')
@@ -57,7 +57,7 @@ export default function WorkspaceDialog({
   const selectableTags = useMemo(() => {
     const q = tagQuery.trim().toLowerCase()
     return allTags
-      .filter((t) => t.category !== 'stage' && !selectedTagIds.includes(t.id))
+      .filter((t) => t.category !== 'stage' && t.category !== 'stream' && !selectedTagIds.includes(t.id))
       .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
       .slice(0, 12)
   }, [allTags, selectedTagIds, tagQuery])
@@ -83,18 +83,18 @@ export default function WorkspaceDialog({
         await updateWorkspace(workspace.id, {
           name: trimmed, emoji: emoji || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
         })
-        onSaved(workspace.id)
+        onSaved(workspace.id, viewMode)
       } else {
         const ws = await createWorkspace({
           name: trimmed, emoji: emoji || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
         })
-        if (viewMode === 'kanban') {
+        if (viewMode === 'kanban' && ws.main_board_id != null) {
           const cols = TEMPLATES.find((t) => t.key === template)?.columns ?? []
           for (const col of cols) {
-            await addBoardColumn(ws.id, col).catch(() => {})
+            await addBoardColumn(ws.id, ws.main_board_id, col).catch(() => {})
           }
         }
-        onSaved(ws.id)
+        onSaved(ws.id, viewMode)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save workspace')

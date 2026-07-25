@@ -117,20 +117,34 @@ export const updateWorkspace = (id: number, data: { name?: string; emoji?: strin
 export const deleteWorkspace = (id: number) =>
   request<void>(`/api/workspaces/${id}`, { method: 'DELETE' })
 
-export const getBoard = (workspaceId: number) =>
-  request<BoardData>(`/api/workspaces/${workspaceId}/board`)
+export const getBoard = (workspaceId: number, boardId?: number) =>
+  request<BoardData>(`/api/workspaces/${workspaceId}/board${boardId != null ? `?board_id=${boardId}` : ''}`)
 
-export const addBoardColumn = (workspaceId: number, name: string, color?: string) =>
-  request<BoardColumn>(`/api/workspaces/${workspaceId}/columns`, { method: 'POST', body: JSON.stringify({ name, color }) })
+export const addWorkspaceBoard = (workspaceId: number, name: string, scopeTagName?: string) =>
+  request<{ id: number; name: string }>(`/api/workspaces/${workspaceId}/boards`, {
+    method: 'POST', body: JSON.stringify({ name, scope_tag_name: scopeTagName ?? null }),
+  })
 
-export const updateBoardColumn = (workspaceId: number, tagId: number, data: { name?: string; color?: string; position?: number }) =>
-  request<{ status: string }>(`/api/workspaces/${workspaceId}/columns/${tagId}`, { method: 'PUT', body: JSON.stringify(data) })
+export const updateWorkspaceBoard = (
+  workspaceId: number, boardId: number,
+  data: { name?: string; scope_tag_name?: string; clear_scope?: boolean; position?: number },
+) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/boards/${boardId}`, { method: 'PUT', body: JSON.stringify(data) })
 
-export const deleteBoardColumn = (workspaceId: number, tagId: number, removeTags = true) =>
-  request<{ status: string }>(`/api/workspaces/${workspaceId}/columns/${tagId}?remove_tags=${removeTags}`, { method: 'DELETE' })
+export const deleteWorkspaceBoard = (workspaceId: number, boardId: number, removeTags = true) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/boards/${boardId}?remove_tags=${removeTags}`, { method: 'DELETE' })
 
-export const moveBoardChat = (workspaceId: number, chatId: number, toTagId: number | null) =>
-  request<{ status: string }>(`/api/workspaces/${workspaceId}/move`, { method: 'POST', body: JSON.stringify({ chat_id: chatId, to_tag_id: toTagId }) })
+export const addBoardColumn = (workspaceId: number, boardId: number, name: string, color?: string) =>
+  request<BoardColumn>(`/api/workspaces/${workspaceId}/boards/${boardId}/columns`, { method: 'POST', body: JSON.stringify({ name, color }) })
+
+export const updateBoardColumn = (workspaceId: number, boardId: number, tagId: number, data: { name?: string; color?: string; position?: number }) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/boards/${boardId}/columns/${tagId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteBoardColumn = (workspaceId: number, boardId: number, tagId: number, removeTags = true) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/boards/${boardId}/columns/${tagId}?remove_tags=${removeTags}`, { method: 'DELETE' })
+
+export const moveBoardChat = (workspaceId: number, boardId: number, chatId: number, toTagId: number | null) =>
+  request<{ status: string }>(`/api/workspaces/${workspaceId}/move`, { method: 'POST', body: JSON.stringify({ board_id: boardId, chat_id: chatId, to_tag_id: toTagId }) })
 
 export const getChatsByIds = (ids: number[]) =>
   request<Chat[]>('/api/chats/by-ids', {

@@ -63,6 +63,7 @@ export interface Workspace {
   tag_ids: number[]
   member_count: number
   unallocated_count: number
+  main_board_id?: number | null
 }
 
 export interface BoardColumn {
@@ -73,11 +74,23 @@ export interface BoardColumn {
   chats: Chat[]
 }
 
+export interface WorkspaceBoard {
+  id: number
+  name: string
+  scope_tag_id: number | null
+  scope_tag_name: string | null
+  position: number
+  unallocated_count: number
+}
+
 export interface BoardData {
   workspace: { id: number; name: string; emoji: string | null; color: string; view_mode: string }
+  boards: WorkspaceBoard[]
+  board_id: number | null
   columns: BoardColumn[]
   unallocated: Chat[]
   backlog: { active: Chat[]; cooling: Chat[]; dormant: Chat[] }
+  classified_chat_ids: number[]
 }
 
 export interface TagSuggestion {

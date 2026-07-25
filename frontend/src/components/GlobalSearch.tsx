@@ -4,6 +4,20 @@ import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2 } 
 import type { GlobalSearchResults, TelegramSearchResult } from '../api/types'
 import { globalSearch, telegramSearch, ensureChat } from '../api/client'
 
+// Telegram directory searches cost two RPCs and repeat queries are common —
+// cache results briefly so re-searching the same term renders instantly.
+const TELEGRAM_CACHE_TTL_MS = 3 * 60 * 1000
+const telegramCache = new Map<string, { ts: number; results: TelegramSearchResult[] }>()
+
+async function cachedTelegramSearch(query: string): Promise<TelegramSearchResult[]> {
+  const key = query.trim().toLowerCase()
+  const hit = telegramCache.get(key)
+  if (hit && Date.now() - hit.ts < TELEGRAM_CACHE_TTL_MS) return hit.results
+  const data = await telegramSearch(query)
+  telegramCache.set(key, { ts: Date.now(), results: data.telegram_dialogs })
+  return data.telegram_dialogs
+}
+
 function fmtDate(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
@@ -135,8 +149,8 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
         .catch(() => setResults(null))
         .finally(() => setLoading(false))
 
-      telegramSearch(query)
-        .then((data) => setTelegramResults(data.telegram_dialogs))
+      cachedTelegramSearch(query)
+        .then(setTelegramResults)
         .catch(() => setTelegramResults([]))
         .finally(() => setTelegramLoading(false))
     }, 300)

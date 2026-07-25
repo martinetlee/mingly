@@ -643,6 +643,10 @@ export default function Chats() {
   // Parse URL params for mention navigation: ?chatId=X&msgId=Y.
   // Consumed exactly once — the params are stripped immediately so list reloads
   // (which re-create loadChats) can never re-arm the navigation and wipe the pane.
+  // navSeq deterministically triggers the processor effect below: without it,
+  // arming while already on /chats (palette click) would never fire the processor
+  // because neither `chats` nor `loadChats` changes.
+  const [navSeq, setNavSeq] = useState(0)
   useEffect(() => {
     const params = new URLSearchParams(location.search)
     const chatIdParam = params.get('chatId')
@@ -653,6 +657,7 @@ export default function Chats() {
     if (!isNaN(chatId)) {
       pendingNavRef.current = { chatId, msgId }
       setNavigatingToChat(true)
+      setNavSeq((n) => n + 1)
     }
     navigate(location.pathname, { replace: true })
   }, [location.search, location.pathname, navigate])
@@ -713,7 +718,7 @@ export default function Chats() {
       retryNavRef.current = false
       setNavigatingToChat(false)
     }
-  }, [chats, loadChats])
+  }, [chats, loadChats, navSeq])
 
   useEffect(() => {
     if (selectedChat) {
@@ -786,6 +791,12 @@ export default function Chats() {
     }
     if (event.type === 'chat_synced') {
       // Background sync finished — reload chat list + messages if viewing this chat
+      setSyncEmptyChats((prev) => {
+        if (!prev.has(event.chat_id)) return prev
+        const next = new Set(prev)
+        next.delete(event.chat_id) // a successful sync invalidates a stale empty flag
+        return next
+      })
       loadChats()
       if (selectedChat && event.chat_id === selectedChat.telegram_id) {
         loadMessages(selectedChat)
@@ -1402,7 +1413,7 @@ export default function Chats() {
                     {(() => {
                       const q = tagQuery.trim().toLowerCase()
                       const visible = availableTags
-                        .filter((t) => t.category !== 'stage')  // board stage tags live on boards, not here
+                        .filter((t) => t.category !== 'stage' && t.category !== 'stream')  // board tags live on boards, not here
                         .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
                       if (visible.length === 0) {
                         return (
@@ -1858,6 +1869,11 @@ export default function Chats() {
                 <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-slate-500">
                   No message history available — this group may have been migrated to a newer
                   group or its history isn't accessible to this account.
+                </div>
+              ) : messages.length === 0 && selectedChat.last_synced_at == null ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-sm text-slate-500">
+                  <Loader2 size={18} className="animate-spin text-indigo-400" />
+                  Syncing message history from Telegram — first-time sync can take a while…
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col overflow-hidden">

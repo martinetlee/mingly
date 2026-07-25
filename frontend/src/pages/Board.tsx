@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, List, MoreVertical, Plus, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, List, MoreVertical, Plus, Settings2, X } from 'lucide-react'
 import type { BoardData, Chat, Tag, WSEvent } from '../api/types'
 import {
   addBoardColumn,
+  addWorkspaceBoard,
   deleteBoardColumn,
+  deleteWorkspaceBoard,
   getBoard,
   getTags,
   moveBoardChat,
   updateBoardColumn,
+  updateWorkspaceBoard,
 } from '../api/client'
 import { useWorkspaces } from '../context/WorkspaceContext'
 import { useWebSocket } from '../hooks/useWebSocket'
+import WorkspaceDialog from '../components/WorkspaceDialog'
 
 const AVATAR_COLORS = [
   'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
@@ -104,12 +108,14 @@ function ChatCard({
 
 export default function Board() {
   const navigate = useNavigate()
-  const { activeWorkspace, refreshWorkspaces } = useWorkspaces()
+  const { activeWorkspace, loaded: workspacesLoaded, refreshWorkspaces } = useWorkspaces()
   const [board, setBoard] = useState<BoardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showBacklog, setShowBacklog] = useState(true)
   const [backlogQuery, setBacklogQuery] = useState('')
+  // Default to the triage view: only chats not yet classified into any stream
+  const [backlogFilter, setBacklogFilter] = useState<'unclassified' | 'all'>('unclassified')
   const [dragOverCol, setDragOverCol] = useState<number | 'backlog' | null>(null)
   const [addingColumn, setAddingColumn] = useState(false)
   const [newColumnName, setNewColumnName] = useState('')
@@ -118,15 +124,41 @@ export default function Board() {
   const [renamingCol, setRenamingCol] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [confirmingDeleteCol, setConfirmingDeleteCol] = useState<number | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
+  // Stream boards (tabs)
+  const [activeBoardId, setActiveBoardId] = useState<number | null>(null)
+  const [addingBoard, setAddingBoard] = useState(false)
+  const [newBoardName, setNewBoardName] = useState('')
+  const [newBoardStream, setNewBoardStream] = useState('')
+  const [boardMenu, setBoardMenu] = useState<number | null>(null)
+  const [renamingBoard, setRenamingBoard] = useState<number | null>(null)
+  const [boardRenameValue, setBoardRenameValue] = useState('')
+  const [scopingBoard, setScopingBoard] = useState<number | null>(null)
+  const [scopeValue, setScopeValue] = useState('')
+  const [confirmingDeleteBoard, setConfirmingDeleteBoard] = useState<number | null>(null)
   const lastLoadRef = useRef(0)
 
   const workspaceId = activeWorkspace?.id
 
+  // Remember the last active tab per workspace
+  useEffect(() => {
+    if (workspaceId == null) return
+    const stored = localStorage.getItem(`activeBoard:${workspaceId}`)
+    setActiveBoardId(stored ? parseInt(stored, 10) : null)
+  }, [workspaceId])
+
+  const selectBoard = (boardId: number) => {
+    setActiveBoardId(boardId)
+    if (workspaceId != null) localStorage.setItem(`activeBoard:${workspaceId}`, String(boardId))
+  }
+
   const loadBoard = useCallback(async () => {
     if (workspaceId == null) return
     try {
-      const data = await getBoard(workspaceId)
+      const data = await getBoard(workspaceId, activeBoardId ?? undefined)
       setBoard(data)
+      // Backend falls back to the first board when the requested one is gone
+      if (data.board_id != null && data.board_id !== activeBoardId) setActiveBoardId(data.board_id)
       setError(null)
       lastLoadRef.current = Date.now()
     } catch (e) {
@@ -134,14 +166,17 @@ export default function Board() {
     } finally {
       setLoading(false)
     }
-  }, [workspaceId])
+  }, [workspaceId, activeBoardId])
 
-  // No active kanban workspace → this page has nothing to show
+  // No active kanban workspace → this page has nothing to show.
+  // Wait for the workspace list to load first, or a direct landing on /board
+  // would bounce to /chats before the active workspace is even known.
   useEffect(() => {
+    if (!workspacesLoaded) return
     if (!activeWorkspace || activeWorkspace.view_mode !== 'kanban') {
       navigate('/chats', { replace: true })
     }
-  }, [activeWorkspace, navigate])
+  }, [activeWorkspace, workspacesLoaded, navigate])
 
   useEffect(() => {
     setLoading(true)
@@ -161,7 +196,8 @@ export default function Board() {
   const openChat = (chat: Chat) => navigate(`/chats?chatId=${chat.telegram_id}`)
 
   const move = async (chatId: number, toTagId: number | null) => {
-    if (workspaceId == null || !board) return
+    if (workspaceId == null || !board || board.board_id == null) return
+    const boardId = board.board_id
     // Optimistic: pluck the chat from wherever it is and place it
     setBoard((prev) => {
       if (!prev) return prev
@@ -189,7 +225,7 @@ export default function Board() {
       return next
     })
     try {
-      await moveBoardChat(workspaceId, chatId, toTagId)
+      await moveBoardChat(workspaceId, boardId, chatId, toTagId)
       refreshWorkspaces()
     } catch {
       loadBoard() // resync on failure
@@ -213,9 +249,9 @@ export default function Board() {
   }
 
   const submitAddColumn = async (name: string) => {
-    if (workspaceId == null || !name.trim()) return
+    if (workspaceId == null || board?.board_id == null || !name.trim()) return
     try {
-      await addBoardColumn(workspaceId, name.trim())
+      await addBoardColumn(workspaceId, board.board_id, name.trim())
       setAddingColumn(false)
       loadBoard()
     } catch (e) {
@@ -224,27 +260,27 @@ export default function Board() {
   }
 
   const shiftColumn = async (tagId: number, dir: -1 | 1) => {
-    if (workspaceId == null || !board) return
+    if (workspaceId == null || !board || board.board_id == null) return
     const idx = board.columns.findIndex((c) => c.tag_id === tagId)
     const other = board.columns[idx + dir]
     if (!other) return
-    await updateBoardColumn(workspaceId, tagId, { position: other.position })
-    await updateBoardColumn(workspaceId, other.tag_id, { position: board.columns[idx].position })
+    await updateBoardColumn(workspaceId, board.board_id, tagId, { position: other.position })
+    await updateBoardColumn(workspaceId, board.board_id, other.tag_id, { position: board.columns[idx].position })
     setColumnMenu(null)
     loadBoard()
   }
 
   const removeColumn = async (tagId: number) => {
-    if (workspaceId == null) return
-    await deleteBoardColumn(workspaceId, tagId, true)
+    if (workspaceId == null || board?.board_id == null) return
+    await deleteBoardColumn(workspaceId, board.board_id, tagId, true)
     setColumnMenu(null)
     loadBoard()
   }
 
   const submitRename = async (tagId: number) => {
-    if (workspaceId == null || !renameValue.trim()) { setRenamingCol(null); return }
+    if (workspaceId == null || board?.board_id == null || !renameValue.trim()) { setRenamingCol(null); return }
     try {
-      await updateBoardColumn(workspaceId, tagId, { name: renameValue.trim() })
+      await updateBoardColumn(workspaceId, board.board_id, tagId, { name: renameValue.trim() })
       setRenamingCol(null)
       loadBoard()
     } catch (e) {
@@ -253,16 +289,74 @@ export default function Board() {
     }
   }
 
+  const submitAddBoard = async () => {
+    if (workspaceId == null || !newBoardName.trim()) return
+    try {
+      const created = await addWorkspaceBoard(workspaceId, newBoardName.trim(), newBoardStream.trim() || undefined)
+      setAddingBoard(false)
+      setNewBoardName('')
+      setNewBoardStream('')
+      selectBoard(created.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to add board')
+    }
+  }
+
+  const submitBoardRename = async (boardId: number) => {
+    if (workspaceId == null || !boardRenameValue.trim()) { setRenamingBoard(null); return }
+    try {
+      await updateWorkspaceBoard(workspaceId, boardId, { name: boardRenameValue.trim() })
+      setRenamingBoard(null)
+      loadBoard()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Board rename failed')
+      setRenamingBoard(null)
+    }
+  }
+
+  const submitBoardScope = async (boardId: number) => {
+    if (workspaceId == null) { setScopingBoard(null); return }
+    try {
+      const v = scopeValue.trim()
+      await updateWorkspaceBoard(workspaceId, boardId, v ? { scope_tag_name: v } : { clear_scope: true })
+      setScopingBoard(null)
+      loadBoard()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to set stream')
+      setScopingBoard(null)
+    }
+  }
+
+  const removeBoard = async (boardId: number) => {
+    if (workspaceId == null) return
+    await deleteWorkspaceBoard(workspaceId, boardId, true)
+    setBoardMenu(null)
+    setConfirmingDeleteBoard(null)
+    if (activeBoardId === boardId) setActiveBoardId(null)
+    else loadBoard()
+  }
+
+  const activeBoardIsScoped = board?.boards.find((b) => b.id === board.board_id)?.scope_tag_id != null
+
   const backlogSections = useMemo(() => {
     if (!board) return []
     const q = backlogQuery.trim().toLowerCase()
-    const f = (chats: Chat[]) => (q ? chats.filter((c) => c.name.toLowerCase().includes(q)) : chats)
+    const classified = new Set(board.classified_chat_ids)
+    const f = (chats: Chat[]) => {
+      let out = chats
+      // Unclassified triage view (only meaningful on unscoped boards —
+      // scoped backlogs already contain a single stream)
+      if (!activeBoardIsScoped && backlogFilter === 'unclassified') {
+        out = out.filter((c) => !classified.has(c.telegram_id))
+      }
+      return q ? out.filter((c) => c.name.toLowerCase().includes(q)) : out
+    }
     return [
       { label: 'Active', hint: '< 7 days', chats: f(board.backlog.active) },
       { label: 'Cooling', hint: '7–30 days', chats: f(board.backlog.cooling) },
       { label: 'Dormant', hint: '> 30 days', chats: f(board.backlog.dormant) },
     ]
-  }, [board, backlogQuery])
+  }, [board, backlogQuery, backlogFilter, activeBoardIsScoped])
 
   if (!activeWorkspace || activeWorkspace.view_mode !== 'kanban') return null
 
@@ -291,7 +385,137 @@ export default function Board() {
         >
           <List size={13} /> List
         </button>
+        <button
+          onClick={() => setShowSettings(true)}
+          title="Workspace settings (tags, name, view)"
+          className="rounded-lg border border-slate-600 px-2 py-1 text-slate-400 transition-colors hover:text-slate-200"
+        >
+          <Settings2 size={13} />
+        </button>
       </div>
+
+      <WorkspaceDialog
+        open={showSettings}
+        workspace={activeWorkspace}
+        onClose={() => setShowSettings(false)}
+        onSaved={async (id, viewMode) => {
+          setShowSettings(false)
+          await refreshWorkspaces()
+          if (id == null) navigate('/chats')            // workspace deleted
+          else if (viewMode === 'list') navigate('/chats') // switched to list view
+          else loadBoard()                                // tags/name may have changed
+        }}
+      />
+
+      {/* Stream board tabs */}
+      {board && (board.boards.length > 1 || addingBoard || board.boards.length === 1) && (
+        <div className="flex items-center gap-1 border-b border-slate-700/50 px-4 py-1.5">
+          {board.boards.map((b) => (
+            <div key={b.id} className="relative">
+              {renamingBoard === b.id ? (
+                <input
+                  autoFocus
+                  value={boardRenameValue}
+                  onChange={(e) => setBoardRenameValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitBoardRename(b.id); if (e.key === 'Escape') setRenamingBoard(null) }}
+                  onBlur={() => submitBoardRename(b.id)}
+                  className="w-28 rounded border border-indigo-500 bg-slate-700 px-1.5 py-0.5 text-xs text-gray-200 outline-none"
+                />
+              ) : (
+                <button
+                  onClick={() => selectBoard(b.id)}
+                  onContextMenu={(e) => { e.preventDefault(); setBoardMenu((v) => (v === b.id ? null : b.id)) }}
+                  title={b.scope_tag_name ? `Stream: ${b.scope_tag_name} (right-click to edit)` : 'All members (right-click to edit)'}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                    board.board_id === b.id
+                      ? 'bg-indigo-500/20 text-indigo-300'
+                      : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  {b.name}
+                  {b.unallocated_count > 0 && (
+                    <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500/30 px-1 text-[9px] font-bold text-amber-300">
+                      {b.unallocated_count}
+                    </span>
+                  )}
+                </button>
+              )}
+              {boardMenu === b.id && (
+                <div className="absolute left-0 top-8 z-30 w-48 rounded-lg border border-slate-600 bg-slate-800 py-1 text-xs shadow-xl">
+                  <button
+                    onClick={() => { setRenamingBoard(b.id); setBoardRenameValue(b.name); setBoardMenu(null) }}
+                    className="block w-full px-3 py-1.5 text-left text-slate-300 hover:bg-slate-700/50"
+                  >
+                    Rename
+                  </button>
+                  {scopingBoard === b.id ? (
+                    <div className="px-3 py-1.5">
+                      <input
+                        autoFocus
+                        placeholder="Stream tag (empty = all)"
+                        value={scopeValue}
+                        onChange={(e) => setScopeValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { submitBoardScope(b.id); setBoardMenu(null) } if (e.key === 'Escape') setScopingBoard(null) }}
+                        className="w-full rounded border border-indigo-500 bg-slate-700 px-1.5 py-0.5 text-[11px] text-gray-200 outline-none"
+                      />
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setScopingBoard(b.id); setScopeValue(b.scope_tag_name ?? '') }}
+                      className="block w-full px-3 py-1.5 text-left text-slate-300 hover:bg-slate-700/50"
+                    >
+                      {b.scope_tag_name ? `Stream: ${b.scope_tag_name}` : 'Set stream…'}
+                    </button>
+                  )}
+                  {confirmingDeleteBoard === b.id ? (
+                    <div className="px-3 py-1.5">
+                      <p className="mb-1 text-[10px] text-slate-400">Cards return to backlog.</p>
+                      <button onClick={() => removeBoard(b.id)} className="mr-2 font-medium text-rose-400 hover:text-rose-300">Delete</button>
+                      <button onClick={() => setConfirmingDeleteBoard(null)} className="text-slate-500 hover:text-slate-300">Cancel</button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmingDeleteBoard(b.id)}
+                      className="block w-full px-3 py-1.5 text-left text-rose-400 hover:bg-slate-700/50"
+                    >
+                      Delete board
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+          {addingBoard ? (
+            <div className="flex items-center gap-1">
+              <input
+                autoFocus
+                placeholder="Board name"
+                value={newBoardName}
+                onChange={(e) => setNewBoardName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submitAddBoard(); if (e.key === 'Escape') setAddingBoard(false) }}
+                className="w-28 rounded border border-slate-600 bg-slate-700 px-1.5 py-0.5 text-xs text-gray-200 outline-none focus:border-indigo-500"
+              />
+              <input
+                placeholder="Stream tag (optional)"
+                value={newBoardStream}
+                onChange={(e) => setNewBoardStream(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submitAddBoard(); if (e.key === 'Escape') setAddingBoard(false) }}
+                className="w-36 rounded border border-slate-600 bg-slate-700 px-1.5 py-0.5 text-xs text-gray-200 outline-none focus:border-indigo-500"
+              />
+              <button onClick={submitAddBoard} className="rounded bg-indigo-500 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-400">Add</button>
+              <button onClick={() => setAddingBoard(false)} className="px-1 text-[11px] text-slate-500 hover:text-slate-300">✕</button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAddingBoard(true)}
+              title="New stream board"
+              className="rounded-md px-2 py-1 text-xs text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300"
+            >
+              <Plus size={13} />
+            </button>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="mx-4 mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-400">
@@ -311,7 +535,7 @@ export default function Board() {
             onDragLeave={() => setDragOverCol(null)}
             onDrop={onDropTo(null)}
           >
-            <div className="border-b border-slate-700/50 p-2">
+            <div className="flex flex-col gap-1.5 border-b border-slate-700/50 p-2">
               <input
                 type="text"
                 placeholder="Filter backlog…"
@@ -319,6 +543,24 @@ export default function Board() {
                 onChange={(e) => setBacklogQuery(e.target.value)}
                 className="w-full rounded-md border border-slate-600 bg-slate-700 px-2 py-1 text-xs text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500"
               />
+              {!activeBoardIsScoped && (
+                <div className="flex overflow-hidden rounded-md border border-slate-700 text-[10px]">
+                  {(['unclassified', 'all'] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setBacklogFilter(m)}
+                      title={m === 'unclassified' ? 'Chats not yet assigned to any stream' : 'All workspace members'}
+                      className={`flex-1 py-1 transition-colors ${
+                        backlogFilter === m
+                          ? 'bg-indigo-500/20 font-medium text-indigo-400'
+                          : 'text-slate-500 hover:bg-slate-700/50 hover:text-slate-300'
+                      }`}
+                    >
+                      {m === 'unclassified' ? 'Unclassified' : 'All'}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex-1 overflow-y-auto p-2">
               {backlogSections.map(({ label, hint, chats }) => (
@@ -356,6 +598,21 @@ export default function Board() {
             <p className="text-sm text-slate-500">Loading board…</p>
           ) : board ? (
             <>
+              {(() => {
+                const meta = board.boards.find((b) => b.id === board.board_id)
+                const empty = board.unallocated.length === 0 &&
+                  board.columns.every((c) => c.chats.length === 0) &&
+                  Object.values(board.backlog).every((s) => s.length === 0)
+                if (meta?.scope_tag_name && empty) {
+                  return (
+                    <p className="self-start rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-xs text-slate-500">
+                      No chats tagged "{meta.scope_tag_name}" yet — tag chats via the Intelligence
+                      assistant or the chat info panel and they'll appear here.
+                    </p>
+                  )
+                }
+                return null
+              })()}
               {/* Unallocated ghost column */}
               {board.unallocated.length > 0 && (
                 <div
@@ -495,7 +752,10 @@ export default function Board() {
                       }}
                       className="w-full rounded-md border border-slate-600 bg-slate-700 px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-indigo-500"
                     />
-                    {stageTags.filter((t) => t.name.toLowerCase().includes(newColumnName.toLowerCase()) && !board.columns.some((c) => c.tag_id === t.id)).slice(0, 5).map((t) => (
+                    {stageTags.filter((t) =>
+                      t.name.toLowerCase().includes(newColumnName.toLowerCase()) &&
+                      !board.columns.some((c) => c.tag_id === t.id || c.name.toLowerCase() === t.name.toLowerCase()),
+                    ).slice(0, 5).map((t) => (
                       <button
                         key={t.id}
                         onClick={() => submitAddColumn(t.name)}

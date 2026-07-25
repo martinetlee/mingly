@@ -123,6 +123,18 @@ class WorkspaceTag(Base):
     is_exclusion: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class WorkspaceBoard(Base):
+    __tablename__ = "workspace_boards"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_workspace_board_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    # Stream tag scoping this board; NULL = unscoped (all workspace members)
+    scope_tag_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class WorkspaceColumn(Base):
     __tablename__ = "workspace_columns"
     __table_args__ = (UniqueConstraint("workspace_id", "tag_id", name="uq_workspace_column"),)
@@ -130,6 +142,10 @@ class WorkspaceColumn(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
     tag_id: Mapped[int] = mapped_column(Integer, nullable=False)  # stage tag backing this column
+    board_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Display name; may differ from the tag name so boards can share labels
+    # ("Done" on two boards) while keeping independent pipeline state
+    label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     color: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 

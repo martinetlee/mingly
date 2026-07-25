@@ -524,6 +524,37 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS ix_workspace_overrides_workspace ON workspace_chat_overrides (workspace_id)",
         ],
     ),
+    (
+        44,
+        "Add workspace_boards (multiple stream-scoped boards per workspace)",
+        [
+            "CREATE TABLE IF NOT EXISTS workspace_boards ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "workspace_id INTEGER NOT NULL, "
+            "name TEXT NOT NULL, "
+            "scope_tag_id INTEGER, "
+            "position INTEGER NOT NULL DEFAULT 0, "
+            "UNIQUE(workspace_id, name))",
+            "CREATE INDEX IF NOT EXISTS ix_workspace_boards_workspace ON workspace_boards (workspace_id)",
+            "ALTER TABLE workspace_columns ADD COLUMN board_id INTEGER",
+            # Every kanban workspace (or any workspace that already has columns)
+            # gets one unscoped 'Main' board that inherits the existing columns.
+            "INSERT INTO workspace_boards (workspace_id, name, position) "
+            "SELECT id, 'Main', 0 FROM workspaces "
+            "WHERE view_mode = 'kanban' OR id IN (SELECT DISTINCT workspace_id FROM workspace_columns)",
+            "UPDATE workspace_columns SET board_id = "
+            "(SELECT wb.id FROM workspace_boards wb WHERE wb.workspace_id = workspace_columns.workspace_id)",
+        ],
+    ),
+    (
+        45,
+        "Add label column to workspace_columns (display name decoupled from stage tag)",
+        [
+            "ALTER TABLE workspace_columns ADD COLUMN label TEXT",
+            "UPDATE workspace_columns SET label = "
+            "(SELECT name FROM tags WHERE tags.id = workspace_columns.tag_id)",
+        ],
+    ),
 ]
 
 # Seed data applied once (tracked as migration version 0).

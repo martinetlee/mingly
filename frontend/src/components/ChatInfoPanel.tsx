@@ -744,8 +744,10 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
   }, [chat.telegram_id, chat.type])
 
   const assignedIds = new Set(chatTags.map((t) => t.id))
-  // Stage tags are managed from kanban boards, not the general picker
-  const unassignedTags = allTags.filter((t) => !assignedIds.has(t.id) && t.category !== 'stage')
+  // Stage/stream tags are managed from kanban boards, not the general picker
+  const unassignedTags = allTags.filter(
+    (t) => !assignedIds.has(t.id) && t.category !== 'stage' && t.category !== 'stream',
+  )
 
   const handleAdd = async (tag: Tag) => {
     await addTagToChat(chat.telegram_id, tag.id)

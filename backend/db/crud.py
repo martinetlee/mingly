@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, delete, desc, asc, func, or_
+from sqlalchemy import select, delete, update, desc, asc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
     Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact,
-    Workspace, WorkspaceTag, WorkspaceColumn, WorkspaceChatOverride,
+    Workspace, WorkspaceTag, WorkspaceColumn, WorkspaceChatOverride, WorkspaceBoard,
 )
 
 
@@ -662,10 +662,11 @@ async def delete_tag(db: AsyncSession, tag_id: int) -> bool:
     tag = result.scalar_one_or_none()
     if not tag:
         return False
-    # Remove all associations first (chats, workspace rules, board columns)
+    # Remove all associations first (chats, workspace rules, board columns, board scopes)
     await db.execute(delete(ChatTag).where(ChatTag.tag_id == tag_id))
     await db.execute(delete(WorkspaceTag).where(WorkspaceTag.tag_id == tag_id))
     await db.execute(delete(WorkspaceColumn).where(WorkspaceColumn.tag_id == tag_id))
+    await db.execute(update(WorkspaceBoard).where(WorkspaceBoard.scope_tag_id == tag_id).values(scope_tag_id=None))
     await db.delete(tag)
     await db.commit()
     return True
@@ -846,6 +847,18 @@ def _workspace_stage_tag_ids(workspace_id: int):
     return select(WorkspaceColumn.tag_id).where(WorkspaceColumn.workspace_id == workspace_id)
 
 
+def _board_stage_tag_ids(board_id: int):
+    return select(WorkspaceColumn.tag_id).where(WorkspaceColumn.board_id == board_id)
+
+
+def _workspace_scope_tag_ids(workspace_id: int):
+    """Stream tags scoping any of this workspace's boards."""
+    return select(WorkspaceBoard.scope_tag_id).where(
+        WorkspaceBoard.workspace_id == workspace_id,
+        WorkspaceBoard.scope_tag_id.isnot(None),
+    )
+
+
 async def get_workspaces_with_counts(db: AsyncSession) -> list[dict]:
     """All workspaces ordered by position, each with tag_ids, member and unallocated counts."""
     workspaces = list((await db.execute(
@@ -897,6 +910,8 @@ async def create_workspace(
     await db.flush()
     for tid in tag_ids:
         db.add(WorkspaceTag(workspace_id=ws.id, tag_id=tid))
+    if view_mode == "kanban":
+        db.add(WorkspaceBoard(workspace_id=ws.id, name="Main", position=0))
     await db.commit()
     await db.refresh(ws)
     return ws
@@ -917,8 +932,14 @@ async def update_workspace(
     if color is not None:
         ws.color = color
     if view_mode is not None:
-        if view_mode == "kanban" and ws.view_mode != "kanban" and ws.board_watermark is None:
-            ws.board_watermark = datetime.utcnow()  # board starts clean; only future activity triages
+        if view_mode == "kanban" and ws.view_mode != "kanban":
+            if ws.board_watermark is None:
+                ws.board_watermark = datetime.utcnow()  # board starts clean; only future activity triages
+            has_board = (await db.execute(
+                select(func.count()).select_from(WorkspaceBoard).where(WorkspaceBoard.workspace_id == workspace_id)
+            )).scalar() or 0
+            if not has_board:
+                db.add(WorkspaceBoard(workspace_id=workspace_id, name="Main", position=0))
         ws.view_mode = view_mode
     if tag_ids is not None:
         await db.execute(delete(WorkspaceTag).where(
@@ -938,42 +959,123 @@ async def delete_workspace(db: AsyncSession, workspace_id: int) -> bool:
         return False
     await db.execute(delete(WorkspaceTag).where(WorkspaceTag.workspace_id == workspace_id))
     await db.execute(delete(WorkspaceColumn).where(WorkspaceColumn.workspace_id == workspace_id))
+    await db.execute(delete(WorkspaceBoard).where(WorkspaceBoard.workspace_id == workspace_id))
     await db.execute(delete(WorkspaceChatOverride).where(WorkspaceChatOverride.workspace_id == workspace_id))
     await db.delete(ws)
     await db.commit()
     return True
 
 
-async def get_board(db: AsyncSession, workspace_id: int) -> Optional[dict]:
-    """Assemble the full board: stage columns, unallocated (triage), and activity-grouped backlog."""
+async def get_workspace_boards(db: AsyncSession, workspace_id: int) -> list[tuple]:
+    """(WorkspaceBoard, scope_tag_name|None) ordered by position."""
+    return list((await db.execute(
+        select(WorkspaceBoard, Tag.name)
+        .outerjoin(Tag, Tag.id == WorkspaceBoard.scope_tag_id)
+        .where(WorkspaceBoard.workspace_id == workspace_id)
+        .order_by(WorkspaceBoard.position, WorkspaceBoard.id)
+    )).all())
+
+
+async def _resolve_stream_tag(db: AsyncSession, name: str) -> Tag:
+    tag = (await db.execute(select(Tag).where(func.lower(Tag.name) == name.lower()))).scalar_one_or_none()
+    if not tag:
+        tag = Tag(name=name, color="slate", category="stream", is_default=False)
+        db.add(tag)
+        await db.flush()
+    return tag
+
+
+async def create_workspace_board(
+    db: AsyncSession, workspace_id: int, name: str, scope_tag_name: Optional[str] = None
+) -> Optional[WorkspaceBoard]:
+    """Returns None on duplicate name within the workspace."""
+    dup = (await db.execute(select(func.count()).select_from(WorkspaceBoard).where(
+        WorkspaceBoard.workspace_id == workspace_id, func.lower(WorkspaceBoard.name) == name.lower()
+    ))).scalar() or 0
+    if dup:
+        return None
+    scope_tag_id = None
+    if scope_tag_name:
+        scope_tag_id = (await _resolve_stream_tag(db, scope_tag_name)).id
+    max_pos = (await db.execute(
+        select(func.max(WorkspaceBoard.position)).where(WorkspaceBoard.workspace_id == workspace_id)
+    )).scalar()
+    board = WorkspaceBoard(workspace_id=workspace_id, name=name, scope_tag_id=scope_tag_id,
+                           position=(max_pos or 0) + 1)
+    db.add(board)
+    await db.commit()
+    await db.refresh(board)
+    return board
+
+
+async def update_workspace_board(
+    db: AsyncSession, workspace_id: int, board_id: int,
+    name: Optional[str] = None, scope_tag_name: Optional[str] = None,
+    clear_scope: bool = False, position: Optional[int] = None,
+) -> bool:
+    board = (await db.execute(select(WorkspaceBoard).where(
+        WorkspaceBoard.id == board_id, WorkspaceBoard.workspace_id == workspace_id
+    ))).scalar_one_or_none()
+    if not board:
+        return False
+    if name is not None:
+        board.name = name
+    if clear_scope:
+        board.scope_tag_id = None
+    elif scope_tag_name:
+        board.scope_tag_id = (await _resolve_stream_tag(db, scope_tag_name)).id
+    if position is not None:
+        board.position = position
+    await db.commit()
+    return True
+
+
+async def delete_workspace_board(
+    db: AsyncSession, workspace_id: int, board_id: int, remove_tags: bool = True
+) -> bool:
+    board = (await db.execute(select(WorkspaceBoard).where(
+        WorkspaceBoard.id == board_id, WorkspaceBoard.workspace_id == workspace_id
+    ))).scalar_one_or_none()
+    if not board:
+        return False
+    if remove_tags:
+        # Cards return to backlog: strip this board's stage tags from member chats,
+        # excluding tags that also back columns on other boards (shared cross-workspace)
+        stage_ids = list((await db.execute(_board_stage_tag_ids(board_id))).scalars().all())
+        shared_ids = set((await db.execute(
+            select(WorkspaceColumn.tag_id).where(
+                WorkspaceColumn.tag_id.in_(stage_ids), WorkspaceColumn.board_id != board_id
+            )
+        )).scalars().all())
+        strip_ids = [tid for tid in stage_ids if tid not in shared_ids]
+        if strip_ids:
+            await db.execute(delete(ChatTag).where(
+                ChatTag.tag_id.in_(strip_ids),
+                ChatTag.chat_id.in_(_workspace_member_ids(workspace_id)),
+            ))
+    await db.execute(delete(WorkspaceColumn).where(WorkspaceColumn.board_id == board_id))
+    await db.delete(board)
+    await db.commit()
+    return True
+
+
+async def get_board(db: AsyncSession, workspace_id: int, board_id: Optional[int] = None) -> Optional[dict]:
+    """Assemble one board of a workspace: its columns, unallocated (triage), backlog —
+    plus the boards list for tab rendering (with per-tab unallocated counts)."""
     ws = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
     if not ws:
         return None
-    columns = list((await db.execute(
-        select(WorkspaceColumn, Tag)
-        .join(Tag, Tag.id == WorkspaceColumn.tag_id)
-        .where(WorkspaceColumn.workspace_id == workspace_id)
-        .order_by(WorkspaceColumn.position, WorkspaceColumn.id)
-    )).all())
-    stage_tag_ids = [col.tag_id for col, _tag in columns]
+    board_rows = await get_workspace_boards(db, workspace_id)
+    active = None
+    if board_rows:
+        active = next((b for b, _n in board_rows if b.id == board_id), None) or board_rows[0][0]
 
     members = list((await db.execute(
         select(Chat).where(Chat.telegram_id.in_(_workspace_member_ids(workspace_id)), _live_chat_filter())
     )).scalars().all())
     member_ids = [c.telegram_id for c in members]
 
-    # chat -> stage tags (within this board) in one query
-    staged: dict[int, int] = {}
-    if stage_tag_ids and member_ids:
-        rows = (await db.execute(
-            select(ChatTag.chat_id, ChatTag.tag_id).where(
-                ChatTag.tag_id.in_(stage_tag_ids), ChatTag.chat_id.in_(member_ids)
-            )
-        )).all()
-        for chat_id, tag_id in rows:
-            staged.setdefault(chat_id, tag_id)  # leftmost-wins handled by column order at render
-
-    # unallocated flags
+    # triage flags (workspace-level)
     triage: dict[int, datetime] = {}
     if member_ids:
         rows = (await db.execute(
@@ -985,84 +1087,195 @@ async def get_board(db: AsyncSession, workspace_id: int) -> Optional[dict]:
         )).all()
         triage = {cid: ts for cid, ts in rows}
 
+    # which chats carry which of this workspace's stream (scope) tags
+    scope_tag_ids = [b.scope_tag_id for b, _n in board_rows if b.scope_tag_id is not None]
+    scope_carriers: dict[int, set[int]] = {tid: set() for tid in scope_tag_ids}  # tag_id -> chat_ids
+    if scope_tag_ids and member_ids:
+        rows = (await db.execute(
+            select(ChatTag.chat_id, ChatTag.tag_id).where(
+                ChatTag.tag_id.in_(scope_tag_ids), ChatTag.chat_id.in_(member_ids)
+            )
+        )).all()
+        for cid, tid in rows:
+            scope_carriers[tid].add(cid)
+    has_any_stream: set[int] = set().union(*scope_carriers.values()) if scope_carriers else set()
+
+    # Chats staged on ANY board of this workspace (dragging onto a board is
+    # itself a classification decision, even before stream tags are set up)
+    staged_anywhere: set[int] = set()
+    if member_ids:
+        staged_anywhere = set((await db.execute(
+            select(ChatTag.chat_id).where(
+                ChatTag.tag_id.in_(_workspace_stage_tag_ids(workspace_id)),
+                ChatTag.chat_id.in_(member_ids),
+            )
+        )).scalars().all())
+
+    def _unallocated_ids_for(board) -> set[int]:
+        # stream-less triage chats surface on every tab; streamed ones only on their own
+        eligible = set()
+        for cid in triage:
+            if cid not in has_any_stream:
+                eligible.add(cid)
+            elif board.scope_tag_id is not None and cid in scope_carriers.get(board.scope_tag_id, set()):
+                eligible.add(cid)
+        return eligible
+
+    boards_out = [
+        {"id": b.id, "name": b.name, "scope_tag_id": b.scope_tag_id, "scope_tag_name": scope_name,
+         "position": b.position, "unallocated_count": len(_unallocated_ids_for(b))}
+        for b, scope_name in board_rows
+    ]
+
+    if active is None:
+        return {"workspace": ws, "boards": boards_out, "board_id": None,
+                "columns": [], "unallocated": [], "backlog": {"active": [], "cooling": [], "dormant": []}}
+
+    columns = list((await db.execute(
+        select(WorkspaceColumn, Tag)
+        .join(Tag, Tag.id == WorkspaceColumn.tag_id)
+        .where(WorkspaceColumn.board_id == active.id)
+        .order_by(WorkspaceColumn.position, WorkspaceColumn.id)
+    )).all())
+    stage_tag_ids = [col.tag_id for col, _tag in columns]
+
+    # chat -> stage tag (within this board)
+    staged: dict[int, int] = {}
+    if stage_tag_ids and member_ids:
+        rows = (await db.execute(
+            select(ChatTag.chat_id, ChatTag.tag_id).where(
+                ChatTag.tag_id.in_(stage_tag_ids), ChatTag.chat_id.in_(member_ids)
+            )
+        )).all()
+        for chat_id, tag_id in rows:
+            staged.setdefault(chat_id, tag_id)  # leftmost-wins handled by column order at render
+
+    unallocated_ids = _unallocated_ids_for(active)
+    in_scope = (
+        (lambda c: c.telegram_id in scope_carriers.get(active.scope_tag_id, set()))
+        if active.scope_tag_id is not None else (lambda c: True)
+    )
+
     by_column: dict[int, list[Chat]] = {tid: [] for tid in stage_tag_ids}
     unallocated: list[Chat] = []
     backlog: list[Chat] = []
     for c in members:
         if c.telegram_id in staged:
             by_column[staged[c.telegram_id]].append(c)
-        elif c.telegram_id in triage:
+        elif c.telegram_id in unallocated_ids:
             unallocated.append(c)
-        else:
+        elif in_scope(c):
             backlog.append(c)
 
     def _recent_first(chats: list[Chat]) -> list[Chat]:
         return sorted(chats, key=lambda c: c.last_activity_at or datetime.min, reverse=True)
 
     now = datetime.utcnow()
-    active, cooling, dormant = [], [], []
+    b_active, b_cooling, b_dormant = [], [], []
     for c in _recent_first(backlog):
         age = (now - c.last_activity_at).days if c.last_activity_at else None
         if age is not None and age < 7:
-            active.append(c)
+            b_active.append(c)
         elif age is not None and age < 30:
-            cooling.append(c)
+            b_cooling.append(c)
         else:
-            dormant.append(c)
+            b_dormant.append(c)
 
     return {
         "workspace": ws,
+        "boards": boards_out,
+        "board_id": active.id,
         "columns": [
-            {"tag_id": col.tag_id, "name": tag.name, "color": col.color or tag.color,
+            {"tag_id": col.tag_id, "name": col.label or tag.name, "color": col.color or tag.color,
              "position": col.position, "chats": _recent_first(by_column[col.tag_id])}
             for col, tag in columns
         ],
         "unallocated": _recent_first(unallocated),
-        "backlog": {"active": active, "cooling": cooling, "dormant": dormant},
+        "backlog": {"active": b_active, "cooling": b_cooling, "dormant": b_dormant},
+        # Members already classified — carrying a stream tag OR staged on any of
+        # this workspace's boards. Lets the UI offer an "unclassified only"
+        # backlog view for triage.
+        "classified_chat_ids": sorted(has_any_stream | staged_anywhere),
     }
 
 
-async def add_board_column(db: AsyncSession, workspace_id: int, name: str, color: Optional[str]) -> Optional[dict]:
-    """Attach a column backed by a stage tag (reused case-insensitively or created)."""
-    tag = (await db.execute(select(Tag).where(func.lower(Tag.name) == name.lower()))).scalar_one_or_none()
+async def add_board_column(
+    db: AsyncSession, workspace_id: int, board_id: int, name: str, color: Optional[str]
+) -> Optional[dict]:
+    """Attach a column with display label `name`.
+
+    The backing stage tag is an implementation detail: an existing tag is reused
+    only when it isn't already backing a column in this workspace (cross-workspace
+    sharing); otherwise a fresh tag with a unique internal name is created, so two
+    boards can both show a "Done" column with independent pipeline state.
+    """
+    board = (await db.execute(select(WorkspaceBoard).where(
+        WorkspaceBoard.id == board_id, WorkspaceBoard.workspace_id == workspace_id
+    ))).scalar_one_or_none()
+    if not board:
+        return None
+
+    # One label per board (case-insensitive)
+    dup = (await db.execute(
+        select(WorkspaceColumn, Tag)
+        .join(Tag, Tag.id == WorkspaceColumn.tag_id)
+        .where(WorkspaceColumn.board_id == board_id)
+    )).all()
+    if any((col.label or tag.name).lower() == name.lower() for col, tag in dup):
+        return None
+
+    workspace_tag_ids = select(WorkspaceColumn.tag_id).where(WorkspaceColumn.workspace_id == workspace_id)
+    tag = (await db.execute(select(Tag).where(
+        func.lower(Tag.name) == name.lower(), Tag.id.notin_(workspace_tag_ids)
+    ))).scalar_one_or_none()
     if not tag:
-        tag = Tag(name=name, color=color or "slate", category="stage", is_default=False)
+        # Mint a distinct stage tag with a unique internal name
+        internal = name
+        candidate = internal
+        suffix = 1
+        while (await db.execute(select(func.count()).select_from(Tag).where(
+            func.lower(Tag.name) == candidate.lower()
+        ))).scalar():
+            suffix += 1
+            candidate = f"{name} · {board.name}" if suffix == 2 else f"{name} · {board.name} {suffix - 1}"
+        tag = Tag(name=candidate, color=color or "slate", category="stage", is_default=False)
         db.add(tag)
         await db.flush()
-    existing = (await db.execute(select(WorkspaceColumn).where(
-        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag.id
-    ))).scalar_one_or_none()
-    if existing:
-        await db.commit()
-        return None  # already a column on this board
+
     max_pos = (await db.execute(
-        select(func.max(WorkspaceColumn.position)).where(WorkspaceColumn.workspace_id == workspace_id)
+        select(func.max(WorkspaceColumn.position)).where(WorkspaceColumn.board_id == board_id)
     )).scalar()
-    col = WorkspaceColumn(workspace_id=workspace_id, tag_id=tag.id, position=(max_pos or 0) + 1, color=color)
+    col = WorkspaceColumn(workspace_id=workspace_id, tag_id=tag.id, board_id=board_id,
+                          label=name, position=(max_pos or 0) + 1, color=color)
     db.add(col)
     await db.commit()
-    return {"tag_id": tag.id, "name": tag.name, "color": col.color or tag.color, "position": col.position}
+    return {"tag_id": tag.id, "name": name, "color": col.color or tag.color, "position": col.position}
 
 
 async def update_board_column(
-    db: AsyncSession, workspace_id: int, tag_id: int,
+    db: AsyncSession, workspace_id: int, board_id: int, tag_id: int,
     name: Optional[str] = None, color: Optional[str] = None, position: Optional[int] = None,
 ) -> str:
-    """Returns 'ok', 'not_found', or 'shared' (rename refused: tag backs another board's column)."""
+    """Returns 'ok' or 'not_found'. Rename changes the display label; the backing
+    tag is renamed too only when this column is its sole user and the name is free."""
     col = (await db.execute(select(WorkspaceColumn).where(
-        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id
+        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id,
+        WorkspaceColumn.board_id == board_id,
     ))).scalar_one_or_none()
     if not col:
         return "not_found"
     if name is not None:
-        other = (await db.execute(select(func.count()).select_from(WorkspaceColumn).where(
-            WorkspaceColumn.tag_id == tag_id, WorkspaceColumn.workspace_id != workspace_id
-        ))).scalar() or 0
-        if other:
-            return "shared"
-        tag = (await db.execute(select(Tag).where(Tag.id == tag_id))).scalar_one_or_none()
-        if tag:
-            tag.name = name
+        col.label = name
+        sole_user = ((await db.execute(select(func.count()).select_from(WorkspaceColumn).where(
+            WorkspaceColumn.tag_id == tag_id, WorkspaceColumn.id != col.id
+        ))).scalar() or 0) == 0
+        name_free = ((await db.execute(select(func.count()).select_from(Tag).where(
+            func.lower(Tag.name) == name.lower(), Tag.id != tag_id
+        ))).scalar() or 0) == 0
+        if sole_user and name_free:
+            tag = (await db.execute(select(Tag).where(Tag.id == tag_id))).scalar_one_or_none()
+            if tag:
+                tag.name = name
     if color is not None:
         col.color = color
     if position is not None:
@@ -1071,32 +1284,58 @@ async def update_board_column(
     return "ok"
 
 
-async def delete_board_column(db: AsyncSession, workspace_id: int, tag_id: int, remove_tags: bool = True) -> bool:
+async def delete_board_column(
+    db: AsyncSession, workspace_id: int, board_id: int, tag_id: int, remove_tags: bool = True
+) -> bool:
     col = (await db.execute(select(WorkspaceColumn).where(
-        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id
+        WorkspaceColumn.workspace_id == workspace_id, WorkspaceColumn.tag_id == tag_id,
+        WorkspaceColumn.board_id == board_id,
     ))).scalar_one_or_none()
     if not col:
         return False
     if remove_tags:
-        # Return this board's cards to backlog (only member chats; the tag may be shared)
-        await db.execute(delete(ChatTag).where(
-            ChatTag.tag_id == tag_id,
-            ChatTag.chat_id.in_(_workspace_member_ids(workspace_id)),
-        ))
+        # Return this board's cards to backlog — but never strip a tag that still
+        # backs a column elsewhere (that would destroy the other board's state)
+        other_users = (await db.execute(select(func.count()).select_from(WorkspaceColumn).where(
+            WorkspaceColumn.tag_id == tag_id, WorkspaceColumn.id != col.id
+        ))).scalar() or 0
+        if not other_users:
+            await db.execute(delete(ChatTag).where(
+                ChatTag.tag_id == tag_id,
+                ChatTag.chat_id.in_(_workspace_member_ids(workspace_id)),
+            ))
     await db.delete(col)
     await db.commit()
     return True
 
 
-async def move_board_chat(db: AsyncSession, workspace_id: int, chat_id: int, to_tag_id: Optional[int]) -> bool:
-    """Move a chat between board columns (None = back to backlog / dismiss triage)."""
-    stage_ids = list((await db.execute(_workspace_stage_tag_ids(workspace_id))).scalars().all())
+async def move_board_chat(
+    db: AsyncSession, workspace_id: int, board_id: int, chat_id: int, to_tag_id: Optional[int]
+) -> bool:
+    """Move a chat between one board's columns (None = back to backlog / dismiss triage).
+
+    Only THIS board's stage tags are touched — a chat can sit in independent
+    pipelines on different stream boards. Allocating on a stream-scoped board
+    also assigns the stream tag (one-gesture stream + stage).
+    """
+    board = (await db.execute(select(WorkspaceBoard).where(
+        WorkspaceBoard.id == board_id, WorkspaceBoard.workspace_id == workspace_id
+    ))).scalar_one_or_none()
+    if not board:
+        return False
+    stage_ids = list((await db.execute(_board_stage_tag_ids(board_id))).scalars().all())
     if to_tag_id is not None and to_tag_id not in stage_ids:
         return False
     if stage_ids:
         await db.execute(delete(ChatTag).where(ChatTag.chat_id == chat_id, ChatTag.tag_id.in_(stage_ids)))
     if to_tag_id is not None:
         db.add(ChatTag(chat_id=chat_id, tag_id=to_tag_id))
+        if board.scope_tag_id is not None:
+            has_scope = (await db.execute(select(func.count()).select_from(ChatTag).where(
+                ChatTag.chat_id == chat_id, ChatTag.tag_id == board.scope_tag_id
+            ))).scalar() or 0
+            if not has_scope:
+                db.add(ChatTag(chat_id=chat_id, tag_id=board.scope_tag_id))
     override = (await db.execute(select(WorkspaceChatOverride).where(
         WorkspaceChatOverride.workspace_id == workspace_id, WorkspaceChatOverride.chat_id == chat_id
     ))).scalar_one_or_none()

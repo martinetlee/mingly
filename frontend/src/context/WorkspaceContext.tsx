@@ -10,6 +10,7 @@ const REFRESH_THROTTLE_MS = 15000
 interface WorkspaceContextValue {
   workspaces: Workspace[]
   activeWorkspace: Workspace | null
+  loaded: boolean
   setActiveWorkspaceId: (id: number | null) => void
   refreshWorkspaces: () => Promise<void>
 }
@@ -17,12 +18,14 @@ interface WorkspaceContextValue {
 const WorkspaceContext = createContext<WorkspaceContextValue>({
   workspaces: [],
   activeWorkspace: null,
+  loaded: false,
   setActiveWorkspaceId: () => {},
   refreshWorkspaces: async () => {},
 })
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [activeId, setActiveId] = useState<number | null>(() => {
     const stored = localStorage.getItem(STORAGE_KEY)
     return stored ? parseInt(stored, 10) : null
@@ -34,6 +37,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     try {
       const data = await getWorkspaces()
       lastRefreshRef.current = Date.now()
+      setLoaded(true)
       // Skip identical payloads — churning object identities re-renders every
       // consumer and destabilizes their useCallback deps for no reason
       const snapshot = JSON.stringify(data)
@@ -69,7 +73,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const activeWorkspace = workspaces.find((w) => w.id === activeId) ?? null
 
   return (
-    <WorkspaceContext.Provider value={{ workspaces, activeWorkspace, setActiveWorkspaceId, refreshWorkspaces }}>
+    <WorkspaceContext.Provider value={{ workspaces, activeWorkspace, loaded, setActiveWorkspaceId, refreshWorkspaces }}>
       {children}
     </WorkspaceContext.Provider>
   )

@@ -39,10 +39,14 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
   const navigate = useNavigate()
   const { workspaces, activeWorkspace, setActiveWorkspaceId, refreshWorkspaces } = useWorkspaces()
   const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false)
+  const [editingWorkspace, setEditingWorkspace] = useState<import('../api/types').Workspace | null>(null)
 
-  const selectWorkspace = (id: number | null) => {
+  // Kanban workspaces land on their board; list workspaces (and "All") on the chat list.
+  // viewModeHint covers freshly created workspaces not yet in the workspaces array.
+  const selectWorkspace = (id: number | null, viewModeHint?: string) => {
     setActiveWorkspaceId(id)
-    navigate('/chats')
+    const mode = viewModeHint ?? (id === null ? null : workspaces.find((w) => w.id === id)?.view_mode)
+    navigate(mode === 'kanban' ? '/board' : '/chats')
   }
 
   const handleBulkSync = async () => {
@@ -79,7 +83,12 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
           <button
             key={ws.id}
             onClick={() => selectWorkspace(ws.id)}
-            title={`${ws.name} — ${ws.member_count} chats${ws.unallocated_count ? `, ${ws.unallocated_count} to triage` : ''}`}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setEditingWorkspace(ws)
+              setShowWorkspaceDialog(true)
+            }}
+            title={`${ws.name} — ${ws.member_count} chats${ws.unallocated_count ? `, ${ws.unallocated_count} to triage` : ''} (right-click to edit)`}
             className={`relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm transition-all ${
               activeWorkspace?.id === ws.id
                 ? `bg-slate-700 ring-2 ${WS_RING[ws.color] ?? 'ring-indigo-400'}`
@@ -95,7 +104,7 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
           </button>
         ))}
         <button
-          onClick={() => setShowWorkspaceDialog(true)}
+          onClick={() => { setEditingWorkspace(null); setShowWorkspaceDialog(true) }}
           title="New workspace"
           className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-dashed border-slate-700 text-slate-500 transition-colors hover:border-slate-500 hover:text-slate-300"
         >
@@ -106,11 +115,15 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
 
       <WorkspaceDialog
         open={showWorkspaceDialog}
+        workspace={editingWorkspace}
         onClose={() => setShowWorkspaceDialog(false)}
-        onSaved={(id) => {
+        onSaved={async (id, viewMode) => {
           setShowWorkspaceDialog(false)
-          refreshWorkspaces()
-          if (id != null) selectWorkspace(id)
+          const wasActive = editingWorkspace != null && activeWorkspace?.id === editingWorkspace.id
+          setEditingWorkspace(null)
+          await refreshWorkspaces()
+          if (id != null) selectWorkspace(id, viewMode)
+          else if (wasActive) selectWorkspace(null) // active workspace was deleted
         }}
       />
 

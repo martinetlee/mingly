@@ -21,6 +21,9 @@ from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract
 
 router = APIRouter()
 
+# Chats with a first-time background sync currently in flight (see get_messages)
+_BG_SYNCING: set[int] = set()
+
 
 class HideRequest(BaseModel):
     hidden: bool
@@ -726,32 +729,49 @@ async def get_messages(
 
             async def _bg_sync():
                 from backend.ws.manager import ws_manager
+                from telethon.errors import FloodWaitError
+                log = logging.getLogger(__name__)
+
+                # One in-flight first-sync per chat — reopening the pane must not stack syncs
+                if telegram_id in _BG_SYNCING:
+                    return
+                _BG_SYNCING.add(telegram_id)
                 try:
-                    await sync_messages(telegram_id, limit=100)
-                    # If very few messages were saved (chat full of service messages),
-                    # try a deeper fetch
-                    from sqlalchemy import func as sa_func, select as sa_select
-                    async with AsyncSessionLocal() as db2:
-                        count = (await db2.execute(
-                            sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == telegram_id)
-                        )).scalar() or 0
-                    if count < 5:
-                        await sync_messages(telegram_id, limit=500)
-                        async with AsyncSessionLocal() as db3:
-                            count = (await db3.execute(
+                    async def _local_count() -> int:
+                        from sqlalchemy import func as sa_func, select as sa_select
+                        async with AsyncSessionLocal() as db2:
+                            return (await db2.execute(
                                 sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == telegram_id)
                             )).scalar() or 0
-                    if count == 0:
-                        # Nothing retrievable (migrated/inaccessible chat) — tell the UI
-                        await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
-                    else:
-                        await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
-                except Exception:
-                    logging.getLogger(__name__).warning("auto-sync failed for chat %s", telegram_id, exc_info=True)
-                    try:
-                        await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
-                    except Exception:
-                        pass
+
+                    # Retry through transient failures (rate limits during click sprees, etc.).
+                    # The UI shows a persistent "syncing…" state, so waiting here is fine;
+                    # a failed sync must never masquerade as "no history".
+                    for attempt in range(1, 5):
+                        try:
+                            await sync_messages(telegram_id, limit=100)
+                            count = await _local_count()
+                            if count < 5:
+                                # Chat may be full of service messages — try a deeper fetch
+                                await sync_messages(telegram_id, limit=500)
+                                count = await _local_count()
+                            if count == 0:
+                                # Sync completed and there is genuinely nothing retrievable
+                                await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
+                            else:
+                                await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
+                            return
+                        except FloodWaitError as e:
+                            log.info("auto-sync chat %s: FloodWait %ss (attempt %d)", telegram_id, e.seconds, attempt)
+                            await asyncio.sleep(min(e.seconds + 2, 120))
+                        except Exception:
+                            log.warning("auto-sync chat %s failed (attempt %d)", telegram_id, attempt, exc_info=True)
+                            await asyncio.sleep(3 * attempt)
+                    # Exhausted: stay silent — the pane keeps its syncing state and the
+                    # next open of this chat retries (last_synced_at is still NULL)
+                    log.warning("auto-sync chat %s gave up after retries", telegram_id)
+                finally:
+                    _BG_SYNCING.discard(telegram_id)
 
             asyncio.create_task(_bg_sync())
 
