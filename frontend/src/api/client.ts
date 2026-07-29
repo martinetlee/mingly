@@ -1,6 +1,21 @@
 import type { AdminActionLog, AdminPermissions, AuthStatus, BoardColumn, BoardData, BriefingRun, CatchUpContext, CatchUpItem, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationMessageItem, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence, Workspace } from './types'
 import { getSessionToken, setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Transient statuses worth retrying: rate limits and gateway/availability blips
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
+
+// True when an error came from a Telegram rate limit surfaced by the backend
+// (429 detail: "Telegram rate limit — retry in Ns")
+export const isRateLimitError = (e: unknown): boolean =>
+  e instanceof Error && e.message.includes('rate limit')
+
+// True when a fetch was cancelled via AbortController — callers that pass a
+// signal should swallow these instead of surfacing an error state
+export const isAbortError = (e: unknown): boolean =>
+  e instanceof DOMException && e.name === 'AbortError'
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -10,19 +25,41 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (token) {
     headers['X-Session-Token'] = token
   }
-  const res = await fetch(path, {
-    ...options,
-    headers,
-  })
-  if (res.status === 401 && !path.includes('/api/auth/')) {
-    notifySessionExpired()
-    throw new Error('Session expired')
+  // Only reads are retried automatically — retrying writes could double-send
+  const method = (options?.method ?? 'GET').toUpperCase()
+  const maxAttempts = method === 'GET' ? 3 : 1
+  let lastError: Error = new Error('Request failed')
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response
+    try {
+      res = await fetch(path, { ...options, headers })
+    } catch (e) {
+      // A deliberate cancellation must not be retried or converted
+      if (isAbortError(e)) throw e
+      lastError = e instanceof Error ? e : new Error(String(e))
+      if (attempt < maxAttempts) {
+        await sleep(500 * attempt)
+        continue
+      }
+      throw lastError
+    }
+    if (res.status === 401 && !path.includes('/api/auth/')) {
+      notifySessionExpired()
+      throw new Error('Session expired')
+    }
+    if (!res.ok) {
+      if (RETRYABLE_STATUS.has(res.status) && attempt < maxAttempts) {
+        const retryAfter = parseInt(res.headers.get('Retry-After') ?? '', 10)
+        await sleep(Number.isNaN(retryAfter) ? 500 * attempt : Math.min(retryAfter * 1000, 5000))
+        continue
+      }
+      const err = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error(err.detail || res.statusText)
+    }
+    return res.json()
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || res.statusText)
-  }
-  return res.json()
+  throw lastError
 }
 
 // --- Vault ---
@@ -192,14 +229,14 @@ export const syncChat = (telegram_id: number, limit?: number) =>
 export const getChatMembers = (telegram_id: number, limit = 100) =>
   request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
 
-export const getSharedMedia = (telegram_id: number, mediaFilter: 'media' | 'files' | 'links' = 'media', limit = 50, offset = 0) =>
-  request<SharedMediaItem[]>(`/api/chats/${telegram_id}/shared-media?media_filter=${mediaFilter}&limit=${limit}&offset=${offset}`)
+export const getSharedMedia = (telegram_id: number, mediaFilter: 'media' | 'files' | 'links' = 'media', limit = 50, offset = 0, signal?: AbortSignal) =>
+  request<SharedMediaItem[]>(`/api/chats/${telegram_id}/shared-media?media_filter=${mediaFilter}&limit=${limit}&offset=${offset}`, { signal })
 
 export const markChatRead = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
 
-export const getPinnedMessage = async (telegram_id: number): Promise<PinnedMessage | null> => {
-  const msgs = await request<PinnedMessage[]>(`/api/chats/${telegram_id}/pinned`)
+export const getPinnedMessage = async (telegram_id: number, signal?: AbortSignal): Promise<PinnedMessage | null> => {
+  const msgs = await request<PinnedMessage[]>(`/api/chats/${telegram_id}/pinned`, { signal })
   return msgs && msgs.length > 0 ? msgs[0] : null
 }
 
@@ -263,8 +300,8 @@ export const reactToMessage = (chat_telegram_id: number, msg_tg_id: number, emoj
     body: JSON.stringify({ emoji }),
   })
 
-export const getUserPresence = (telegram_id: number) =>
-  request<UserPresence>(`/api/chats/${telegram_id}/presence`)
+export const getUserPresence = (telegram_id: number, signal?: AbortSignal) =>
+  request<UserPresence>(`/api/chats/${telegram_id}/presence`, { signal })
 
 export const sendTypingAction = (telegram_id: number) =>
   request<{ success: boolean }>(`/api/chats/${telegram_id}/typing`, { method: 'POST' })
@@ -376,8 +413,8 @@ export const generateOrgContext = (orgId: number) =>
 export const syncContacts = () =>
   request<{ imported: number; total: number }>('/api/contacts/sync', { method: 'POST' })
 
-export const getContactByTelegram = (telegramId: number) =>
-  request<Contact>(`/api/contacts/by-telegram/${telegramId}`)
+export const getContactByTelegram = (telegramId: number, signal?: AbortSignal) =>
+  request<Contact>(`/api/contacts/by-telegram/${telegramId}`, { signal })
 
 export const createContact = (data: { telegram_id: number; first_name?: string; last_name?: string; username?: string }) =>
   request<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(data) })
@@ -422,8 +459,8 @@ export const updatePosition = (
 export const removePosition = (telegramId: number, positionId: number) =>
   request<{ success: boolean }>(`/api/contacts/${telegramId}/positions/${positionId}`, { method: 'DELETE' })
 
-export const getPositions = (telegramId: number) =>
-  request<ContactPosition[]>(`/api/contacts/${telegramId}/positions`)
+export const getPositions = (telegramId: number, signal?: AbortSignal) =>
+  request<ContactPosition[]>(`/api/contacts/${telegramId}/positions`, { signal })
 
 export const setRelationshipStatus = (contactId: number, status: string) =>
   request<Contact>(`/api/contacts/${contactId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
@@ -436,8 +473,8 @@ export const resolvePerson = (telegramId: number) =>
 
 // --- Profiles ---
 
-export const getProfile = (userId: number | string) =>
-  request<TelegramProfile>(`/api/profiles/${userId}`)
+export const getProfile = (userId: number | string, signal?: AbortSignal) =>
+  request<TelegramProfile>(`/api/profiles/${userId}`, { signal })
 
 // --- Settings / Prefs ---
 
@@ -687,11 +724,11 @@ export const getDashboard = () =>
 
 // --- Global Search ---
 
-export const globalSearch = (query: string, limit = 20) =>
-  request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+export const globalSearch = (query: string, limit = 20, signal?: AbortSignal) =>
+  request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
 
-export const telegramSearch = (query: string, limit = 20) =>
-  request<{ telegram_dialogs: TelegramSearchResult[] }>(`/api/search/telegram?q=${encodeURIComponent(query)}&limit=${limit}`)
+export const telegramSearch = (query: string, limit = 20, signal?: AbortSignal) =>
+  request<{ telegram_dialogs: TelegramSearchResult[] }>(`/api/search/telegram?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
 
 export const ensureChat = (telegramId: number) =>
   request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
@@ -967,3 +1004,20 @@ export const setTranslationLanguage = (language: string) =>
     method: 'POST',
     body: JSON.stringify({ language }),
   })
+
+// ── MCP Server ──
+
+export const getMcpSettings = () =>
+  request<import('./types').McpSettings>('/api/settings/prefs/mcp')
+
+export const setMcpEnabled = (enabled: boolean) =>
+  request<{ success: boolean; enabled: boolean; key_set: boolean }>('/api/settings/prefs/mcp', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
+
+export const generateMcpKey = () =>
+  request<{ key: string }>('/api/settings/prefs/mcp/generate-key', { method: 'POST' })
+
+export const revealMcpKey = () =>
+  request<{ key: string }>('/api/settings/prefs/mcp/reveal-key', { method: 'POST' })

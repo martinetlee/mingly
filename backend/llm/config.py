@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -48,4 +49,7 @@ def save_registry_config(config: LLMRegistryConfig) -> None:
         "orchestrator_name": config.orchestrator_name,
         "orchestrator_prompt": config.orchestrator_prompt,
     }
-    path.write_text(json.dumps(data, indent=2))
+    # Atomic replace so a crash mid-write can't leave a truncated config.
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)

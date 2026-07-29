@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import type { Chat, ChatMember, Contact, SharedMediaItem, Tag, TagSuggestion, AdminPermissions, InviteLink, GroupSettings, AdminActionLog } from '../api/types'
-import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog } from '../api/client'
+import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError } from '../api/client'
 import { authenticatedMediaUrl } from '../api/session'
 import ContactInfoSection from './ContactInfoSection'
 import ModerationPanel from './ModerationPanel'
@@ -133,10 +133,20 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
   useEffect(() => {
     setLoading(true)
     setItems([])
-    getSharedMedia(chat.telegram_id, activeTab)
-      .then(setItems)
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false))
+    // Abort on tab/chat switch so a slower earlier response can't populate
+    // the currently active tab with the wrong items
+    const ac = new AbortController()
+    getSharedMedia(chat.telegram_id, activeTab, 50, 0, ac.signal)
+      .then((data) => {
+        setItems(data)
+        setLoading(false)
+      })
+      .catch((e) => {
+        if (isAbortError(e)) return
+        setItems([])
+        setLoading(false)
+      })
+    return () => ac.abort()
   }, [chat.telegram_id, activeTab])
 
   const tabs: { key: SharedMediaTab; label: string; icon: React.ReactNode }[] = [

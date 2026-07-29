@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { Message } from '../api/types'
 import MessageBubble from './MessageBubble'
 import MediaAlbumGrid from './MediaAlbumGrid'
@@ -21,6 +21,7 @@ interface Props {
   /** Set of telegram IDs flagged as scammers */
   flaggedSenderIds?: Set<number>
   onReportScam?: (msg: Message) => void
+  onScamVerdictChange?: (msg: Message, verdict: 'not_scam' | null) => void
   /** Avatar context menu callbacks */
   onOpenProfile?: (senderId: number) => void
   onSendMessage?: (senderId: number) => void
@@ -72,10 +73,14 @@ function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> })
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
+export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam, onScamVerdictChange, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const prevCountRef = useRef(0)
+  const prevRef = useRef<{ count: number; firstId: number | null; scrollHeight: number }>({
+    count: 0,
+    firstId: null,
+    scrollHeight: 0,
+  })
   const highlightRef = useRef<HTMLDivElement>(null)
   const unreadRef = useRef<HTMLDivElement>(null)
   const isGroup = chatType === 'group' || chatType === 'channel'
@@ -87,9 +92,22 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
     ? messages.length - unreadCount
     : null
 
-  useEffect(() => {
-    const prevCount = prevCountRef.current
-    prevCountRef.current = messages.length
+  // Intent-based scrolling in a single layout effect (before paint, so
+  // prepend restoration doesn't flash):
+  //   highlight   → center the highlighted message
+  //   initial     → jump to unread separator, else bottom
+  //   prepend     → keep the viewport anchored on the same message
+  //   append/edit → follow to bottom only if the user was already near it
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current
+    const prev = prevRef.current
+    const firstId = messages.length > 0 ? messages[0].id : null
+    prevRef.current = {
+      count: messages.length,
+      firstId,
+      scrollHeight: el?.scrollHeight ?? 0,
+    }
+
     if (highlightTelegramId && highlightRef.current) {
       // Scroll to highlighted message instead of bottom
       highlightRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
@@ -98,31 +116,32 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
       const t = setTimeout(() => setDimHighlight(true), 3000)
       return () => clearTimeout(t)
     }
-    // Jump to unread separator on initial load if present
-    if (prevCount === 0 && unreadRef.current) {
-      unreadRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
+
+    if (prev.count === 0) {
+      // Initial load: jump to unread separator if present, else bottom
+      if (unreadRef.current) {
+        unreadRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
+      } else {
+        bottomRef.current?.scrollIntoView({ behavior: 'instant' })
+      }
       return
     }
-    // Instant jump on initial load; smooth scroll only when new messages arrive
-    const behavior = prevCount === 0 ? 'instant' : 'smooth'
-    bottomRef.current?.scrollIntoView({ behavior })
-  }, [messages, highlightTelegramId])
-
-  // Preserve scroll position when older messages are prepended
-  const prevScrollHeightRef = useRef(0)
-  useEffect(() => {
-    const el = scrollContainerRef.current
     if (!el) return
-    const prevCount = prevCountRef.current
-    // If messages were prepended (count grew but we're not at initial load)
-    if (prevCount > 0 && messages.length > prevCount) {
-      const heightDiff = el.scrollHeight - prevScrollHeightRef.current
-      if (heightDiff > 0 && el.scrollTop < 100) {
-        el.scrollTop = heightDiff
-      }
+
+    const prepended = firstId !== null && prev.firstId !== null
+      && firstId !== prev.firstId && messages.length > prev.count
+    if (prepended) {
+      el.scrollTop += el.scrollHeight - prev.scrollHeight
+      return
     }
-    prevScrollHeightRef.current = el.scrollHeight
-  })
+
+    // Distance from the bottom before this update (scrollTop is unchanged by
+    // the DOM update; prev.scrollHeight is the pre-update content height)
+    const gapFromBottom = prev.scrollHeight - el.scrollTop - el.clientHeight
+    if (gapFromBottom < 150) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, highlightTelegramId])
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current
@@ -229,6 +248,7 @@ export default function MessageList({ messages, chatType, highlightTelegramId, o
                 onForward={onForward}
                 isFlaggedSender={!!msg.sender_id && !!flaggedSenderIds?.has(msg.sender_id)}
                 onReportScam={onReportScam}
+                onScamVerdictChange={onScamVerdictChange}
                 onOpenProfile={onOpenProfile}
                 onSendMessage={onSendMessage}
                 onMention={onMention}

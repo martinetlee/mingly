@@ -15,6 +15,7 @@ from backend.secrets import (
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault,
 )
 from backend.api.dependencies import generate_session_token, clear_session_token, require_session_token
+from backend.tasks import spawn
 
 router = APIRouter()
 
@@ -83,9 +84,9 @@ async def do_unlock_vault(req: VaultPasswordRequest):
                 await sync_dialogs(limit=200)
                 await register_event_handlers()
                 # Background: sync remaining dialogs + messages
-                asyncio.create_task(_background_full_sync())
-                asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
-                asyncio.create_task(sync_global_mentions(days=30))
+                spawn(_background_full_sync(), name="auth_background_full_sync")
+                spawn(bulk_sync(n_chats=50, messages_per_chat=30), name="auth_bulk_sync")
+                spawn(sync_global_mentions(days=30), name="auth_mention_sync")
         except Exception:
             pass
     return {"success": True, "session_token": token}
@@ -93,7 +94,10 @@ async def do_unlock_vault(req: VaultPasswordRequest):
 
 @router.post("/vault/reset", dependencies=[Depends(require_session_token)])
 async def do_reset_vault():
+    from backend.api.mcp import clear_mcp_sessions
+
     clear_session_token()
+    clear_mcp_sessions()
     reset_vault()
     return {"success": True}
 
@@ -183,8 +187,8 @@ async def auth_verify_code(req: CodeRequest):
         await persist_session()
         await sync_dialogs(limit=200)
         await register_event_handlers()
-        asyncio.create_task(sync_dialogs())
-        asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+        spawn(sync_dialogs(), name="auth_dialog_sync")
+        spawn(bulk_sync(n_chats=50, messages_per_chat=30), name="auth_bulk_sync")
         me = await get_me()
         return {
             "success": True,
@@ -207,8 +211,8 @@ async def auth_verify_2fa(req: PasswordRequest):
         await persist_session()
         await sync_dialogs(limit=200)
         await register_event_handlers()
-        asyncio.create_task(sync_dialogs())
-        asyncio.create_task(bulk_sync(n_chats=50, messages_per_chat=30))
+        spawn(sync_dialogs(), name="auth_dialog_sync")
+        spawn(bulk_sync(n_chats=50, messages_per_chat=30), name="auth_bulk_sync")
         me = await get_me()
         return {
             "success": True,

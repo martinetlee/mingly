@@ -645,18 +645,28 @@ function MentionsTab() {
     return () => clearTimeout(t)
   }, [groupSearch])
 
+  // Monotonic guard: a WS-triggered refetch (delayed 1500ms below) must not
+  // overwrite the results of a newer filter change that resolved first
+  const mentionsSeqRef = useRef(0)
   const fetchMentions = useCallback(async (opts?: { days?: number; groupName?: string; tagName?: string }) => {
+    const seq = ++mentionsSeqRef.current
     setLoading(true)
     setError('')
     try {
       const data = await getMentions(opts)
+      if (seq !== mentionsSeqRef.current) return
       setGroups(data)
     } catch (e) {
+      if (seq !== mentionsSeqRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load mentions')
     } finally {
-      setLoading(false)
+      if (seq === mentionsSeqRef.current) setLoading(false)
     }
   }, [])
+
+  // Current filters, readable from delayed callbacks without stale closures
+  const filterOptsRef = useRef({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+  filterOptsRef.current = { days, groupName: debouncedGroupSearch, tagName: tagFilter }
 
   // Fetch tags once on mount
   useEffect(() => {
@@ -671,13 +681,15 @@ function MentionsTab() {
   // Live update: re-fetch when a new incoming message arrives (potential mention)
   useWebSocket((evt: WSEvent) => {
     if (evt.type === 'new_message' && !evt.is_outgoing) {
-      // Re-fetch after a short delay so the backend has processed the message
+      // Re-fetch after a short delay so the backend has processed the message.
+      // Read filters from the ref at FIRE time — the user may have changed
+      // them during the delay.
       setTimeout(() => {
-        fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+        fetchMentions(filterOptsRef.current)
       }, 1500)
     }
     if (evt.type === 'bulk_sync_complete' || evt.type === 'chat_synced') {
-      fetchMentions({ days, groupName: debouncedGroupSearch, tagName: tagFilter })
+      fetchMentions(filterOptsRef.current)
     }
   })
 

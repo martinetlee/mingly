@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { ArrowLeft, Globe, Phone, AtSign, MessageSquare, Star, UserPlus, Building2, Plus, X, UserMinus, RotateCcw } from 'lucide-react'
 import type { TelegramProfile, Contact, ContactPosition } from '../api/types'
-import { getProfile, getContactByTelegram, setContactImportantByTelegram, createContact, getPositions, addPosition, updatePosition, removePosition } from '../api/client'
+import { getProfile, getContactByTelegram, setContactImportantByTelegram, createContact, getPositions, addPosition, updatePosition, removePosition, isAbortError } from '../api/client'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard from '../components/PersonCard'
 import ComboInput from '../components/ComboInput'
@@ -21,28 +21,41 @@ export default function Profile() {
     if (!userId) return
     setLoading(true)
     setError(null)
+    // Abort on profile change so a slow response for the previous userId
+    // can't overwrite (or mismatch with) the current profile's data
+    const ac = new AbortController()
     // Support both numeric IDs and @username lookups
     const isUsername = userId.startsWith('@')
     const profileKey = isUsername ? userId : Number(userId)
     const contactKey = isUsername ? NaN : Number(userId)
     Promise.all([
-      getProfile(profileKey),
-      isUsername ? Promise.resolve(null) : getContactByTelegram(contactKey).catch(() => null),
+      getProfile(profileKey, ac.signal),
+      isUsername ? Promise.resolve(null) : getContactByTelegram(contactKey, ac.signal).catch((e) => {
+        if (isAbortError(e)) throw e
+        return null
+      }),
     ])
       .then(([p, c]) => {
         setProfile(p)
         setContact(c)
         // Load positions by telegram_id (works even without a contact record)
         if (p?.id) {
-          getPositions(p.id).then(setPositions).catch(() => setPositions([]))
+          getPositions(p.id, ac.signal).then(setPositions).catch((e) => {
+            if (!isAbortError(e)) setPositions([])
+          })
         }
         // If resolved via username, fetch contact info using the returned numeric ID
         if (isUsername && p?.id) {
-          getContactByTelegram(p.id).then(setContact).catch(() => {})
+          getContactByTelegram(p.id, ac.signal).then(setContact).catch(() => {})
         }
+        setLoading(false)
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false))
+      .catch((e) => {
+        if (isAbortError(e)) return
+        setError(e.message)
+        setLoading(false)
+      })
+    return () => ac.abort()
   }, [userId])
 
   async function handleToggleImportant() {

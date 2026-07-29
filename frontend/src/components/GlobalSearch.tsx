@@ -2,18 +2,18 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2 } from 'lucide-react'
 import type { GlobalSearchResults, TelegramSearchResult } from '../api/types'
-import { globalSearch, telegramSearch, ensureChat } from '../api/client'
+import { globalSearch, telegramSearch, ensureChat, isAbortError } from '../api/client'
 
 // Telegram directory searches cost two RPCs and repeat queries are common —
 // cache results briefly so re-searching the same term renders instantly.
 const TELEGRAM_CACHE_TTL_MS = 3 * 60 * 1000
 const telegramCache = new Map<string, { ts: number; results: TelegramSearchResult[] }>()
 
-async function cachedTelegramSearch(query: string): Promise<TelegramSearchResult[]> {
+async function cachedTelegramSearch(query: string, signal?: AbortSignal): Promise<TelegramSearchResult[]> {
   const key = query.trim().toLowerCase()
   const hit = telegramCache.get(key)
   if (hit && Date.now() - hit.ts < TELEGRAM_CACHE_TTL_MS) return hit.results
-  const data = await telegramSearch(query)
+  const data = await telegramSearch(query, 20, signal)
   telegramCache.set(key, { ts: Date.now(), results: data.telegram_dialogs })
   return data.telegram_dialogs
 }
@@ -140,21 +140,37 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
     setLoading(true)
     setTelegramLoading(true)
 
+    // Abort on cleanup so a slow response for an older query can never
+    // overwrite the results of a newer one
+    const ac = new AbortController()
     const timer = setTimeout(() => {
-      globalSearch(query)
+      globalSearch(query, 20, ac.signal)
         .then((data) => {
           setResults(data)
           setSelectedIdx(0)
+          setLoading(false)
         })
-        .catch(() => setResults(null))
-        .finally(() => setLoading(false))
+        .catch((e) => {
+          if (isAbortError(e)) return
+          setResults(null)
+          setLoading(false)
+        })
 
-      cachedTelegramSearch(query)
-        .then(setTelegramResults)
-        .catch(() => setTelegramResults([]))
-        .finally(() => setTelegramLoading(false))
+      cachedTelegramSearch(query, ac.signal)
+        .then((r) => {
+          setTelegramResults(r)
+          setTelegramLoading(false)
+        })
+        .catch((e) => {
+          if (isAbortError(e)) return
+          setTelegramResults([])
+          setTelegramLoading(false)
+        })
     }, 300)
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(timer)
+      ac.abort()
+    }
   }, [query, open])
 
   // Reset on open

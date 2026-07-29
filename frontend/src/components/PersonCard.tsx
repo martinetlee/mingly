@@ -114,6 +114,9 @@ function useResolvedPerson(
       setPerson(cached)
       return
     }
+    // Guard against telegramId changing (or unmount) before the request
+    // resolves — the old response must not overwrite the new person's data
+    let stale = false
     let req = pendingRequests.get(telegramId)
     if (!req) {
       req = resolvePerson(telegramId)
@@ -122,9 +125,10 @@ function useResolvedPerson(
     req
       .then((data) => {
         personCache.set(telegramId, data)
-        setPerson(data)
+        if (!stale) setPerson(data)
       })
       .catch(() => {
+        if (stale) return
         setPerson({
           telegram_id: telegramId,
           name: String(telegramId),
@@ -143,6 +147,9 @@ function useResolvedPerson(
       .finally(() => {
         pendingRequests.delete(telegramId)
       })
+    return () => {
+      stale = true
+    }
   }, [telegramId, preloaded])
 
   return person

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -5,6 +6,7 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Optional
 from telethon import events
+from telethon.errors import FloodWaitError
 from telethon.tl.types import User, Channel
 from sqlalchemy import select
 
@@ -122,6 +124,21 @@ def _send_native_notification(
 
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(exist_ok=True)
+
+
+async def _get_connected_client():
+    """Return the Telethon client, reconnecting first if the link dropped
+    (laptop sleep, network change). Returns None when no client exists yet."""
+    client = get_client()
+    if client is None:
+        return None
+    if not client.is_connected():
+        try:
+            await client.connect()
+        except Exception:
+            logger.warning("Telegram reconnect failed", exc_info=True)
+            return None
+    return client
 
 
 def _chat_type(entity) -> str:
@@ -363,7 +380,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
                Dialogs are returned most-recent-first by Telegram.
         include_archived: Also scan the archived/contact-requests folder.
     """
-    client = get_client()
+    client = await _get_connected_client()
     if not client:
         return
 
@@ -459,6 +476,14 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
         for chat_id, name, count in chats_with_unread_mentions:
             try:
                 await sync_messages(chat_id, limit=max(100, count * 5))
+            except FloodWaitError as e:
+                # Telegram wants us to back off — hammering the remaining chats
+                # escalates the penalty. Defer them to the next periodic sync.
+                logger.warning(
+                    "Mention sync: FloodWait %ss on chat %s — deferring remaining mention syncs",
+                    e.seconds, chat_id,
+                )
+                break
             except Exception as e:
                 logger.warning("Failed to sync mention chat %s (%s): %s", name, chat_id, e)
 
@@ -605,35 +630,50 @@ def _is_deactivated(entity) -> bool:
 
 async def bulk_sync(n_chats: int = 50, messages_per_chat: int = 30) -> int:
     """Sync messages for the n most recent dialogs. Returns count of chats synced."""
-    client = get_client()
+    client = await _get_connected_client()
     if not client:
         return 0
 
     synced = 0
-    async with AsyncSessionLocal() as db:
-        async for dialog in client.iter_dialogs(limit=n_chats):
-            entity = dialog.entity
-            chat = await crud.upsert_chat(
-                db,
-                telegram_id=dialog.id,
-                name=dialog.name or str(dialog.id),
-                chat_type=_chat_type(entity),
-                username=getattr(entity, "username", None),
-                unread_count=dialog.unread_count,
-                members_count=getattr(entity, "participants_count", None),
-                is_forum=getattr(entity, "forum", False) or False,
-                slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
-                is_deactivated=_is_deactivated(entity),
-            )
-            if chat.is_hidden or chat.is_briefing or chat.is_deactivated:
-                continue
-            try:
-                await sync_messages(dialog.id, limit=messages_per_chat)
-                synced += 1
-                await ws_manager.broadcast({"type": "chat_synced", "chat_id": dialog.id})
-            except Exception as e:
-                logger.warning("bulk_sync: failed to sync chat %s (%s): %s", dialog.name, dialog.id, e)
-                continue
+    try:
+        async with AsyncSessionLocal() as db:
+            async for dialog in client.iter_dialogs(limit=n_chats):
+                entity = dialog.entity
+                chat = await crud.upsert_chat(
+                    db,
+                    telegram_id=dialog.id,
+                    name=dialog.name or str(dialog.id),
+                    chat_type=_chat_type(entity),
+                    username=getattr(entity, "username", None),
+                    unread_count=dialog.unread_count,
+                    members_count=getattr(entity, "participants_count", None),
+                    is_forum=getattr(entity, "forum", False) or False,
+                    slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
+                    is_deactivated=_is_deactivated(entity),
+                )
+                if chat.is_hidden or chat.is_briefing or chat.is_deactivated:
+                    continue
+                try:
+                    await sync_messages(dialog.id, limit=messages_per_chat)
+                    synced += 1
+                    await ws_manager.broadcast({"type": "chat_synced", "chat_id": dialog.id})
+                except FloodWaitError as e:
+                    # Continuing after a flood wait escalates the penalty — stop here.
+                    # Per-chat auto-sync on open covers whatever was left out.
+                    logger.warning(
+                        "bulk_sync: FloodWait %ss on chat %s — stopping early (%d chats synced)",
+                        e.seconds, dialog.id, synced,
+                    )
+                    break
+                except Exception as e:
+                    logger.warning("bulk_sync: failed to sync chat %s (%s): %s", dialog.name, dialog.id, e)
+                    continue
+                # Gentle pacing — 50 back-to-back history fetches trip rate limits
+                await asyncio.sleep(0.3)
+    except FloodWaitError as e:
+        logger.warning("bulk_sync: FloodWait %ss while listing dialogs — stopping (%d chats synced)", e.seconds, synced)
+    except Exception:
+        logger.warning("bulk_sync aborted", exc_info=True)
 
     # Notify frontend that bulk sync is done so pages can refresh
     await ws_manager.broadcast({"type": "bulk_sync_complete", "synced": synced})
@@ -654,9 +694,6 @@ def get_tag_sync_state() -> dict:
 
 
 async def _run_tag_sync(tag_name: str, chat_ids: list[int], messages_per_chat: int) -> None:
-    import asyncio
-    from telethon.errors import FloodWaitError
-
     global _tag_sync_task
     client = get_client()
     synced = 0
@@ -715,8 +752,6 @@ def start_tag_sync(tag_name: str, chat_ids: list[int], messages_per_chat: int = 
 
     Returns the run state; check 'already_running' to distinguish.
     """
-    import asyncio
-
     global _tag_sync_task, _tag_sync_state
     if _tag_sync_task is not None and not _tag_sync_task.done():
         return {**_tag_sync_state, "already_running": True}
@@ -753,10 +788,13 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
             logger.info("scan_unscanned_messages: no messages older than %dh — likely first sync, skipping", max_age_hours)
             return 0
 
-        # Find recent incoming messages with no scam_score
+        # Find recent incoming messages with no scam_score. Messages with a
+        # manual verdict are excluded: dismissing a flag nulls scam_score, and
+        # without this predicate the next scan would re-flag it.
         result = await db.execute(
             select(Message).where(
                 Message.scam_score.is_(None),
+                Message.scam_manual_verdict.is_(None),
                 Message.is_outgoing == False,
                 Message.text.isnot(None),
                 Message.text != "",
@@ -875,15 +913,39 @@ async def _download_photo(client, msg) -> Optional[str]:
         return None
 
 
-async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
-    """Fetch recent messages for a chat and store in DB."""
-    client = get_client()
+_ACTIVE_CHAT_SYNCS: set[int] = set()
+
+
+async def sync_messages(chat_telegram_id: int, limit: int = 50) -> int:
+    """Fetch recent messages for a chat and store in DB.
+
+    Returns the number of local changes (messages added + messages removed),
+    so callers can skip UI notifications when nothing actually changed.
+    """
+    # Every sync trigger (auto-open, manual, bulk, tag, mention) funnels
+    # through here; a second concurrent sync of the same chat only doubles
+    # FloodWait pressure and write contention, so skip it.
+    if chat_telegram_id in _ACTIVE_CHAT_SYNCS:
+        logger.info("sync_messages: chat %s already syncing, skipping", chat_telegram_id)
+        return 0
+    _ACTIVE_CHAT_SYNCS.add(chat_telegram_id)
+    try:
+        return await _sync_messages_inner(chat_telegram_id, limit)
+    finally:
+        _ACTIVE_CHAT_SYNCS.discard(chat_telegram_id)
+
+
+async def _sync_messages_inner(chat_telegram_id: int, limit: int = 50) -> int:
+    client = await _get_connected_client()
     if not client:
-        return
+        return 0
 
     synced_tg_ids: set[int] = set()
     oldest_synced_date = None
+    newest_synced_date = None
     newest_incoming_date = None
+    changed_count = 0
+    deleted_count = 0
 
     async with AsyncSessionLocal() as db:
         async for msg in client.iter_messages(chat_telegram_id, limit=limit):
@@ -894,6 +956,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             msg_date = msg.date.replace(tzinfo=None)
             if oldest_synced_date is None or msg_date < oldest_synced_date:
                 oldest_synced_date = msg_date
+            if newest_synced_date is None or msg_date > newest_synced_date:
+                newest_synced_date = msg_date
             if not msg.out and (newest_incoming_date is None or msg_date > newest_incoming_date):
                 newest_incoming_date = msg_date
 
@@ -911,7 +975,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
             if msg.out:
                 delivery_state = "sent"
 
-            await crud.save_message(
+            saved = await crud.save_message(
                 db,
                 tg_message_id=msg.id,
                 chat_id=chat_telegram_id,
@@ -933,10 +997,15 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 delivery_state=delivery_state,
                 is_edited=bool(msg.edit_date),
             )
+            if saved is not None and getattr(saved, "_change", None):
+                changed_count += 1
 
-        # Delete locally stored messages that were deleted on Telegram
-        # Only within the synced date range to avoid removing older unsynced messages
-        if synced_tg_ids and oldest_synced_date:
+        # Delete locally stored messages that were deleted on Telegram.
+        # Bound the window on BOTH sides: below oldest we didn't fetch those
+        # messages, and at/above newest a message may have arrived live (via the
+        # event handler) after iter_messages snapshotted — deleting it here would
+        # silently drop a just-received message.
+        if synced_tg_ids and oldest_synced_date and newest_synced_date:
             from backend.db.models import Message as MsgModel
             from sqlalchemy import delete as sa_delete
 
@@ -944,6 +1013,7 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 select(MsgModel.tg_message_id).where(
                     MsgModel.chat_id == chat_telegram_id,
                     MsgModel.date >= oldest_synced_date,
+                    MsgModel.date < newest_synced_date,
                 )
             )
             local_ids = {row[0] for row in local_result.fetchall()}
@@ -957,7 +1027,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                     )
                 )
                 await db.commit()
-                logger.info("sync_messages: removed %d deleted messages from chat %s", len(deleted_ids), chat_telegram_id)
+                deleted_count = len(deleted_ids)
+                logger.info("sync_messages: removed %d deleted messages from chat %s", deleted_count, chat_telegram_id)
 
         # Fetch and store pinned message id + content for the chat
         try:
@@ -1008,6 +1079,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                             media_size=_media_size(pmsg),
                             is_edited=bool(pmsg.edit_date),
                         )
+                        if saved is not None and getattr(saved, "_change", None):
+                            changed_count += 1
                 except Exception:
                     pass
         except Exception:
@@ -1022,6 +1095,8 @@ async def sync_messages(chat_telegram_id: int, limit: int = 50) -> None:
                 await crud.mark_workspace_triage(db, chat_telegram_id, newest_incoming_date)
             except Exception:
                 logger.warning("workspace triage stamp failed for chat %s", chat_telegram_id, exc_info=True)
+
+    return changed_count + deleted_count
 
 
 async def register_event_handlers() -> None:
@@ -1087,6 +1162,11 @@ async def register_event_handlers() -> None:
                 delivery_state="sending" if msg.out else "sent",
                 is_edited=bool(msg.edit_date),
             )
+            if saved is None:
+                logger.error(
+                    "Failed to persist incoming message %s in chat %s", msg.id, event.chat_id
+                )
+                return
 
             # Auto-reopen handled catch-up items on new incoming messages
             if not saved.is_outgoing:
@@ -1108,6 +1188,10 @@ async def register_event_handlers() -> None:
                 except Exception:
                     logger.warning("workspace triage stamp failed for chat %s", event.chat_id, exc_info=True)
 
+        # Full serialized message lets the frontend apply the event as a
+        # delta (append + patch chat preview) instead of refetching, which
+        # used to clobber optimistic updates and flicker unread badges.
+        from backend.api.chats import _serialize_msg
         await ws_manager.broadcast({
             "type": "new_message",
             "chat_id": event.chat_id,
@@ -1117,6 +1201,7 @@ async def register_event_handlers() -> None:
             "text": (saved.text or "")[:120],
             "is_tracked": chat.is_tracked,
             "is_outgoing": saved.is_outgoing,
+            "message": _serialize_msg((saved, None, None, None)),
         })
 
         # Run scam detection on incoming messages (fire-and-forget)
@@ -1258,9 +1343,15 @@ async def register_event_handlers() -> None:
                     media_type=None,
                     media_path=None,
                 )
+                if saved is None:
+                    logger.error(
+                        "Raw handler: failed to persist message %s from user %s", event.id, user_id
+                    )
+                    return
 
             # Broadcast to frontend
             from backend.ws.manager import ws_manager
+            from backend.api.chats import _serialize_msg
             await ws_manager.broadcast({
                 "type": "new_message",
                 "chat_id": user_id,
@@ -1270,6 +1361,7 @@ async def register_event_handlers() -> None:
                 "text": (event.message or "")[:120],
                 "is_tracked": False,
                 "is_outgoing": False,
+                "message": _serialize_msg((saved, None, None, None)),
             })
             logger.info("Raw handler: captured message from unknown user %s (%s)", name, user_id)
 

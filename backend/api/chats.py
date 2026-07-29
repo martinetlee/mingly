@@ -8,13 +8,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import utils
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import GetDialogFiltersRequest
 from telethon.tl.types import DialogFilter
 
 logger = logging.getLogger(__name__)
 
 from backend.config import DATA_DIR
-from backend.db.database import get_db
+from backend.db.database import get_db, AsyncSessionLocal
+from backend.db.models import Message
 from backend.db import crud
 from backend.telegram.client import get_client, ensure_connected
 from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract_user_status, _is_deactivated
@@ -59,7 +61,12 @@ async def list_folders():
     client = get_client()
     if not client:
         return []
-    response = await client(GetDialogFiltersRequest())
+    try:
+        await ensure_connected()
+        response = await client(GetDialogFiltersRequest())
+    except Exception as e:
+        logger.warning("Failed to fetch dialog folders: %s", e)
+        return []
     filters = response.filters if hasattr(response, 'filters') else response
     result = []
     for f in filters:
@@ -203,15 +210,10 @@ async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
             is_deactivated=_is_deactivated(entity),
         )
 
-    # Sync messages if not synced yet
-    if chat.last_synced_at is None:
-        try:
-            await sync_messages(telegram_id, limit=50)
-        except ValueError:
-            pass  # Entity not resolvable; return chat without messages
-
-    # Re-fetch to get updated last_synced_at
-    await db.refresh(chat)
+    # No synchronous history sync here — it made chat-open block for many
+    # seconds. Returning immediately lets the pane open now; the first
+    # GET /messages triggers the background auto-sync (with retry/FloodWait
+    # handling) and the pane shows its "Syncing message history…" state.
     return _chat_dict(chat)
 
 
@@ -583,6 +585,18 @@ async def mark_chat_read(telegram_id: int, db: AsyncSession = Depends(get_db)):
     chat = await crud.mark_chat_read(db, telegram_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Sync to Telegram (best-effort). Without this, the periodic dialog sync
+    # restores Telegram's unread count and the badge resurrects within ~2 min.
+    client = get_client()
+    if client:
+        try:
+            await ensure_connected()
+            entity = await client.get_input_entity(telegram_id)
+            await client.send_read_acknowledge(entity)
+        except Exception as e:
+            logger.warning("Failed to sync read state to Telegram: %s", e)
+
     return {"success": True}
 
 
@@ -721,18 +735,24 @@ async def get_messages(
     if anchor_telegram_id is not None:
         offset = await crud.get_offset_for_anchor(db, telegram_id, anchor_telegram_id)
 
-    # Auto-sync on first open — non-blocking (skip hidden chats)
+    # Auto-sync on open — non-blocking (skip hidden chats).
+    # First open (never synced) does a deep fetch; a chat whose last sync is old
+    # gets a lighter refresh so history missed while the app was closed appears.
     if offset == 0:
         chat = await crud.get_chat_by_telegram_id(db, telegram_id)
-        if chat and chat.last_synced_at is None and not chat.is_hidden and not chat.is_briefing:
+        first_sync = chat is not None and chat.last_synced_at is None
+        stale = (
+            chat is not None
+            and chat.last_synced_at is not None
+            and chat.last_synced_at < datetime.utcnow() - timedelta(minutes=15)
+        )
+        if chat and (first_sync or stale) and not chat.is_hidden and not chat.is_briefing:
             import asyncio
 
             async def _bg_sync():
                 from backend.ws.manager import ws_manager
-                from telethon.errors import FloodWaitError
-                log = logging.getLogger(__name__)
 
-                # One in-flight first-sync per chat — reopening the pane must not stack syncs
+                # One in-flight sync per chat — reopening the pane must not stack syncs
                 if telegram_id in _BG_SYNCING:
                     return
                 _BG_SYNCING.add(telegram_id)
@@ -749,27 +769,32 @@ async def get_messages(
                     # a failed sync must never masquerade as "no history".
                     for attempt in range(1, 5):
                         try:
-                            await sync_messages(telegram_id, limit=100)
-                            count = await _local_count()
-                            if count < 5:
-                                # Chat may be full of service messages — try a deeper fetch
-                                await sync_messages(telegram_id, limit=500)
+                            changed = await sync_messages(telegram_id, limit=100 if first_sync else 50)
+                            if first_sync:
                                 count = await _local_count()
-                            if count == 0:
-                                # Sync completed and there is genuinely nothing retrievable
-                                await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
-                            else:
+                                if count < 5:
+                                    # Chat may be full of service messages — try a deeper fetch
+                                    changed += await sync_messages(telegram_id, limit=500)
+                                    count = await _local_count()
+                                if count == 0:
+                                    # Sync completed and there is genuinely nothing retrievable
+                                    await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
+                                else:
+                                    await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
+                            elif changed:
+                                # Refresh sync: only notify when something actually changed,
+                                # so opening an idle chat doesn't flash a pointless reload
                                 await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
                             return
                         except FloodWaitError as e:
-                            log.info("auto-sync chat %s: FloodWait %ss (attempt %d)", telegram_id, e.seconds, attempt)
-                            await asyncio.sleep(min(e.seconds + 2, 120))
+                            logger.info("auto-sync chat %s: FloodWait %ss (attempt %d)", telegram_id, e.seconds, attempt)
+                            await asyncio.sleep(min(e.seconds + 2, 600))
                         except Exception:
-                            log.warning("auto-sync chat %s failed (attempt %d)", telegram_id, attempt, exc_info=True)
+                            logger.warning("auto-sync chat %s failed (attempt %d)", telegram_id, attempt, exc_info=True)
                             await asyncio.sleep(3 * attempt)
                     # Exhausted: stay silent — the pane keeps its syncing state and the
                     # next open of this chat retries (last_synced_at is still NULL)
-                    log.warning("auto-sync chat %s gave up after retries", telegram_id)
+                    logger.warning("auto-sync chat %s gave up after retries", telegram_id)
                 finally:
                     _BG_SYNCING.discard(telegram_id)
 
@@ -847,11 +872,20 @@ async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depen
         raise HTTPException(status_code=404, detail="Chat not found")
     try:
         await sync_messages(telegram_id, limit=min(limit, 200))
+    except FloodWaitError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Telegram rate limit — retry in {e.seconds}s",
+            headers={"Retry-After": str(e.seconds)},
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=422,
             detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({e})",
         )
+    except Exception as e:
+        logger.warning("sync_chat %s failed: %s", telegram_id, e)
+        raise HTTPException(status_code=502, detail=f"Sync failed: {e}")
     from backend.ws.manager import ws_manager
     await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
     return {"status": "ok"}

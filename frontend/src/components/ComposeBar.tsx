@@ -2,9 +2,14 @@ import { useState, useRef, useEffect, useCallback, KeyboardEvent, DragEvent, Cli
 import { Send, X, CornerUpLeft, Pencil, Paperclip, FileIcon, Image, Loader2 } from 'lucide-react'
 import type { Message } from '../api/types'
 
-interface AttachedFile {
+export interface AttachedFile {
   file: File
   preview?: string // data URL for images
+}
+
+export interface ComposeDraft {
+  text: string
+  attachments: AttachedFile[]
 }
 
 interface Props {
@@ -21,6 +26,10 @@ interface Props {
   /** When set, this text is appended to the compose field and the value is cleared via onInsertConsumed */
   insertText?: string | null
   onInsertConsumed?: () => void
+  /** Restore a previously saved draft (used with a per-chat `key` to keep drafts per chat) */
+  initialDraft?: ComposeDraft | null
+  /** Reports every draft change so the parent can persist it across chat switches */
+  onDraftChange?: (draft: ComposeDraft) => void
 }
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB per file
@@ -51,10 +60,12 @@ export default function ComposeBar({
   uploadProgress,
   insertText,
   onInsertConsumed,
+  initialDraft,
+  onDraftChange,
 }: Props) {
-  const [text, setText] = useState('')
+  const [text, setText] = useState(initialDraft?.text ?? '')
   const [sending, setSending] = useState(false)
-  const [attachments, setAttachments] = useState<AttachedFile[]>([])
+  const [attachments, setAttachments] = useState<AttachedFile[]>(initialDraft?.attachments ?? [])
   const [dragOver, setDragOver] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lastTypingSentRef = useRef(0)
@@ -89,14 +100,26 @@ export default function ComposeBar({
     }
   }, [insertText, onInsertConsumed])
 
-  // Clean up preview URLs on unmount
+  // Report draft changes so the parent can persist them across chat switches
+  const onDraftChangeRef = useRef(onDraftChange)
+  onDraftChangeRef.current = onDraftChange
+  useEffect(() => {
+    onDraftChangeRef.current?.({ text, attachments })
+  }, [text, attachments])
+
+  // Clean up preview URLs on unmount — via a ref so we revoke the CURRENT
+  // attachments, not the ones captured on mount. Skipped when a parent
+  // persists drafts (onDraftChange): the previews must survive remount.
+  const attachmentsRef = useRef(attachments)
+  attachmentsRef.current = attachments
   useEffect(() => {
     return () => {
-      for (const att of attachments) {
+      if (onDraftChangeRef.current) return
+      for (const att of attachmentsRef.current) {
         if (att.preview) URL.revokeObjectURL(att.preview)
       }
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   const addFiles = useCallback((fileList: FileList | File[]) => {
     const newFiles: AttachedFile[] = []

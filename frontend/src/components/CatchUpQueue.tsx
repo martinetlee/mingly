@@ -468,9 +468,17 @@ export default function CatchUpQueue({ needsReply, onRefreshDashboard, onBadgeCo
     selectedRef.current?.scrollIntoView({ block: 'nearest' })
   }, [selectedIdx])
 
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current)
+    }
+  }, [])
+
   const showFeedback = (chatId: number, msg: string) => {
     setActionFeedback({ chatId, msg })
-    setTimeout(() => setActionFeedback(null), 2000)
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current)
+    feedbackTimerRef.current = setTimeout(() => setActionFeedback(null), 2000)
   }
 
   const handleSnooze = async (chatId: number, hours: number) => {

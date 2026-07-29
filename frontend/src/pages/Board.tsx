@@ -152,19 +152,26 @@ export default function Board() {
     if (workspaceId != null) localStorage.setItem(`activeBoard:${workspaceId}`, String(boardId))
   }
 
+  // Monotonic guard: rapid board-tab switches must not let an earlier board's
+  // response land last — it would both show the wrong board and snap the
+  // active tab back via the board_id reconciliation below
+  const boardSeqRef = useRef(0)
   const loadBoard = useCallback(async () => {
     if (workspaceId == null) return
+    const seq = ++boardSeqRef.current
     try {
       const data = await getBoard(workspaceId, activeBoardId ?? undefined)
+      if (seq !== boardSeqRef.current) return
       setBoard(data)
       // Backend falls back to the first board when the requested one is gone
       if (data.board_id != null && data.board_id !== activeBoardId) setActiveBoardId(data.board_id)
       setError(null)
       lastLoadRef.current = Date.now()
     } catch (e) {
+      if (seq !== boardSeqRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load board')
     } finally {
-      setLoading(false)
+      if (seq === boardSeqRef.current) setLoading(false)
     }
   }, [workspaceId, activeBoardId])
 

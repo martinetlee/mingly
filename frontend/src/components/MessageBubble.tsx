@@ -27,6 +27,9 @@ interface Props {
   /** Whether the sender is a known flagged scammer */
   isFlaggedSender?: boolean
   onReportScam?: (msg: Message) => void
+  /** Called when the user dismisses a scam flag — the parent should update
+      its messages state (the bubble must not mutate its message prop) */
+  onScamVerdictChange?: (msg: Message, verdict: 'not_scam' | null) => void
   /** Avatar context menu callbacks */
   onOpenProfile?: (senderId: number) => void
   onSendMessage?: (senderId: number) => void
@@ -366,7 +369,7 @@ function ContextMenu({
   )
 }
 
-export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender, onReportScam, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
+export default function MessageBubble({ message, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, showAvatar, isGroupChat, isFlaggedSender, onReportScam, onScamVerdictChange, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
   const isOut = message.is_outgoing
   // Lazy photo download: if media_type is photo but media_url is missing, download it
   const [lazyPhotoUrl, setLazyPhotoUrl] = useState<string | null>(null)
@@ -766,10 +769,13 @@ export default function MessageBubble({ message, showSender, highlighted, onRepl
                       e.stopPropagation()
                       if (message.sender_id) {
                         setScamDismissed(true)
-                        message.scam_manual_verdict = 'not_scam'
+                        // Lift the verdict into parent state instead of
+                        // mutating the prop — a mutation is silently lost on
+                        // the next reload from the server
+                        onScamVerdictChange?.(message, 'not_scam')
                         dismissScamFlag(message.sender_id).catch(() => {
                           setScamDismissed(false)
-                          message.scam_manual_verdict = undefined
+                          onScamVerdictChange?.(message, null)
                         })
                       }
                     }}

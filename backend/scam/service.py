@@ -318,6 +318,8 @@ class ScamDetectionService:
                     .where(
                         Message.chat_id == chat_id,
                         Message.tg_message_id.in_(msg_ids),
+                        # A human verdict always wins over automated scoring
+                        Message.scam_manual_verdict.is_(None),
                     )
                     .values(**values)
                 )
@@ -326,8 +328,10 @@ class ScamDetectionService:
                     chat_id, msg_ids, result.is_scam, result.confidence, update_result.rowcount,
                 )
 
-                # Flag senders (only for scam verdicts)
-                if result.is_scam:
+                # Flag senders (only for scam verdicts). Skip when every
+                # message was protected by a manual verdict — re-flagging a
+                # sender the user explicitly dismissed would undo their call.
+                if result.is_scam and update_result.rowcount > 0:
                     # Find the triggering message (first message from the flagged sender)
                     for sid in sender_ids:
                         existing = await db.execute(

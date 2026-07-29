@@ -43,8 +43,7 @@ async def check_users(req: CheckUsersRequest):
     svc = get_scam_service()
     if not svc:
         raise HTTPException(status_code=503, detail="Scam detection not initialized")
-    import asyncio
-    asyncio.create_task(svc.check_flagged_users(req.telegram_ids))
+    spawn(svc.check_flagged_users(req.telegram_ids), name="scam_check_flagged_users")
     return {"status": "queued", "count": len(req.telegram_ids)}
 
 
@@ -136,8 +135,6 @@ async def check_messages(req: CheckMessagesRequest):
             "type": chat.type or "private" if chat else "private",
         }
 
-    import asyncio
-
     async def _run_check():
         try:
             await svc.check_messages_for_scam(
@@ -150,7 +147,7 @@ async def check_messages(req: CheckMessagesRequest):
         except Exception:
             logger.exception("Scam check task failed for chat %s", req.chat_id)
 
-    asyncio.create_task(_run_check())
+    spawn(_run_check(), name=f"scam_check_chat_{req.chat_id}")
 
     # Analytics
     from backend.scam.analytics import get_analytics_tracker

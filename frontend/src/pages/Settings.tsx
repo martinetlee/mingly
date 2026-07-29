@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type ChangeEvent } from 'react'
-import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations, getShieldCloudSettings, setShieldCloudSettings, getScamDetectionSettings, setScamDetectionSettings, triggerSync } from '../api/client'
+import { getPrefs, setNotifPref as apiSetNotifPref, setBriefingSchedule as apiSetBriefingSchedule, setBriefingTime as apiSetBriefingTime, setBriefingMaxTokens as apiSetBriefingMaxTokens, setCatchUpSummaryInterval as apiSetCatchUpSummaryInterval, setTranslationLanguage as apiSetTranslationLanguage, getTags, createTag, updateTag, deleteTag, getOrganizations, getUserOrganizations, setUserOrganizations, getShieldCloudSettings, setShieldCloudSettings, getScamDetectionSettings, setScamDetectionSettings, triggerSync, getMcpSettings, setMcpEnabled as apiSetMcpEnabled, generateMcpKey, revealMcpKey } from '../api/client'
 import { getSessionToken, notifySessionExpired } from '../api/session'
 import type { OllamaStatus, Tag } from '../api/types'
 import { useTheme } from '../hooks/useTheme'
@@ -467,6 +467,14 @@ export default function Settings() {
   const [userOrgs, setUserOrgs] = useState<string[]>([])
   const [orgSaving, setOrgSaving] = useState(false)
 
+  // MCP server state
+  const [mcpEnabled, setMcpEnabledState] = useState(false)
+  const [mcpKeySet, setMcpKeySet] = useState(false)
+  const [mcpUrl, setMcpUrl] = useState('')
+  const [mcpKey, setMcpKey] = useState<string | null>(null)
+  const [mcpBusy, setMcpBusy] = useState(false)
+  const [mcpMsg, setMcpMsg] = useState<string | null>(null)
+
   // Keyboard shortcuts toggle (localStorage)
   const [shortcutsEnabled, setShortcutsEnabled] = useState(() => localStorage.getItem('shortcuts_enabled') !== 'false')
   const handleShortcutsToggle = useCallback((enabled: boolean) => {
@@ -549,7 +557,65 @@ export default function Settings() {
         setShieldMaxTokens(s.max_tokens || 200)
       })
       .catch(() => {})
+
+    // Load MCP server settings
+    getMcpSettings()
+      .then((s) => {
+        setMcpEnabledState(s.enabled)
+        setMcpKeySet(s.key_set)
+        setMcpUrl(s.url)
+      })
+      .catch(() => {})
   }, [refreshOllamaStatus])
+
+  // ── MCP server handlers ─────────────────────────────────────────────────
+
+  const handleMcpToggle = async (enabled: boolean) => {
+    setMcpBusy(true)
+    setMcpMsg(null)
+    try {
+      const res = await apiSetMcpEnabled(enabled)
+      setMcpEnabledState(res.enabled)
+      setMcpKeySet(res.key_set)
+      if (res.enabled && !res.key_set) {
+        setMcpMsg('Generate an access key so clients can connect.')
+      }
+    } catch (e) {
+      setMcpMsg(e instanceof Error ? e.message : 'Failed to update MCP setting')
+    } finally {
+      setMcpBusy(false)
+    }
+  }
+
+  const handleMcpGenerateKey = async () => {
+    if (mcpKeySet && !window.confirm('Regenerating the key will disconnect all existing MCP clients. Continue?')) {
+      return
+    }
+    setMcpBusy(true)
+    setMcpMsg(null)
+    try {
+      const { key } = await generateMcpKey()
+      setMcpKey(key)
+      setMcpKeySet(true)
+    } catch (e) {
+      setMcpMsg(e instanceof Error ? e.message : 'Failed to generate key')
+    } finally {
+      setMcpBusy(false)
+    }
+  }
+
+  const handleMcpRevealKey = async () => {
+    setMcpBusy(true)
+    setMcpMsg(null)
+    try {
+      const { key } = await revealMcpKey()
+      setMcpKey(key)
+    } catch (e) {
+      setMcpMsg(e instanceof Error ? e.message : 'Failed to reveal key')
+    } finally {
+      setMcpBusy(false)
+    }
+  }
 
   // ── Orchestrator selection ──────────────────────────────────────────────
 
@@ -1256,6 +1322,115 @@ export default function Settings() {
                     <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${shortcutsEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
                   </button>
                 </label>
+              </div>
+            </section>
+
+            {/* ── MCP Server ── */}
+            <section className="mt-8 max-w-xl">
+              <h2 className="mb-1 text-sm font-medium text-slate-300">MCP Server</h2>
+              <p className="mb-4 text-xs text-slate-400">
+                Let external AI tools (Claude Code, other MCP clients) read your chats, messages, tags,
+                contacts, and organizations. Read-only, local-only, and active only while Mingly is
+                running and unlocked.
+              </p>
+              <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-800 p-4">
+                <label className="flex items-center justify-between gap-3 cursor-pointer">
+                  <div>
+                    <p className="text-sm text-slate-200">Enable MCP server</p>
+                    <p className="text-xs text-slate-400 mt-0.5">Off by default. Requires an access key.</p>
+                  </div>
+                  <button
+                    role="switch"
+                    aria-checked={mcpEnabled}
+                    disabled={mcpBusy}
+                    onClick={() => handleMcpToggle(!mcpEnabled)}
+                    className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors ${mcpEnabled ? 'bg-emerald-500' : 'bg-slate-600'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${mcpEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </button>
+                </label>
+
+                {mcpEnabled && (
+                  <div className="mt-4 space-y-3 border-t border-slate-700 pt-4">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-slate-400">Server URL</label>
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 truncate rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs text-slate-300">{mcpUrl}</code>
+                        <button
+                          onClick={() => navigator.clipboard.writeText(mcpUrl)}
+                          className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        The port can change between launches if the default is taken — re-check this URL after restarting Mingly.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-slate-400">Access key</label>
+                      {mcpKey ? (
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 truncate rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs text-emerald-300">{mcpKey}</code>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(mcpKey)}
+                            className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600"
+                          >
+                            Copy
+                          </button>
+                          <button
+                            onClick={() => setMcpKey(null)}
+                            className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600"
+                          >
+                            Hide
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className="flex-1 text-xs text-slate-400">
+                            {mcpKeySet ? 'A key is set (stored encrypted in the vault).' : 'No key generated yet.'}
+                          </span>
+                          {mcpKeySet && (
+                            <button
+                              onClick={handleMcpRevealKey}
+                              disabled={mcpBusy}
+                              className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600 disabled:opacity-50"
+                            >
+                              Reveal
+                            </button>
+                          )}
+                          <button
+                            onClick={handleMcpGenerateKey}
+                            disabled={mcpBusy}
+                            className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                          >
+                            {mcpKeySet ? 'Regenerate' : 'Generate key'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {mcpKeySet && (
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-slate-400">Connect Claude Code</label>
+                        <div className="flex items-start gap-2">
+                          <code className="flex-1 break-all rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-[11px] leading-relaxed text-slate-300">
+                            {`claude mcp add --transport http mingly ${mcpUrl} --header "Authorization: Bearer <key>"`}
+                          </code>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(`claude mcp add --transport http mingly ${mcpUrl} --header "Authorization: Bearer ${mcpKey ?? '<key>'}"`)}
+                            className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {mcpMsg && <p className="text-xs text-amber-400">{mcpMsg}</p>}
+                  </div>
+                )}
               </div>
             </section>
           </>

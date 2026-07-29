@@ -10,7 +10,7 @@ import pytest
 
 # Mock all heavy transitive dependencies before importing sync.py
 for mod_name in [
-    "telethon", "telethon.events", "telethon.tl", "telethon.tl.types",
+    "telethon", "telethon.events", "telethon.errors", "telethon.tl", "telethon.tl.types",
     "telethon.sessions", "telethon.extensions", "telethon.extensions.html",
     "cryptography", "cryptography.fernet", "cryptography.hazmat",
     "cryptography.hazmat.bindings", "cryptography.hazmat.bindings._rust",

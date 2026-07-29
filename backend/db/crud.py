@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import select, delete, update, desc, asc, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
@@ -441,7 +442,7 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
         if kwargs.get("text_html") and kwargs["text_html"] != msg.text_html:
             msg.text_html = kwargs["text_html"]
             updated = True
-        if kwargs.get("reactions_json"):
+        if kwargs.get("reactions_json") and kwargs["reactions_json"] != msg.reactions_json:
             msg.reactions_json = kwargs["reactions_json"]
             updated = True
         if "reply_to_tg_message_id" in kwargs and kwargs["reply_to_tg_message_id"] is not None and msg.reply_to_tg_message_id is None:
@@ -456,7 +457,7 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
         if kwargs.get("grouped_id") and not msg.grouped_id:
             msg.grouped_id = kwargs["grouped_id"]
             updated = True
-        if "delivery_state" in kwargs and kwargs["delivery_state"]:
+        if "delivery_state" in kwargs and kwargs["delivery_state"] and kwargs["delivery_state"] != msg.delivery_state:
             msg.delivery_state = kwargs["delivery_state"]
             updated = True
         if "is_edited" in kwargs and kwargs["is_edited"] and not msg.is_edited:
@@ -465,24 +466,36 @@ async def save_message(db: AsyncSession, **kwargs) -> Message:
         if updated:
             await db.commit()
             await db.refresh(msg)
+        # Transient marker (not persisted) so sync can tell whether this call
+        # actually changed anything — row counts miss in-place updates
+        msg._change = "updated" if updated else None
         return msg
 
     try:
         msg = Message(**kwargs)
         db.add(msg)
-        # Update cached last message fields on the chat
+        # Update cached last message fields on the chat. Conditional UPDATE so
+        # two concurrent inserts can't leave the older message as the preview.
         msg_date = kwargs.get("date")
         if msg_date and kwargs.get("chat_id"):
-            chat = await get_chat_by_telegram_id(db, kwargs["chat_id"])
-            if chat and (not chat.last_activity_at or msg_date > chat.last_activity_at):
-                chat.last_activity_at = msg_date
-                chat.last_message_text = kwargs.get("text")
-                chat.last_message_sender = kwargs.get("sender_name")
-                chat.last_message_date = msg_date
+            await db.execute(
+                update(Chat)
+                .where(
+                    Chat.telegram_id == kwargs["chat_id"],
+                    or_(Chat.last_activity_at.is_(None), Chat.last_activity_at < msg_date),
+                )
+                .values(
+                    last_activity_at=msg_date,
+                    last_message_text=kwargs.get("text"),
+                    last_message_sender=kwargs.get("sender_name"),
+                    last_message_date=msg_date,
+                )
+            )
         await db.commit()
         await db.refresh(msg)
+        msg._change = "created"
         return msg
-    except Exception:
+    except IntegrityError:
         await db.rollback()
         # Lost a race — fetch the row the other writer inserted
         result = await db.execute(

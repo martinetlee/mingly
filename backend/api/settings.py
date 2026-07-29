@@ -26,8 +26,13 @@ def _load_prefs() -> dict:
 
 
 def _save_prefs(data: dict) -> None:
-    _PREFS_FILE.write_text(json.dumps(data))
-    os.chmod(_PREFS_FILE, 0o600)
+    # Atomic replace so a crash mid-write can't leave a truncated prefs file.
+    # NOTE: callers must not await between _load_prefs() and _save_prefs() —
+    # the single event loop is what keeps read-modify-write cycles atomic.
+    tmp = _PREFS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, _PREFS_FILE)
 
 
 def get_notif_pref() -> str:
@@ -403,6 +408,75 @@ async def set_shield_cloud(req: ShieldCloudSettingsRequest):
         )
 
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# MCP server settings
+# ---------------------------------------------------------------------------
+
+def get_mcp_enabled() -> bool:
+    """Whether the MCP endpoint should accept requests (default off)."""
+    return bool(_load_prefs().get("mcp_enabled", False))
+
+
+class McpSettingsRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/prefs/mcp")
+async def get_mcp_settings():
+    """MCP server status: enabled flag, whether a key exists, and the live URL."""
+    from backend.config import API_PORT
+    from backend.secrets import get_secret, vault_status
+
+    return {
+        "enabled": get_mcp_enabled(),
+        "key_set": get_secret("mcp_api_key") is not None,
+        "url": f"http://127.0.0.1:{API_PORT}/mcp",
+        "vault_unlocked": vault_status() == "unlocked",
+    }
+
+
+@router.post("/prefs/mcp")
+async def set_mcp_settings(req: McpSettingsRequest):
+    from backend.secrets import get_secret
+
+    prefs = _load_prefs()
+    prefs["mcp_enabled"] = req.enabled
+    _save_prefs(prefs)
+    return {
+        "success": True,
+        "enabled": req.enabled,
+        "key_set": get_secret("mcp_api_key") is not None,
+    }
+
+
+@router.post("/prefs/mcp/generate-key")
+async def generate_mcp_key():
+    """Create (or rotate) the MCP bearer key. Any connected clients are cut off."""
+    import secrets as pysecrets
+
+    from fastapi import HTTPException
+    from backend.secrets import save_secret, vault_status
+
+    if vault_status() != "unlocked":
+        raise HTTPException(status_code=409, detail="Vault must be unlocked to manage the MCP key")
+    key = pysecrets.token_urlsafe(32)
+    save_secret("mcp_api_key", key)
+    return {"key": key}
+
+
+@router.post("/prefs/mcp/reveal-key")
+async def reveal_mcp_key():
+    from fastapi import HTTPException
+    from backend.secrets import get_secret, vault_status
+
+    if vault_status() != "unlocked":
+        raise HTTPException(status_code=409, detail="Vault must be unlocked to reveal the MCP key")
+    key = get_secret("mcp_api_key")
+    if key is None:
+        raise HTTPException(status_code=404, detail="No MCP key has been generated")
+    return {"key": key}
 
 
 def _reconfigure_scam_service(prefs: dict) -> None:

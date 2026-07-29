@@ -84,6 +84,7 @@ export default function Shield() {
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null) // "chatId-msgId"
   const [scannedPage, setScannedPage] = useState(1)
   const scannedPageRef = useRef(1)
+  const activeFiltersRef = useRef<{ sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string } | undefined>(undefined)
   const [scannedTotal, setScannedTotal] = useState(0)
   const PAGE_SIZE = 200
 
@@ -163,17 +164,24 @@ export default function Shield() {
       .finally(() => setLoadingFlags(false))
   }, [])
 
+  // Monotonic guard: rapid filter/page switches (or a WS-triggered reload
+  // racing a user click) must resolve to the LATEST request, not the slowest
+  const scanSeqRef = useRef(0)
   const loadScanned = useCallback((page: number = 1, filters?: { sender_id?: number; chat_id?: number; min_members?: number; verdict_filter?: string }) => {
+    const seq = ++scanSeqRef.current
     setLoadingScanned(true)
     getScannedMessages(page, PAGE_SIZE, filters)
       .then((data) => {
+        if (seq !== scanSeqRef.current) return
         setScanned(data.messages)
         setScannedTotal(data.total)
         setScannedPage(data.page)
         scannedPageRef.current = data.page
       })
       .catch(() => {})
-      .finally(() => setLoadingScanned(false))
+      .finally(() => {
+        if (seq === scanSeqRef.current) setLoadingScanned(false)
+      })
   }, [])
 
   const loadUnmarked = useCallback(() => {
@@ -221,37 +229,33 @@ export default function Shield() {
       .finally(() => setLoadingSyncStats(false))
   }, [loadFlags, loadScanned, loadReports])
 
+  const clearRescanSpinners = useCallback((msgIds: number[] | undefined) => {
+    if (!msgIds) return
+    setRescanning(prev => {
+      const next = new Set(prev)
+      for (const key of prev) {
+        const tgId = parseInt(key.split('-')[1])
+        if (msgIds.includes(tgId)) next.delete(key)
+      }
+      return next
+    })
+  }, [])
+
   useWebSocket(useCallback((event: WSEvent) => {
     if (event.type === 'scam_users_flagged' || event.type === 'scam_detected') {
       loadFlags()
-      loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined)
-      // Clear rescanning spinners for completed messages
-      const msgIds = (event as any).message_ids as number[] | undefined
-      if (msgIds) {
-        setRescanning(prev => {
-          const next = new Set(prev)
-          for (const key of prev) {
-            const tgId = parseInt(key.split('-')[1])
-            if (msgIds.includes(tgId)) next.delete(key)
-          }
-          return next
-        })
-      }
+      // Reload with ALL active filters (not just the verdict), so a WS event
+      // doesn't silently replace a filtered view with an unfiltered one
+      loadScanned(scannedPageRef.current, activeFiltersRef.current)
+      clearRescanSpinners((event as any).message_ids as number[] | undefined)
     } else if (event.type === 'scam_check_safe') {
-      loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined)
-      const msgIds = (event as any).message_ids as number[] | undefined
-      if (msgIds) {
-        setRescanning(prev => {
-          const next = new Set(prev)
-          for (const key of prev) {
-            const tgId = parseInt(key.split('-')[1])
-            if (msgIds.includes(tgId)) next.delete(key)
-          }
-          return next
-        })
-      }
+      loadScanned(scannedPageRef.current, activeFiltersRef.current)
+      clearRescanSpinners((event as any).message_ids as number[] | undefined)
+    } else if (event.type === 'scam_check_error') {
+      // Failed scans must clear their spinners too, or they spin forever
+      clearRescanSpinners((event as any).message_ids as number[] | undefined)
     }
-  }, [loadFlags, loadScanned]))
+  }, [loadFlags, loadScanned, clearRescanSpinners]))
 
   const handleDismissFlag = async (telegramId: number) => {
     setFlags((prev) => prev.filter((f) => f.telegram_id !== telegramId))
@@ -270,10 +274,21 @@ export default function Shield() {
   const handleRescan = async (chatId: number, tgMessageId: number) => {
     const key = `${chatId}-${tgMessageId}`
     setRescanning(prev => new Set(prev).add(key))
+    const clearKey = () => setRescanning(prev => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+    // Fallback: if no scam_detected/safe/error WS event ever arrives (backend
+    // died mid-scan), don't leave the spinner running forever
+    setTimeout(clearKey, 60_000)
     try {
       await checkMessagesForScam(chatId, [tgMessageId])
       // Result arrives via WebSocket which triggers loadScanned
-    } catch { /* ignore */ }
+    } catch {
+      clearKey()
+    }
   }
 
   const goToMessage = (chatId: number, messageId: number) => {
@@ -342,6 +357,9 @@ export default function Shield() {
     if (scanFilter !== 'all') f.verdict_filter = scanFilter
     return Object.keys(f).length ? f : undefined
   }
+  // Kept current every render so the WS handler (a stable closure) always
+  // reloads with the filters the user is actually looking at
+  activeFiltersRef.current = getActiveFilters()
 
   const filteredScanned = scanned  // filtering is now server-side
 
@@ -668,7 +686,7 @@ export default function Shield() {
                     try {
                       const r = await triggerMassScan()
                       setMassScanResult(`${r.messages_queued} messages queued`)
-                      setTimeout(() => loadScanned(scannedPageRef.current, scanFilterRef.current !== 'all' ? { verdict_filter: scanFilterRef.current } : undefined), 5000)
+                      setTimeout(() => loadScanned(scannedPageRef.current, activeFiltersRef.current), 5000)
                     } catch { setMassScanResult('Failed') }
                     finally { setMassScanning(false) }
                   }}

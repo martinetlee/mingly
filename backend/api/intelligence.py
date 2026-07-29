@@ -581,7 +581,7 @@ async def _persist_tool_trace(conversation_id: Optional[int], trace: list[str]) 
         logging.getLogger(__name__).warning("Failed to persist tool trace", exc_info=True)
 
 
-async def _run_agent(messages_in: list[dict], db: AsyncSession, conversation_id: Optional[int] = None):
+async def _run_agent(messages_in: list[dict], conversation_id: Optional[int] = None):
     """
     Agentic loop:
       1. Call LLM with tools (non-streaming).
@@ -662,7 +662,11 @@ async def _run_agent(messages_in: list[dict], db: AsyncSession, conversation_id:
 
                 yield _sse("tool_call", {"name": tool_name, "args": tool_args})
 
-                result = await execute_tool(tool_name, tool_args, db)
+                # Fresh short-lived session per tool call: holding one session
+                # across the multi-round LLM loop would keep a SQLite read
+                # transaction open for minutes, blocking every writer.
+                async with AsyncSessionLocal() as tool_db:
+                    result = await execute_tool(tool_name, tool_args, tool_db)
 
                 yield _sse("tool_result", {"name": tool_name, "content": result[:500]})
 
@@ -831,8 +835,12 @@ async def intelligence_chat(
     else:
         messages_in = []
 
+    # Release the request session's read transaction before streaming begins;
+    # the agent loop opens its own short-lived sessions per tool call.
+    await db.commit()
+
     async def generate():
-        async for chunk in _run_agent(messages_in, db, conversation_id=req.conversation_id):
+        async for chunk in _run_agent(messages_in, conversation_id=req.conversation_id):
             yield chunk
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1247,8 +1255,11 @@ async def _summarize_important_contact(
 async def intelligence_briefing(
     request: Request,
     days: int = 1,
-    db: AsyncSession = Depends(get_db),
 ):
+    # No request-scoped DB session here: the stream runs for minutes and a
+    # session held across the LLM calls would keep a SQLite read transaction
+    # open the whole time, blocking every writer (incoming messages included).
+    # Each read below opens its own short-lived session instead.
     """
     Generate summaries for all tracked and briefing chats.
     Streams SSE events:
@@ -1281,10 +1292,11 @@ async def intelligence_briefing(
         watcher = asyncio.create_task(_watch_disconnect())
 
         try:
-            tracked = await crud.get_tracked_chats(db)
-            briefing = await crud.get_briefing_chats(db)
-            all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
-            important_contacts = await crud.get_important_contacts(db)
+            async with AsyncSessionLocal() as read_db:
+                tracked = await crud.get_tracked_chats(read_db)
+                briefing = await crud.get_briefing_chats(read_db)
+                all_chats = [("tracked", c) for c in tracked] + [("briefing", c) for c in briefing]
+                important_contacts = await crud.get_important_contacts(read_db)
 
             yield _sse("start", {"total": len(all_chats) + len(important_contacts)})
 
@@ -1297,7 +1309,8 @@ async def intelligence_briefing(
                         break
                     yield _sse("progress", {"current": idx + 1, "chat_name": chat.name})
 
-                    msgs = await crud.get_messages_since(db, chat.telegram_id, since, limit=200)
+                    async with AsyncSessionLocal() as read_db:
+                        msgs = await crud.get_messages_since(read_db, chat.telegram_id, since, limit=200)
                     if not msgs:
                         entry = {
                             "chat_id": chat.telegram_id,
@@ -1337,7 +1350,10 @@ async def intelligence_briefing(
                     # Resolve org context for senders in this chat
                     from backend.org_context import get_org_context_for_senders
                     chat_senders = list({m[0].sender_name for m in msgs if m[0].sender_name and not m[0].is_outgoing})
-                    chat_org_ctx = await get_org_context_for_senders(db, chat_senders) if chat_senders else None
+                    chat_org_ctx = None
+                    if chat_senders:
+                        async with AsyncSessionLocal() as read_db:
+                            chat_org_ctx = await get_org_context_for_senders(read_db, chat_senders)
 
                     summary, source_ids = "", []
                     async for event_type, data in _summarize_chat(
@@ -1380,9 +1396,10 @@ async def intelligence_briefing(
                     )
                     yield _sse("progress", {"current": base_idx + idx + 1, "chat_name": contact_name})
 
-                    rows = await crud.get_messages_from_sender_since(
-                        db, contact.telegram_id, since, limit=100
-                    )
+                    async with AsyncSessionLocal() as read_db:
+                        rows = await crud.get_messages_from_sender_since(
+                            read_db, contact.telegram_id, since, limit=100
+                        )
                     if not rows:
                         entry = {
                             "chat_id": contact.telegram_id,
@@ -1423,7 +1440,8 @@ async def intelligence_briefing(
                     messages_text = "\n".join(lines[-80:])
                     # Resolve org context for this contact
                     from backend.org_context import get_org_context_for_contact
-                    contact_org_ctx = await get_org_context_for_contact(db, contact_name)
+                    async with AsyncSessionLocal() as read_db:
+                        contact_org_ctx = await get_org_context_for_contact(read_db, contact_name)
 
                     summary, source_ids = "", []
                     async for event_type, data in _summarize_important_contact(
@@ -1604,6 +1622,9 @@ async def regenerate_briefing_entry(
                         _org_ctx = await _get_org_ctx(db, _senders) if _senders else None
 
                         source_ids: list[int] = []
+                        # Release the read transaction before the LLM stream —
+                        # holding it blocks SQLite writers for the duration.
+                        await db.commit()
                         async with httpx.AsyncClient(timeout=180.0) as client:
                             async for event_type, data in _summarize_chat(
                                 client,
@@ -1653,6 +1674,9 @@ async def regenerate_briefing_entry(
                         _contact_org_ctx = await _get_contact_ctx(db, entry.chat_name)
 
                         source_ids: list[int] = []
+                        # Release the read transaction before the LLM stream —
+                        # holding it blocks SQLite writers for the duration.
+                        await db.commit()
                         async with httpx.AsyncClient(timeout=180.0) as client:
                             async for event_type, data in _summarize_important_contact(
                                 client,
@@ -1685,10 +1709,17 @@ async def regenerate_briefing_entry(
                 yield _sse("cancelled", {"entry_id": entry.id})
                 return
 
-            entry.summary = summary
-            entry.sources_json = json.dumps(sources) if sources else None
-            await db.commit()
-            await db.refresh(entry)
+            # Write in a fresh session — the request session's transaction was
+            # released before the LLM stream and shouldn't be reused here.
+            async with AsyncSessionLocal() as write_db:
+                res = await write_db.execute(
+                    select(BriefingEntry).where(BriefingEntry.id == entry_id)
+                )
+                fresh_entry = res.scalar_one_or_none()
+                if fresh_entry:
+                    fresh_entry.summary = summary
+                    fresh_entry.sources_json = json.dumps(sources) if sources else None
+                    await write_db.commit()
 
             yield _sse(
                 "done",
@@ -1699,7 +1730,7 @@ async def regenerate_briefing_entry(
                         "chat_id": entry.chat_id,
                         "chat_name": entry.chat_name,
                         "category": entry.category,
-                        "summary": entry.summary,
+                        "summary": summary,
                         "sources": sources,
                     }
                 },

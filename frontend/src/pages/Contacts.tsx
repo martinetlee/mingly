@@ -105,25 +105,33 @@ export default function Contacts() {
     }
   }
 
+  // Monotonic guard: rapid contact switches must not let an older response
+  // land in the newer contact's message pane
+  const loadSeqRef = useRef(0)
+
   // Load messages for selected contact
   const loadMessages = useCallback(async (contact: Contact) => {
+    const seq = ++loadSeqRef.current
     setLoadingMessages(true)
     setMessageOffset(0)
     try {
       const data = await getMessages(contact.telegram_id, MSG_LIMIT, 0)
+      if (seq !== loadSeqRef.current) return
       setMessages(data)
       setHasMore(data.length === MSG_LIMIT)
     } finally {
-      setLoadingMessages(false)
+      if (seq === loadSeqRef.current) setLoadingMessages(false)
     }
   }, [])
 
   const loadMoreMessages = useCallback(async () => {
     if (!selected || loadingMore) return
+    const seq = loadSeqRef.current
     setLoadingMore(true)
     const nextOffset = messageOffset + MSG_LIMIT
     try {
       const data = await getMessages(selected.telegram_id, MSG_LIMIT, nextOffset)
+      if (seq !== loadSeqRef.current) return
       setMessages((prev) => [...data, ...prev])
       setMessageOffset(nextOffset)
       setHasMore(data.length === MSG_LIMIT)

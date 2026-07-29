@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import socket
 import threading
 import time
@@ -15,6 +16,7 @@ from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
 from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
 from backend.scam.pipeline import init_pipeline_manager
 from backend.scam.service import init_scam_service, get_scam_service
+from backend.tasks import spawn
 
 app = create_app()
 
@@ -55,7 +57,7 @@ async def on_startup():
             if cloud_sync_mgr.is_configured:
                 await cloud_sync_mgr.sync()
 
-    asyncio.create_task(_cloud_sync_loop())
+    spawn(_cloud_sync_loop(), name="cloud_sync_loop")
 
     from backend.api.settings import get_scam_detection_settings
     scam_settings = get_scam_detection_settings()
@@ -68,13 +70,18 @@ async def on_startup():
         max_tokens = scam_settings.get("max_tokens", 200)
         scam_client = LocalPipelineClient(pipeline_mgr.get_config(), max_tokens=max_tokens)
     scam_svc = init_scam_service(scam_client)
-    asyncio.create_task(scam_svc.resume_pending_requests())
+    spawn(scam_svc.resume_pending_requests(), name="resume_pending_scam_requests")
 
     if not has_credentials():
         return
     authenticated = await init_client()
     if authenticated:
-        await sync_dialogs()
+        try:
+            await sync_dialogs()
+        except Exception:
+            # Never let a rate limit or network blip at launch kill startup —
+            # the periodic dialog sync below covers the gap.
+            logging.getLogger(__name__).warning("Startup dialog sync failed", exc_info=True)
         await register_event_handlers()
         # Catch up on updates missed while disconnected (must be after handlers are registered)
         from backend.telegram.client import get_client
@@ -88,8 +95,8 @@ async def on_startup():
             await bulk_sync(n_chats=50, messages_per_chat=30)
             await scan_unscanned_messages()
 
-        asyncio.create_task(_sync_then_scan())
-        asyncio.create_task(sync_global_mentions(days=30))
+        spawn(_sync_then_scan(), name="startup_sync_then_scan")
+        spawn(sync_global_mentions(days=30), name="startup_mention_sync")
 
         # Periodic dialog re-sync to catch missed messages/chats + contact requests
         async def _periodic_dialog_sync():
@@ -99,7 +106,7 @@ async def on_startup():
                     await sync_dialogs(limit=100, include_archived=True)
                 except Exception:
                     pass
-        asyncio.create_task(_periodic_dialog_sync())
+        spawn(_periodic_dialog_sync(), name="periodic_dialog_sync")
 
 
 if __name__ == "__main__":

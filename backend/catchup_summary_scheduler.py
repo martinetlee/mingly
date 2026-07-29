@@ -239,6 +239,10 @@ async def generate_summary_for_chat(db, chat_telegram_id: int) -> dict:
     sender_names = list({m["sender_name"] for m in summary_messages if m.get("sender_name")})
     org_context = await get_org_context_for_senders(db, sender_names) if sender_names else None
 
+    # All reads are done — release the transaction before the (slow) LLM call
+    # so it doesn't hold a SQLite read lock against concurrent writers.
+    await db.commit()
+
     summary_text = await _llm_summarize(chat_name, summary_messages, org_context=org_context) if summary_messages else None
 
     if not summary_text:
@@ -272,15 +276,18 @@ async def generate_all_summaries(chat_ids: Optional[List[int]] = None) -> int:
     from backend.db.models import CatchUpItem
 
     count = 0
-    async with AsyncSessionLocal() as db:
-        if chat_ids is None:
-            # Fall back to chats with active catch-up items (used by scheduler)
+    if chat_ids is None:
+        # Fall back to chats with active catch-up items (used by scheduler)
+        async with AsyncSessionLocal() as db:
             items_q = select(CatchUpItem.chat_telegram_id).where(
                 CatchUpItem.status.in_(["pending", "snoozed"])
             )
             chat_ids = list((await db.execute(items_q)).scalars().all())
 
-        for chat_id in chat_ids:
+    # One fresh session per chat: a failure (e.g. duplicate insert from a
+    # concurrent run) can only poison its own session, not the whole batch.
+    for chat_id in chat_ids:
+        async with AsyncSessionLocal() as db:
             try:
                 result = await generate_summary_for_chat(db, chat_id)
 

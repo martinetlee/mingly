@@ -25,6 +25,7 @@ from backend.llm.config import (
     save_registry_config,
 )
 from backend.llm.registry import get_registry
+from backend.tasks import spawn
 from backend.llm.ollama import OllamaProvider
 
 router = APIRouter()
@@ -344,7 +345,11 @@ async def install_ollama():
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"] = str(e)
 
-    asyncio.create_task(_download_task())
+    def _mark_failed(exc: BaseException) -> None:
+        _jobs[job_id]["status"] = "error"
+        _jobs[job_id]["error"] = str(exc)
+
+    spawn(_download_task(), name=f"ollama_download_{job_id}", on_error=_mark_failed)
     return {"job_id": job_id}
 
 
@@ -494,7 +499,11 @@ async def start_pull(req: PullRequest):
         else:
             _jobs[job_id]["status"] = "done"
 
-    asyncio.create_task(_pull_task())
+    def _mark_failed(exc: BaseException) -> None:
+        _jobs[job_id]["status"] = "error"
+        _jobs[job_id]["error"] = str(exc)
+
+    spawn(_pull_task(), name=f"ollama_pull_{job_id}", on_error=_mark_failed)
     return {"job_id": job_id}
 
 

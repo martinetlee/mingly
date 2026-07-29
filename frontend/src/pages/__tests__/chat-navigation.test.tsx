@@ -11,7 +11,7 @@
  *    counter deterministically triggers the processor.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import type { Chat } from '../../api/types'
 
@@ -43,6 +43,7 @@ const chatPolygon = makeChat(-100222, 'Polygon <> ETHTaipei 2024')
 
 const getChats = vi.fn(async () => [chatAztec, chatPolygon])
 const getMessages = vi.fn(async () => [])
+const ensureChat = vi.fn(async (): Promise<Chat | null> => null)
 
 vi.mock('../../api/client', () => {
   const resolve = (value: unknown = null) => vi.fn(async () => value)
@@ -64,7 +65,7 @@ vi.mock('../../api/client', () => {
     searchChatsLocal: resolve({ local: [] }),
     searchChatsTelegram: resolve([]),
     searchMessagesGlobal: resolve([]),
-    ensureChat: resolve(null),
+    ensureChat: (...args: unknown[]) => ensureChat(...(args as [])),
     syncChat: resolve(null),
     sendMessage: resolve(null),
     editMessage: resolve(null),
@@ -133,7 +134,10 @@ function renderChats(initialEntry: string) {
 
 beforeEach(() => {
   getChats.mockClear()
+  getChats.mockImplementation(async () => [chatAztec, chatPolygon])
   getMessages.mockClear()
+  ensureChat.mockClear()
+  ensureChat.mockImplementation(async () => null)
 })
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -187,6 +191,87 @@ describe('?chatId= navigation', () => {
         chatPolygon.telegram_id, expect.anything(), expect.anything(), undefined,
       )
     })
+  })
+
+  // Watches every committed DOM frame for the empty-state text. Inspects
+  // mutation records (not just final DOM) so a frame that is added and removed
+  // between observer callbacks is still caught.
+  const EMPTY_STATE = 'Select a chat to start'
+  const watchFlash = (container: HTMLElement) => {
+    const state = { flashed: false }
+    const checkNow = () => {
+      if (container.textContent?.includes(EMPTY_STATE)) state.flashed = true
+    }
+    const obs = new MutationObserver((records) => {
+      for (const rec of records) {
+        rec.addedNodes.forEach((node) => {
+          if (node.textContent?.includes(EMPTY_STATE)) state.flashed = true
+        })
+      }
+      checkNow()
+    })
+    obs.observe(container, { subtree: true, childList: true, characterData: true })
+    checkNow()
+    return {
+      stop: () => { checkNow(); obs.disconnect(); return state.flashed },
+    }
+  }
+
+  it('never flashes "Select a chat to start" while navigation is resolving', async () => {
+    // Slow the list load so the nav processor has to wait, like production
+    getChats.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 15))
+      return [chatAztec, chatPolygon]
+    })
+    const { container } = renderChats(`/chats?chatId=${chatPolygon.telegram_id}`)
+    const watcher = watchFlash(container)
+
+    await waitFor(() => expect(getMessages).toHaveBeenCalled())
+    expect(watcher.stop()).toBe(false)
+  })
+
+  it('never flashes the empty state for a chat beyond page 1 (ensureChat path)', async () => {
+    // The Board→chat case: target chat is NOT in the paginated list, so the
+    // nav processor resolves it via ensureChat with real-world latency.
+    const offPage = makeChat(-100999, 'Beyond Page One')
+    getChats.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 15))
+      return [chatAztec, chatPolygon]
+    })
+    ensureChat.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 60))
+      return offPage
+    })
+    const { container } = renderChats(`/chats?chatId=${offPage.telegram_id}`)
+    const watcher = watchFlash(container)
+
+    // Regression (2026-07-26): reload the chat list WHILE ensureChat is still
+    // in flight. The nav processor re-runs on every list identity change and
+    // used to hit its "already retried — give up" branch, blanking the pane
+    // ("Select a chat to start" flash) until ensureChat resolved.
+    await waitFor(() => expect(ensureChat).toHaveBeenCalled())
+    await act(async () => { fireEvent.click(screen.getByText('Unread')) })
+
+    await waitFor(() => {
+      expect(getMessages).toHaveBeenCalledWith(
+        offPage.telegram_id, expect.anything(), expect.anything(), undefined,
+      )
+    })
+    expect(watcher.stop()).toBe(false)
+  })
+
+  it('never flashes the empty state on in-page navigation (palette/board click)', async () => {
+    const { container } = renderChats('/chats')
+    await waitFor(() => expect(getChats).toHaveBeenCalled())
+
+    // The empty state is legitimately visible now (nothing selected).
+    // From the navigation onward it must disappear and never come back.
+    act(() => {
+      routerControls.navigate!(`/chats?chatId=${chatPolygon.telegram_id}`)
+    })
+    const watcher = watchFlash(container)
+    await waitFor(() => expect(getMessages).toHaveBeenCalled())
+    expect(watcher.stop()).toBe(false)
   })
 
   it('renders the chat list without wiping selection on list reload', async () => {

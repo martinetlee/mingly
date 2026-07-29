@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import admin, auth, catchup, chats, compose, contacts, conversations, dashboard, media, organizations, scam, search, settings, llm, tags, intelligence, profiles, translate, workspaces
+from backend.api import admin, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, settings, llm, tags, intelligence, profiles, translate, workspaces
 from backend.api.dependencies import require_session_token, validate_ws_origin, get_session_token
 
 
@@ -39,6 +39,10 @@ def create_app() -> FastAPI:
     app.include_router(scam.router, prefix="/api/scam", tags=["scam"], dependencies=protected)
     app.include_router(translate.router, prefix="/api/translate", tags=["translate"], dependencies=protected)
     app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspaces"], dependencies=protected)
+
+    # MCP endpoint has its own auth (vault-stored bearer key), NOT the session
+    # token — external MCP clients can't obtain the ephemeral session token.
+    app.include_router(mcp.router, tags=["mcp"])
 
     @app.post("/api/open-url")
     async def open_external_url(

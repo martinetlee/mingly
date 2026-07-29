@@ -58,8 +58,15 @@ export default function Organizations() {
   const dragging = useRef(false)
   const pendingSelectRef = useRef<number | null>(null)
 
+  // Monotonic guards: rapid searches / org clicks must resolve to the latest
+  // request, not the slowest response
+  const orgsSeqRef = useRef(0)
+  const selectSeqRef = useRef(0)
+
   const loadOrgs = useCallback(async (q = '') => {
+    const seq = ++orgsSeqRef.current
     const data = await getOrganizations(q)
+    if (seq !== orgsSeqRef.current) return
     setOrgs(data)
     setLoading(false)
   }, [])
@@ -99,7 +106,9 @@ export default function Organizations() {
   }, [search, loadOrgs])
 
   const handleSelect = async (org: OrgSummary) => {
+    const seq = ++selectSeqRef.current
     const detail = await getOrganization(org.id)
+    if (seq !== selectSeqRef.current) return
     setSelected(detail)
     setEditingContext(false)
     setEditingName(false)
