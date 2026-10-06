@@ -101,6 +101,7 @@ class AddInstanceRequest(BaseModel):
     model: str
     base_url: str = "http://localhost:11434/v1"
     system_prompt: str = ""
+    num_ctx: Optional[int] = None  # Ollama context window (tokens); default 8192
 
 
 @router.post("/instances", status_code=201)
@@ -113,7 +114,10 @@ async def add_instance(req: AddInstanceRequest):
         model=req.model,
         base_url=req.base_url,
         system_prompt=req.system_prompt,
+        num_ctx=req.num_ctx,
     )
+    if cfg.num_ctx is not None and not (2048 <= cfg.num_ctx <= 262144):
+        raise HTTPException(status_code=400, detail="num_ctx must be between 2048 and 262144")
     try:
         registry.add(cfg)
     except ValueError as e:
@@ -143,6 +147,48 @@ async def instance_health(name: str):
         raise HTTPException(status_code=404, detail=f"Instance {name!r} not found")
     healthy = await instance.health_check()
     return {"name": name, "healthy": healthy}
+
+
+# ---------------------------------------------------------------------------
+# Provider API keys (stored in the encrypted vault, never returned)
+# ---------------------------------------------------------------------------
+
+_KEY_SECRETS = {"anthropic": "anthropic_api_key", "openai": "openai_api_key"}
+
+
+class ApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@router.get("/keys")
+async def api_key_status():
+    """Which provider API keys are set: {"anthropic": bool, "openai": bool}."""
+    from backend.secrets import get_secret
+    return {p: get_secret(k) is not None for p, k in _KEY_SECRETS.items()}
+
+
+@router.put("/keys/{provider}")
+async def set_api_key(provider: str, req: ApiKeyRequest):
+    from backend.secrets import save_secret
+    if provider not in _KEY_SECRETS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}")
+    key = req.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="api_key is empty")
+    try:
+        save_secret(_KEY_SECRETS[provider], key)
+    except RuntimeError as e:  # vault locked
+        raise HTTPException(status_code=423, detail=str(e))
+    return {"provider": provider, "key_set": True}
+
+
+@router.delete("/keys/{provider}")
+async def delete_api_key(provider: str):
+    from backend.secrets import delete_secret
+    if provider not in _KEY_SECRETS:
+        raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}")
+    delete_secret(_KEY_SECRETS[provider])
+    return {"provider": provider, "key_set": False}
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +537,11 @@ async def start_pull(req: PullRequest):
         ollama = _get_ollama()
         try:
             async for progress in ollama.pull_model_stream(req.model):
+                # Ollama reports pull failures inline ({"error": ...}) with HTTP 200
+                if progress.get("error"):
+                    _jobs[job_id]["status"] = "error"
+                    _jobs[job_id]["error"] = str(progress["error"])
+                    return
                 _jobs[job_id].update(progress)
                 _jobs[job_id]["status"] = progress.get("status", "pulling")
         except LLMError as e:

@@ -1,8 +1,12 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2 } from 'lucide-react'
+import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2, AlertTriangle } from 'lucide-react'
 import type { GlobalSearchResults, TelegramSearchResult } from '../api/types'
-import { globalSearch, telegramSearch, ensureChat, isAbortError } from '../api/client'
+import { globalSearch, telegramSearch, ensureChat } from '../api/client'
+import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
+import { errorMessage } from '../lib/toast'
+import { fmtRelative } from '../utils/time'
+import { Modal } from './ui'
 
 // Telegram directory searches cost two RPCs and repeat queries are common —
 // cache results briefly so re-searching the same term renders instantly.
@@ -16,16 +20,6 @@ async function cachedTelegramSearch(query: string, signal?: AbortSignal): Promis
   const data = await telegramSearch(query, 20, signal)
   telegramCache.set(key, { ts: Date.now(), results: data.telegram_dialogs })
   return data.telegram_dialogs
-}
-
-function fmtDate(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (diffDays < 7) return `${diffDays}d ago`
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 interface ResultItem {
@@ -77,11 +71,11 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
   for (const m of results.messages) {
     items.push({
       type: 'message',
-      id: `msg-${m.chat_id}-${m.telegram_id}`,
+      id: `msg-${m.chat_id}-${m.tg_message_id}`,
       label: m.text,
-      sublabel: `${m.chat_name}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtDate(m.date)}`,
+      sublabel: `${m.chat_name}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtRelative(m.date)}`,
       icon: 'message',
-      navigateTo: `/chats?chatId=${m.chat_id}&msgId=${m.telegram_id}`,
+      navigateTo: `/chats?chatId=${m.chat_id}&msgId=${m.tg_message_id}`,
     })
   }
 
@@ -117,11 +111,13 @@ const CATEGORY_LABELS: Record<string, string> = {
 }
 
 export default function GlobalSearch({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) return null
+  // Mounted per open: query, results and errors always start fresh
+  return <GlobalSearchPanel onClose={onClose} />
+}
+
+function GlobalSearchPanel({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<GlobalSearchResults | null>(null)
-  const [telegramResults, setTelegramResults] = useState<TelegramSearchResult[]>([])
-  const [loading, setLoading] = useState(false)
-  const [telegramLoading, setTelegramLoading] = useState(false)
   const [ensuring, setEnsuring] = useState(false)
   const [ensureError, setEnsureError] = useState<string | null>(null)
   const [selectedIdx, setSelectedIdx] = useState(0)
@@ -129,62 +125,22 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
   const listRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
 
-  // Debounced search — local + Telegram in parallel
-  useEffect(() => {
-    if (!open) return
-    if (query.length < 2) {
-      setResults(null)
-      setTelegramResults([])
-      return
-    }
-    setLoading(true)
-    setTelegramLoading(true)
+  // Local + Telegram run independently (debounced, latest-only, aborted on
+  // change): a failure in one section never blanks the other
+  const local = useDebouncedQuery(query, (q, signal) => globalSearch(q, 20, signal), {
+    delayMs: 300, minLength: 2, keepPreviousData: false,
+  })
+  const tg = useDebouncedQuery(query, (q, signal) => cachedTelegramSearch(q, signal), {
+    delayMs: 300, minLength: 2, keepPreviousData: false,
+  })
+  const results: GlobalSearchResults | null = local.data ?? null
+  const telegramResults: TelegramSearchResult[] = tg.data ?? []
+  const loading = local.pending
+  const telegramLoading = tg.pending
+  const localError = local.error != null ? errorMessage(local.error) : null
+  const telegramError = tg.error != null ? errorMessage(tg.error) : null
 
-    // Abort on cleanup so a slow response for an older query can never
-    // overwrite the results of a newer one
-    const ac = new AbortController()
-    const timer = setTimeout(() => {
-      globalSearch(query, 20, ac.signal)
-        .then((data) => {
-          setResults(data)
-          setSelectedIdx(0)
-          setLoading(false)
-        })
-        .catch((e) => {
-          if (isAbortError(e)) return
-          setResults(null)
-          setLoading(false)
-        })
-
-      cachedTelegramSearch(query, ac.signal)
-        .then((r) => {
-          setTelegramResults(r)
-          setTelegramLoading(false)
-        })
-        .catch((e) => {
-          if (isAbortError(e)) return
-          setTelegramResults([])
-          setTelegramLoading(false)
-        })
-    }, 300)
-    return () => {
-      clearTimeout(timer)
-      ac.abort()
-    }
-  }, [query, open])
-
-  // Reset on open
-  useEffect(() => {
-    if (open) {
-      setQuery('')
-      setResults(null)
-      setTelegramResults([])
-      setSelectedIdx(0)
-      setEnsuring(false)
-      setEnsureError(null)
-      setTimeout(() => inputRef.current?.focus(), 50)
-    }
-  }, [open])
+  useEffect(() => { setSelectedIdx(0) }, [results, telegramResults.length])
 
   // Build unified items list: local results + Telegram results (deduped)
   const localItems = results ? flattenResults(results) : []
@@ -246,8 +202,6 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
     el?.scrollIntoView({ block: 'nearest' })
   }, [selectedIdx])
 
-  if (!open) return null
-
   // Group items by type for display
   const grouped = new Map<string, ResultItem[]>()
   for (const item of items) {
@@ -259,16 +213,24 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
   const allDone = !loading && !telegramLoading
   let globalIdx = 0
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+  const sectionError = (label: string, msg: string) => (
+    <div role="alert" className="mx-4 my-2 flex items-center gap-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-[11px] text-rose-400">
+      <AlertTriangle size={12} className="flex-shrink-0" />
+      <span className="truncate">{label}: {msg}</span>
+    </div>
+  )
 
-      {/* Modal */}
-      <div
-        className="relative w-full max-w-xl rounded-xl border border-slate-700/80 bg-slate-800 shadow-2xl overflow-hidden"
-        onKeyDown={handleKeyDown}
-      >
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      position="top"
+      size="xl"
+      ariaLabel="Search"
+      initialFocusRef={inputRef}
+      className="overflow-hidden"
+    >
+      <div onKeyDown={handleKeyDown}>
         {/* Search input */}
         <div className="flex items-center gap-3 border-b border-slate-700/50 px-4 py-3">
           <Search size={16} className="flex-shrink-0 text-slate-400" />
@@ -303,7 +265,7 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               Type to search across chats, contacts, and messages
             </div>
-          ) : loading && items.length === 0 ? (
+          ) : loading && items.length === 0 && !localError ? (
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               Searching...
             </div>
@@ -312,12 +274,13 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
               <Loader2 size={14} className="animate-spin" />
               Syncing chat...
             </div>
-          ) : items.length === 0 && allDone ? (
+          ) : items.length === 0 && allDone && !localError && !telegramError ? (
             <div className="px-4 py-8 text-center text-sm text-slate-500">
               No results found for &ldquo;{query}&rdquo;
             </div>
           ) : (
             <>
+              {localError && sectionError('Local search failed', localError)}
               {Array.from(grouped.entries()).map(([type, groupItems]) => (
                 <div key={type}>
                   <div className="sticky top-0 bg-slate-800/95 px-4 py-1.5 text-[10px] font-medium uppercase tracking-wider text-slate-500 backdrop-blur-sm">
@@ -359,6 +322,7 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
                   Searching Telegram...
                 </div>
               )}
+              {telegramError && !telegramLoading && sectionError('Telegram search unavailable', telegramError)}
             </>
           )}
         </div>
@@ -374,6 +338,6 @@ export default function GlobalSearch({ open, onClose }: { open: boolean; onClose
           </div>
         )}
       </div>
-    </div>
+    </Modal>
   )
 }

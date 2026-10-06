@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { Workspace, WSEvent } from '../api/types'
+import type { Workspace } from '../api/types'
 import { getWorkspaces } from '../api/client'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { reportError } from '../lib/toast'
 
 const STORAGE_KEY = 'activeWorkspaceId'
 const REFRESH_THROTTLE_MS = 15000
@@ -30,13 +32,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const stored = localStorage.getItem(STORAGE_KEY)
     return stored ? parseInt(stored, 10) : null
   })
-  const lastRefreshRef = useRef(0)
   const snapshotRef = useRef('')
+  // Ordering guard: only the most recently *started* refresh may apply, so a
+  // slow WS-triggered read can't overwrite the list after a save
+  const seqRef = useRef(0)
+  const loadedRef = useRef(false)
 
   const refreshWorkspaces = useCallback(async () => {
+    const seq = ++seqRef.current
     try {
       const data = await getWorkspaces()
-      lastRefreshRef.current = Date.now()
+      if (seq !== seqRef.current) return
+      loadedRef.current = true
       setLoaded(true)
       // Skip identical payloads — churning object identities re-renders every
       // consumer and destabilizes their useCallback deps for no reason
@@ -44,8 +51,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (snapshot === snapshotRef.current) return
       snapshotRef.current = snapshot
       setWorkspaces(data)
-    } catch {
-      // Session may not be ready yet; the next trigger retries
+    } catch (e) {
+      // Background refreshes retry on the next event; only a failed first
+      // load is worth telling the user about
+      if (seq === seqRef.current && !loadedRef.current) reportError(e, 'Couldn\'t load workspaces')
     }
   }, [])
 
@@ -53,16 +62,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     refreshWorkspaces()
   }, [refreshWorkspaces])
 
-  // Keep badge counts loosely fresh on chat activity
-  const handleWsEvent = useCallback(
-    (event: WSEvent) => {
-      if (event.type !== 'new_message' && event.type !== 'chat_synced') return
-      if (Date.now() - lastRefreshRef.current < REFRESH_THROTTLE_MS) return
-      refreshWorkspaces()
-    },
-    [refreshWorkspaces],
-  )
-  useWebSocket(handleWsEvent)
+  // Keep badge counts loosely fresh on chat activity: at most one refresh per
+  // window, with a trailing one so the last burst is never dropped
+  const refreshSoon = useCoalescedRefetch(refreshWorkspaces, REFRESH_THROTTLE_MS)
+  useWsEvent('new_message', refreshSoon)
+  useWsEvent('chats_synced', refreshSoon)
+  useWsEvent('chat_synced', refreshSoon)
+  // Events may have been missed while disconnected
+  useWsEvent('resync', () => { refreshWorkspaces() })
 
   const setActiveWorkspaceId = useCallback((id: number | null) => {
     setActiveId(id)

@@ -16,11 +16,16 @@ class LLMRegistry:
         """Build and register a named provider instance. Replaces existing."""
         provider = _build_provider(cfg)
         provider.instance_name = cfg.name
+        old = self._instances.get(cfg.name)
+        if old is not None:
+            _close_later(old)
         self._instances[cfg.name] = provider
         self._configs[cfg.name] = cfg
 
     def remove(self, name: str) -> None:
-        self._instances.pop(name, None)
+        old = self._instances.pop(name, None)
+        if old is not None:
+            _close_later(old)
         self._configs.pop(name, None)
 
     def get(self, name: str) -> BaseLLMProvider:
@@ -50,6 +55,7 @@ class LLMRegistry:
                 "model": cfg.model,
                 "base_url": cfg.base_url,
                 "system_prompt": cfg.system_prompt,
+                "num_ctx": cfg.num_ctx,
             }
             for cfg in self._configs.values()
         ]
@@ -69,10 +75,20 @@ class LLMRegistry:
         return len(self._instances)
 
 
+def _close_later(provider: BaseLLMProvider) -> None:
+    """Close a replaced provider's HTTP client without blocking the caller."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    from backend.tasks import spawn
+    spawn(provider.aclose(), name=f"llm_close:{provider.instance_name}")
+
+
 def _build_provider(cfg: LLMInstanceConfig) -> BaseLLMProvider:
     if cfg.provider == "ollama":
         from backend.llm.ollama import OllamaProvider
-        return OllamaProvider(base_url=cfg.base_url, model=cfg.model)
+        return OllamaProvider(base_url=cfg.base_url, model=cfg.model, num_ctx=cfg.num_ctx)
     elif cfg.provider == "anthropic":
         from backend.llm.anthropic import AnthropicProvider
         return AnthropicProvider(model=cfg.model)

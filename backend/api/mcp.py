@@ -23,7 +23,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import API_PORT
-from backend.api.dependencies import _is_allowed_origin
+from backend import secrets as vault
+from backend.api.dependencies import _is_allowed_origin, is_allowed_host
 from backend.api.mcp_tools import TOOLS, ToolError, tool_descriptors, validate_args
 from backend.api.settings import get_mcp_enabled
 from backend.db.database import get_db
@@ -63,6 +64,9 @@ def clear_mcp_sessions() -> None:
     _sessions.clear()
 
 
+vault.add_lock_listener(clear_mcp_sessions)
+
+
 # ── JSON-RPC helpers ─────────────────────────────────────────────────────────
 
 def _rpc_error(req_id, code: int, message: str, status: int = 200, headers: Optional[dict] = None) -> JSONResponse:
@@ -89,8 +93,9 @@ def _tool_text_result(payload: dict, is_error: bool = False) -> dict:
 
 def _gate(request: Request) -> Optional[Response]:
     """Host/Origin, availability, and bearer-key checks. None means pass."""
-    host = request.headers.get("host", "")
-    if host not in (f"127.0.0.1:{API_PORT}", f"localhost:{API_PORT}"):
+    # The app-wide middleware already requires a loopback Host; MCP clients
+    # connect directly, so also pin the exact port.
+    if not is_allowed_host(request.headers.get("host"), port=API_PORT):
         return Response(status_code=403)
 
     origin = request.headers.get("origin")

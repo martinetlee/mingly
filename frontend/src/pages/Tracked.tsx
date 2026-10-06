@@ -1,117 +1,83 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
-import type { Chat, Message, WSEvent } from '../api/types'
-import { getTrackedChats, getMessages, setTracked, syncChat, sendMessage } from '../api/client'
-import { useWebSocket } from '../hooks/useWebSocket'
-import MessageList from '../components/MessageList'
+import type { Chat } from '../api/types'
+import { getTrackedChats, setTracked, syncChat, sendMessage } from '../api/client'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { useChatMessages } from '../hooks/useChatMessages'
+import { reportError, errorMessage } from '../lib/toast'
+import { fmtDate } from '../utils/time'
+import ChatMessagesView from '../components/ChatMessagesView'
 import ComposeBar from '../components/ComposeBar'
 import ChatInfoPanel from '../components/ChatInfoPanel'
 
-function fmtDate(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (diffDays === 1) return 'Yesterday'
-  if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' })
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-}
-
-const LIMIT = 100
 
 export default function Tracked() {
-  const [chats, setChats] = useState<Chat[]>([])
+  const { data: chatsData, error: chatsError, loading: chatsLoading, refetch: refetchChats, setData: setChats } =
+    useLatestQuery(['tracked-chats'], () => getTrackedChats())
+  const chats = chatsData ?? []
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [loadingMessages, setLoadingMessages] = useState(false)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [messageOffset, setMessageOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [syncing, setSyncing] = useState(false)
+  const [syncing, setSyncing] = useState<number | null>(null)
   const [showInfo, setShowInfo] = useState(false)
   const [search, setSearch] = useState('')
   const [sidebarWidth, setSidebarWidth] = useState(288)
   const dragging = useRef(false)
 
-  useEffect(() => {
-    getTrackedChats().then(setChats)
-  }, [])
+  // Messages are bound to the selected chat: a late response for a previous
+  // chat can never render here (or be replied to via Compose)
+  const selectedId = selectedChat?.telegram_id ?? null
+  // Same message-window engine as the Chats pane (paging, backfill, live WS updates)
+  const pane = useChatMessages({ chatId: selectedId, topicId: null, nonce: 0 })
+  const selectedRef = useRef(selectedChat)
+  selectedRef.current = selectedChat
 
-  const loadMessages = useCallback(async (chat: Chat) => {
-    setLoadingMessages(true)
-    setMessageOffset(0)
-    try {
-      const data = await getMessages(chat.telegram_id, LIMIT, 0)
-      setMessages(data)
-      setHasMore(data.length === LIMIT)
-    } finally {
-      setLoadingMessages(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (selectedChat) loadMessages(selectedChat)
-  }, [selectedChat, loadMessages])
-
-  const loadMoreMessages = useCallback(async () => {
-    if (!selectedChat || loadingMore) return
-    setLoadingMore(true)
-    const nextOffset = messageOffset + LIMIT
-    try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
-      setMessages((prev) => [...data, ...prev])
-      setMessageOffset(nextOffset)
-      setHasMore(data.length === LIMIT)
-    } finally {
-      setLoadingMore(false)
-    }
-  }, [selectedChat, messageOffset, loadingMore])
-
-  const handleWsEvent = useCallback((event: WSEvent) => {
-    if (event.type === 'new_message') {
-      getTrackedChats().then(setChats)
-      if (selectedChat && event.chat_id === selectedChat.telegram_id) {
-        loadMessages(selectedChat)
-      }
-    }
-  }, [selectedChat, loadMessages])
-
-  useWebSocket(handleWsEvent)
+  // The list refreshes at most every 3s however many messages arrive
+  const refreshList = useCoalescedRefetch(refetchChats, 3000)
+  // The open chat's messages update themselves (useChatMessages); only the list is refreshed here
+  useWsEvent('new_message', refreshList)
+  useWsEvent('chats_synced', refreshList)
+  useWsEvent('resync', refreshList)
 
   const handleSelectChat = (chat: Chat) => {
+    if (selectedRef.current?.telegram_id === chat.telegram_id) return
     setSelectedChat(chat)
-    setMessages([])
-    setHasMore(false)
-    setMessageOffset(0)
     setShowInfo(false)
   }
 
   const handleSync = async () => {
-    if (!selectedChat) return
-    setSyncing(true)
+    const chat = selectedRef.current
+    if (!chat || syncing === chat.telegram_id) return
+    setSyncing(chat.telegram_id)
     try {
-      await syncChat(selectedChat.telegram_id)
-      await loadMessages(selectedChat)
+      await syncChat(chat.telegram_id)
+      if (selectedRef.current?.telegram_id === chat.telegram_id) await pane.refresh()
+    } catch (e) {
+      reportError(e, 'Sync failed')
     } finally {
-      setSyncing(false)
+      setSyncing((v) => (v === chat.telegram_id ? null : v))
     }
   }
 
   const handleUntrack = async (chat: Chat) => {
-    await setTracked(chat.telegram_id, false)
-    setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat(null)
-      setMessages([])
+    try {
+      await setTracked(chat.telegram_id, false)
+    } catch (e) {
+      reportError(e, 'Untrack failed')
+      return
     }
+    setChats((prev) => prev?.filter((c) => c.telegram_id !== chat.telegram_id))
+    setSelectedChat((cur) => (cur?.telegram_id === chat.telegram_id ? null : cur))
   }
 
   const handleSend = async (text: string) => {
-    if (!selectedChat) return
-    await sendMessage(selectedChat.telegram_id, text)
-    await loadMessages(selectedChat)
+    const chat = selectedRef.current
+    if (!chat) return
+    const res = await sendMessage(chat.telegram_id, text)
+    if (res?.message) pane.applyMessage(res.message)
+    else if (selectedRef.current?.telegram_id === chat.telegram_id) await pane.refresh()
   }
+
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -157,7 +123,14 @@ export default function Tracked() {
           />
         </div>
         <div className="flex-1 overflow-y-auto">
-          {filtered.length === 0 ? (
+          {chatsLoading ? (
+            <p className="px-4 py-6 text-center text-sm text-slate-500">Loading…</p>
+          ) : chatsError != null && chats.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-sm text-rose-400">Couldn't load tracked chats: {errorMessage(chatsError)}</p>
+              <button onClick={() => refetchChats()} className="mt-2 text-xs text-indigo-400 hover:text-indigo-300">Retry</button>
+            </div>
+          ) : filtered.length === 0 ? (
             <p className="px-4 py-6 text-center text-sm text-slate-500">No tracked chats</p>
           ) : (
             filtered.map((chat) => (
@@ -233,34 +206,17 @@ export default function Tracked() {
                 </button>
                 <button
                   onClick={handleSync}
-                  disabled={syncing}
+                  disabled={syncing === selectedChat.telegram_id}
                   className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
                 >
-                  <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+                  <RefreshCw size={13} className={syncing === selectedChat.telegram_id ? 'animate-spin' : ''} />
                   Sync
                 </button>
               </div>
             </div>
 
-            {loadingMessages ? (
-              <div className="flex flex-1 items-center justify-center text-sm text-slate-500">Loading…</div>
-            ) : (
-              <div className="flex flex-1 flex-col overflow-hidden">
-                {hasMore && (
-                  <div className="flex justify-center border-b border-slate-700/50 py-2">
-                    <button
-                      onClick={loadMoreMessages}
-                      disabled={loadingMore}
-                      className="text-xs text-amber-500 hover:text-amber-700 disabled:opacity-50"
-                    >
-                      {loadingMore ? 'Loading…' : 'Load older messages'}
-                    </button>
-                  </div>
-                )}
-                <MessageList messages={messages} chatType={selectedChat.type} />
-              </div>
-            )}
-            <ComposeBar onSend={handleSend} />
+            <ChatMessagesView key={selectedChat.telegram_id} msgs={pane} chatType={selectedChat.type} />
+            <ComposeBar key={selectedChat.telegram_id} onSend={handleSend} />
           </>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center text-slate-400">

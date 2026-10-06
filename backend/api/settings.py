@@ -1,38 +1,113 @@
-import json
-import os
-from typing import Optional
+import logging
+import re
+from typing import List, Optional, Tuple, Union
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.config import DATA_DIR
+from backend import secrets as vault
+from backend.features import require_shield
+from backend.db.database import get_db
 from backend.llm.briefing_prompts import (
     DEFAULT_BRIEFING_CHAT_PROMPT,
     DEFAULT_TRACKED_CHAT_PROMPT,
 )
+from backend.prefs import get_pref, load_prefs, save_prefs
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_PREFS_FILE = DATA_DIR / "prefs.json"
+# Kept as aliases: several modules import these names from here.
+_load_prefs = load_prefs
+_save_prefs = save_prefs
+
+# Prefs the UI may read back via GET /prefs. Everything else (API keys, sync
+# bookkeeping, prompt overrides with their own endpoints) stays server-side.
+PUBLIC_PREF_KEYS = (
+    "notif_pref",
+    "briefing_schedule",
+    "briefing_time",
+    "briefing_day",
+    "briefing_max_tokens",
+    "briefing_last_run",
+    "catchup_summary_interval_minutes",
+    "translation_language",
+    "session_idle_timeout_minutes",
+)
+
+# API keys that used to live in plaintext prefs.json. They now live in the
+# vault; a legacy plaintext value is moved into the vault on first access
+# while the vault is unlocked (and on every unlock).
+SECRET_PREF_KEYS = ("scam_detection_api_key", "shield_api_key")
 
 
-def _load_prefs() -> dict:
-    if _PREFS_FILE.exists():
-        try:
-            return json.loads(_PREFS_FILE.read_text())
-        except Exception:
-            return {}
-    return {}
+def migrate_plaintext_secrets() -> "list[str]":
+    """Move legacy plaintext API keys from prefs.json into the vault.
+
+    No-op while the vault is locked. A value already in the vault wins (new
+    code never writes these keys to prefs). Returns the keys removed from prefs.
+    """
+    if vault.vault_status() != "unlocked":
+        return []
+    prefs = load_prefs()
+    moved = [k for k in SECRET_PREF_KEYS if k in prefs]
+    if not moved:
+        return []
+    for key in moved:
+        value = prefs.pop(key)
+        if value and not vault.get_secret(key):
+            vault.save_secret(key, str(value))
+    save_prefs(prefs)
+    logger.info("Moved %s from prefs.json into the vault", ", ".join(moved))
+    return moved
 
 
-def _save_prefs(data: dict) -> None:
-    # Atomic replace so a crash mid-write can't leave a truncated prefs file.
-    # NOTE: callers must not await between _load_prefs() and _save_prefs() —
-    # the single event loop is what keeps read-modify-write cycles atomic.
-    tmp = _PREFS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, _PREFS_FILE)
+def get_secret_pref(key: str) -> str:
+    """Return an API key from the vault, falling back to a not-yet-migrated
+    plaintext value (e.g. at startup, before the first unlock)."""
+    value = vault.get_secret(key)
+    if value:
+        return value
+    legacy = get_pref(key) or ""
+    if legacy and vault.vault_status() == "unlocked":
+        migrate_plaintext_secrets()
+    return legacy
+
+
+def _store_secret_pref(key: str, value: str) -> None:
+    if vault.vault_status() != "unlocked":
+        raise HTTPException(status_code=409, detail="Vault must be unlocked to store an API key")
+    vault.save_secret(key, value)
+
+
+def _clear_secret_pref(key: str) -> None:
+    vault.delete_secret(key)
+    prefs = load_prefs()
+    if prefs.pop(key, None) is not None:
+        save_prefs(prefs)
+
+
+def get_shield_api_key() -> str:
+    return get_secret_pref("shield_api_key")
+
+
+def on_vault_unlocked() -> None:
+    """Unlock listener: migrate legacy keys and hand vault-held keys to the
+    services that were configured at startup while the vault was locked."""
+    migrate_plaintext_secrets()
+    prefs = load_prefs()
+    if prefs.get("scam_detection_mode") == "external":
+        _reconfigure_scam_service(prefs)
+    try:
+        from backend.scam.cloud_sync import get_cloud_sync_manager
+
+        mgr = get_cloud_sync_manager()
+        if mgr:
+            mgr.configure(base_url=prefs.get("shield_cloud_url", ""), api_key=get_shield_api_key())
+    except Exception:
+        logger.exception("Failed to reconfigure Shield cloud sync after unlock")
 
 
 def get_notif_pref() -> str:
@@ -52,15 +127,33 @@ class BriefingTimeRequest(BaseModel):
     time: str  # "HH:MM" in 24h format, e.g. "09:00"
 
 
+_HHMM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+DEFAULT_BRIEFING_TIME = "09:00"
+
+
+def parse_briefing_time(value: object) -> Optional[Tuple[int, int]]:
+    """Strictly parse "HH:MM" (00-23 / 00-59). Returns (hour, minute) or None."""
+    if not isinstance(value, str):
+        return None
+    m = _HHMM.fullmatch(value)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def get_briefing_time() -> Tuple[int, int]:
+    """Configured briefing time; an invalid stored value falls back to 09:00."""
+    return parse_briefing_time(get_pref("briefing_time")) or parse_briefing_time(DEFAULT_BRIEFING_TIME)  # type: ignore[return-value]
+
+
 @router.get("/prefs")
 async def get_prefs():
-    return _load_prefs()
+    """Whitelisted view of prefs.json (never includes secrets)."""
+    prefs = load_prefs()
+    return {k: prefs[k] for k in PUBLIC_PREF_KEYS if k in prefs}
 
 
 @router.post("/prefs/notifications")
 async def set_notif_pref(req: NotifPrefRequest):
     if req.pref not in ("all", "tracked", "off"):
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid preference")
     prefs = _load_prefs()
     prefs["notif_pref"] = req.pref
@@ -71,7 +164,6 @@ async def set_notif_pref(req: NotifPrefRequest):
 @router.post("/prefs/briefing-schedule")
 async def set_briefing_schedule(req: BriefingScheduleRequest):
     if req.schedule not in ("daily", "weekly"):
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid schedule")
     prefs = _load_prefs()
     prefs["briefing_schedule"] = req.schedule
@@ -82,10 +174,8 @@ async def set_briefing_schedule(req: BriefingScheduleRequest):
 @router.post("/prefs/briefing-time")
 async def set_briefing_time(req: BriefingTimeRequest):
     """Set the hour/minute at which the briefing auto-runs (local time, 24h HH:MM)."""
-    import re
-    if not re.match(r"^\d{2}:\d{2}$", req.time):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid time format. Use HH:MM.")
+    if parse_briefing_time(req.time) is None:
+        raise HTTPException(status_code=400, detail="Invalid time. Use 24-hour HH:MM (00:00-23:59).")
     prefs = _load_prefs()
     prefs["briefing_time"] = req.time
     _save_prefs(prefs)
@@ -101,7 +191,6 @@ async def set_briefing_day(req: BriefingDayRequest):
     """Set the day of week on which the weekly briefing auto-runs."""
     valid = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     if req.day not in valid:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid day")
     prefs = _load_prefs()
     prefs["briefing_day"] = req.day
@@ -158,7 +247,6 @@ def get_briefing_prompt_overrides() -> dict:
 @router.post("/prefs/briefing-max-tokens")
 async def set_briefing_max_tokens(req: BriefingMaxTokensRequest):
     """Set max_tokens used when calling the LLM for each briefing summary."""
-    from fastapi import HTTPException
     if not (256 <= req.max_tokens <= 32000):
         raise HTTPException(status_code=400, detail="max_tokens must be between 256 and 32000")
     prefs = _load_prefs()
@@ -249,7 +337,6 @@ class CatchUpSummaryIntervalRequest(BaseModel):
 @router.post("/prefs/catchup-summary-interval")
 async def set_catchup_summary_interval(req: CatchUpSummaryIntervalRequest):
     """Set the interval (in minutes) for the catch-up summary cronjob (5-1440)."""
-    from fastapi import HTTPException
     if not (5 <= req.interval_minutes <= 1440):
         raise HTTPException(status_code=400, detail="Interval must be between 5 and 1440 minutes")
     prefs = _load_prefs()
@@ -273,23 +360,32 @@ async def set_briefing_last_run():
 # ---------------------------------------------------------------------------
 
 class UserOrganizationsRequest(BaseModel):
-    organizations: list[str]
+    # Org ids (preferred) or names; unmatched names are kept as name-only entries.
+    organizations: List[Union[int, str]]
+
+
+def _user_orgs_response(entries: list) -> dict:
+    return {
+        "organizations": [e["name"] for e in entries],
+        "entries": entries,
+    }
 
 
 @router.get("/prefs/user-organizations")
-async def get_user_organizations():
-    """Return the list of organization names the user belongs to."""
-    prefs = _load_prefs()
-    return {"organizations": prefs.get("user_organizations", [])}
+async def get_user_organizations(db: AsyncSession = Depends(get_db)):
+    """The organizations the user belongs to: names (legacy shape) plus
+    ``entries`` [{id, name}] where id is null for names matching no org."""
+    from backend.user_orgs import resolve_user_orgs
+
+    return _user_orgs_response(await resolve_user_orgs(db))
 
 
 @router.put("/prefs/user-organizations")
-async def set_user_organizations(req: UserOrganizationsRequest):
-    """Set which organizations the user belongs to."""
-    prefs = _load_prefs()
-    prefs["user_organizations"] = req.organizations
-    _save_prefs(prefs)
-    return {"success": True, "organizations": req.organizations}
+async def set_user_organizations(req: UserOrganizationsRequest, db: AsyncSession = Depends(get_db)):
+    """Set which organizations the user belongs to (ids or names)."""
+    from backend.user_orgs import set_user_orgs
+
+    return {"success": True, **_user_orgs_response(await set_user_orgs(db, req.organizations))}
 
 
 class TranslationLanguageRequest(BaseModel):
@@ -321,12 +417,12 @@ def get_scam_detection_settings() -> dict:
     return {
         "mode": prefs.get("scam_detection_mode", "local_llm"),
         "api_url": prefs.get("scam_detection_api_url", ""),
-        "api_key": prefs.get("scam_detection_api_key", ""),
+        "api_key": get_secret_pref("scam_detection_api_key"),
         "max_tokens": prefs.get("scam_detection_max_tokens", 200),
     }
 
 
-@router.get("/prefs/scam-detection")
+@router.get("/prefs/scam-detection", dependencies=[Depends(require_shield)])
 async def get_scam_detection():
     """Get current scam detection configuration."""
     settings = get_scam_detection_settings()
@@ -339,10 +435,9 @@ async def get_scam_detection():
     return settings
 
 
-@router.post("/prefs/scam-detection")
+@router.post("/prefs/scam-detection", dependencies=[Depends(require_shield)])
 async def set_scam_detection(req: ScamDetectionSettingsRequest):
     """Update scam detection configuration and reconfigure the service."""
-    from fastapi import HTTPException
 
     if req.mode not in ("local_llm", "external"):
         raise HTTPException(status_code=400, detail="Mode must be 'local_llm' or 'external'")
@@ -356,9 +451,10 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
     prefs["scam_detection_max_tokens"] = max(50, min(2000, req.max_tokens))
     # Only update API key if provided (non-empty), otherwise keep existing
     if req.api_key:
-        prefs["scam_detection_api_key"] = req.api_key
+        _store_secret_pref("scam_detection_api_key", req.api_key)
     elif req.mode == "local_llm":
         # Clear API key when switching to local mode
+        _clear_secret_pref("scam_detection_api_key")
         prefs.pop("scam_detection_api_key", None)
     _save_prefs(prefs)
 
@@ -374,11 +470,11 @@ class ShieldCloudSettingsRequest(BaseModel):
     sync_dismissals: Optional[bool] = None
 
 
-@router.get("/prefs/shield-cloud")
+@router.get("/prefs/shield-cloud", dependencies=[Depends(require_shield)])
 async def get_shield_cloud():
     """Get Shield cloud sync configuration."""
     prefs = _load_prefs()
-    api_key = prefs.get("shield_api_key", "")
+    api_key = get_shield_api_key()
     return {
         "cloud_url": prefs.get("shield_cloud_url", ""),
         "api_key_set": bool(api_key),
@@ -387,13 +483,13 @@ async def get_shield_cloud():
     }
 
 
-@router.post("/prefs/shield-cloud")
+@router.post("/prefs/shield-cloud", dependencies=[Depends(require_shield)])
 async def set_shield_cloud(req: ShieldCloudSettingsRequest):
     """Update Shield cloud sync configuration."""
+    if req.api_key:
+        _store_secret_pref("shield_api_key", req.api_key)
     prefs = _load_prefs()
     prefs["shield_cloud_url"] = req.cloud_url.strip()
-    if req.api_key:
-        prefs["shield_api_key"] = req.api_key
     if req.sync_dismissals is not None:
         prefs["shield_sync_dismissals"] = req.sync_dismissals
     _save_prefs(prefs)
@@ -404,10 +500,36 @@ async def set_shield_cloud(req: ShieldCloudSettingsRequest):
     if mgr:
         mgr.configure(
             base_url=req.cloud_url.strip(),
-            api_key=req.api_key or prefs.get("shield_api_key", ""),
+            api_key=get_shield_api_key(),
         )
 
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Session idle timeout
+# ---------------------------------------------------------------------------
+
+class SessionTimeoutRequest(BaseModel):
+    minutes: int  # 0 = never expire
+
+
+@router.get("/prefs/session-timeout")
+async def get_session_timeout():
+    from backend.api.dependencies import get_idle_timeout_minutes
+
+    return {"minutes": get_idle_timeout_minutes()}
+
+
+@router.post("/prefs/session-timeout")
+async def set_session_timeout(req: SessionTimeoutRequest):
+    """Idle minutes after which a window's session token expires (0 = never, else 5-10080)."""
+    if req.minutes != 0 and not (5 <= req.minutes <= 10080):
+        raise HTTPException(status_code=400, detail="Timeout must be 0 (never) or between 5 and 10080 minutes")
+    prefs = _load_prefs()
+    prefs["session_idle_timeout_minutes"] = req.minutes
+    _save_prefs(prefs)
+    return {"success": True, "minutes": req.minutes}
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +578,6 @@ async def generate_mcp_key():
     """Create (or rotate) the MCP bearer key. Any connected clients are cut off."""
     import secrets as pysecrets
 
-    from fastapi import HTTPException
     from backend.secrets import save_secret, vault_status
 
     if vault_status() != "unlocked":
@@ -468,7 +589,6 @@ async def generate_mcp_key():
 
 @router.post("/prefs/mcp/reveal-key")
 async def reveal_mcp_key():
-    from fastapi import HTTPException
     from backend.secrets import get_secret, vault_status
 
     if vault_status() != "unlocked":
@@ -492,7 +612,7 @@ def _reconfigure_scam_service(prefs: dict) -> None:
     mode = prefs.get("scam_detection_mode", "local_llm")
     if mode == "external":
         api_url = prefs.get("scam_detection_api_url", "")
-        api_key = prefs.get("scam_detection_api_key", "")
+        api_key = get_secret_pref("scam_detection_api_key")
         svc._client = ExternalScamAPIClient(base_url=api_url, api_key=api_key)
     else:
         max_tokens = prefs.get("scam_detection_max_tokens", 200)

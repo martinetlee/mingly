@@ -1,525 +1,467 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+/**
+ * Chats page: owns chat selection. Every way of opening a chat — list click,
+ * j/k/arrow keys, ?chatId= URL (mentions, palette, notifications), Telegram
+ * search result, message search result, avatar "Send message", new chat —
+ * goes through the single selectChat(chat, {anchorMsgId, topic}) below, so
+ * they all behave the same (mark read, unread separator, reset panes).
+ *
+ * Message state lives in ChatPane (keyed per chat) / useChatMessages; per-chat
+ * transient UI (draft, reply, edit, upload progress, topic) in chatUiStore.
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { RefreshCw, Radio, EyeOff, Eye, FileText, Info, X, Search, Star, Loader2, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert, Tag as TagIcon, Columns3 } from 'lucide-react'
-import type { Chat, Folder, Message, PinnedMessage, Tag, UserPresence, WSEvent } from '../api/types'
-import { isRateLimitError, isAbortError, getChats, getFolders, getMessages, syncChat, sendMessage, editMessage, deleteMessages, forwardMessages, sendFiles, getHiddenChats, setHidden, setBriefing, setTracked, markChatRead, reactToMessage, searchChatMessages, getChatDateOffset, getContactByTelegram, setContactImportantByTelegram, ensureChat, setPinned, setArchived, setMuted, setMarkedUnread, getArchivedChats, getPinnedMessage, getUserPresence, sendTypingAction, getTopicMessages, pinMessage, getScamFlags, searchChatsLocal, searchChatsTelegram, searchMessagesGlobal, getTags, getChatsByIds } from '../api/client'
+import { Loader2 } from 'lucide-react'
+import type { VirtuosoHandle } from 'react-virtuoso'
+import type { Chat, Tag } from '../api/types'
 import type { MessageSearchResult } from '../api/client'
-import { useWebSocket } from '../hooks/useWebSocket'
+import {
+  ensureChat, getChatsByIds, getFolders, getScamFlags, markChatRead, searchChatsTelegram, searchMessagesGlobal,
+  setArchived, setBriefing, setHidden, setMarkedUnread, setMuted, setPinned, setTracked,
+} from '../api/client'
+import { useFeatures } from '../context/FeaturesContext'
 import { useWorkspaces } from '../context/WorkspaceContext'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
-import MessageList from '../components/MessageList'
-import ComposeBar, { type ComposeDraft } from '../components/ComposeBar'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { reportError } from '../lib/toast'
 import ChatInfoPanel from '../components/ChatInfoPanel'
-import ForumTopicsPanel from '../components/ForumTopicsPanel'
-import ChatPickerDialog from '../components/ChatPickerDialog'
-import DeleteConfirmDialog from '../components/DeleteConfirmDialog'
 import NewChatDialog from '../components/NewChatDialog'
-import ReportScamDialog from '../components/ReportScamDialog'
+import ChatListPane from './chats/ChatListPane'
+import type { ChatActions, SortBy } from './chats/ChatListPane'
+import ChatPane from './chats/ChatPane'
+import { useChatList } from './chats/useChatList'
+import { getChatUi, updateChatUi, useChatUiSelect } from './chats/chatUiStore'
 
-import { authenticatedMediaUrl } from '../api/session'
+/** How long an open, focused chat waits before acknowledging new messages as read */
+export const READ_ACK_MS = 1500
 
-const AVATAR_COLORS = [
-  'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
-  'bg-violet-600', 'bg-pink-600', 'bg-teal-600', 'bg-orange-600',
-]
-
-// Same tag color maps as ChatInfoPanel
-const TAG_COLORS: Record<string, string> = {
-  indigo:  'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
-  emerald: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30',
-  rose:    'bg-rose-500/20 text-rose-300 border border-rose-500/30',
-  amber:   'bg-amber-500/20 text-amber-300 border border-amber-500/30',
-  violet:  'bg-violet-500/20 text-violet-300 border border-violet-500/30',
-  sky:     'bg-sky-500/20 text-sky-300 border border-sky-500/30',
-  slate:   'bg-slate-500/20 text-slate-300 border border-slate-500/30',
-}
-const COLOR_DOTS: Record<string, string> = {
-  indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
-  amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
-}
-const failedChatPhotos = new Set<number>()
-
-function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName: string; size?: number }) {
-  const [imgFailed, setImgFailed] = useState(false)
-  const initial = (chatName || '?')[0].toUpperCase()
-  const colorIndex = Math.abs(chatId) % AVATAR_COLORS.length
-  const bgColor = AVATAR_COLORS[colorIndex]
-  const hasPhoto = !failedChatPhotos.has(chatId) && !imgFailed
-  const photoUrl = authenticatedMediaUrl(`/api/media/profile_photos/${chatId}.jpg`)
-
-  return (
-    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
-      <div
-        className={`absolute inset-0 flex items-center justify-center rounded-full text-white font-medium ${bgColor}`}
-        style={{ fontSize: size * 0.38 }}
-      >
-        {initial}
-      </div>
-      {hasPhoto && (
-        <img
-          src={photoUrl}
-          alt=""
-          className="absolute inset-0 rounded-full object-cover"
-          style={{ width: size, height: size }}
-          onError={() => { failedChatPhotos.add(chatId); setImgFailed(true) }}
-        />
-      )}
-    </div>
-  )
+export interface SelectOptions {
+  /** Open centred on this message (and highlight it) */
+  anchorMsgId?: number | null
+  /** Forum topic; undefined keeps the current one when re-selecting the same chat */
+  topic?: { id: number; title: string } | null
+  /** Keyboard navigation: keep focus in the chat list (don't focus the compose box) */
+  viaKeyboard?: boolean
 }
 
-/** Strip Telegram markdown/HTML formatting to plain text for previews. */
-function stripFormatting(text: string): string {
-  return text
-    // [**text**](url) or [text](url) → text
-    .replace(/\[(\*{0,2})(.*?)\1\]\([^)]*\)/g, '$2')
-    // **bold** or __italic__
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/__(.*?)__/g, '$1')
-    // `code`
-    .replace(/`([^`]*)`/g, '$1')
-    // Remove leftover markdown chars
-    .replace(/[*_~`]/g, '')
-}
-
-function fmtDate(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (diffDays === 1) return 'Yesterday'
-  if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' })
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-}
-
-function ChatContextMenu({
-  chat,
-  position,
-  onClose,
-  onPin,
-  onArchive,
-  onMute,
-  onMarkUnread,
-  onHide,
-  onBriefing,
-  onToggleTrack,
-}: {
+interface Selection {
   chat: Chat
-  position: { x: number; y: number }
-  onClose: () => void
-  onPin: () => void
-  onArchive: () => void
-  onMute: (duration?: string) => void
-  onMarkUnread: () => void
-  onHide: () => void
-  onBriefing: () => void
-  onToggleTrack: () => void
-}) {
-  const [showMuteOptions, setShowMuteOptions] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
+  viaKeyboard: boolean
+  anchorTgId: number | null
+  unreadCount: number
+  nonce: number
+}
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose()
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [onClose])
+function isWindowFocused(): boolean {
+  return document.visibilityState !== 'hidden' && document.hasFocus()
+}
 
-  const menuStyle: React.CSSProperties = {
-    position: 'fixed',
-    left: position.x,
-    top: position.y,
-    zIndex: 50,
+function parseNav(search: string): { chatId: number; msgId: number | null } | null {
+  const params = new URLSearchParams(search)
+  const chatId = parseInt(params.get('chatId') ?? '', 10)
+  if (isNaN(chatId)) return null
+  const msgId = parseInt(params.get('msgId') ?? '', 10)
+  return { chatId, msgId: isNaN(msgId) || msgId === 0 ? null : msgId }
+}
+
+/** Move a chat to the top of the unpinned section with a new preview (mirrors the server's "recent" sort). */
+function bumpChat(prev: Chat[], chatId: number, patch: Partial<Chat>): Chat[] {
+  const idx = prev.findIndex((c) => c.telegram_id === chatId)
+  if (idx === -1) return prev
+  const updated = { ...prev[idx], ...patch }
+  if (updated.is_pinned) {
+    const next = [...prev]
+    next[idx] = updated
+    return next
   }
-
-  const itemClass = "flex w-full items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-600 transition-colors text-left"
-
-  return (
-    <div ref={menuRef} style={menuStyle} className="min-w-[180px] rounded-lg border border-slate-600 bg-slate-700 py-1 shadow-xl">
-      <button onClick={onPin} className={itemClass}>
-        <Pin size={13} className={chat.is_pinned ? 'text-indigo-400' : ''} />
-        {chat.is_pinned ? 'Unpin' : 'Pin to top'}
-      </button>
-      <button onClick={onArchive} className={itemClass}>
-        <Archive size={13} />
-        {chat.is_archived ? 'Unarchive' : 'Archive'}
-      </button>
-      {!showMuteOptions ? (
-        <button onClick={() => chat.is_muted ? onMute() : setShowMuteOptions(true)} className={itemClass}>
-          {chat.is_muted ? <Bell size={13} /> : <BellOff size={13} />}
-          {chat.is_muted ? 'Unmute' : 'Mute...'}
-        </button>
-      ) : (
-        <div className="border-t border-b border-slate-600 py-0.5">
-          <p className="px-3 py-1 text-[10px] text-slate-500 font-medium">Mute for:</p>
-          {[
-            { label: '1 hour', value: '1h' },
-            { label: '8 hours', value: '8h' },
-            { label: '1 day', value: '1d' },
-            { label: 'Forever', value: 'forever' },
-          ].map((opt) => (
-            <button key={opt.value} onClick={() => onMute(opt.value)} className={itemClass}>
-              <BellOff size={13} />
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      )}
-      <button onClick={onMarkUnread} className={itemClass}>
-        <MailOpen size={13} />
-        {chat.is_marked_unread ? 'Mark as read' : 'Mark as unread'}
-      </button>
-      <div className="my-0.5 border-t border-slate-600" />
-      <button onClick={onToggleTrack} className={itemClass}>
-        <Radio size={13} className={chat.is_tracked ? 'text-indigo-400' : ''} />
-        {chat.is_tracked ? 'Stop tracking' : 'Track'}
-      </button>
-      <button onClick={onBriefing} className={itemClass}>
-        <FileText size={13} />
-        Add to briefing
-      </button>
-      <button onClick={onHide} className={itemClass}>
-        <EyeOff size={13} />
-        Hide
-      </button>
-    </div>
-  )
+  const rest = prev.filter((_, i) => i !== idx)
+  const firstUnpinned = rest.findIndex((c) => !c.is_pinned)
+  const at = firstUnpinned === -1 ? rest.length : firstUnpinned
+  return [...rest.slice(0, at), updated, ...rest.slice(at)]
 }
-
-function ChatItem({
-  chat,
-  selected,
-  onClick,
-  onToggleTrack,
-  onHide,
-  onBriefing,
-  onContextMenu,
-  hasScamFlag,
-}: {
-  chat: Chat
-  selected: boolean
-  onClick: () => void
-  onToggleTrack: () => void
-  onHide: () => void
-  onBriefing: () => void
-  onContextMenu: (e: React.MouseEvent) => void
-  hasScamFlag?: boolean
-}) {
-  const typeColor = {
-    private: 'bg-indigo-500/20 text-indigo-400',
-    group: 'bg-purple-500/20 text-purple-400',
-    channel: 'bg-amber-500/20 text-amber-400',
-  }[chat.type] ?? 'bg-slate-600 text-slate-400'
-
-  return (
-    <div
-      onContextMenu={(e) => { e.preventDefault(); onContextMenu(e) }}
-      className={`group flex items-center gap-3 px-3 py-2.5 transition-colors ${
-        selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'
-      }`}
-    >
-      {/* Row select button */}
-      <button
-        type="button"
-        onClick={onClick}
-        aria-current={selected ? 'true' : undefined}
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:rounded"
-      >
-        {/* Avatar */}
-        <ChatAvatar chatId={chat.telegram_id} chatName={chat.name} size={36} />
-
-        {/* Name + preview */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            {chat.is_pinned && <Pin size={11} className="flex-shrink-0 text-indigo-400" />}
-            <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>
-              {chat.name}
-            </p>
-            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${typeColor}`}>
-              {chat.type}
-            </span>
-            {chat.is_forum && (
-              <span className="flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">
-                <MessageSquare size={9} className="inline" />
-              </span>
-            )}
-            {hasScamFlag && <span title="Contains flagged scammer"><ShieldAlert size={11} className="flex-shrink-0 text-red-400" /></span>}
-            {chat.is_muted && <BellOff size={11} className="flex-shrink-0 text-slate-500" />}
-            {chat.last_message?.date && (
-              <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
-                {fmtDate(chat.last_message.date)}
-              </span>
-            )}
-          </div>
-          {chat.last_message && (
-            <p className="truncate text-xs text-slate-500 mt-0.5">
-              {chat.last_message.sender_name && (
-                <span className="text-slate-400">{chat.last_message.sender_name}: </span>
-              )}
-              {chat.last_message.text ? stripFormatting(chat.last_message.text) : '[media]'}
-            </p>
-          )}
-        </div>
-      </button>
-
-      {/* Actions - always in DOM for keyboard/screen-reader access */}
-      <div className="flex flex-shrink-0 items-center gap-0.5">
-        {((chat.unread_count ?? 0) > 0 || chat.is_marked_unread) && (
-          <span className={`min-w-[18px] rounded-full px-1.5 py-0.5 text-center text-[10px] font-semibold leading-tight text-white ${chat.is_muted ? 'bg-slate-500' : 'bg-indigo-500'}`} aria-label={`${chat.unread_count ?? 0} unread`}>
-            {(chat.unread_count ?? 0) > 0
-              ? (chat.unread_count ?? 0) > 99 ? '99+' : chat.unread_count
-              : '\u2022'}
-          </span>
-        )}
-        <button
-          onClick={(e) => { e.stopPropagation(); onContextMenu(e) }}
-          title="More actions"
-          aria-label="More actions"
-          className="rounded p-1 text-slate-500 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 hover:text-slate-300 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:outline-none"
-        >
-          <MoreVertical size={14} />
-        </button>
-        <button
-          onClick={onToggleTrack}
-          title={chat.is_tracked ? 'Stop tracking' : 'Track this chat'}
-          aria-label={chat.is_tracked ? 'Stop tracking' : 'Track this chat'}
-          className={`rounded p-1 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
-            chat.is_tracked
-              ? 'text-indigo-400 hover:text-indigo-300'
-              : 'text-slate-600 hover:text-slate-400'
-          }`}
-        >
-          <Radio size={14} />
-        </button>
-      </div>
-    </div>
-  )
-}
-
-
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 
 export default function Chats() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [chats, setChats] = useState<Chat[]>([])
-  const [folders, setFolders] = useState<Folder[]>([])
-  const [selectedFolder, setSelectedFolder] = useState<number | null>(null)
-  const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
-  const [mentionInsert, setMentionInsert] = useState<string | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [loadingMessages, setLoadingMessages] = useState(false)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [messageOffset, setMessageOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [syncing, setSyncing] = useState(false)
-  const [flaggedSenderIds, setFlaggedSenderIds] = useState<Set<number>>(new Set())
-  const [flaggedChatIds, setFlaggedChatIds] = useState<Set<number>>(new Set())
-  const [search, setSearch] = useState('')
-  const [telegramSearchResults, setTelegramSearchResults] = useState<Chat[]>([])
-  const [messageSearchResults, setMessageSearchResults] = useState<MessageSearchResult[]>([])
-  const [searchingTelegram, setSearchingTelegram] = useState(false)
-  const [searchingMessages, setSearchingMessages] = useState(false)
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Folder members fetched by id — kept separate from `chats` so list reloads can't wipe them
-  const [folderMembers, setFolderMembers] = useState<Chat[]>([])
   const { activeWorkspace } = useWorkspaces()
-  // Tag filter (popover next to search bar)
+  const activeWorkspaceId = activeWorkspace?.id ?? null
+
+  // ── List filters ───────────────────────────────────────────────────────────
+  const [sortBy, setSortBy] = useState<SortBy>('recent')
   const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
-  const [availableTags, setAvailableTags] = useState<Tag[]>([])
-  const [showTagPopover, setShowTagPopover] = useState(false)
-  const [tagQuery, setTagQuery] = useState('')
-  const tagPopoverRef = useRef<HTMLDivElement>(null)
-  const [showHidden, setShowHidden] = useState(false)
-  const [hiddenChats, setHiddenChats] = useState<Chat[]>([])
-  const [showInfo, setShowInfo] = useState(false)
-  const [sidebarWidth, setSidebarWidth] = useState(288) // 72 * 4 = w-72
-  const dragging = useRef(false)
-  const [sortBy, setSortBy] = useState<'recent' | 'unread' | 'alpha'>('recent')
-  const LIMIT = 100
-  const CHAT_PAGE = 50
-  const [chatOffset, setChatOffset] = useState(0)
-  const [hasMoreChats, setHasMoreChats] = useState(false)
-  const [loadingMoreChats, setLoadingMoreChats] = useState(false)
-  const chatListRef = useRef<HTMLDivElement>(null)
-  const searchInputRef = useRef<HTMLInputElement>(null)
-  // Track which chat telegram_ids have been auto-synced to avoid duplicate requests
-  const autoSyncedRef = useRef<Set<number>>(new Set())
-  // Highlight a specific message (set from URL params when navigating from Mentions/Briefing)
-  const [highlightMsgId, setHighlightMsgId] = useState<number | null>(null)
-  const pendingNavRef = useRef<{ chatId: number; msgId: number } | null>(null)
-  // When set, loadMessages will use anchor-based fetching to land near this message
-  const pendingAnchorRef = useRef<number | null>(null)
-  // Reply-to state
-  const [replyToMessage, setReplyToMessage] = useState<import('../api/types').Message | null>(null)
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
-  // In-chat search state
-  const [showChatSearch, setShowChatSearch] = useState(false)
-  const [chatSearch, setChatSearch] = useState('')
-  const [chatSearchResults, setChatSearchResults] = useState<Message[]>([])
-  const [searchingChat, setSearchingChat] = useState(false)
-  const chatSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [selectedFolder, setSelectedFolder] = useState<number | null>(null)
+  const [search, setSearch] = useState('')
+  const list = useChatList({ sortBy, tagId: selectedTag?.id ?? null, workspaceId: activeWorkspaceId })
+  const chatsRef = useRef(list.chats)
+  chatsRef.current = list.chats
 
-  // Forum topic state
-  const [selectedTopicId, setSelectedTopicId] = useState<number | null>(null)
-  const [selectedTopicTitle, setSelectedTopicTitle] = useState<string | null>(null)
-
-  // Edit/delete/forward state
-  const [editingMessage, setEditingMessage] = useState<Message | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Message | null>(null)
-  const [forwardTarget, setForwardTarget] = useState<Message | null>(null)
-  const [reportTarget, setReportTarget] = useState<Message | null>(null)
-
-  // Pinned message for the selected chat
-  const [pinnedMessage, setPinnedMessage] = useState<PinnedMessage | null>(null)
-  // Unread count snapshot for the selected chat (used for unread separator)
-  const [selectedChatUnread, setSelectedChatUnread] = useState(0)
-  // Typing indicator state: map of chat_id -> { userName, expiresAt }
-  const [typingUsers, setTypingUsers] = useState<Record<number, { userName: string; expiresAt: number }>>({})
-  // Online/last-seen presence for the selected private chat
-  const [presence, setPresence] = useState<UserPresence | null>(null)
-
-  // Important-contact star for 1-1 chats
-  const [isImportant, setIsImportant] = useState(false)
-  const [togglingImportant, setTogglingImportant] = useState(false)
-  // True while we're resolving a pendingNav chat (loading indicator in right pane).
-  // Initialized from the URL so the very first paint already shows "Loading chat…"
-  // instead of flashing "Select a chat to start" until the nav effect runs.
-  const [navigatingToChat, setNavigatingToChat] = useState(
-    () => new URLSearchParams(location.search).has('chatId')
+  const folders = useLatestQuery(['folders'], () => getFolders())
+  const folder = selectedFolder == null ? null : (folders.data ?? []).find((f) => f.id === selectedFolder) ?? null
+  // Folder members can live beyond the loaded pages: fetched by id, kept apart from the list
+  const folderMembers = useLatestQuery(
+    ['folder-members', folder?.id ?? null, folder?.chat_ids ?? []],
+    () => getChatsByIds(folder!.chat_ids),
+    { enabled: !!folder && folder.chat_ids.length > 0 },
   )
-  // Chats whose background auto-sync found no retrievable history (migrated/inaccessible)
-  const [syncEmptyChats, setSyncEmptyChats] = useState<Set<number>>(new Set())
-  // Transient error toast (e.g. when a chat can't be opened from Telegram)
-  const [errorToast, setErrorToast] = useState<string | null>(null)
-  const errorToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const showErrorToast = useCallback((msg: string) => {
-    setErrorToast(msg)
-    if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current)
-    errorToastTimerRef.current = setTimeout(() => setErrorToast(null), 4000)
-  }, [])
-  // Context menu state
-  const [contextMenu, setContextMenu] = useState<{ chat: Chat; x: number; y: number } | null>(null)
-  // Archived chats panel
-  const [showArchived, setShowArchived] = useState(false)
-  const [archivedChats, setArchivedChats] = useState<Chat[]>([])
-  // New Chat dialog
+
+  const { shield } = useFeatures()
+  const flaggedChats = useLatestQuery(
+    ['scam-flagged-chats', shield],
+    () => getScamFlags().then((r) => new Set(r.flagged_chat_ids)),
+    { enabled: shield },
+  )
+  const refreshFlaggedChats = useCoalescedRefetch(flaggedChats.refetch, 3000)
+  useWsEvent('scam_users_flagged', refreshFlaggedChats)
+  useWsEvent('scam_verdict_changed', refreshFlaggedChats)
+
+  // ── Selection ──────────────────────────────────────────────────────────────
+  const [sel, setSel] = useState<Selection | null>(null)
+  const selRef = useRef(sel)
+  selRef.current = sel
+  /** Bumped by every selection: async openers (nav, search) drop their result if the user moved on */
+  const selGenRef = useRef(0)
+  const nonceRef = useRef(0)
+  const [showInfo, setShowInfo] = useState(false)
+  const [showSearch, setShowSearch] = useState(false)
   const [showNewChat, setShowNewChat] = useState(false)
-  // Per-chat compose drafts, keyed by telegram_id (survive chat switches)
-  const draftsRef = useRef(new Map<number, ComposeDraft>())
+  const [pendingNav, setPendingNav] = useState<{ chatId: number; msgId: number | null } | null>(null)
+  const selectedId = sel?.chat.telegram_id ?? null
+  const topic = useChatUiSelect(selectedId, (u) => u.topic)
 
-  // Fetch presence status when selected chat changes (private chats only).
-  // Aborted on chat switch so a slow response can't show the previous
-  // person's status on the new chat's header.
-  useEffect(() => {
-    if (!selectedChat || selectedChat.type !== 'private') {
-      setPresence(null)
+  const patchChat = useCallback((chatId: number, patch: Partial<Chat>) => {
+    list.setChats((prev) => prev.map((c) => (c.telegram_id === chatId ? { ...c, ...patch } : c)))
+    setSel((s) => (s && s.chat.telegram_id === chatId ? { ...s, chat: { ...s.chat, ...patch } } : s))
+  }, [list.setChats]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const markRead = useCallback((chat: Chat) => {
+    const current = chatsRef.current.find((c) => c.telegram_id === chat.telegram_id) ?? chat
+    if ((current.unread_count ?? 0) === 0 && !current.is_marked_unread) return
+    patchChat(chat.telegram_id, { unread_count: 0, is_marked_unread: false })
+    markChatRead(chat.telegram_id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
+    if (current.is_marked_unread) {
+      setMarkedUnread(chat.telegram_id, false).catch((e) => reportError(e, 'Couldn’t clear unread mark'))
+    }
+  }, [patchChat])
+
+  const selectChat = useCallback((chat: Chat, opts: SelectOptions = {}) => {
+    selGenRef.current++
+    setPendingNav(null)
+    const prev = selRef.current
+    const sameChat = prev?.chat.telegram_id === chat.telegram_id
+    if (sameChat && opts.anchorMsgId == null && opts.topic === undefined) {
+      markRead(chat)
       return
     }
-    const ac = new AbortController()
-    getUserPresence(selectedChat.telegram_id, ac.signal)
-      .then((p) => setPresence(p))
-      .catch((e) => {
-        if (!isAbortError(e)) setPresence(null)
-      })
-    return () => ac.abort()
-  }, [selectedChat?.telegram_id, selectedChat?.type])
+    const topicNext = opts.topic !== undefined ? opts.topic : sameChat ? getChatUi(chat.telegram_id).topic : null
+    updateChatUi(chat.telegram_id, { topic: topicNext })
+    const current = chatsRef.current.find((c) => c.telegram_id === chat.telegram_id)
+    const unread = sameChat ? 0 : ((current ?? chat).unread_count ?? 0)
+    setSel({ chat: current ?? chat, viaKeyboard: !!opts.viaKeyboard, anchorTgId: opts.anchorMsgId ?? null, unreadCount: unread, nonce: ++nonceRef.current })
+    if (!sameChat) {
+      setShowInfo(false)
+      setShowSearch(false)
+    }
+    markRead(chat)
+  }, [markRead])
 
-  // Clear expired typing indicators every second
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTypingUsers((prev) => {
-        const now = Date.now()
-        const next: Record<number, { userName: string; expiresAt: number }> = {}
-        for (const [key, val] of Object.entries(prev)) {
-          if (val.expiresAt > now) next[Number(key)] = val
-        }
-        return Object.keys(next).length !== Object.keys(prev).length ? next : prev
-      })
-    }, 1000)
-    return () => clearInterval(interval)
+  const deselect = useCallback((chatId: number) => {
+    setSel((s) => (s && s.chat.telegram_id === chatId ? null : s))
   }, [])
 
-  // Fetch pinned message when selected chat changes (abort on switch — the
-  // banner is clickable, so a stale one would jump to the wrong message)
+  // Switching workspace closes the open chat (only an explicit switch — list
+  // reloads never close it, even if the chat isn't on the first page)
+  const prevWorkspaceRef = useRef(activeWorkspaceId)
   useEffect(() => {
-    if (!selectedChat) {
-      setPinnedMessage(null)
+    if (prevWorkspaceRef.current !== activeWorkspaceId) setSel(null)
+    prevWorkspaceRef.current = activeWorkspaceId
+  }, [activeWorkspaceId])
+
+  // The freshest copy of the selected chat (list deltas update badges, flags, previews)
+  const selectedChat = useMemo(() => {
+    if (!sel) return null
+    return list.chats.find((c) => c.telegram_id === sel.chat.telegram_id) ?? sel.chat
+  }, [sel, list.chats])
+  const selection = useMemo(
+    () => (sel ? { anchorTgId: sel.anchorTgId, unreadCount: sel.unreadCount, nonce: sel.nonce, viaKeyboard: sel.viaKeyboard } : null),
+    [sel],
+  )
+
+  // ── ?chatId=&msgId= navigation (mentions, palette, notifications) ─────────
+  useEffect(() => {
+    const nav = parseNav(location.search)
+    if (!nav) return
+    // Consume once: strip the params so list reloads can never re-arm it
+    navigate(location.pathname, { replace: true })
+    setPendingNav(nav)
+  }, [location.search, location.pathname, navigate])
+
+  useEffect(() => {
+    if (!pendingNav) return
+    const nav = pendingNav
+    const found = chatsRef.current.find((c) => c.telegram_id === nav.chatId)
+      ?? (selRef.current?.chat.telegram_id === nav.chatId ? selRef.current.chat : undefined)
+    if (found) {
+      selectChat(found, { anchorMsgId: nav.msgId })
       return
     }
-    const ac = new AbortController()
-    getPinnedMessage(selectedChat.telegram_id, ac.signal)
-      .then((msg) => setPinnedMessage(msg))
-      .catch((e) => {
-        if (!isAbortError(e)) setPinnedMessage(null)
+    if (list.loading) return // wait for the first page before asking the server
+    const gen = selGenRef.current
+    let cancelled = false
+    ensureChat(nav.chatId)
+      .then((chat) => {
+        if (cancelled || gen !== selGenRef.current) return
+        list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
+        selectChat(chat, { anchorMsgId: nav.msgId })
       })
-    return () => ac.abort()
-  }, [selectedChat?.telegram_id])
-
-  // Fetch importance status when selected chat changes (private chats only)
-  useEffect(() => {
-    if (!selectedChat || selectedChat.type !== 'private') {
-      setIsImportant(false)
-      return
-    }
-    const ac = new AbortController()
-    getContactByTelegram(selectedChat.telegram_id, ac.signal)
-      .then((c) => setIsImportant(c.is_important))
       .catch((e) => {
-        if (!isAbortError(e)) setIsImportant(false)
+        if (cancelled || gen !== selGenRef.current) return
+        setPendingNav(null)
+        reportError(e, 'Couldn’t open this chat from Telegram')
       })
-    return () => ac.abort()
-  }, [selectedChat?.telegram_id, selectedChat?.type])
+    return () => { cancelled = true }
+  }, [pendingNav, list.loading]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleToggleImportant = useCallback(async () => {
-    if (!selectedChat || togglingImportant) return
-    const newVal = !isImportant
-    setTogglingImportant(true)
+  /** Open a chat that may not be in the loaded list yet (search results, avatar menu) */
+  const openRemote = useCallback(async (telegramId: number, opts: SelectOptions = {}) => {
+    const gen = selGenRef.current
     try {
-      const updated = await setContactImportantByTelegram(selectedChat.telegram_id, newVal)
-      setIsImportant(updated.is_important)
-    } catch {
-      // ignore
-    } finally {
-      setTogglingImportant(false)
+      const chat = chatsRef.current.find((c) => c.telegram_id === telegramId) ?? await ensureChat(telegramId)
+      if (gen !== selGenRef.current) return
+      list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
+      selectChat(chat, opts)
+    } catch (e) {
+      if (gen === selGenRef.current) reportError(e, 'Couldn’t open this chat from Telegram')
     }
-  }, [selectedChat, isImportant, togglingImportant])
+  }, [selectChat]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleChatCreated = useCallback((chat: Chat) => {
-    setShowNewChat(false)
-    // Add the new chat to the list if not already present
-    setChats((prev) => {
-      if (prev.some((c) => c.telegram_id === chat.telegram_id)) return prev
-      return [chat, ...prev]
+  // ── Read acknowledgement while the chat is open and the window focused ────
+  const pendingAckRef = useRef<number | null>(null)
+  const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scheduleAck = useCallback((chatId: number) => {
+    pendingAckRef.current = chatId
+    if (!isWindowFocused()) return // acknowledged when the window regains focus
+    if (ackTimerRef.current) clearTimeout(ackTimerRef.current)
+    ackTimerRef.current = setTimeout(() => {
+      ackTimerRef.current = null
+      const id = pendingAckRef.current
+      if (id == null || selRef.current?.chat.telegram_id !== id || !isWindowFocused()) return
+      pendingAckRef.current = null
+      patchChat(id, { unread_count: 0 })
+      markChatRead(id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
+    }, READ_ACK_MS)
+  }, [patchChat])
+  useEffect(() => {
+    const onFocus = () => {
+      const id = pendingAckRef.current
+      if (id != null && selRef.current?.chat.telegram_id === id) scheduleAck(id)
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
+      if (ackTimerRef.current) clearTimeout(ackTimerRef.current)
+    }
+  }, [scheduleAck])
+
+  // ── Live list updates ──────────────────────────────────────────────────────
+  const reloadSoon = useCoalescedRefetch(list.reload, 2000)
+  useWsEvent('new_message', (e) => {
+    const viewing = selRef.current?.chat.telegram_id === e.chat_id
+    const known = chatsRef.current.some((c) => c.telegram_id === e.chat_id)
+    if (!known) {
+      // A chat outside the loaded pages (or brand new): one coalesced refetch
+      reloadSoon()
+      return
+    }
+    const msg = e.message
+    const date = msg?.date ?? new Date().toISOString()
+    const incoming = !e.is_outgoing
+    const countAsUnread = incoming && !(viewing && isWindowFocused())
+    list.setChats((prev) => {
+      const cur = prev.find((c) => c.telegram_id === e.chat_id)
+      return bumpChat(prev, e.chat_id, {
+        last_message: { text: e.text ?? msg?.text ?? '', sender_name: e.sender_name ?? null, date },
+        last_activity_at: date,
+        unread_count: countAsUnread ? (cur?.unread_count ?? 0) + 1 : cur?.unread_count,
+      })
     })
-    // Select the newly created chat
-    setSelectedChat(chat)
-    setMessages([])
-    setHasMore(false)
-    setMessageOffset(0)
-    setShowInfo(false)
-    setHighlightMsgId(null)
-    setReplyToMessage(null)
-  }, [])
+    if (viewing && incoming) scheduleAck(e.chat_id)
+  })
+  useWsEvent('chats_synced', reloadSoon)
+  useWsEvent('chat_synced', reloadSoon)
+  useWsEvent('bulk_sync_complete', reloadSoon)
+  useWsEvent('resync', () => {
+    reloadSoon()
+    void folders.refetch()
+    if (shield) void flaggedChats.refetch()
+  })
 
-  const onDragStart = useCallback((e: React.MouseEvent) => {
+  const onChatActivity = useCallback((chatId: number, preview: { text: string; date: string }) => {
+    list.setChats((prev) => bumpChat(prev, chatId, {
+      last_message: { text: preview.text, sender_name: null, date: preview.date },
+      last_activity_at: preview.date,
+    }))
+  }, [list.setChats]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Chat actions (context menu / row buttons) ─────────────────────────────
+  const act = useCallback(async (label: string, fn: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await fn()
+      return true
+    } catch (e) {
+      reportError(e, label)
+      return false
+    }
+  }, [])
+  const actions: ChatActions = useMemo(() => ({
+    toggleTrack: (chat) => act('Couldn’t change tracking', async () => {
+      const r = await setTracked(chat.telegram_id, !chat.is_tracked)
+      patchChat(chat.telegram_id, { is_tracked: r.is_tracked })
+    }),
+    hide: (chat) => act('Couldn’t hide chat', async () => {
+      await setHidden(chat.telegram_id, true)
+      list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+      deselect(chat.telegram_id)
+    }),
+    unhide: (chat) => act('Couldn’t unhide chat', async () => {
+      await setHidden(chat.telegram_id, false)
+      void list.reload()
+    }),
+    briefing: (chat) => act('Couldn’t add to briefing', async () => {
+      await setBriefing(chat.telegram_id, true)
+      list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+      deselect(chat.telegram_id)
+    }),
+    pin: (chat) => act(chat.is_pinned ? 'Couldn’t unpin chat' : 'Couldn’t pin chat', async () => {
+      const r = await setPinned(chat.telegram_id, !chat.is_pinned)
+      patchChat(chat.telegram_id, { is_pinned: r.is_pinned })
+    }),
+    archive: (chat) => act(chat.is_archived ? 'Couldn’t unarchive chat' : 'Couldn’t archive chat', async () => {
+      const archived = !chat.is_archived
+      await setArchived(chat.telegram_id, archived)
+      if (archived) {
+        list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+        deselect(chat.telegram_id)
+      } else {
+        void list.reload()
+      }
+    }),
+    mute: (chat, duration) => act('Couldn’t change mute', async () => {
+      const muted = !chat.is_muted || !!duration
+      const r = await setMuted(chat.telegram_id, muted, duration)
+      patchChat(chat.telegram_id, { is_muted: r.is_muted, muted_until: r.muted_until })
+    }),
+    markUnread: (chat) => act('Couldn’t change unread mark', async () => {
+      const r = await setMarkedUnread(chat.telegram_id, !chat.is_marked_unread)
+      patchChat(chat.telegram_id, { is_marked_unread: r.is_marked_unread })
+    }),
+  }), [act, patchChat, deselect, list.setChats, list.reload]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Visible list ───────────────────────────────────────────────────────────
+  const visible = useMemo(() => {
+    let pool = list.chats
+    if (folder) {
+      // Union loaded chats with separately fetched folder members (prefer the
+      // list copy: it carries fresher unread/last-message data)
+      const loadedIds = new Set(pool.map((c) => c.telegram_id))
+      pool = [...pool, ...(folderMembers.data ?? []).filter((m) => !loadedIds.has(m.telegram_id))]
+        .filter((c) => folder.chat_ids.includes(c.telegram_id)
+          || (folder.include_groups && c.type === 'group')
+          || (folder.include_channels && c.type === 'channel')
+          || (folder.include_contacts && c.type === 'private'))
+    }
+    const q = search.trim().toLowerCase()
+    if (q) pool = pool.filter((c) => c.name.toLowerCase().includes(q) || (c.username ?? '').toLowerCase().includes(q))
+    return [...pool].sort((a, b) => {
+      if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1
+      const da = a.last_activity_at ?? ''
+      const db = b.last_activity_at ?? ''
+      if (sortBy === 'unread') {
+        const d = (b.unread_count ?? 0) - (a.unread_count ?? 0)
+        return d !== 0 ? d : db.localeCompare(da)
+      }
+      if (sortBy === 'alpha') return a.name.localeCompare(b.name)
+      return da !== db ? db.localeCompare(da) : a.name.localeCompare(b.name)
+    })
+  }, [list.chats, folder, folderMembers.data, search, sortBy])
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+
+  // ── Search: Telegram directory + message content ──────────────────────────
+  const tgSearch = useDebouncedQuery(search, (q, signal) => searchChatsTelegram(q, signal), { delayMs: 300 })
+  const telegramResults = useMemo(() => {
+    const shown = new Set(visible.map((c) => c.telegram_id))
+    return (tgSearch.data ?? []).filter((c) => !shown.has(c.telegram_id))
+  }, [tgSearch.data, visible])
+  // Latest-only: a new query aborts the one in flight (never silently ignored)
+  const [messageResults, setMessageResults] = useState<{ q: string; results: MessageSearchResult[] } | null>(null)
+  const [messageSearchPending, setMessageSearchPending] = useState<string | null>(null)
+  const messageSearchCtl = useRef<AbortController | null>(null)
+  const runMessageSearch = useCallback(async (q: string) => {
+    messageSearchCtl.current?.abort()
+    const ctl = new AbortController()
+    messageSearchCtl.current = ctl
+    setMessageSearchPending(q)
+    try {
+      const results = await searchMessagesGlobal(q, ctl.signal)
+      if (messageSearchCtl.current === ctl) setMessageResults({ q, results })
+    } catch (e) {
+      if (messageSearchCtl.current === ctl) reportError(e, 'Message search failed')
+    } finally {
+      if (messageSearchCtl.current === ctl) {
+        messageSearchCtl.current = null
+        setMessageSearchPending(null)
+      }
+    }
+  }, [])
+  useEffect(() => () => messageSearchCtl.current?.abort(), [])
+  const currentMessageResults = messageResults && messageResults.q === search.trim() ? messageResults.results : null
+
+  // ── Keyboard ───────────────────────────────────────────────────────────────
+  const chatListRef = useRef<HTMLDivElement>(null)
+  const chatListVirtuosoRef = useRef<VirtuosoHandle>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const moveSelection = (delta: 1 | -1) => {
+    const items = visibleRef.current
+    const cur = selRef.current?.chat.telegram_id
+    const idx = cur == null ? -1 : items.findIndex((c) => c.telegram_id === cur)
+    const next = idx === -1 ? (delta > 0 ? items[0] : undefined) : items[idx + delta]
+    if (!next) return
+    // Focus follows the selection in the list, so the next j/k/arrow keeps
+    // navigating. The list is virtualized: bring the row into view first.
+    chatListVirtuosoRef.current?.scrollIntoView({ index: items.indexOf(next) })
+    const findRow = () => chatListRef.current?.querySelector<HTMLElement>(`[data-chat-id="${next.telegram_id}"] [data-chat-row]`)
+    const row = findRow()
+    if (row) row.focus()
+    else requestAnimationFrame(() => findRow()?.focus())
+    selectChat(next, { viaKeyboard: true })
+  }
+  const listHasFocus = () => !!chatListRef.current && chatListRef.current.contains(document.activeElement)
+  useKeyboardShortcuts({
+    j: () => moveSelection(1),
+    k: () => moveSelection(-1),
+    '/': () => searchInputRef.current?.focus(),
+    i: () => { if (!selRef.current) return false; setShowInfo((v) => !v) },
+    'mod+f': () => { if (!selRef.current) return false; setShowSearch((v) => !v) },
+    n: () => setShowNewChat(true),
+  })
+  // Arrow keys move through the list only while the list has focus; elsewhere they scroll
+  useKeyboardShortcuts({
+    arrowdown: () => { if (!listHasFocus()) return false; moveSelection(1) },
+    arrowup: () => { if (!listHasFocus()) return false; moveSelection(-1) },
+  }, { yieldScrollKeys: false })
+
+  // ── Resizable list ─────────────────────────────────────────────────────────
+  const [sidebarWidth, setSidebarWidth] = useState(288)
+  const onResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
-    dragging.current = true
     const startX = e.clientX
     const startWidth = sidebarWidth
-
-    const onMove = (e: MouseEvent) => {
-      if (!dragging.current) return
-      const next = Math.min(480, Math.max(200, startWidth + e.clientX - startX))
-      setSidebarWidth(next)
-    }
+    const onMove = (ev: MouseEvent) => setSidebarWidth(Math.min(480, Math.max(200, startWidth + ev.clientX - startX)))
     const onUp = () => {
-      dragging.current = false
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
@@ -527,1649 +469,99 @@ export default function Chats() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
-  const activeWorkspaceId = activeWorkspace?.id
-  const loadChats = useCallback(async () => {
-    try {
-      const data = await getChats(CHAT_PAGE, 0, sortBy, selectedTag?.id, activeWorkspaceId)
-      setChats(data)
-      setChatOffset(0)
-      setHasMoreChats(data.length === CHAT_PAGE)
-    } catch (e) {
-      // request() already retried transient failures — keep the current list
-      console.warn('loadChats failed:', e)
-    }
-  }, [CHAT_PAGE, sortBy, selectedTag, activeWorkspaceId])
+  const onSelectTopic = useCallback((t: { id: number; title: string } | null) => {
+    const cur = selRef.current
+    if (cur) selectChat(cur.chat, { topic: t })
+  }, [selectChat])
+  const onToggleInfo = useCallback(() => setShowInfo((v) => !v), [])
+  const onSearchMessages = useCallback(() => { const q = search.trim(); if (q) void runMessageSearch(q) }, [search, runMessageSearch])
+  const onOpenSearchResult = useCallback((chat: Chat) => {
+    setSearch('')
+    void openRemote(chat.telegram_id)
+  }, [openRemote])
+  const onOpenMessageResult = useCallback((r: MessageSearchResult) => {
+    void openRemote(r.telegram_id, { anchorMsgId: r.messages[0]?.tg_message_id ?? null })
+  }, [openRemote])
+  const handleChatCreated = useCallback((chat: Chat) => {
+    setShowNewChat(false)
+    list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
+    selectChat(chat)
+  }, [selectChat]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadMoreChats = useCallback(async () => {
-    if (loadingMoreChats || !hasMoreChats) return
-    setLoadingMoreChats(true)
-    try {
-      const nextOffset = chatOffset + CHAT_PAGE
-      const data = await getChats(CHAT_PAGE, nextOffset, sortBy, selectedTag?.id, activeWorkspaceId)
-      setChats((prev) => {
-        const existingIds = new Set(prev.map((c) => c.telegram_id))
-        const newChats = data.filter((c) => !existingIds.has(c.telegram_id))
-        // Auto-sync newly visible chats (sequential to avoid stampeding)
-        const toSync = newChats.filter((c) => !autoSyncedRef.current.has(c.telegram_id))
-        for (const c of toSync) autoSyncedRef.current.add(c.telegram_id)
-        if (toSync.length > 0) {
-          ;(async () => {
-            for (const c of toSync) {
-              try {
-                await syncChat(c.telegram_id, 25)
-              } catch (e) {
-                // Rate limited — stop hammering; the rest sync on open.
-                // Other failures (deleted chat etc.) only skip that chat.
-                if (isRateLimitError(e)) break
-              }
-            }
-          })()
-        }
-        return [...prev, ...newChats]
-      })
-      setChatOffset(nextOffset)
-      setHasMoreChats(data.length === CHAT_PAGE)
-    } finally {
-      setLoadingMoreChats(false)
-    }
-  }, [loadingMoreChats, hasMoreChats, chatOffset, CHAT_PAGE, sortBy, selectedTag, activeWorkspaceId])
-
-  const loadFolders = useCallback(async () => {
-    try {
-      const data = await getFolders()
-      setFolders(data)
-    } catch (e) {
-      console.warn('loadFolders failed:', e)
-    }
-  }, [])
-
-  const toggleTagPopover = useCallback(() => {
-    setShowTagPopover((prev) => {
-      if (!prev) {
-        setTagQuery('')
-        getTags().then(setAvailableTags).catch(() => {})
-      }
-      return !prev
-    })
-  }, [])
-
-  // Folder members can live far beyond the paginated recent-chats window —
-  // fetch them by id into their own state (list reloads must not wipe them;
-  // loadChats() fully replaces `chats` on every new_message/chat_synced event).
-  useEffect(() => {
-    const folder = selectedFolder === null ? undefined : folders.find((f) => f.id === selectedFolder)
-    if (!folder || folder.chat_ids.length === 0) {
-      setFolderMembers([])
-      return
-    }
-    let cancelled = false
-    getChatsByIds(folder.chat_ids)
-      .then((members) => {
-        if (!cancelled) setFolderMembers(members)
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [selectedFolder, folders])
-
-  // Dismiss tag popover on click outside
-  useEffect(() => {
-    if (!showTagPopover) return
-    const handler = (e: MouseEvent) => {
-      if (tagPopoverRef.current && !tagPopoverRef.current.contains(e.target as Node)) {
-        setShowTagPopover(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [showTagPopover])
-
-  // Monotonic sequence for message loads: a slow response for a previously
-  // selected chat must never overwrite the messages of the chat now open.
-  const loadSeqRef = useRef(0)
-  const loadMessages = useCallback(async (chat: Chat) => {
-    const seq = ++loadSeqRef.current
-    setLoadingMessages(true)
-    // Consume the pending anchor (if navigating from a citation) and compute offset server-side
-    const anchor = pendingAnchorRef.current
-    pendingAnchorRef.current = null
-    setMessageOffset(0)
-    try {
-      const data = await getMessages(chat.telegram_id, LIMIT, 0, anchor ?? undefined)
-      if (seq !== loadSeqRef.current) return // superseded by a newer load
-      setMessages(data)
-      setHasMore(data.length === LIMIT)
-    } catch (e) {
-      if (seq !== loadSeqRef.current) return
-      // Keep whatever this chat already shows, but never leave another chat's
-      // messages on screen under this chat's header
-      setMessages((prev) => prev.filter((m) => m.chat_id === chat.telegram_id))
-      console.warn('loadMessages failed:', e)
-    } finally {
-      if (seq === loadSeqRef.current) setLoadingMessages(false)
-    }
-  }, [LIMIT])
-
-  // Track whether we've exhausted Telegram history for this chat
-  const [noMoreRemote, setNoMoreRemote] = useState(false)
-
-  const loadMoreMessages = useCallback(async () => {
-    if (!selectedChat || loadingMore) return
-    setLoadingMore(true)
-    const nextOffset = messageOffset + LIMIT
-    try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
-      if (data.length > 0) {
-        setMessages((prev) => [...data, ...prev])
-        setMessageOffset(nextOffset)
-        setHasMore(data.length === LIMIT)
-      } else {
-        // No more local messages — try fetching from Telegram
-        setHasMore(false)
-        if (!noMoreRemote) {
-          try {
-            await syncChat(selectedChat.telegram_id, 100)
-            // Reload all messages after sync
-            const refreshed = await getMessages(selectedChat.telegram_id, LIMIT, nextOffset)
-            if (refreshed.length > 0) {
-              setMessages((prev) => [...refreshed, ...prev])
-              setMessageOffset(nextOffset)
-              setHasMore(refreshed.length === LIMIT)
-            } else {
-              setNoMoreRemote(true)
-            }
-          } catch (e) {
-            // A rate limit is temporary — don't permanently disable remote
-            // fetching; scrolling up again after the wait will retry.
-            if (!isRateLimitError(e)) {
-              setNoMoreRemote(true)
-            }
-          }
-        }
-      }
-    } finally {
-      setLoadingMore(false)
-    }
-  }, [selectedChat, messageOffset, loadingMore, LIMIT, noMoreRemote])
-
-  // Parse URL params for mention navigation: ?chatId=X&msgId=Y.
-  // Consumed exactly once — the params are stripped immediately so list reloads
-  // (which re-create loadChats) can never re-arm the navigation and wipe the pane.
-  // navSeq deterministically triggers the processor effect below: without it,
-  // arming while already on /chats (palette click) would never fire the processor
-  // because neither `chats` nor `loadChats` changes.
-  const [navSeq, setNavSeq] = useState(0)
-  useEffect(() => {
-    const params = new URLSearchParams(location.search)
-    const chatIdParam = params.get('chatId')
-    const msgIdParam = params.get('msgId')
-    if (!chatIdParam) return
-    const chatId = parseInt(chatIdParam, 10)
-    const msgId = msgIdParam ? parseInt(msgIdParam, 10) : 0
-    if (!isNaN(chatId)) {
-      pendingNavRef.current = { chatId, msgId }
-      setNavigatingToChat(true)
-      setNavSeq((n) => n + 1)
-    }
-    navigate(location.pathname, { replace: true })
-  }, [location.search, location.pathname, navigate])
-
-  useEffect(() => {
-    loadChats()
-    loadFolders()
-    getScamFlags()
-      .then((data) => {
-        setFlaggedSenderIds(new Set(data.flags.map((f) => f.telegram_id)))
-        setFlaggedChatIds(new Set(data.flagged_chat_ids))
-      })
-      .catch(() => {})
-  }, [loadChats, loadFolders])
-
-  // When chats load, auto-select the chat from URL params if pending
-  const retryNavRef = useRef(false)
-  useEffect(() => {
-    if (!pendingNavRef.current) return
-    // An ensureChat resolution is in flight — it selects the chat directly when
-    // it lands. Re-running here (list reloads fire this effect repeatedly) must
-    // not "give up" and blank the pane in the meantime.
-    if (retryNavRef.current) return
-    if (chats.length === 0) return
-    const { chatId, msgId } = pendingNavRef.current
-    const target = chats.find((c) => c.telegram_id === chatId)
-    if (target) {
-      pendingNavRef.current = null
-      retryNavRef.current = false
-      setNavigatingToChat(false)
-      if (msgId) {
-        pendingAnchorRef.current = msgId  // loadMessages will use this to fetch the right window
-        setHighlightMsgId(msgId)
-      }
-      setSelectedChat(target)
-      setMessages([])
-      setHasMore(false)
-      setMessageOffset(0)
-      setShowInfo(false)
-    } else {
-      // Chat not found in paginated list — fetch it directly by telegram_id.
-      // This handles chats beyond the first page (CHAT_PAGE=50).
-      retryNavRef.current = true
-      ensureChat(chatId)
-        .then((chat) => {
-          // Select the fetched chat DIRECTLY. Routing it through `chats` and a
-          // second effect cycle loses a race: any WS-triggered loadChats() in
-          // between replaces the list with page 1, wipes the prepended chat,
-          // and the retry branch gives up with an empty pane.
-          pendingNavRef.current = null
-          retryNavRef.current = false
-          setNavigatingToChat(false)
-          setChats((prev) => {
-            if (prev.some((c) => c.telegram_id === chat.telegram_id)) return prev
-            return [chat, ...prev]
-          })
-          if (msgId) {
-            pendingAnchorRef.current = msgId
-            setHighlightMsgId(msgId)
-          }
-          setSelectedChat(chat)
-          setMessages([])
-          setHasMore(false)
-          setMessageOffset(0)
-          setShowInfo(false)
-        })
-        .catch(() => {
-          // Could not fetch — give up, but tell the user why nothing opened
-          pendingNavRef.current = null
-          retryNavRef.current = false
-          setNavigatingToChat(false)
-          showErrorToast('Couldn’t open this chat from Telegram')
-        })
-    }
-  }, [chats, loadChats, navSeq])
-
-  useEffect(() => {
-    if (selectedChat) {
-      loadMessages(selectedChat)
-    }
-  }, [selectedChat, loadMessages])
-
-  // Keep refs of current messages/offset for WS handlers (avoids stale closures)
-  const messagesRef = useRef<Message[]>([])
-  useEffect(() => { messagesRef.current = messages }, [messages])
-  const messageOffsetRef = useRef(0)
-  useEffect(() => { messageOffsetRef.current = messageOffset }, [messageOffset])
-
-  // Fallback poll while the pane is empty (first-time sync in flight, or the
-  // chat_synced WS event was missed during a reconnect): re-check the local DB
-  // every 5s for up to 3 minutes so the spinner can never hang forever.
-  useEffect(() => {
-    if (!selectedChat) return
-    if (loadingMessages || messages.length > 0) return
-    if (syncEmptyChats.has(selectedChat.telegram_id)) return
-    let cancelled = false
-    let ticks = 0
-    const timer = setInterval(async () => {
-      if (++ticks > 36) {
-        clearInterval(timer)
-        return
-      }
-      try {
-        const data = await getMessages(selectedChat.telegram_id, LIMIT, 0)
-        if (cancelled || data.length === 0) return
-        setMessages(data)
-        setHasMore(data.length === LIMIT)
-      } catch {
-        // next tick retries
-      }
-    }, 5000)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [selectedChat, loadingMessages, messages.length, syncEmptyChats, LIMIT])
-
-  const handleWsEvent = useCallback((event: WSEvent) => {
-    if (event.type === 'user_typing') {
-      setTypingUsers((prev) => ({
-        ...prev,
-        [event.chat_id]: { userName: event.user_name, expiresAt: Date.now() + 5000 },
-      }))
-      return
-    }
-    if (event.type === 'user_status') {
-      // Update presence if this is the currently selected chat user
-      if (selectedChat && selectedChat.type === 'private' && event.user_id === selectedChat.telegram_id) {
-        setPresence({
-          status: event.status as UserPresence['status'],
-          last_seen: event.last_seen,
-        })
-      }
-      return
-    }
-    if (event.type === 'new_message') {
-      const isViewingChat = selectedChat?.telegram_id === event.chat_id
-      let knownChat = false
-      // Apply the event as a DELTA to the chat list instead of a full
-      // loadChats(): a wholesale refetch raced in-flight mark-read calls
-      // (badge flicker) and clobbered optimistic updates.
-      setChats((prev) => {
-        const idx = prev.findIndex((c) => c.telegram_id === event.chat_id)
-        if (idx === -1) {
-          if (!autoSyncedRef.current.has(event.chat_id)) {
-            autoSyncedRef.current.add(event.chat_id)
-            // Delay slightly so the chat upsert from loadChats completes first
-            setTimeout(() => syncChat(event.chat_id, 25).catch(() => {}), 1500)
-          }
-          return prev
-        }
-        knownChat = true
-        const msg = event.message
-        const date = msg?.date ?? new Date().toISOString()
-        const updated: Chat = {
-          ...prev[idx],
-          last_message: {
-            text: event.text ?? msg?.text ?? '',
-            sender_name: event.sender_name ?? null,
-            date,
-          },
-          last_activity_at: date,
-          // Local increment; the periodic dialog sync reconciles with Telegram
-          unread_count: !event.is_outgoing && !isViewingChat
-            ? (prev[idx].unread_count ?? 0) + 1
-            : prev[idx].unread_count,
-        }
-        // Newest activity → top of the non-pinned section (pinned chats keep
-        // their positions, mirroring the server's "recent" sort)
-        const rest = prev.filter((_, i) => i !== idx)
-        if (updated.is_pinned) {
-          const next = [...prev]
-          next[idx] = updated
-          return next
-        }
-        const firstUnpinned = rest.findIndex((c) => !c.is_pinned)
-        const insertAt = firstUnpinned === -1 ? rest.length : firstUnpinned
-        return [...rest.slice(0, insertAt), updated, ...rest.slice(insertAt)]
-      })
-      if (!knownChat) {
-        // Unknown chat: the list genuinely needs a refetch to pick it up
-        loadChats()
-      }
-      // Message pane: append/patch in place when possible; fall back to a
-      // reload only when the event carries no message payload.
-      // Skip while the user is scrolled into older history — resetting to
-      // offset 0 would yank their reading position.
-      if (selectedChat && event.chat_id === selectedChat.telegram_id && messageOffsetRef.current === 0) {
-        const msg = event.message
-        if (msg) {
-          setMessages((prev) => {
-            const existing = prev.findIndex((m) => m.id === msg.id)
-            if (existing !== -1) {
-              const next = [...prev]
-              next[existing] = msg
-              return next
-            }
-            return [...prev, msg]
-          })
-        } else {
-          loadMessages(selectedChat)
-        }
-      }
-      // Fire desktop notification if not outgoing
-      if (!event.is_outgoing) {
-        const pref = localStorage.getItem('notifPref') ?? 'tracked'
-        const shouldNotify =
-          pref === 'all' || (pref === 'tracked' && event.is_tracked)
-        if (shouldNotify && Notification.permission === 'granted') {
-          const title = event.chat_name ?? 'New message'
-          const body = event.sender_name
-            ? event.sender_name + ': ' + (event.text ?? '')
-            : (event.text ?? '')
-          new Notification(title, { body, silent: false })
-        }
-      }
-    }
-    if (event.type === 'scam_detected') {
-      // Update scam scores in-place without reloading (avoids scroll jump)
-      if (selectedChat && event.chat_id === selectedChat.telegram_id) {
-        setMessages((prev) => prev.map((m) =>
-          event.message_ids.includes(m.tg_message_id)
-            ? { ...m, scam_score: event.confidence, scam_reason: event.reason }
-            : m
-        ))
-      }
-    }
-    if (event.type === 'scam_check_error') {
-      window.dispatchEvent(new CustomEvent('scam_check_error', { detail: event }))
-    }
-    if (event.type === 'scam_check_safe') {
-      window.dispatchEvent(new CustomEvent('scam_check_safe', { detail: event }))
-    }
-    if (event.type === 'chat_synced') {
-      // Background sync finished — reload chat list + messages if viewing this chat
-      setSyncEmptyChats((prev) => {
-        if (!prev.has(event.chat_id)) return prev
-        const next = new Set(prev)
-        next.delete(event.chat_id) // a successful sync invalidates a stale empty flag
-        return next
-      })
-      loadChats()
-      // Same scroll-position guard as new_message above
-      if (selectedChat && event.chat_id === selectedChat.telegram_id && messageOffsetRef.current === 0) {
-        loadMessages(selectedChat)
-      }
-    }
-    if (event.type === 'chat_sync_empty') {
-      // Background sync found no retrievable history for this chat
-      setSyncEmptyChats((prev) => {
-        const next = new Set(prev)
-        next.add(event.chat_id)
-        return next
-      })
-    }
-    if (event.type === 'bulk_sync_complete') {
-      // Bulk sync done — reload if current chat has no messages.
-      // Read via ref: this callback's `messages` closure is stale.
-      if (selectedChat && messagesRef.current.length === 0) {
-        loadMessages(selectedChat)
-      }
-    }
-    if (event.type === 'messages_deleted') {
-      const deletedIds = new Set(event.message_ids as number[])
-      // chat_id-less deletions are only meaningful in the shared private/basic-group
-      // id namespace — never strip messages from channels/supergroups (per-channel ids)
-      const applies = selectedChat && (
-        event.chat_id === selectedChat.telegram_id ||
-        (!event.chat_id && selectedChat.telegram_id > -1000000000000)
-      )
-      if (applies) {
-        setMessages((prev) => prev.filter((m) => !deletedIds.has(m.tg_message_id)))
-      }
-    }
-    if (event.type === 'scam_users_flagged') {
-      setFlaggedSenderIds((prev) => {
-        const next = new Set(prev)
-        for (const id of event.telegram_ids) next.add(id)
-        return next
-      })
-    }
-  }, [selectedChat, loadChats, loadMessages])
-
-  useWebSocket(handleWsEvent)
-
-  // Debounced in-chat search
-  useEffect(() => {
-    if (!selectedChat || !chatSearch.trim()) {
-      setChatSearchResults([])
-      return
-    }
-    if (chatSearchTimerRef.current) clearTimeout(chatSearchTimerRef.current)
-    chatSearchTimerRef.current = setTimeout(async () => {
-      setSearchingChat(true)
-      try {
-        const results = await searchChatMessages(selectedChat.telegram_id, chatSearch.trim())
-        setChatSearchResults(results)
-      } finally {
-        setSearchingChat(false)
-      }
-    }, 300)
-    return () => { if (chatSearchTimerRef.current) clearTimeout(chatSearchTimerRef.current) }
-  }, [chatSearch, selectedChat])
-
-  const handleDateJump = async (dateStr: string) => {
-    if (!selectedChat || !dateStr) return
-    // Same monotonic guard as loadMessages: if the user switches chats (or
-    // jumps again) before this resolves, drop the stale result
-    const seq = ++loadSeqRef.current
-    const { offset } = await getChatDateOffset(selectedChat.telegram_id, dateStr)
-    if (seq !== loadSeqRef.current) return
-    setLoadingMessages(true)
-    try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, offset)
-      if (seq !== loadSeqRef.current) return
-      setMessages(data)
-      setMessageOffset(offset)
-      setHasMore(offset + data.length < offset + LIMIT || data.length === LIMIT)
-    } finally {
-      if (seq === loadSeqRef.current) setLoadingMessages(false)
-    }
-  }
-
-  const handleJumpToMessage = async (msg: Message) => {
-    if (!selectedChat) return
-    const seq = ++loadSeqRef.current
-    setLoadingMessages(true)
-    try {
-      const data = await getMessages(selectedChat.telegram_id, LIMIT, 0, msg.tg_message_id)
-      if (seq !== loadSeqRef.current) return
-      setMessages(data)
-      setHighlightMsgId(msg.tg_message_id)
-      setTimeout(() => setHighlightMsgId(null), 3000)
-    } finally {
-      if (seq === loadSeqRef.current) setLoadingMessages(false)
-    }
-  }
-
-  const handleSelectChat = (chat: Chat) => {
-    if (selectedChat?.telegram_id === chat.telegram_id) return
-    // Capture unread count before clearing so MessageList can show the separator
-    setSelectedChatUnread(chat.unread_count ?? 0)
-    setSelectedChat(chat)
-    setMessages([])
-    setHasMore(false)
-    setNoMoreRemote(false)
-    setMessageOffset(0)
-    setShowInfo(false)
-    setHighlightMsgId(null)
-    setReplyToMessage(null)
-    setEditingMessage(null)
-    setShowChatSearch(false)
-    setChatSearch('')
-    setChatSearchResults([])
-    setSelectedTopicId(null)
-    setSelectedTopicTitle(null)
-    // Mark as read: clear badge locally and persist to backend
-    if ((chat.unread_count ?? 0) > 0) {
-      setChats((prev) =>
-        prev.map((c) => c.telegram_id === chat.telegram_id ? { ...c, unread_count: 0 } : c)
-      )
-      markChatRead(chat.telegram_id).catch(() => {})
-    }
-  }
-
-  const handleTrackChat = async (chat: Chat) => {
-    const tracked = !chat.is_tracked
-    await setTracked(chat.telegram_id, tracked)
-    setChats((prev) =>
-      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_tracked: tracked } : c))
-    )
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat((c) => c ? { ...c, is_tracked: tracked } : c)
-    }
-  }
-
-  const handleBriefingChat = async (chat: Chat) => {
-    await setBriefing(chat.telegram_id, true)
-    setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat(null)
-      setMessages([])
-    }
-  }
-
-  const handleHideChat = async (chat: Chat) => {
-    await setHidden(chat.telegram_id, true)
-    setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat(null)
-      setMessages([])
-    }
-  }
-
-  const handleUnhideChat = async (chat: Chat) => {
-    await setHidden(chat.telegram_id, false)
-    setHiddenChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-    setChats((prev) => [...prev, { ...chat, is_hidden: false }])
-  }
-
-  const handlePinChat = async (chat: Chat) => {
-    const pinned = !chat.is_pinned
-    await setPinned(chat.telegram_id, pinned)
-    setChats((prev) =>
-      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_pinned: pinned } : c))
-    )
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat((c) => c ? { ...c, is_pinned: pinned } : c)
-    }
-    setContextMenu(null)
-  }
-
-  const handleArchiveChat = async (chat: Chat) => {
-    const archived = !chat.is_archived
-    await setArchived(chat.telegram_id, archived)
-    if (archived) {
-      setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-      if (selectedChat?.telegram_id === chat.telegram_id) {
-        setSelectedChat(null)
-        setMessages([])
-      }
-    } else {
-      setArchivedChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-      setChats((prev) => [...prev, { ...chat, is_archived: false }])
-    }
-    setContextMenu(null)
-  }
-
-  const handleMuteChat = async (chat: Chat, duration?: string) => {
-    const muted = !chat.is_muted || !!duration
-    await setMuted(chat.telegram_id, muted, duration)
-    const muted_until = muted && duration && duration !== 'forever'
-      ? new Date(Date.now() + ({ '1h': 3600000, '8h': 28800000, '1d': 86400000 }[duration] ?? 0)).toISOString()
-      : null
-    setChats((prev) =>
-      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_muted: muted, muted_until } : c))
-    )
-    if (selectedChat?.telegram_id === chat.telegram_id) {
-      setSelectedChat((c) => c ? { ...c, is_muted: muted, muted_until } : c)
-    }
-    setContextMenu(null)
-  }
-
-  const handleMarkUnread = async (chat: Chat) => {
-    const markedUnread = !chat.is_marked_unread
-    await setMarkedUnread(chat.telegram_id, markedUnread)
-    setChats((prev) =>
-      prev.map((c) => (c.telegram_id === chat.telegram_id ? { ...c, is_marked_unread: markedUnread } : c))
-    )
-    setContextMenu(null)
-  }
-
-  const handleToggleArchivedPanel = async () => {
-    if (!showArchived) {
-      const data = await getArchivedChats()
-      setArchivedChats(data)
-    }
-    setShowArchived((v) => !v)
-  }
-
-  const handleToggleHiddenPanel = async () => {
-    if (!showHidden) {
-      const data = await getHiddenChats()
-      setHiddenChats(data)
-    }
-    setShowHidden((v) => !v)
-  }
-
-  const handleSync = async () => {
-    if (!selectedChat) return
-    setSyncing(true)
-    try {
-      await syncChat(selectedChat.telegram_id)
-      await loadMessages(selectedChat)
-    } catch (e) {
-      // Surface why the sync didn't run (rate limit detail includes retry time)
-      showErrorToast(e instanceof Error ? e.message : 'Sync failed')
-    } finally {
-      setSyncing(false)
-    }
-  }
-
-  const handleTyping = useCallback(() => {
-    if (!selectedChat) return
-    sendTypingAction(selectedChat.telegram_id).catch(() => {})
-  }, [selectedChat])
-
-  const handleSend = async (text: string) => {
-    if (!selectedChat) return
-    await sendMessage(selectedChat.telegram_id, text, replyToMessage?.tg_message_id)
-    setReplyToMessage(null)
-    await loadMessages(selectedChat)
-    // Update chat list sidebar with the sent message
-    setChats((prev) =>
-      prev.map((c) =>
-        c.telegram_id === selectedChat.telegram_id
-          ? { ...c, last_message: { text, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
-          : c
-      )
-    )
-  }
-
-  const handleSelectTopic = useCallback(async (topicId: number | null, topicTitle: string | null) => {
-    setSelectedTopicId(topicId)
-    setSelectedTopicTitle(topicTitle)
-    if (!selectedChat) return
-    const seq = ++loadSeqRef.current
-    setLoadingMessages(true)
-    try {
-      if (topicId !== null) {
-        const data = await getTopicMessages(selectedChat.telegram_id, topicId, LIMIT, 0)
-        if (seq !== loadSeqRef.current) return
-        setMessages(data)
-        setHasMore(data.length === LIMIT)
-      } else {
-        const data = await getMessages(selectedChat.telegram_id, LIMIT, 0)
-        if (seq !== loadSeqRef.current) return
-        setMessages(data)
-        setHasMore(data.length === LIMIT)
-      }
-      setMessageOffset(0)
-    } finally {
-      if (seq === loadSeqRef.current) setLoadingMessages(false)
-    }
-  }, [selectedChat, LIMIT])
-
-  const handlePinMessage = async (msg: Message) => {
-    if (!selectedChat) return
-    const newPinned = !msg.is_pinned
-    try {
-      await pinMessage(selectedChat.telegram_id, msg.tg_message_id, newPinned)
-      setMessages((prev) =>
-        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, is_pinned: newPinned } : m)
-      )
-    } catch {
-      // silently ignore
-    }
-  }
-
-  const handleSendFiles = async (files: File[], text: string) => {
-    if (!selectedChat) return
-    setUploadProgress(0)
-    try {
-      const { promise } = sendFiles(
-        selectedChat.telegram_id,
-        files,
-        text || undefined,
-        replyToMessage?.tg_message_id,
-        (fraction) => setUploadProgress(fraction),
-      )
-      await promise
-      setReplyToMessage(null)
-      await loadMessages(selectedChat)
-      // Update chat list sidebar
-      const preview = text || `[${files[0]?.type?.startsWith('image/') ? 'photo' : 'file'}]`
-      setChats((prev) =>
-        prev.map((c) =>
-          c.telegram_id === selectedChat.telegram_id
-            ? { ...c, last_message: { text: preview, sender_name: null, date: new Date().toISOString() }, last_activity_at: new Date().toISOString() }
-            : c
-        )
-      )
-    } finally {
-      setUploadProgress(null)
-    }
-  }
-
-  const handleReact = async (msg: Message, emoji: string | null) => {
-    if (!selectedChat) return
-    try {
-      await reactToMessage(selectedChat.telegram_id, msg.tg_message_id, emoji)
-      // Update the message's my_reaction in local state immediately
-      setMessages((prev) =>
-        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, my_reaction: emoji } : m)
-      )
-    } catch {
-      // silently ignore
-    }
-  }
-
-  const handleEdit = (msg: Message) => {
-    setEditingMessage(msg)
-    setReplyToMessage(null)
-  }
-
-  const handleSaveEdit = async (text: string) => {
-    if (!selectedChat || !editingMessage) return
-    await editMessage(selectedChat.telegram_id, editingMessage.tg_message_id, text)
-    setEditingMessage(null)
-    // Update local state immediately
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.tg_message_id === editingMessage.tg_message_id
-          ? { ...m, text, text_html: null }
-          : m
-      )
-    )
-  }
-
-  const handleDelete = (msg: Message) => {
-    setDeleteTarget(msg)
-  }
-
-  const handleConfirmDelete = async (revoke: boolean) => {
-    if (!selectedChat || !deleteTarget) return
-    await deleteMessages(selectedChat.telegram_id, [deleteTarget.tg_message_id], revoke)
-    setMessages((prev) => prev.filter((m) => m.tg_message_id !== deleteTarget.tg_message_id))
-    setDeleteTarget(null)
-  }
-
-  const handleForward = (msg: Message) => {
-    setForwardTarget(msg)
-  }
-
-  const handleForwardToChat = async (targetChat: Chat) => {
-    if (!selectedChat || !forwardTarget) return
-    await forwardMessages(selectedChat.telegram_id, [forwardTarget.tg_message_id], targetChat.telegram_id)
-    setForwardTarget(null)
-  }
-
-  // Avatar context menu handlers
-  const handleAvatarOpenProfile = useCallback((senderId: number) => {
-    navigate(`/profile/${senderId}`)
-  }, [navigate])
-
-  const handleAvatarSendMessage = useCallback(async (senderId: number) => {
-    // Open DM with this user — ensure chat exists then navigate
-    try {
-      const chat = await ensureChat(senderId)
-      if (chat?.telegram_id) {
-        navigate(`/chats?chatId=${chat.telegram_id}`)
-      }
-    } catch {
-      // fallback — just navigate to profile
-      navigate(`/profile/${senderId}`)
-    }
-  }, [navigate])
-
-  const handleAvatarMention = useCallback((_senderId: number, senderName: string) => {
-    // Extract first name for mention
-    const mention = `@${senderName.replace(/\s+/g, '_')} `
-    setMentionInsert(mention)
-  }, [])
-
-  const handleAvatarRestrict = useCallback(async (senderId: number) => {
-    if (!selectedChat) return
-    const ok = window.confirm(`Restrict this user from sending messages in ${selectedChat.name}?`)
-    if (!ok) return
-    try {
-      const { restrictMember } = await import('../api/client')
-      await restrictMember(selectedChat.telegram_id, senderId, {
-        send_messages: false,
-        send_media: false,
-        send_stickers: false,
-        send_gifs: false,
-        send_games: false,
-        send_inline: false,
-        embed_links: false,
-        send_polls: false,
-      })
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to restrict user')
-    }
-  }, [selectedChat])
-
-  const folderFiltered = selectedFolder === null
-    ? chats
-    : (() => {
-        const folder = folders.find((f) => f.id === selectedFolder)
-        if (!folder) return chats
-        // Union loaded chats with separately-fetched folder members (dedupe by id,
-        // preferring the `chats` copy — it carries fresher unread/last-message data)
-        const loadedIds = new Set(chats.map((c) => c.telegram_id))
-        const pool = [...chats, ...folderMembers.filter((m) => !loadedIds.has(m.telegram_id))]
-        return pool.filter((c) => {
-          if (folder.chat_ids.includes(c.telegram_id)) return true
-          if (folder.include_groups && c.type === 'group') return true
-          if (folder.include_channels && c.type === 'channel') return true
-          if (folder.include_contacts && c.type === 'private') return true
-          return false
-        })
-      })()
-
-  const filtered = folderFiltered.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase())
-  )
-
-  // Debounced Telegram search when typing in search bar
-  useEffect(() => {
-    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
-    if (!search.trim()) {
-      setTelegramSearchResults([])
-      setMessageSearchResults([])
-      setSearchingTelegram(false)
-      setSearchingMessages(false)
-      return
-    }
-    searchTimerRef.current = setTimeout(async () => {
-      setSearchingTelegram(true)
-      try {
-        const results = await searchChatsTelegram(search)
-        // Filter out chats already in local list
-        const localIds = new Set(chats.map((c) => c.telegram_id))
-        setTelegramSearchResults(results.filter((c) => !localIds.has(c.telegram_id)))
-      } catch (err) {
-        console.warn('Telegram search failed:', err)
-        setTelegramSearchResults([])
-      }
-      setSearchingTelegram(false)
-    }, 300)
-    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
-  }, [search]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Apply client-side sort to guarantee correct order (pinned first)
-  const sorted = [...filtered].sort((a, b) => {
-    // Pinned chats always come first
-    if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1
-
-    if (sortBy === 'unread') {
-      const ua = a.unread_count ?? 0
-      const ub = b.unread_count ?? 0
-      if (ub !== ua) return ub - ua
-      const da = a.last_activity_at ?? ''
-      const db2 = b.last_activity_at ?? ''
-      return db2.localeCompare(da)
-    }
-    if (sortBy === 'alpha') {
-      return a.name.localeCompare(b.name)
-    }
-    // recent (default)
-    const da = a.last_activity_at ?? ''
-    const db2 = b.last_activity_at ?? ''
-    if (da !== db2) return db2.localeCompare(da)
-    return a.name.localeCompare(b.name)
-  })
-
-  // Deselect only when the user actively switches workspace — NEVER because a
-  // background list reload paged the open chat out of the first 50 or a filter
-  // hid it. (WS events reload the list every few seconds during bulk sync; the
-  // old membership check here silently closed whatever chat was open.)
-  // Hide/brief/archive handlers clear the selection themselves.
-  const prevWorkspaceRef = useRef<number | undefined | null>(null)
-  useEffect(() => {
-    if (prevWorkspaceRef.current !== null && prevWorkspaceRef.current !== activeWorkspaceId) {
-      setSelectedChat(null)
-      setMessages([])
-    }
-    prevWorkspaceRef.current = activeWorkspaceId
-  }, [activeWorkspaceId])
-
-  // Keyboard shortcuts
-  const chatShortcuts = useMemo(() => ({
-    'j': () => {
-      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const next = sorted[idx + 1]
-      if (next) handleSelectChat(next)
-    },
-    'arrowdown': () => {
-      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const next = sorted[idx + 1]
-      if (next) handleSelectChat(next)
-    },
-    'k': () => {
-      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const prev = sorted[idx - 1]
-      if (prev) handleSelectChat(prev)
-    },
-    'arrowup': () => {
-      const idx = selectedChat ? sorted.findIndex((c) => c.telegram_id === selectedChat.telegram_id) : -1
-      const prev = sorted[idx - 1]
-      if (prev) handleSelectChat(prev)
-    },
-    '/': () => searchInputRef.current?.focus(),
-    'i': () => setShowInfo((v) => !v),
-    'mod+f': () => setShowChatSearch((v) => !v),
-    'n': () => setShowNewChat(true),
-    'enter': () => {
-      if (!selectedChat && sorted.length > 0) handleSelectChat(sorted[0])
-    },
-  }), [selectedChat, sorted, handleSelectChat])
-
-  useKeyboardShortcuts(chatShortcuts)
+  const navigating = !sel && (pendingNav != null || parseNav(location.search) != null)
 
   return (
     <div className="flex flex-1 overflow-hidden">
-      {/* Transient error toast */}
-      {errorToast && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-md border border-rose-500/30 bg-rose-500/15 px-3 py-1.5 text-xs font-medium text-rose-400 backdrop-blur-sm">
-          {errorToast}
-        </div>
-      )}
-      {/* Chat list */}
-      <div className="flex flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800 relative" style={{ width: sidebarWidth }}>
-        {/* Drag handle */}
-        <div
-          onMouseDown={onDragStart}
-          className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-indigo-500 transition-colors z-10"
-        />
-        {folders.length > 0 && (
-          <div className="folder-scrollbar flex overflow-x-auto border-b border-slate-700/50 px-2 pt-2 pb-1 gap-1">
-            <button
-              onClick={() => setSelectedFolder(null)}
-              className={`flex-shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                selectedFolder === null
-                  ? 'bg-indigo-500/20 text-indigo-400'
-                  : 'text-slate-400 hover:bg-slate-700'
-              }`}
-            >
-              All
-            </button>
-            {folders.map((folder) => (
-              <button
-                key={folder.id}
-                onClick={() => setSelectedFolder(folder.id)}
-                className={`flex-shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  selectedFolder === folder.id
-                    ? 'bg-indigo-500/20 text-indigo-400'
-                    : 'text-slate-400 hover:bg-slate-700'
-                }`}
-              >
-                {folder.title}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="border-b border-slate-700/50 px-3 py-3 flex flex-col gap-2">
-          <div className="flex gap-2">
-            <input
-              ref={searchInputRef}
-              type="text"
-              placeholder="Search chats…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
-            />
-            <button
-              onClick={() => setShowNewChat(true)}
-              title="New conversation"
-              className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
-            >
-              <Plus size={16} />
-            </button>
-            {activeWorkspace?.view_mode === 'kanban' && (
-              <button
-                onClick={() => navigate('/board')}
-                title={`${activeWorkspace.name} board`}
-                className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
-              >
-                <Columns3 size={16} />
-              </button>
-            )}
-            <div ref={tagPopoverRef} className="relative flex-shrink-0">
-              <button
-                onClick={toggleTagPopover}
-                title="Filter by tag"
-                className={`rounded-lg border px-2 py-1.5 transition-colors ${
-                  selectedTag || showTagPopover
-                    ? 'border-indigo-500/30 bg-indigo-500/20 text-indigo-400'
-                    : 'border-slate-600 bg-slate-700 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30'
-                }`}
-              >
-                <TagIcon size={16} />
-              </button>
-              {showTagPopover && (
-                <div className="absolute right-0 top-full mt-1 z-30 w-60 rounded-lg border border-slate-600 bg-slate-800 shadow-xl overflow-hidden">
-                  <div className="p-2 border-b border-slate-700/50">
-                    <input
-                      type="text"
-                      autoFocus
-                      placeholder="Filter tags…"
-                      value={tagQuery}
-                      onChange={(e) => setTagQuery(e.target.value)}
-                      className="w-full rounded-md border border-slate-600 bg-slate-700 px-2 py-1 text-xs text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500"
-                    />
-                  </div>
-                  <div className="max-h-64 overflow-y-auto py-1">
-                    {(() => {
-                      const q = tagQuery.trim().toLowerCase()
-                      const visible = availableTags
-                        .filter((t) => t.category !== 'stage' && t.category !== 'stream')  // board tags live on boards, not here
-                        .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
-                      if (visible.length === 0) {
-                        return (
-                          <p className="px-3 py-2 text-xs text-slate-500">
-                            {availableTags.length === 0 ? 'No tags yet' : 'No matching tags'}
-                          </p>
-                        )
-                      }
-                      return visible.map((tag) => (
-                        <button
-                          key={tag.id}
-                          onClick={() => {
-                            setSelectedTag((prev) => (prev?.id === tag.id ? null : tag))
-                            setShowTagPopover(false)
-                          }}
-                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-slate-700/50 ${
-                            selectedTag?.id === tag.id ? 'text-indigo-300' : 'text-slate-300'
-                          }`}
-                        >
-                          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${COLOR_DOTS[tag.color] ?? 'bg-slate-400'}`} />
-                          <span className="min-w-0 flex-1 truncate">{tag.name}</span>
-                          <span className="text-slate-500">{tag.chat_count ?? 0}</span>
-                        </button>
-                      ))
-                    })()}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="flex rounded-lg border border-slate-700 overflow-hidden text-[11px]">
-            {(['recent', 'unread', 'alpha'] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setSortBy(s)}
-                className={`flex-1 py-1 transition-colors ${
-                  sortBy === s
-                    ? 'bg-indigo-500/20 text-indigo-400 font-medium'
-                    : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
-                }`}
-              >
-                {s === 'recent' ? 'Recent' : s === 'unread' ? 'Unread' : 'A-Z'}
-              </button>
-            ))}
-          </div>
-        </div>
-        {selectedTag && (
-          <div className="border-b border-slate-700/50 px-3 py-1.5">
-            <button
-              onClick={() => setSelectedTag(null)}
-              title="Clear tag filter"
-              className={`inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${TAG_COLORS[selectedTag.color] ?? TAG_COLORS.slate}`}
-            >
-              <span className="truncate">{selectedTag.name}</span>
-              <X size={12} className="flex-shrink-0" />
-            </button>
-          </div>
-        )}
-        <div
-          ref={chatListRef}
-          className="flex-1 overflow-y-auto"
-          onScroll={(e) => {
-            const el = e.currentTarget
-            if (el.scrollHeight - el.scrollTop - el.clientHeight < 400 && !loadingMoreChats) {
-              loadMoreChats()
-            }
-          }}
-        >
-          {sorted.length === 0 ? (
-            <p className="px-4 py-6 text-center text-sm text-slate-500">No chats found</p>
-          ) : (
-            sorted.map((chat) => (
-              <ChatItem
-                key={chat.telegram_id}
-                chat={chat}
-                selected={selectedChat?.telegram_id === chat.telegram_id}
-                onClick={() => handleSelectChat(chat)}
-                onToggleTrack={() => handleTrackChat(chat)}
-                onHide={() => handleHideChat(chat)}
-                onBriefing={() => handleBriefingChat(chat)}
-                onContextMenu={(e) => setContextMenu({ chat, x: e.clientX, y: e.clientY })}
-                hasScamFlag={flaggedChatIds.has(chat.telegram_id)}
-              />
-            ))
-          )}
-          {loadingMoreChats && (
-            <p className="px-4 py-3 text-center text-xs text-slate-500">Loading…</p>
-          )}
+      <ChatListPane
+        width={sidebarWidth}
+        onResizeStart={onResizeStart}
+        listRef={chatListRef}
+        virtuosoRef={chatListVirtuosoRef}
+        searchInputRef={searchInputRef}
+        folders={folders.data ?? []}
+        selectedFolder={selectedFolder}
+        onSelectFolder={setSelectedFolder}
+        search={search}
+        onSearchChange={setSearch}
+        telegramResults={telegramResults}
+        searchingTelegram={tgSearch.pending}
+        messageResults={currentMessageResults}
+        searchingMessages={messageSearchPending != null && messageSearchPending === search.trim()}
+        onSearchMessages={onSearchMessages}
+        onOpenSearchResult={onOpenSearchResult}
+        onOpenMessageResult={onOpenMessageResult}
+        sortBy={sortBy}
+        onSortBy={setSortBy}
+        selectedTag={selectedTag}
+        onSelectTag={setSelectedTag}
+        boardButton={activeWorkspace?.view_mode === 'kanban' ? { title: `${activeWorkspace.name} board`, onClick: () => navigate('/board') } : null}
+        onNewChat={() => setShowNewChat(true)}
+        chats={visible}
+        loading={list.loading}
+        loadingMore={list.loadingMore}
+        onLoadMore={list.loadMore}
+        selectedId={selectedId}
+        flaggedChatIds={(shield && flaggedChats.data) || EMPTY_SET}
+        onSelect={selectChat}
+        actions={actions}
+      />
 
-          {/* Telegram search results (chats not in local DB) */}
-          {search.trim() && (
-            <div className="border-t border-slate-700/50">
-              <p className="px-3 py-1.5 text-[10px] font-medium text-slate-500 uppercase tracking-wider">
-                {searchingTelegram ? 'Searching all chats…' : telegramSearchResults.length > 0 ? 'All chats' : 'No other chats found'}
-              </p>
-              {telegramSearchResults.map((chat) => (
-                <ChatItem
-                  key={`tg-${chat.telegram_id}`}
-                  chat={chat}
-                  selected={selectedChat?.telegram_id === chat.telegram_id}
-                  onClick={() => {
-                    // Ensure chat exists and is synced, then select it
-                    ensureChat(chat.telegram_id)
-                      .then((ensured) => {
-                        // Add to local chat list if not already there
-                        setChats((prev) => {
-                          if (prev.some((c) => c.telegram_id === ensured.telegram_id)) return prev
-                          return [ensured, ...prev]
-                        })
-                        setSearch('')
-                        handleSelectChat(ensured)
-                      })
-                      .catch(() => showErrorToast(`Couldn't open "${chat.name}" from Telegram`))
-                  }}
-                  onToggleTrack={() => {}}
-                  onHide={() => {}}
-                  onBriefing={() => {}}
-                  onContextMenu={() => {}}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Search messages button */}
-          {search.trim() && (
-            <div className="border-t border-slate-700/50 px-3 py-2">
-              {searchingMessages ? (
-                <p className="text-center text-xs text-slate-500">Searching messages…</p>
-              ) : messageSearchResults.length > 0 ? (
-                <div>
-                  <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">Messages</p>
-                  {messageSearchResults.map((r) => (
-                    <button
-                      key={r.telegram_id}
-                      onClick={() => {
-                        const existing = chats.find((c) => c.telegram_id === r.telegram_id)
-                        if (existing) handleSelectChat(existing)
-                      }}
-                      className="w-full text-left px-2 py-1.5 rounded hover:bg-slate-700/50 transition-colors"
-                    >
-                      <p className="text-xs font-medium text-slate-300 truncate">{r.name}</p>
-                      {r.messages[0] && (
-                        <p className="text-[11px] text-slate-500 truncate">
-                          {r.messages[0].sender_name && <span className="text-slate-400">{r.messages[0].sender_name}: </span>}
-                          {r.messages[0].text}
-                        </p>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <button
-                  onClick={async () => {
-                    setSearchingMessages(true)
-                    try {
-                      const results = await searchMessagesGlobal(search)
-                      setMessageSearchResults(results)
-                    } catch {}
-                    setSearchingMessages(false)
-                  }}
-                  className="w-full rounded-lg border border-slate-600 bg-slate-700/50 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Search size={12} />
-                  Search message content
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Archived chats panel */}
-        <div className="border-t border-slate-700/50">
-          <button
-            onClick={handleToggleArchivedPanel}
-            className="flex w-full items-center gap-1.5 px-3 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <Archive size={12} />
-            {showArchived ? 'Hide archived chats' : 'Show archived chats'}
-          </button>
-          {showArchived && (
-            <div className="max-h-48 overflow-y-auto border-t border-slate-700/50 bg-slate-900/50">
-              {archivedChats.length === 0 ? (
-                <p className="px-4 py-3 text-center text-xs text-slate-500">No archived chats</p>
-              ) : (
-                archivedChats.map((chat) => (
-                  <div key={chat.telegram_id} className="flex items-center gap-2 px-3 py-2">
-                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-400">
-                      {chat.name.charAt(0).toUpperCase()}
-                    </div>
-                    <p title={chat.name} className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
-                    <button
-                      onClick={() => handleArchiveChat(chat)}
-                      title="Unarchive"
-                      className="flex-shrink-0 rounded p-1 text-slate-500 hover:text-slate-300 transition-colors"
-                    >
-                      <Archive size={12} />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Hidden chats panel */}
-        <div className="border-t border-slate-700/50">
-          <button
-            onClick={handleToggleHiddenPanel}
-            className="flex w-full items-center gap-1.5 px-3 py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <Eye size={12} />
-            {showHidden ? 'Hide hidden chats' : 'Show hidden chats'}
-          </button>
-          {showHidden && (
-            <div className="max-h-48 overflow-y-auto border-t border-slate-700/50 bg-slate-900/50">
-              {hiddenChats.length === 0 ? (
-                <p className="px-4 py-3 text-center text-xs text-slate-500">No hidden chats</p>
-              ) : (
-                hiddenChats.map((chat) => (
-                  <div key={chat.telegram_id} className="flex items-center gap-2 px-3 py-2">
-                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-400">
-                      {chat.name.charAt(0).toUpperCase()}
-                    </div>
-                    <p title={chat.name} className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
-                    <button
-                      onClick={() => handleUnhideChat(chat)}
-                      title="Unhide"
-                      className="flex-shrink-0 rounded p-1 text-slate-500 hover:text-slate-300 transition-colors"
-                    >
-                      <Eye size={12} />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Context menu */}
-        {contextMenu && (
-          <ChatContextMenu
-            chat={contextMenu.chat}
-            position={{ x: contextMenu.x, y: contextMenu.y }}
-            onClose={() => setContextMenu(null)}
-            onPin={() => handlePinChat(contextMenu.chat)}
-            onArchive={() => handleArchiveChat(contextMenu.chat)}
-            onMute={(duration) => handleMuteChat(contextMenu.chat, duration)}
-            onMarkUnread={() => handleMarkUnread(contextMenu.chat)}
-            onHide={() => { handleHideChat(contextMenu.chat); setContextMenu(null) }}
-            onBriefing={() => { handleBriefingChat(contextMenu.chat); setContextMenu(null) }}
-            onToggleTrack={() => { handleTrackChat(contextMenu.chat); setContextMenu(null) }}
-          />
-        )}
-      </div>
-
-      {/* Message area + optional info panel */}
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
-          {selectedChat ? (
-            <>
-              {/* Header */}
-              <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <div>
-                    <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                    <div className="flex items-center gap-1.5">
-                      <p className="text-xs text-slate-400">
-                        {(() => {
-                          const typingEntry = typingUsers[selectedChat.telegram_id]
-                          if (typingEntry && typingEntry.expiresAt > Date.now()) {
-                            return <span className="text-indigo-400">typing...</span>
-                          }
-                          if (selectedChat.type === 'private' && presence) {
-                            if (presence.status === 'online') {
-                              return <span className="text-green-400">online</span>
-                            }
-                            if (presence.status === 'offline' && presence.last_seen) {
-                              const lastSeen = new Date(presence.last_seen)
-                              return <span>last seen {fmtDate(lastSeen.toISOString())}</span>
-                            }
-                            if (presence.status === 'recently') {
-                              return <span>last seen recently</span>
-                            }
-                            if (presence.status === 'last_week') {
-                              return <span>last seen within a week</span>
-                            }
-                            if (presence.status === 'last_month') {
-                              return <span>last seen within a month</span>
-                            }
-                          }
-                          return selectedChat.type
-                        })()}
-                      </p>
-                      {selectedChat.is_forum && (
-                        <span className="rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">forum</span>
-                      )}
-                      {selectedTopicTitle && (
-                        <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-indigo-500/20 text-indigo-400">
-                          <MessageSquare size={9} />
-                          {selectedTopicTitle}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {selectedChat.type === 'private' && (
-                    <button
-                      onClick={handleToggleImportant}
-                      disabled={togglingImportant}
-                      title={isImportant ? 'Remove from important' : 'Mark as important'}
-                      className={`rounded-full p-1 transition-colors ${
-                        isImportant
-                          ? 'text-amber-400 hover:text-amber-300'
-                          : 'text-slate-600 hover:text-amber-400'
-                      }`}
-                    >
-                      <Star size={16} className={isImportant ? 'fill-amber-400' : ''} />
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => { setShowChatSearch((v) => !v); if (showChatSearch) { setChatSearch(''); setChatSearchResults([]) } }}
-                    title="Search in chat"
-                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
-                      showChatSearch ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
-                    }`}
-                  >
-                    <Search size={13} />
-                    Search
-                  </button>
-                  <button
-                    onClick={() => setShowInfo((v) => !v)}
-                    title="Chat info & tags"
-                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
-                      showInfo ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
-                    }`}
-                  >
-                    <Info size={13} />
-                    Info
-                  </button>
-                  <button
-                    onClick={handleSync}
-                    disabled={syncing}
-                    title="Sync messages"
-                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-                  >
-                    <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-                    Sync
-                  </button>
-                </div>
-              </div>
+        {selectedChat && selection ? (
+          <ChatPane
+            key={selectedChat.telegram_id}
+            chat={selectedChat}
+            topic={topic}
+            selection={selection}
+            showInfo={showInfo}
+            onToggleInfo={onToggleInfo}
+            showSearch={showSearch}
+            onShowSearch={setShowSearch}
+            onSelectTopic={onSelectTopic}
+            onOpenChat={selectChat}
+            onChatActivity={onChatActivity}
+          />
+        ) : (
+          <div className="flex flex-1 flex-col items-center justify-center bg-slate-900 text-slate-500">
+            {navigating ? (
+              <>
+                <Loader2 size={20} className="animate-spin text-slate-400 mb-2" />
+                <p className="text-sm text-slate-400">Loading chat…</p>
+              </>
+            ) : (
+              <p className="text-sm">Select a chat to start</p>
+            )}
+          </div>
+        )}
 
-              {/* In-chat search bar */}
-              {showChatSearch && (
-                <div className="border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <Search size={14} className="text-slate-500 flex-shrink-0" />
-                    <input
-                      autoFocus
-                      type="text"
-                      placeholder="Search messages…"
-                      value={chatSearch}
-                      onChange={(e) => setChatSearch(e.target.value)}
-                      className="flex-1 bg-transparent text-sm text-gray-200 placeholder:text-slate-500 outline-none"
-                    />
-                    <input
-                      type="date"
-                      onChange={(e) => handleDateJump(e.target.value)}
-                      title="Jump to date"
-                      className="rounded border border-slate-600 bg-slate-700 px-2 py-0.5 text-[11px] text-slate-300 outline-none"
-                    />
-                    <button
-                      onClick={() => { setShowChatSearch(false); setChatSearch(''); setChatSearchResults([]) }}
-                      className="text-slate-500 hover:text-slate-300"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                  {chatSearch.trim() && (
-                    <div className="text-[11px] text-slate-500">
-                      {searchingChat ? 'Searching…' : `${chatSearchResults.length} result${chatSearchResults.length !== 1 ? 's' : ''}`}
-                    </div>
-                  )}
-                  {chatSearchResults.length > 0 && (
-                    <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
-                      {chatSearchResults.map((msg) => (
-                        <button
-                          key={msg.tg_message_id}
-                          onClick={() => handleJumpToMessage(msg)}
-                          className="flex items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-slate-700/50 transition-colors"
-                        >
-                          <span className="text-slate-400 flex-shrink-0">{msg.sender_name || 'Unknown'}</span>
-                          <span className="truncate text-slate-500">{msg.text || '[media]'}</span>
-                          {msg.date && <span className="ml-auto flex-shrink-0 text-[10px] text-slate-600">{new Date(msg.date).toLocaleDateString()}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Forum topics panel */}
-              {selectedChat.is_forum && (
-                <ForumTopicsPanel
-                  telegramId={selectedChat.telegram_id}
-                  onSelectTopic={handleSelectTopic}
-                  selectedTopicId={selectedTopicId}
-                />
-              )}
-
-              {/* Pinned message banner */}
-              {pinnedMessage && (
-                <div className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors"
-                  onClick={() => {
-                    // Jump to pinned message using anchor-based navigation
-                    if (selectedChat && pinnedMessage.tg_message_id) {
-                      pendingAnchorRef.current = pinnedMessage.tg_message_id
-                      setHighlightMsgId(pinnedMessage.tg_message_id)
-                      loadMessages(selectedChat)
-                    }
-                  }}
-                >
-                  <Pin size={14} className="text-indigo-400 flex-shrink-0" />
-                  {pinnedMessage.media_url && pinnedMessage.media_type === 'photo' && (
-                    <img src={authenticatedMediaUrl(pinnedMessage.media_url)} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-medium text-indigo-400">Pinned message</p>
-                    <p className="text-xs text-slate-300 truncate">
-                      {pinnedMessage.text
-                        ? pinnedMessage.text.slice(0, 120)
-                        : pinnedMessage.media_type
-                          ? `[${pinnedMessage.media_type}]`
-                          : ''}
-                    </p>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setPinnedMessage(null) }}
-                    className="flex-shrink-0 text-slate-500 hover:text-slate-300 transition-colors"
-                    title="Dismiss pinned message"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              )}
-
-              {/* Messages */}
-              {loadingMessages ? (
-                <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
-                  Loading…
-                </div>
-              ) : messages.length === 0 && syncEmptyChats.has(selectedChat.telegram_id) ? (
-                <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-slate-500">
-                  No message history available — this group may have been migrated to a newer
-                  group or its history isn't accessible to this account.
-                </div>
-              ) : messages.length === 0 && selectedChat.last_synced_at == null ? (
-                <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-sm text-slate-500">
-                  <Loader2 size={18} className="animate-spin text-indigo-400" />
-                  Syncing message history from Telegram — first-time sync can take a while…
-                </div>
-              ) : (
-                <div className="flex flex-1 flex-col overflow-hidden">
-                  <MessageList
-                    messages={messages}
-                    chatType={selectedChat.type}
-                    highlightTelegramId={highlightMsgId}
-                    onReply={setReplyToMessage}
-                    onReact={handleReact}
-                    onEdit={handleEdit}
-                    onDelete={handleDelete}
-                    onForward={handleForward}
-                    unreadCount={selectedChatUnread}
-                    loadingOlder={loadingMore}
-                    onScrollNearTop={(hasMore || !noMoreRemote) ? loadMoreMessages : undefined}
-                    flaggedSenderIds={flaggedSenderIds}
-                    onReportScam={setReportTarget}
-                    onScamVerdictChange={(msg, verdict) =>
-                      setMessages((prev) =>
-                        prev.map((m) => m.id === msg.id ? { ...m, scam_manual_verdict: verdict ?? undefined } : m)
-                      )
-                    }
-                    onOpenProfile={handleAvatarOpenProfile}
-                    onSendMessage={handleAvatarSendMessage}
-                    onMention={handleAvatarMention}
-                    onRestrict={selectedChat.type === 'group' ? handleAvatarRestrict : undefined}
-                  />
-                </div>
-              )}
-
-              {/* Typing indicator */}
-              {(() => {
-                const typingEntry = typingUsers[selectedChat.telegram_id]
-                if (typingEntry && typingEntry.expiresAt > Date.now()) {
-                  return (
-                    <div className="px-4 py-1 text-xs text-indigo-400 animate-pulse">
-                      {typingEntry.userName} is typing...
-                    </div>
-                  )
-                }
-                return null
-              })()}
-
-              {/* Compose — keyed per chat so a half-typed draft (text or
-                  attachments) can never leak into, or be sent to, another
-                  chat; drafts are restored when switching back */}
-              <ComposeBar
-                key={selectedChat.telegram_id}
-                onSend={handleSend}
-                onSendFiles={handleSendFiles}
-                replyTo={replyToMessage}
-                onCancelReply={() => setReplyToMessage(null)}
-                editingMessage={editingMessage}
-                onSaveEdit={handleSaveEdit}
-                onCancelEdit={() => setEditingMessage(null)}
-                onTyping={handleTyping}
-                uploadProgress={uploadProgress}
-                insertText={mentionInsert}
-                onInsertConsumed={() => setMentionInsert(null)}
-                initialDraft={draftsRef.current.get(selectedChat.telegram_id) ?? null}
-                onDraftChange={(draft) => {
-                  if (!draft.text && draft.attachments.length === 0) {
-                    draftsRef.current.delete(selectedChat.telegram_id)
-                  } else {
-                    draftsRef.current.set(selectedChat.telegram_id, draft)
-                  }
-                }}
-              />
-            </>
-          ) : (
-            <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
-              {/* Also check the raw URL: a nav param can arrive mid-mount (palette
-                  click) and render once before the effect arms navigatingToChat */}
-              {(navigatingToChat || new URLSearchParams(location.search).has('chatId')) ? (
-                <>
-                  <Loader2 size={20} className="animate-spin text-slate-400 mb-2" />
-                  <p className="text-sm text-slate-400">Loading chat…</p>
-                </>
-              ) : (
-                <p className="text-sm">Select a chat to start</p>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Info panel */}
         {showInfo && selectedChat && (
-          <ChatInfoPanel chat={selectedChat} onClose={() => setShowInfo(false)} />
+          <ChatInfoPanel key={selectedChat.telegram_id} chat={selectedChat} onClose={onToggleInfo} />
         )}
       </div>
 
-      {/* Forward chat picker dialog */}
-      <ChatPickerDialog
-        open={!!forwardTarget}
-        onClose={() => setForwardTarget(null)}
-        onSelect={handleForwardToChat}
-      />
-
-      {/* Delete confirmation dialog */}
-      <DeleteConfirmDialog
-        message={deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={handleConfirmDelete}
-      />
-
-      {/* New Chat Dialog */}
-      <NewChatDialog
-        open={showNewChat}
-        onClose={() => setShowNewChat(false)}
-        onChatCreated={handleChatCreated}
-      />
-
-      {/* Report Scam Dialog */}
-      {reportTarget && selectedChat && (
-        <ReportScamDialog
-          chatId={selectedChat.telegram_id}
-          targetMessageId={reportTarget.tg_message_id}
-          targetSenderId={reportTarget.sender_id || 0}
-          onClose={() => setReportTarget(null)}
-        />
-      )}
+      <NewChatDialog open={showNewChat} onClose={() => setShowNewChat(false)} onChatCreated={handleChatCreated} />
     </div>
   )
 }
+
+const EMPTY_SET: Set<number> = new Set()

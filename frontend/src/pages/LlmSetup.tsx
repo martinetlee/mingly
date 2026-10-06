@@ -1,77 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import logo from '../assets/logo.png'
-import { getSessionToken, notifySessionExpired } from '../api/session'
+import { apiFetch, followLlmJob, isAbortError } from '../api/client'
+import { useFeatures } from '../context/FeaturesContext'
 import { Cpu, Shield, MessageSquare, Sparkles, Check, AlertCircle, Loader2 } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
-// API helpers (self-contained for SSE streaming)
+// API helpers (shared apiFetch/streamSSE live in api/client.ts)
 // ---------------------------------------------------------------------------
-
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const h: Record<string, string> = { ...extra }
-  const token = getSessionToken()
-  if (token) h['X-Session-Token'] = token
-  return h
-}
-
-async function apiFetch<T>(
-  method: string,
-  path: string,
-  body?: object,
-  signal?: AbortSignal,
-): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: authHeaders(body ? { 'Content-Type': 'application/json' } : undefined),
-    body: body ? JSON.stringify(body) : undefined,
-    signal,
-  })
-  if (res.status === 401) {
-    notifySessionExpired()
-    throw new Error('Session expired')
-  }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? res.statusText)
-  }
-  return res.json()
-}
-
-async function* streamSSE(
-  url: string,
-  signal?: AbortSignal,
-): AsyncGenerator<Record<string, unknown>> {
-  const res = await fetch(url, { headers: authHeaders(), signal })
-  if (res.status === 401) {
-    notifySessionExpired()
-    throw new Error('Session expired')
-  }
-  if (!res.ok || !res.body) throw new Error('Stream unavailable')
-  const reader = res.body.getReader()
-  const dec = new TextDecoder()
-  let buf = ''
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
-      const parts = buf.split('\n\n')
-      buf = parts.pop() ?? ''
-      for (const part of parts) {
-        const line = part.trim()
-        if (line.startsWith('data: ')) {
-          try {
-            yield JSON.parse(line.slice(6))
-          } catch {
-            // skip malformed chunk
-          }
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock()
-  }
-}
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms))
@@ -106,6 +41,7 @@ interface Props {
 // ---------------------------------------------------------------------------
 
 export default function LlmSetup({ onComplete }: Props) {
+  const { shield } = useFeatures()
   const [status, setStatus] = useState<'intro' | 'setting-up' | 'ready' | 'skipped'>('intro')
   const [progress, setProgress] = useState<SetupProgress | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -149,17 +85,14 @@ export default function LlmSetup({ onComplete }: Props) {
         const { job_id } = await apiFetch<{ job_id: number }>(
           'POST', '/api/llm/ollama/install', undefined, signal,
         )
-        for await (const ev of streamSSE(`/api/llm/jobs/${job_id}`, signal)) {
-          if (ev.status === 'error')
-            throw new Error((ev.error as string) || 'Binary install failed')
+        await followLlmJob(job_id, (ev) => {
           if (typeof ev.total === 'number' && ev.total > 0 && typeof ev.downloaded === 'number') {
             update('install-binary', 'Downloading Ollama runtime…',
               Math.round((ev.downloaded / ev.total) * 100))
           } else if (ev.status === 'extracting') {
             update('install-binary', 'Extracting…', 99)
           }
-          if (ev.status === 'done') break
-        }
+        }, signal, 'Ollama install failed')
       }
 
       // 3. Start server if needed
@@ -192,14 +125,17 @@ export default function LlmSetup({ onComplete }: Props) {
         const { job_id: pullId } = await apiFetch<{ job_id: number }>(
           'POST', '/api/llm/ollama/pull', { model: 'qwen3.5:4b' }, signal,
         )
-        for await (const ev of streamSSE(`/api/llm/jobs/${pullId}`, signal)) {
-          if (ev.status === 'error')
-            throw new Error((ev.error as string) || 'Model download failed')
+        await followLlmJob(pullId, (ev) => {
           if (typeof ev.total === 'number' && ev.total > 0 && typeof ev.completed === 'number') {
             update('pull-model', 'Downloading Qwen 3.5 4B model…',
               Math.round((ev.completed / ev.total) * 100))
           }
-          if (ev.status === 'done') break
+        }, signal, 'Model download failed')
+
+        // Verify the model really is installed before calling setup done
+        const { models: installed } = await apiFetch<{ models: { name: string }[] }>('GET', '/api/llm/ollama/models', undefined, signal)
+        if (!installed.some((m) => m.name.startsWith('qwen3.5:4b'))) {
+          throw new Error('Model download finished but qwen3.5:4b is not installed. Check your disk space and connection, then retry.')
         }
       }
 
@@ -223,7 +159,7 @@ export default function LlmSetup({ onComplete }: Props) {
       update('done', 'AI is ready', 100)
       setStatus('ready')
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') {
+      if (isAbortError(e)) {
         setStatus('intro')
         setProgress(null)
         return
@@ -271,6 +207,7 @@ export default function LlmSetup({ onComplete }: Props) {
               <div className="space-y-3">
                 <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">Why local AI?</p>
                 <div className="space-y-2.5">
+                  {shield && (
                   <div className="flex items-start gap-3 rounded-lg bg-slate-900/50 px-3 py-2.5 border border-slate-700/50">
                     <Shield size={16} className="mt-0.5 flex-shrink-0 text-red-400" />
                     <div>
@@ -278,6 +215,7 @@ export default function LlmSetup({ onComplete }: Props) {
                       <p className="text-[11px] text-slate-500">Messages are analyzed locally to detect scam attempts, phishing, and suspicious behavior — without sending your conversations to any server.</p>
                     </div>
                   </div>
+                  )}
                   <div className="flex items-start gap-3 rounded-lg bg-slate-900/50 px-3 py-2.5 border border-slate-700/50">
                     <MessageSquare size={16} className="mt-0.5 flex-shrink-0 text-indigo-400" />
                     <div>
@@ -424,7 +362,7 @@ export default function LlmSetup({ onComplete }: Props) {
                 </div>
                 <h2 className="text-lg font-semibold text-slate-200">AI is Ready</h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  Qwen 3.5 4B is running locally. Scam detection, summaries, and briefings are now enabled.
+                  Qwen 3.5 4B is running locally. {shield ? 'Scam detection, summaries' : 'Summaries'}, and briefings are now enabled.
                 </p>
               </div>
               <button

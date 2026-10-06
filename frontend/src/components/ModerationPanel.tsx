@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { Pin, Clock, BarChart3, Eye, ArrowRight } from 'lucide-react'
 import type { Chat, Message, ChannelPostStats } from '../api/types'
 import { getPinnedMessages, pinMessage, setSlowMode, getPostStats } from '../api/client'
+import { reportError } from '../lib/toast'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { fmtShortDate } from '../utils/time'
 
 const SLOW_MODE_OPTIONS = [
   { value: 0, label: 'Off' },
@@ -13,6 +16,10 @@ const SLOW_MODE_OPTIONS = [
   { value: 3600, label: '1h' },
 ]
 
+/**
+ * Mount with `key={chat.telegram_id}`: all state (pinned list, stats) belongs
+ * to one chat, so switching chats can never unpin in the wrong one.
+ */
 interface ModerationPanelProps {
   chat: Chat
   onChatUpdate?: (updates: Partial<Chat>) => void
@@ -33,8 +40,9 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
     try {
       const data = await getPinnedMessages(chat.telegram_id)
       setPinnedMessages(data)
-    } catch {
+    } catch (e) {
       setPinnedMessages([])
+      reportError(e, 'Couldn’t load pinned messages')
     } finally {
       setLoadingPinned(false)
     }
@@ -45,8 +53,9 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
     try {
       const data = await getPostStats(chat.telegram_id)
       setPostStats(data)
-    } catch {
+    } catch (e) {
       setPostStats([])
+      reportError(e, 'Couldn’t load post stats')
     } finally {
       setLoadingStats(false)
     }
@@ -62,21 +71,27 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
       await setSlowMode(chat.telegram_id, seconds)
       setSlowModeValue(seconds)
       onChatUpdate?.({ slow_mode_seconds: seconds })
-    } catch {
-      // ignore
+    } catch (e) {
+      reportError(e, 'Slow mode change failed')
     } finally {
       setSettingSlowMode(false)
     }
   }
 
   const handleUnpin = async (msg: Message) => {
+    // A pinned row always belongs to the chat it was loaded for
     try {
-      await pinMessage(chat.telegram_id, msg.tg_message_id, false)
+      await pinMessage(msg.chat_id ?? chat.telegram_id, msg.tg_message_id, false)
       setPinnedMessages((prev) => prev.filter((m) => m.tg_message_id !== msg.tg_message_id))
-    } catch {
-      // ignore
+    } catch (e) {
+      reportError(e, 'Unpin failed')
     }
   }
+
+  // Pins changed from any device: refresh the open list
+  useWsEvent('messages_pinned', (e) => {
+    if (e.chat_id === chat.telegram_id && showPinned) void loadPinnedMessages()
+  })
 
   const isGroupOrChannel = chat.type === 'group' || chat.type === 'channel'
 
@@ -184,7 +199,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
                         {post.replies_count} replies
                       </span>
                       {post.date && (
-                        <span className="ml-auto">{new Date(post.date).toLocaleDateString()}</span>
+                        <span className="ml-auto">{fmtShortDate(post.date)}</span>
                       )}
                     </div>
                   </div>

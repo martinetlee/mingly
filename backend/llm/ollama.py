@@ -1,36 +1,86 @@
 import json
 from collections.abc import AsyncIterator
+from typing import Optional
 
 import httpx
 
-from typing import Optional
+from backend.llm.base import (
+    BaseLLMProvider,
+    ChatMessage,
+    CompletionResponse,
+    LLMError,
+    LLMModelMissing,
+    StreamDelta,
+    ToolCall,
+)
 
-from backend.llm.base import BaseLLMProvider, ChatMessage, CompletionResponse, LLMError, ToolCall
+# Context window sent with every request. Ollama's own default (2-4k tokens)
+# silently truncates briefing transcripts from the front. Keep it constant per
+# instance: changing num_ctx between calls forces Ollama to reload the model.
+DEFAULT_NUM_CTX = 8192
 
 
 class OllamaProvider(BaseLLMProvider):
     provider_name = "ollama"
-    supports_tools = True  # Ollama's OpenAI-compatible API supports tools
+    supports_tools = True
 
     def __init__(
         self,
         base_url: str = "http://localhost:11434/v1",
         model: str = "qwen3.5:4b",
+        num_ctx: Optional[int] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.instance_name = ""  # set by registry
+        self.context_tokens = num_ctx or DEFAULT_NUM_CTX
         # Native Ollama API base (strip /v1 suffix)
         self._ollama_base = self.base_url.removesuffix("/v1")
 
     def _serialize_message(self, m: ChatMessage) -> dict:
-        """Serialize a ChatMessage to the OpenAI API format."""
+        """Serialize a ChatMessage to Ollama's native /api/chat format."""
         msg: dict = {"role": m.role, "content": m.content}
         if m.tool_calls:
-            msg["tool_calls"] = m.tool_calls
+            # Native API wants arguments as an object; OpenAI-shaped callers
+            # pass a JSON string, which Ollama rejects.
+            calls = []
+            for tc in m.tool_calls:
+                func = dict(tc.get("function", {}))
+                args = func.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args) if args.strip() else {}
+                    except json.JSONDecodeError:
+                        args = {"raw": args}
+                func["arguments"] = args or {}
+                calls.append({"function": func})
+            msg["tool_calls"] = calls
         if m.tool_call_id:
             msg["tool_call_id"] = m.tool_call_id
         return msg
+
+    def _body(self, messages: list[ChatMessage], max_tokens: int, temperature: float, stream: bool) -> dict:
+        # think:false keeps thinking-mode models (e.g. Qwen 3.5) from spending
+        # the whole budget on hidden reasoning and returning empty content.
+        return {
+            "model": self.model,
+            "messages": [self._serialize_message(m) for m in messages],
+            "stream": stream,
+            "think": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+                "num_ctx": self.context_tokens,
+            },
+        }
+
+    def _raise_status(self, status: int, body: str) -> None:
+        low = body.lower()
+        if status == 404 or ("model" in low and "not found" in low):
+            raise LLMModelMissing(
+                f"Model '{self.model}' is not installed in Ollama", provider=self.provider_name, status_code=status
+            )
+        raise LLMError(body[:500], provider=self.provider_name, status_code=status)
 
     async def complete(
         self,
@@ -40,63 +90,47 @@ class OllamaProvider(BaseLLMProvider):
         temperature: float = 0.3,
         tools: Optional[list] = None,
     ) -> CompletionResponse:
-        # Use native Ollama API (/api/chat) with think:false to avoid
-        # thinking-mode models (e.g. Qwen 3.5) spending all tokens on
-        # internal reasoning and returning empty content.
-        request_body: dict = {
-            "model": self.model,
-            "messages": [self._serialize_message(m) for m in messages],
-            "stream": False,
-            "think": False,
-            "options": {
-                "num_predict": max_tokens,
-                "temperature": temperature,
-            },
-        }
+        body = self._body(messages, max_tokens, temperature, stream=False)
         if tools:
-            request_body["tools"] = tools
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{self._ollama_base}/api/chat",
-                json=request_body,
-            )
+            body["tools"] = tools
+        try:
+            resp = await self._http().post(f"{self._ollama_base}/api/chat", json=body)
+        except httpx.HTTPError as exc:
+            self._raise_transport(exc)
         if resp.status_code != 200:
-            raise LLMError(resp.text, provider=self.provider_name, status_code=resp.status_code)
+            self._raise_status(resp.status_code, resp.text)
         data = resp.json()
+        if data.get("error"):
+            self._raise_status(500, str(data["error"]))
 
-        # Parse tool calls from response
         message_data = data.get("message", {})
         parsed_tool_calls = None
         raw_tool_calls = message_data.get("tool_calls")
         if raw_tool_calls:
             parsed_tool_calls = []
-            for tc in raw_tool_calls:
+            for i, tc in enumerate(raw_tool_calls):
                 func = tc.get("function", {})
-                args = func.get("arguments", "{}")
+                args = func.get("arguments", {})
                 if isinstance(args, str):
                     try:
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         args = {"raw": args}
                 parsed_tool_calls.append(ToolCall(
-                    id=tc.get("id", ""),
+                    id=tc.get("id") or f"call_{i}",
                     name=func.get("name", ""),
-                    arguments=args,
+                    arguments=args if isinstance(args, dict) else {"value": args},
                 ))
-
-        # Native API reports tokens in top-level fields
-        prompt_tokens = data.get("prompt_eval_count")
-        completion_tokens = data.get("eval_count")
 
         return CompletionResponse(
             content=message_data.get("content") or "",
             model=self.model,
             provider=self.provider_name,
             instance_name=self.instance_name,
-            input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
+            input_tokens=data.get("prompt_eval_count"),
+            output_tokens=data.get("eval_count"),
             tool_calls=parsed_tool_calls,
+            reasoning=message_data.get("thinking") or None,
         )
 
     async def stream(
@@ -105,31 +139,29 @@ class OllamaProvider(BaseLLMProvider):
         *,
         max_tokens: int = 1024,
         temperature: float = 0.3,
-    ) -> AsyncIterator[str]:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self._ollama_base}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": [self._serialize_message(m) for m in messages],
-                    "stream": True,
-                    "think": False,
-                    "options": {
-                        "num_predict": max_tokens,
-                        "temperature": temperature,
-                    },
-                },
-            ) as resp:
+    ) -> AsyncIterator[StreamDelta]:
+        body = self._body(messages, max_tokens, temperature, stream=True)
+        try:
+            async with self._http().stream("POST", f"{self._ollama_base}/api/chat", json=body) as resp:
                 if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise LLMError(body.decode(), provider=self.provider_name, status_code=resp.status_code)
+                    raw = await resp.aread()
+                    self._raise_status(resp.status_code, raw.decode(errors="replace"))
                 async for line in resp.aiter_lines():
-                    if line:
+                    if not line:
+                        continue
+                    try:
                         chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            yield content
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        self._raise_status(500, str(chunk["error"]))
+                    msg = chunk.get("message", {})
+                    content = msg.get("content") or ""
+                    reasoning = msg.get("thinking") or ""
+                    if content or reasoning:
+                        yield StreamDelta(content=content, reasoning=reasoning)
+        except httpx.HTTPError as exc:
+            self._raise_transport(exc)
 
     async def health_check(self) -> bool:
         """Check that Ollama is listening and this instance's model is installed — fast, no model load."""
@@ -152,8 +184,11 @@ class OllamaProvider(BaseLLMProvider):
 
     async def list_models(self) -> list[dict]:
         """Return list of locally available Ollama models."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{self._ollama_base}/api/tags")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{self._ollama_base}/api/tags")
+        except httpx.HTTPError as exc:
+            self._raise_transport(exc)
         if resp.status_code != 200:
             raise LLMError(resp.text, provider=self.provider_name, status_code=resp.status_code)
         return resp.json().get("models", [])
@@ -163,15 +198,18 @@ class OllamaProvider(BaseLLMProvider):
         Stream pull progress dicts: {"status": str, "completed": int, "total": int}.
         Raises LLMError if Ollama is unreachable.
         """
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                f"{self._ollama_base}/api/pull",
-                json={"name": model_name, "stream": True},
-            ) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise LLMError(body.decode(), provider=self.provider_name, status_code=resp.status_code)
-                async for line in resp.aiter_lines():
-                    if line:
-                        yield json.loads(line)
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._ollama_base}/api/pull",
+                    json={"name": model_name, "stream": True},
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        raise LLMError(body.decode(), provider=self.provider_name, status_code=resp.status_code)
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield json.loads(line)
+        except httpx.HTTPError as exc:
+            self._raise_transport(exc)

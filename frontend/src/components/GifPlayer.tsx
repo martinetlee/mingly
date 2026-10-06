@@ -1,17 +1,40 @@
 import { useState } from 'react'
-import { Play } from 'lucide-react'
+import { Loader2, Play, RotateCcw } from 'lucide-react'
 import { authenticatedMediaUrl } from '../api/session'
+import { useMediaDownload } from '../hooks/useMediaDownload'
 import ImageLightbox from './ImageLightbox'
 
 interface Props {
-  mediaUrl: string
+  chatTelegramId: number
+  msgTelegramId: number
+  mediaUrl: string | null
   isOut: boolean
 }
 
-export default function GifPlayer({ mediaUrl, isOut }: Props) {
+export default function GifPlayer({ chatTelegramId, msgTelegramId, mediaUrl, isOut }: Props) {
+  // GIFs are small: download automatically (through the shared, rate-limited pipeline)
+  const media = useMediaDownload(chatTelegramId, msgTelegramId, { auto: true, initialUrl: mediaUrl })
   const [playing, setPlaying] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
-  const url = authenticatedMediaUrl(mediaUrl)
+
+  if (!media.url) {
+    const failed = media.status === 'error'
+    return (
+      <button
+        onClick={failed ? media.retry : undefined}
+        disabled={!failed}
+        className={`flex items-center gap-2 px-3 py-4 text-xs ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}
+      >
+        {failed ? <RotateCcw size={14} /> : <Loader2 size={14} className="animate-spin" />}
+        {failed ? `${media.error ?? 'GIF failed to load'} — retry` : 'Loading GIF…'}
+      </button>
+    )
+  }
+
+  const url = authenticatedMediaUrl(media.url)
+  const badge = (
+    <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">GIF</span>
+  )
 
   if (playing) {
     return (
@@ -24,13 +47,9 @@ export default function GifPlayer({ mediaUrl, isOut }: Props) {
             style={{ maxWidth: 320, maxHeight: 320 }}
             onClick={() => setLightboxOpen(true)}
           />
-          <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">
-            GIF
-          </span>
+          {badge}
         </div>
-        {lightboxOpen && (
-          <ImageLightbox src={url} onClose={() => setLightboxOpen(false)} />
-        )}
+        {lightboxOpen && <ImageLightbox src={url} onClose={() => setLightboxOpen(false)} />}
       </>
     )
   }
@@ -41,7 +60,6 @@ export default function GifPlayer({ mediaUrl, isOut }: Props) {
       style={{ maxWidth: 320, maxHeight: 320 }}
       onClick={() => setPlaying(true)}
     >
-      {/* Show first frame as thumbnail (same URL, browser will render first frame for static display) */}
       <img
         src={url}
         alt="GIF thumbnail"
@@ -53,9 +71,7 @@ export default function GifPlayer({ mediaUrl, isOut }: Props) {
           <Play size={22} className="ml-0.5" />
         </div>
       </div>
-      <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">
-        GIF
-      </span>
+      {badge}
     </div>
   )
 }

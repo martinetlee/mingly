@@ -5,6 +5,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.database import Base
 
+# Scam/Shield verdict model (see Message.effective_is_scam)
+from sqlalchemy import Index, and_, case, func  # noqa: E402
+from sqlalchemy.ext.hybrid import hybrid_property  # noqa: E402
+
+SCAM_SCORE_THRESHOLD = 0.5
+SCAM_SUCCESS_STATUSES = ("completed", "short_circuited")
+
 
 class Chat(Base):
     __tablename__ = "chats"
@@ -75,13 +82,59 @@ class Message(Base):
     scam_trace_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
     scam_manual_verdict: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 'scam', 'not_scam', or NULL
+    # NULL = never scanned; pending | completed | failed | short_circuited.
+    # A failed scan never touches scam_score/scam_reason (error goes to scam_error).
+    scam_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    scam_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    scam_next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Cloud change tracking: re-upload when scam_updated_at > scam_synced_at
+    scam_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scam_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Transient, not mapped: set by crud.save_message to "created" | "updated" | None
+    _change = None  # type: Optional[str]
+
+    @hybrid_property
+    def pipeline_is_scam(self) -> Optional[bool]:
+        """The automated verdict alone: None without a successful scan."""
+        if self.scam_status not in SCAM_SUCCESS_STATUSES or self.scam_score is None:
+            return None
+        return self.scam_score > SCAM_SCORE_THRESHOLD
+
+    @pipeline_is_scam.inplace.expression
+    @classmethod
+    def _pipeline_is_scam_expression(cls):
+        # False (never NULL) when there is no successful scan
+        return and_(
+            func.coalesce(cls.scam_status, "").in_(SCAM_SUCCESS_STATUSES),
+            func.coalesce(cls.scam_score, 0.0) > SCAM_SCORE_THRESHOLD,
+        )
+
+    @hybrid_property
+    def effective_is_scam(self) -> bool:
+        """The one verdict every consumer uses: a manual verdict wins, else a
+        successful scan scoring above the threshold."""
+        if self.scam_manual_verdict is not None:
+            return self.scam_manual_verdict == "scam"
+        return bool(self.pipeline_is_scam)
+
+    @effective_is_scam.inplace.expression
+    @classmethod
+    def _effective_is_scam_expression(cls):
+        # Never NULL, so NOT effective_is_scam is also correct in SQL
+        return case(
+            (cls.scam_manual_verdict.isnot(None), cls.scam_manual_verdict == "scam"),
+            else_=cls.pipeline_is_scam,
+        )
 
 
 class Tag(Base):
     __tablename__ = "tags"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Also unique on lower(trim(name)) (index uq_tags_name_ci, migration 91)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     color: Mapped[str] = mapped_column(String, default="slate")
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -185,10 +238,16 @@ class Contact(Base):
 
 class ContactPosition(Base):
     __tablename__ = "contact_positions"
-    __table_args__ = (UniqueConstraint("telegram_id", "organization", name="uq_telegram_org"),)
+    __table_args__ = (UniqueConstraint("telegram_id", "organization_id", name="uq_telegram_org"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # Source of truth for membership. NULL = detached (the org was deleted with
+    # mode=detach); the position keeps its history under `organization`.
+    organization_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    # Display name: mirrors organizations.name while attached, frozen once detached
     organization: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # True = current, False = former
@@ -200,6 +259,7 @@ class Organization(Base):
     __tablename__ = "organizations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Also unique on lower(trim(name)) (index uq_organizations_name_ci, migration 92)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     context: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -252,6 +312,8 @@ class CatchUpSummary(Base):
     action_needed: Mapped[bool] = mapped_column(Boolean, default=False)
     total_messages_at_generation: Mapped[int] = mapped_column(Integer, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Rule-based fallback written because the LLM failed; regenerated once it is back.
+    is_degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class BriefingRun(Base):
@@ -260,6 +322,10 @@ class BriefingRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     days: Mapped[int] = mapped_column(Integer, default=1)
+    # running | done | partial (some entries failed / run aborted after ≥1 entry) | failed
+    status: Mapped[str] = mapped_column(String, nullable=False, default="done", server_default="done")
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ScamCheckRequest(Base):
@@ -295,6 +361,11 @@ class ScamFlag(Base):
     flagged_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Per-sender verdict record: 'active' = flagged scammer, 'dismissed' = the
+    # user cleared this sender; automated flagging never re-activates it.
+    status: Mapped[str] = mapped_column(String, default="active", server_default="active")
+    dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ScamReport(Base):
@@ -342,6 +413,7 @@ class ScamFeedback(Base):
 
 class ScamAnalytics(Base):
     __tablename__ = "scam_analytics"
+    __table_args__ = (Index("uq_scam_analytics_period", "period_start", unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)

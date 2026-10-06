@@ -1,264 +1,351 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { Virtuoso } from 'react-virtuoso'
+import type { VirtuosoHandle } from 'react-virtuoso'
+import { ArrowDown, Loader2 } from 'lucide-react'
 import type { Message } from '../api/types'
+import type { ScrollIntent } from '../hooks/useChatMessages'
+import { parseServerDate } from '../utils/time'
 import MessageBubble from './MessageBubble'
-import MediaAlbumGrid from './MediaAlbumGrid'
+import type { ScamVerdictScope } from './MessageBubble'
 
 interface Props {
   messages: Message[]
   chatType: string
+  /** Visual highlight only (scrolling is driven by `scrollIntent`) */
   highlightTelegramId?: number | null
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
   onEdit?: (msg: Message) => void
-  onDelete?: (msg: Message) => void
-  onForward?: (msg: Message) => void
-  /** Number of unread messages from the end of the list */
-  unreadCount?: number
-  /** Called when user scrolls near the top */
+  onDelete?: (msg: Message, album?: Message[]) => void
+  onForward?: (msg: Message, album?: Message[]) => void
+  onPin?: (msg: Message) => void
+  onJumpToMessage?: (tgId: number) => void
+  /** The unread separator is drawn above this message */
+  firstUnreadTgId?: number | null
+  /**
+   * One-shot scroll request: each intent id is performed once, then ignored
+   * (re-renders and new messages never re-centre the view). Without it the
+   * list starts at the bottom.
+   */
+  scrollIntent?: ScrollIntent | null
+  /** Called when the user scrolls to the top / bottom of the loaded window */
   onScrollNearTop?: () => void
-  /** Whether older messages are currently loading */
+  onScrollNearBottom?: () => void
   loadingOlder?: boolean
+  loadingNewer?: boolean
+  /** Rendered above the first message (load-older / history status) */
+  header?: ReactNode
+  /** The window isn't at the newest message (show "Jump to latest") */
+  hasNewer?: boolean
+  onJumpToLatest?: () => void
   /** Set of telegram IDs flagged as scammers */
   flaggedSenderIds?: Set<number>
   onReportScam?: (msg: Message) => void
-  onScamVerdictChange?: (msg: Message, verdict: 'not_scam' | null) => void
+  onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void
   /** Avatar context menu callbacks */
   onOpenProfile?: (senderId: number) => void
   onSendMessage?: (senderId: number) => void
   onMention?: (senderId: number, senderName: string) => void
-  onRestrict?: (senderId: number) => void
+  onRestrict?: (senderId: number, chatId: number) => void
 }
 
-/**
- * Group consecutive messages that share the same grouped_id into album clusters.
- * Returns an array of items: either a single message or an album group.
- */
-function groupMessages(messages: Message[]): Array<{ type: 'single'; message: Message } | { type: 'album'; messages: Message[]; groupedId: number }> {
-  const result: Array<{ type: 'single'; message: Message } | { type: 'album'; messages: Message[]; groupedId: number }> = []
-  let i = 0
+export interface Item {
+  type: 'single' | 'album'
+  /** Stable across window merges (albums keyed by grouped_id, so loading more of an album keeps its key) */
+  key: string
+  message: Message
+  album?: Message[]
+  ids: number[]
+  showSender: boolean
+  /** Day label when this item starts a new day */
+  dateLabel: string | null
+}
 
+/** Group consecutive messages sharing a grouped_id into album items, with sender/day separators. */
+export function buildItems(messages: Message[], isGroup: boolean): Item[] {
+  const result: Item[] = []
+  const thisYear = new Date().getFullYear()
+  let prevMsg: Message | undefined
+  let i = 0
   while (i < messages.length) {
     const msg = messages[i]
+    let j = i + 1
     if (msg.grouped_id) {
-      // Collect all consecutive messages with the same grouped_id
-      const albumMessages: Message[] = [msg]
-      let j = i + 1
-      while (j < messages.length && messages[j].grouped_id === msg.grouped_id) {
-        albumMessages.push(messages[j])
-        j++
-      }
-      if (albumMessages.length > 1) {
-        result.push({ type: 'album', messages: albumMessages, groupedId: msg.grouped_id })
-        i = j
-        continue
-      }
+      while (j < messages.length && messages[j].grouped_id === msg.grouped_id) j++
     }
-    result.push({ type: 'single', message: msg })
-    i++
+    const group = messages.slice(i, j)
+    const isAlbum = group.length > 1
+    // The bubble carries the caption item (Telegram puts the caption on one item)
+    const primary = isAlbum ? (group.find((m) => m.text) ?? group[0]) : msg
+    const date = parseServerDate(primary.date)
+    const prevDate = prevMsg ? parseServerDate(prevMsg.date) : null
+    result.push({
+      type: isAlbum ? 'album' : 'single',
+      key: isAlbum ? `a${msg.grouped_id}` : `m${msg.tg_message_id}`,
+      message: primary,
+      album: isAlbum ? group : undefined,
+      ids: group.map((m) => m.tg_message_id),
+      showSender: isGroup && !primary.is_outgoing && primary.sender_name !== prevMsg?.sender_name,
+      dateLabel: date && (!prevDate || date.toDateString() !== prevDate.toDateString())
+        ? date.toLocaleDateString([], { day: 'numeric', month: 'long', year: date.getFullYear() !== thisYear ? 'numeric' : undefined })
+        : null,
+    })
+    prevMsg = group[group.length - 1]
+    i = j
   }
-
   return result
 }
 
+/** Virtuoso's firstItemIndex starts high so prepends can keep decreasing it */
+export const BASE_INDEX = 1_000_000
+
+/**
+ * Keep Virtuoso's scroll anchor across window changes: a prepend of N items
+ * lowers firstItemIndex by N, a top trim raises it; anything without overlap
+ * is a new window (remount at the intent).
+ */
+export function rebaseFirstIndex(prevKeys: string[], prevBase: number, nextKeys: string[]): { base: number; replaced: boolean } {
+  if (prevKeys.length === 0 || nextKeys.length === 0) return { base: BASE_INDEX, replaced: true }
+  const prepended = nextKeys.indexOf(prevKeys[0])
+  if (prepended >= 0) return { base: prevBase - prepended, replaced: false }
+  const trimmed = prevKeys.indexOf(nextKeys[0])
+  if (trimmed >= 0) return { base: prevBase + trimmed, replaced: false }
+  return { base: BASE_INDEX, replaced: true }
+}
+
 /** Separator line between read and unread messages */
-function UnreadSeparator({ innerRef }: { innerRef?: React.Ref<HTMLDivElement> }) {
+function UnreadSeparator() {
   return (
-    <div ref={innerRef} className="flex items-center gap-3 my-2 px-2">
+    <div className="flex items-center gap-3 my-2 px-2" data-unread-separator="">
       <div className="flex-1 border-t border-indigo-500/50" />
-      <span className="flex-shrink-0 text-[11px] font-medium text-indigo-400">
-        Unread messages
-      </span>
+      <span className="flex-shrink-0 text-[11px] font-medium text-indigo-400">Unread messages</span>
       <div className="flex-1 border-t border-indigo-500/50" />
     </div>
   )
 }
 
-export default function MessageList({ messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, unreadCount, onScrollNearTop, loadingOlder, flaggedSenderIds, onReportScam, onScamVerdictChange, onOpenProfile, onSendMessage, onMention, onRestrict }: Props) {
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const prevRef = useRef<{ count: number; firstId: number | null; scrollHeight: number }>({
-    count: 0,
-    firstId: null,
-    scrollHeight: 0,
-  })
-  const highlightRef = useRef<HTMLDivElement>(null)
-  const unreadRef = useRef<HTMLDivElement>(null)
+interface ListContext {
+  header?: ReactNode
+  loadingOlder?: boolean
+  loadingNewer?: boolean
+}
+
+// Stable component identities (Virtuoso remounts header/footer when these change)
+const ListHeader = ({ context }: { context?: ListContext }) => (
+  <div className="px-4 pt-3">
+    {context?.header}
+    {context?.loadingOlder && (
+      <div className="flex justify-center py-3"><Loader2 size={18} className="animate-spin text-indigo-400" /></div>
+    )}
+  </div>
+)
+const ListFooter = ({ context }: { context?: ListContext }) => (
+  <div className="px-4 pb-3">
+    {context?.loadingNewer && (
+      <div className="flex justify-center py-3"><Loader2 size={18} className="animate-spin text-indigo-400" /></div>
+    )}
+  </div>
+)
+const COMPONENTS = { Header: ListHeader, Footer: ListFooter }
+
+export default function MessageList({
+  messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
+  firstUnreadTgId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header,
+  hasNewer, onJumpToLatest, flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict,
+}: Props) {
   const isGroup = chatType === 'group' || chatType === 'channel'
-  const [dimHighlight, setDimHighlight] = useState(false)
-
-  // Compute index where unread separator should appear
-  // unreadCount = N means the last N messages are unread
-  const unreadSeparatorIndex = (unreadCount && unreadCount > 0 && unreadCount < messages.length)
-    ? messages.length - unreadCount
-    : null
-
-  // Intent-based scrolling in a single layout effect (before paint, so
-  // prepend restoration doesn't flash):
-  //   highlight   → center the highlighted message
-  //   initial     → jump to unread separator, else bottom
-  //   prepend     → keep the viewport anchored on the same message
-  //   append/edit → follow to bottom only if the user was already near it
-  useLayoutEffect(() => {
-    const el = scrollContainerRef.current
-    const prev = prevRef.current
-    const firstId = messages.length > 0 ? messages[0].id : null
-    prevRef.current = {
-      count: messages.length,
-      firstId,
-      scrollHeight: el?.scrollHeight ?? 0,
+  const items = useMemo(() => buildItems(messages, isGroup), [messages, isGroup])
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const [atBottom, setAtBottom] = useState(true)
+  const scrollerElRef = useRef<HTMLElement | null>(null)
+  /**
+   * Bottom pinning: rendered items replace Virtuoso's height estimates with
+   * real heights after the first scroll, which left the view short of the end
+   * (measured 55px in Chrome). Re-pin on height changes for a short window —
+   * cancelled the moment the user scrolls — and set the scroller's own
+   * scrollTop (Virtuoso's scrollTo stops before the footer).
+   */
+  const pinBottomUntilRef = useRef(0)
+  const toBottom = useCallback(() => {
+    const el = scrollerElRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [])
+  const pinBottom = useCallback(() => {
+    pinBottomUntilRef.current = Date.now() + 1500
+    toBottom()
+    requestAnimationFrame(toBottom)
+  }, [toBottom])
+  /** Distance from the bottom as of the last scroll event (i.e. before any re-measure) */
+  const gapAtLastScrollRef = useRef(0)
+  const listenersRef = useRef<(() => void) | null>(null)
+  const setScroller = useCallback((el: HTMLElement | Window | null) => {
+    listenersRef.current?.()
+    listenersRef.current = null
+    scrollerElRef.current = el instanceof HTMLElement ? el : null
+    const sc = scrollerElRef.current
+    if (!sc) return
+    const cancel = () => { pinBottomUntilRef.current = 0 }
+    const onScroll = () => { gapAtLastScrollRef.current = sc.scrollHeight - sc.scrollTop - sc.clientHeight }
+    const user = ['wheel', 'touchstart', 'pointerdown', 'keydown']
+    for (const ev of user) sc.addEventListener(ev, cancel, { passive: true })
+    sc.addEventListener('scroll', onScroll, { passive: true })
+    listenersRef.current = () => {
+      for (const ev of user) sc.removeEventListener(ev, cancel)
+      sc.removeEventListener('scroll', onScroll)
     }
+  }, [])
+  const consumedIntentRef = useRef<number | null>(null)
 
-    if (highlightTelegramId && highlightRef.current) {
-      // Scroll to highlighted message instead of bottom
-      highlightRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
-      // Clear highlight after 3s
-      setDimHighlight(false)
-      const t = setTimeout(() => setDimHighlight(true), 3000)
-      return () => clearTimeout(t)
+  const indexOfTg = useCallback((tgId: number) => items.findIndex((it) => it.ids.includes(tgId)), [items])
+
+  // firstItemIndex bookkeeping, recomputed in the same render as the data. A
+  // new (non-overlapping) window bumps `generation`, remounting Virtuoso at
+  // `initialTop`: the pending scroll intent's target, else the bottom.
+  const layoutRef = useRef({
+    items: [] as Item[], keys: [] as string[], base: BASE_INDEX, generation: 0,
+    initialTop: { index: 0, align: 'end' as 'end' | 'center', offset: 0 }, initialIntentId: null as number | null,
+  })
+  if (layoutRef.current.items !== items) {
+    const keys = items.map((it) => it.key)
+    const prev = layoutRef.current
+    const { base, replaced } = rebaseFirstIndex(prev.keys, prev.base, keys)
+    let { initialTop, initialIntentId } = prev
+    if (replaced) {
+      const pending = scrollIntent && consumedIntentRef.current !== scrollIntent.id ? scrollIntent : null
+      const idx = pending?.kind === 'message' ? items.findIndex((it) => it.ids.includes(pending.tgId)) : -1
+      // Bottom: overshoot past the footer — the browser clamps to the true end
+      initialTop = idx >= 0
+        ? { index: idx, align: 'center', offset: 0 }
+        : { index: Math.max(0, items.length - 1), align: 'end', offset: 100_000 }
+      initialIntentId = pending && (pending.kind === 'bottom' || idx >= 0) ? pending.id : null
     }
+    layoutRef.current = { items, keys, base, generation: prev.generation + (replaced ? 1 : 0), initialTop, initialIntentId }
+  }
+  const { base, generation, initialTop } = layoutRef.current
 
-    if (prev.count === 0) {
-      // Initial load: jump to unread separator if present, else bottom
-      if (unreadRef.current) {
-        unreadRef.current.scrollIntoView({ behavior: 'instant', block: 'center' })
-      } else {
-        bottomRef.current?.scrollIntoView({ behavior: 'instant' })
-      }
+  // A window that starts at the bottom: pin it there while items get measured
+  useEffect(() => {
+    if (layoutRef.current.initialTop.align === 'end') pinBottom()
+  }, [generation, pinBottom])
+
+  // Intents not already served by a remount: scroll to the target once
+  useEffect(() => {
+    if (!scrollIntent || consumedIntentRef.current === scrollIntent.id || items.length === 0) return
+    if (scrollIntent.kind === 'bottom') {
+      // Past the last item too (footer): scroll to the very end, not "last item aligned to end"
+      pinBottom()
+      consumedIntentRef.current = scrollIntent.id
       return
     }
-    if (!el) return
-
-    const prepended = firstId !== null && prev.firstId !== null
-      && firstId !== prev.firstId && messages.length > prev.count
-    if (prepended) {
-      el.scrollTop += el.scrollHeight - prev.scrollHeight
+    if (layoutRef.current.initialIntentId === scrollIntent.id) {
+      consumedIntentRef.current = scrollIntent.id
       return
     }
+    const idx = indexOfTg(scrollIntent.tgId)
+    if (idx < 0) return // not in the window (yet)
+    virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center' })
+    consumedIntentRef.current = scrollIntent.id
+  }, [scrollIntent, items.length, indexOfTg, pinBottom])
 
-    // Distance from the bottom before this update (scrollTop is unchanged by
-    // the DOM update; prev.scrollHeight is the pre-update content height)
-    const gapFromBottom = prev.scrollHeight - el.scrollTop - el.clientHeight
-    if (gapFromBottom < 150) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [messages, highlightTelegramId])
+  const onHeightChanged = useCallback(() => {
+    if (hasNewer) return
+    // Re-measure while the user was really at the end (not mid-scroll-up) keeps them there
+    if (Date.now() < pinBottomUntilRef.current || gapAtLastScrollRef.current < 4) toBottom()
+  }, [hasNewer, toBottom])
 
-  const handleScroll = useCallback(() => {
-    const el = scrollContainerRef.current
-    if (!el || !onScrollNearTop) return
-    if (el.scrollTop < 200) {
-      onScrollNearTop()
-    }
-  }, [onScrollNearTop])
 
-  if (messages.length === 0) {
+  // Follow new messages at the end while the user is at the bottom (instead of
+  // Virtuoso's followOutput, which aligns to the estimated height and ends short)
+  const lastKey = items.length ? items[items.length - 1].key : null
+  const prevLastKeyRef = useRef(lastKey)
+  useEffect(() => {
+    const appended = lastKey !== prevLastKeyRef.current
+    prevLastKeyRef.current = lastKey
+    if (appended && !hasNewer && gapAtLastScrollRef.current < 150) pinBottom()
+  }, [lastKey, hasNewer, pinBottom])
+  const context = useMemo<ListContext>(() => ({ header, loadingOlder, loadingNewer }), [header, loadingOlder, loadingNewer])
+
+  const itemContent = useCallback((_index: number, item: Item) => {
+    const msg = item.message
     return (
-      <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
-        No messages yet
+      <div data-tg-ids={item.ids.join(' ')} className="px-4">
+        {item.dateLabel && (
+          <div className="flex items-center justify-center py-2 my-1">
+            <span className="text-[11px] font-medium text-slate-500">{item.dateLabel}</span>
+          </div>
+        )}
+        {firstUnreadTgId != null && item.ids.includes(firstUnreadTgId) && <UnreadSeparator />}
+        <MessageBubble
+          message={msg}
+          album={item.album}
+          showSender={item.showSender}
+          showAvatar={item.showSender}
+          isGroupChat={isGroup}
+          highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
+          onReply={onReply}
+          onReact={onReact}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onForward={onForward}
+          onPin={onPin}
+          onJumpToMessage={onJumpToMessage}
+          isFlaggedSender={msg.sender_id != null && !!flaggedSenderIds?.has(msg.sender_id)}
+          onReportScam={onReportScam}
+          onScamVerdict={onScamVerdict}
+          onOpenProfile={onOpenProfile}
+          onSendMessage={onSendMessage}
+          onMention={onMention}
+          onRestrict={onRestrict}
+        />
+      </div>
+    )
+  }, [firstUnreadTgId, isGroup, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
+    flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict])
+
+  if (items.length === 0) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3" data-testid="message-scroll">
+        {header}
+        <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">No messages yet</div>
       </div>
     )
   }
 
-  const grouped = groupMessages(messages)
+  const showJump = !!onJumpToLatest && (hasNewer || !atBottom)
 
   return (
-    <div ref={scrollContainerRef} onScroll={handleScroll} className="flex flex-1 flex-col overflow-y-auto px-4 py-3">
-      {loadingOlder && (
-        <div className="flex justify-center py-3">
-          <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
-        </div>
+    <div className="relative flex min-h-0 flex-1 flex-col" data-testid="message-scroll">
+      <Virtuoso
+        // A new (non-overlapping) window remounts at its intent; prepends/appends keep the anchor
+        key={generation}
+        ref={virtuosoRef}
+        scrollerRef={setScroller}
+        className="flex-1"
+        data={items}
+        firstItemIndex={base}
+        initialTopMostItemIndex={initialTop}
+        computeItemKey={(_i, item) => item.key}
+        itemContent={itemContent}
+        components={COMPONENTS}
+        context={context}
+        atBottomStateChange={setAtBottom}
+        totalListHeightChanged={onHeightChanged}
+        atBottomThreshold={150}
+        startReached={onScrollNearTop ? () => onScrollNearTop() : undefined}
+        endReached={onScrollNearBottom && hasNewer ? () => onScrollNearBottom() : undefined}
+        increaseViewportBy={{ top: 600, bottom: 600 }}
+      />
+      {showJump && (
+        <button
+          onClick={onJumpToLatest}
+          className="absolute bottom-3 right-5 flex items-center gap-1.5 rounded-full border border-slate-600 bg-slate-800/95 px-3 py-1.5 text-xs text-slate-200 shadow-lg hover:bg-slate-700"
+          title="Jump to latest"
+        >
+          <ArrowDown size={13} />
+          Latest
+        </button>
       )}
-      {grouped.map((item, idx) => {
-        if (item.type === 'album') {
-          const firstMsg = item.messages[0]
-          const isOut = firstMsg.is_outgoing
-          const isHighlighted = item.messages.some(
-            (m) => highlightTelegramId != null && m.tg_message_id === highlightTelegramId && !dimHighlight
-          )
-          const hasHighlightRef = item.messages.some(
-            (m) => highlightTelegramId === m.tg_message_id
-          )
-          // Collect text from all album messages (captions)
-          const captionMsg = item.messages.find((m) => m.text)
-
-          return (
-            <div
-              key={`album-${item.groupedId}`}
-              ref={hasHighlightRef ? highlightRef : undefined}
-              className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1 ${
-                isHighlighted ? 'rounded-lg ring-2 ring-amber-400/50 ring-offset-2 ring-offset-slate-900 transition-all duration-700' : ''
-              }`}
-            >
-              <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
-                <div
-                  className={`rounded-2xl text-sm leading-relaxed overflow-hidden ${
-                    isOut
-                      ? 'rounded-br-sm bg-indigo-600 text-white'
-                      : 'rounded-bl-sm bg-slate-700 text-gray-100 border border-slate-600'
-                  }`}
-                >
-                  <MediaAlbumGrid messages={item.messages} isOut={isOut} />
-                  {captionMsg?.text && (
-                    <p className="px-3 py-2 text-sm">{captionMsg.text}</p>
-                  )}
-                </div>
-                <span className={`mt-0.5 text-[10px] text-slate-500 ${isOut ? 'mr-1' : 'ml-1'}`}>
-                  {new Date(firstMsg.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              </div>
-            </div>
-          )
-        }
-
-        const msg = item.message
-        const prevItem = idx > 0 ? grouped[idx - 1] : null
-        const prevMsg = prevItem?.type === 'single' ? prevItem.message : prevItem?.type === 'album' ? prevItem.messages[prevItem.messages.length - 1] : undefined
-        const showSender =
-          isGroup && !msg.is_outgoing && msg.sender_name !== prevMsg?.sender_name
-        const isHighlighted = highlightTelegramId != null && msg.tg_message_id === highlightTelegramId && !dimHighlight
-
-        // Date separator when day changes
-        const msgDate = new Date(msg.date + (msg.date.includes('Z') || msg.date.includes('+') ? '' : 'Z'))
-        const prevDate = prevMsg?.date ? new Date(prevMsg.date + (prevMsg.date.includes('Z') || prevMsg.date.includes('+') ? '' : 'Z')) : null
-        const showDateSep = !prevDate || msgDate.toDateString() !== prevDate.toDateString()
-
-        return (
-          <div key={msg.id}>
-            {showDateSep && (
-              <div className="flex items-center justify-center py-2 my-1">
-                <span className="text-[11px] font-medium text-slate-500">
-                  {msgDate.toLocaleDateString([], { day: 'numeric', month: 'long' })}
-                </span>
-              </div>
-            )}
-            {unreadSeparatorIndex === idx && (
-              <UnreadSeparator innerRef={unreadRef} />
-            )}
-            <div ref={highlightTelegramId === msg.tg_message_id ? highlightRef : undefined}>
-              <MessageBubble
-                message={msg}
-                showSender={showSender}
-                showAvatar={showSender}
-                isGroupChat={isGroup}
-                highlighted={isHighlighted}
-                onReply={onReply}
-                onReact={onReact}
-                onEdit={onEdit}
-                onDelete={onDelete}
-                onForward={onForward}
-                isFlaggedSender={!!msg.sender_id && !!flaggedSenderIds?.has(msg.sender_id)}
-                onReportScam={onReportScam}
-                onScamVerdictChange={onScamVerdictChange}
-                onOpenProfile={onOpenProfile}
-                onSendMessage={onSendMessage}
-                onMention={onMention}
-                onRestrict={onRestrict}
-              />
-            </div>
-          </div>
-        )
-      })}
-      <div ref={bottomRef} />
     </div>
   )
 }

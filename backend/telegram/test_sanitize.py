@@ -1,31 +1,15 @@
 """Tests for URL sanitization in message HTML generation.
 
-We mock heavy dependencies to test the pure utility functions in isolation.
+The helpers live in a dependency-free module, so no mocking is needed.
 """
 
-import sys
-from unittest.mock import MagicMock
 
-import pytest
 
-# Mock all heavy transitive dependencies before importing sync.py
-for mod_name in [
-    "telethon", "telethon.events", "telethon.errors", "telethon.tl", "telethon.tl.types",
-    "telethon.sessions", "telethon.extensions", "telethon.extensions.html",
-    "cryptography", "cryptography.fernet", "cryptography.hazmat",
-    "cryptography.hazmat.bindings", "cryptography.hazmat.bindings._rust",
-    "cryptography.exceptions",
-    "backend.telegram.client", "backend.secrets",
-    "backend.db.database", "backend.db.models", "backend.db.crud",
-    "backend.config",
-    "backend.ws", "backend.ws.manager",
-    "fastapi", "fastapi.websockets",
-]:
-    if mod_name not in sys.modules:
-        sys.modules[mod_name] = MagicMock()
-
-# Now import the functions under test
-from backend.telegram.sync import _safe_href, _sanitize_hrefs, _markdown_pass
+from backend.telegram.formatting import (
+    safe_href as _safe_href,
+    sanitize_hrefs as _sanitize_hrefs,
+    markdown_pass as _markdown_pass,
+)
 
 
 class TestSafeHref:

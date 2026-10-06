@@ -14,7 +14,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
-from backend.db.models import Contact, ContactPosition, Organization
+from backend.db.models import Contact, ContactPosition
+from backend.serialization import iso_utc
 from backend.api.contacts import _contact_dict
 from backend.api.organizations import list_organizations as _list_organizations
 
@@ -38,7 +39,7 @@ def _chat_visible(chat) -> bool:
 
 
 def _iso(dt) -> Optional[str]:
-    return dt.isoformat() + "Z" if dt else None
+    return iso_utc(dt)
 
 
 def _mcp_chat(c, last_text=None, last_sender=None, last_date=None) -> dict:

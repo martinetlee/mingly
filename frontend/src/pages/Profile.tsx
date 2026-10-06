@@ -1,78 +1,86 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { ArrowLeft, Globe, Phone, AtSign, MessageSquare, Star, UserPlus, Building2, Plus, X, UserMinus, RotateCcw } from 'lucide-react'
-import type { TelegramProfile, Contact, ContactPosition } from '../api/types'
-import { getProfile, getContactByTelegram, setContactImportantByTelegram, createContact, getPositions, addPosition, updatePosition, removePosition, isAbortError } from '../api/client'
+import { ArrowLeft, Globe, Phone, AtSign, MessageSquare, Star, UserPlus, CloudOff, RefreshCw, Loader2 } from 'lucide-react'
+import type { Contact, ContactPosition, PersonDetail } from '../api/types'
+import { getProfile, getPerson, setContactImportantByTelegram, createContact, ApiError } from '../api/client'
+import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { invalidatePerson } from '../hooks/usePersonSummary'
+import { errorMessage } from '../lib/toast'
+import { fmtRelative } from '../utils/time'
 import ContactInfoSection from '../components/ContactInfoSection'
+import PositionsEditor from '../components/PositionsEditor'
 import PersonCard from '../components/PersonCard'
-import ComboInput from '../components/ComboInput'
 
+/**
+ * Two independent sources:
+ * - local data (contact, notes, positions) from /api/people/{id} — works offline
+ * - the Telegram profile from /api/profiles/{id} — may be stale or unavailable
+ * A Telegram failure never hides the local data.
+ */
 export default function Profile() {
-  const { userId } = useParams<{ userId: string }>()
+  const { userId = '' } = useParams<{ userId: string }>()
   const navigate = useNavigate()
-  const [profile, setProfile] = useState<TelegramProfile | null>(null)
-  const [contact, setContact] = useState<Contact | null>(null)
-  const [positions, setPositions] = useState<ContactPosition[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [togglingImportant, setTogglingImportant] = useState(false)
+  const isUsername = userId.startsWith('@')
 
-  useEffect(() => {
-    if (!userId) return
-    setLoading(true)
-    setError(null)
-    // Abort on profile change so a slow response for the previous userId
-    // can't overwrite (or mismatch with) the current profile's data
-    const ac = new AbortController()
-    // Support both numeric IDs and @username lookups
-    const isUsername = userId.startsWith('@')
-    const profileKey = isUsername ? userId : Number(userId)
-    const contactKey = isUsername ? NaN : Number(userId)
-    Promise.all([
-      getProfile(profileKey, ac.signal),
-      isUsername ? Promise.resolve(null) : getContactByTelegram(contactKey, ac.signal).catch((e) => {
-        if (isAbortError(e)) throw e
-        return null
-      }),
-    ])
-      .then(([p, c]) => {
-        setProfile(p)
-        setContact(c)
-        // Load positions by telegram_id (works even without a contact record)
-        if (p?.id) {
-          getPositions(p.id, ac.signal).then(setPositions).catch((e) => {
-            if (!isAbortError(e)) setPositions([])
-          })
-        }
-        // If resolved via username, fetch contact info using the returned numeric ID
-        if (isUsername && p?.id) {
-          getContactByTelegram(p.id, ac.signal).then(setContact).catch(() => {})
-        }
-        setLoading(false)
-      })
-      .catch((e) => {
-        if (isAbortError(e)) return
-        setError(e.message)
-        setLoading(false)
-      })
-    return () => ac.abort()
-  }, [userId])
+  const profileQ = useLatestQuery(
+    ['profile', userId],
+    (signal) => getProfile(isUsername ? userId : Number(userId), signal),
+    { enabled: userId !== '' },
+  )
+  const profile = profileQ.data
 
-  async function handleToggleImportant() {
-    if (!profile || togglingImportant) return
-    const newVal = !(contact?.is_important ?? false)
-    setTogglingImportant(true)
-    try {
-      const updated = await setContactImportantByTelegram(profile.id, newVal)
-      setContact(updated)
-    } catch {
-      // ignore
-    } finally {
-      setTogglingImportant(false)
-    }
+  // A @username resolves to a numeric id only through Telegram
+  const numericId = isUsername ? profile?.id : Number(userId)
+  const hasId = numericId != null && Number.isFinite(numericId) && numericId !== 0
+  const personQ = useLatestQuery(
+    ['person', numericId],
+    (signal) => getPerson(numericId as number, signal),
+    { enabled: hasId },
+  )
+  const person = personQ.data
+  const contact = person?.contact ?? null
+  const positions = person?.positions ?? []
+
+  const idRef = useRef(numericId)
+  idRef.current = numericId
+
+  /** Patch the local person — only if it's still the one on screen */
+  const patchPerson = useCallback((tid: number, fn: (p: PersonDetail) => PersonDetail) => {
+    if (idRef.current !== tid) return
+    personQ.setData((prev) => (prev ? fn(prev) : prev))
+  }, [personQ])
+
+  const setContact = (updated: Contact) => {
+    invalidatePerson(updated.telegram_id)
+    patchPerson(updated.telegram_id, (p) => ({ ...p, contact: updated, positions: updated.positions ?? p.positions }))
   }
+  const setPositions = (tid: number, next: ContactPosition[]) =>
+    patchPerson(tid, (p) => ({ ...p, positions: next, contact: p.contact ? { ...p.contact, positions: next } : null }))
 
-  if (loading) {
+  const toggleImportant = useAsyncAction(async (tid: number, value: boolean) => {
+    setContact(await setContactImportantByTelegram(tid, value))
+  }, { errorContext: 'Couldn\'t update important' })
+
+  const addContact = useAsyncAction(async (tid: number) => {
+    setContact(await createContact({
+      telegram_id: tid,
+      first_name: profile?.first_name || undefined,
+      last_name: profile?.last_name || undefined,
+      username: profile?.username || undefined,
+    }))
+  }, { errorContext: 'Couldn\'t add contact' })
+
+  const refreshProfile = useAsyncAction(async () => {
+    const key = userId
+    const fresh = await getProfile(isUsername ? userId : Number(userId), undefined, { refresh: true })
+    if (key === userId) profileQ.setData(fresh)
+  }, { errorContext: 'Telegram profile' })
+
+  const profileError = profileQ.error
+  const profileMissing = profileError instanceof ApiError && profileError.status === 404
+
+  if ((profileQ.loading && (!hasId || personQ.loading)) || (hasId && personQ.loading && !profile)) {
     return (
       <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
         Loading profile...
@@ -80,10 +88,13 @@ export default function Profile() {
     )
   }
 
-  if (error || !profile) {
+  const hasLocal = !!person && (person.contact != null || person.positions.length > 0)
+  if (!profile && !hasLocal && (profileMissing || !hasId || personQ.error)) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500">
-        <p className="text-sm">{error || 'Profile not found'}</p>
+        <p className="text-sm">
+          {profileMissing ? 'Profile not found' : errorMessage(profileError ?? personQ.error ?? 'Profile not found')}
+        </p>
         <button
           onClick={() => navigate(-1)}
           className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
@@ -94,13 +105,18 @@ export default function Profile() {
     )
   }
 
-  const displayName = profile.type === 'user'
-    ? [profile.first_name, profile.last_name].filter(Boolean).join(' ') || `User ${profile.id}`
-    : profile.title || `Entity ${profile.id}`
+  const tid = (profile?.id ?? numericId) as number
+  const displayName = profile
+    ? profile.type === 'user'
+      ? [profile.first_name, profile.last_name].filter(Boolean).join(' ') || `User ${profile.id}`
+      : profile.title || `Entity ${profile.id}`
+    : person?.name ?? String(tid)
+  // Without Telegram we can't know the entity type; local data means a person
+  const isUser = profile ? profile.type === 'user' : true
 
-  const bioText = profile.bio || profile.about
+  const bioText = profile?.bio || profile?.about
   const isImportant = contact?.is_important ?? false
-  const activePosition = positions.filter((p) => p.is_active !== false)?.[0] ?? null
+  const activePosition = positions.find((p) => p.is_active !== false) ?? null
 
   return (
     <div className="flex flex-1 overflow-hidden">
@@ -114,36 +130,65 @@ export default function Profile() {
           Back
         </button>
 
+        {/* Telegram availability */}
+        {(!profile && profileError != null && !profileMissing) && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <CloudOff size={13} className="flex-shrink-0" />
+            <span className="flex-1">Telegram offline — showing local data only.</span>
+            <button
+              onClick={() => profileQ.refetch()}
+              disabled={profileQ.fetching}
+              className="flex items-center gap-1 text-amber-200 hover:text-amber-100 disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={profileQ.fetching ? 'animate-spin' : ''} /> Retry
+            </button>
+          </div>
+        )}
+        {profile?.stale && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs text-slate-400">
+            <CloudOff size={13} className="flex-shrink-0 text-amber-400" />
+            <span className="flex-1">
+              Stale — Telegram is unreachable; profile cached {profile.fetched_at ? fmtRelative(profile.fetched_at * 1000) : 'earlier'}.
+            </span>
+            <button
+              onClick={() => refreshProfile.run()}
+              disabled={refreshProfile.pending}
+              className="flex items-center gap-1 text-slate-300 hover:text-slate-100 disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={refreshProfile.pending ? 'animate-spin' : ''} /> Refresh
+            </button>
+          </div>
+        )}
+
         {/* Profile header -- unified PersonCard */}
         <PersonCard
-          telegramId={profile.id}
+          telegramId={tid}
           name={displayName}
-          username={profile.username}
-          photoUrl={profile.photo_url}
-          isVerified={profile.is_verified}
-          isPremium={profile.is_premium}
-          isBot={profile.is_bot}
-          onlineStatus={profile.status}
+          username={profile ? profile.username : contact?.username ?? null}
+          photoUrl={profile?.photo_url}
+          isVerified={profile?.is_verified}
+          isPremium={profile?.is_premium}
+          isBot={profile?.is_bot}
+          onlineStatus={profile?.status}
           bio={bioText}
           isImportant={isImportant}
-          status={contact?.relationship_status}
+          status={contact?.relationship_status ?? null}
           position={activePosition ? { title: activePosition.title, organization: activePosition.organization } : null}
-          lastInteraction={contact?.last_interaction_at}
-          phone={contact?.phone ?? profile.phone}
-          twitterHandle={contact?.twitter_handle}
-          linkedinUrl={contact?.linkedin_url}
+          lastInteraction={contact?.last_interaction_at ?? null}
+          phone={contact?.phone ?? profile?.phone ?? null}
+          twitterHandle={contact?.twitter_handle ?? null}
+          linkedinUrl={contact?.linkedin_url ?? null}
           hasNotes={!!contact?.notes}
-          contactId={contact?.id}
           mode="profile"
           disableLink
           showStatus={!!contact}
           actions={
-            profile.type === 'user' ? (
+            isUser ? (
               <button
-                onClick={handleToggleImportant}
-                disabled={togglingImportant}
+                onClick={() => toggleImportant.run(tid, !isImportant)}
+                disabled={toggleImportant.pending}
                 title={isImportant ? 'Remove from important' : 'Mark as important'}
-                className={`rounded-full p-1 transition-colors ${
+                className={`rounded-full p-1 transition-colors disabled:opacity-60 ${
                   isImportant
                     ? 'text-amber-400 hover:text-amber-300'
                     : 'text-slate-600 hover:text-amber-400'
@@ -162,63 +207,54 @@ export default function Profile() {
         <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
           <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-500">Details</h3>
           <div className="flex flex-col gap-2.5">
-            <DetailRow icon={<Globe size={14} />} label="Type" value={profile.type} />
-            <DetailRow icon={<AtSign size={14} />} label="ID" value={String(profile.id)} />
-            {profile.phone && (
+            {profile && <DetailRow icon={<Globe size={14} />} label="Type" value={profile.type} />}
+            <DetailRow icon={<AtSign size={14} />} label="ID" value={String(tid)} />
+            {profile?.phone && (
               <DetailRow icon={<Phone size={14} />} label="Phone" value={`+${profile.phone}`} />
             )}
-            {profile.username && (
+            {profile?.username && (
               <DetailRow icon={<AtSign size={14} />} label="Username" value={`@${profile.username}`} />
             )}
           </div>
         </div>
 
         {/* Non-user entity: members count */}
-        {profile.type !== 'user' && profile.members_count != null && (
+        {profile && profile.type !== 'user' && profile.members_count != null && (
           <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
             <p className="text-xs text-slate-400">{profile.members_count.toLocaleString()} members</p>
           </div>
         )}
 
-        {/* Contact extra info (twitter, linkedin, notes) + Positions */}
+        {/* Local data: contact info + positions */}
+        {personQ.error != null && !person && (
+          <p className="mb-6 text-xs text-rose-400">Couldn't load local data: {errorMessage(personQ.error)}</p>
+        )}
         {contact ? (
           <div className="mb-6 flex flex-col gap-4">
-            <ContactInfoSection contact={contact} onContactChange={(updated) => {
-              setContact(updated)
-              // Sync positions from the updated contact
-              if (updated.positions) setPositions(updated.positions)
-            }} />
+            <ContactInfoSection contact={contact} onContactChange={setContact} />
           </div>
-        ) : profile.type === 'user' && (
+        ) : isUser && person && (
           <div className="mb-6 flex flex-col gap-4">
-            {/* Positions section — available for all users, even non-contacts */}
-            <PositionsSection
-              telegramId={profile.id}
-              positions={positions}
-              onPositionsChange={setPositions}
+            {/* Positions work for every user, contact or not */}
+            <PositionsEditor
+              key={tid}
+              telegramId={tid}
+              initialPositions={positions}
+              onChange={(next) => setPositions(tid, next)}
             />
             <button
-              onClick={async () => {
-                try {
-                  const c = await createContact({
-                    telegram_id: profile.id,
-                    first_name: profile.first_name || undefined,
-                    last_name: profile.last_name || undefined,
-                    username: profile.username || undefined,
-                  })
-                  setContact(c)
-                } catch { /* ignore */ }
-              }}
-              className="flex items-center gap-2 rounded-lg border border-dashed border-slate-600 px-4 py-3 text-xs text-slate-400 hover:border-slate-500 hover:text-slate-300 transition-colors w-full justify-center"
+              onClick={() => addContact.run(tid)}
+              disabled={addContact.pending}
+              className="flex items-center gap-2 rounded-lg border border-dashed border-slate-600 px-4 py-3 text-xs text-slate-400 hover:border-slate-500 hover:text-slate-300 transition-colors w-full justify-center disabled:opacity-60"
             >
-              <UserPlus size={14} />
+              {addContact.pending ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
               Add to contacts to manage notes, socials & more
             </button>
           </div>
         )}
 
         {/* Common chats */}
-        {profile.common_chats && profile.common_chats.length > 0 && (
+        {profile?.common_chats && profile.common_chats.length > 0 && (
           <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4">
             <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-500">
               Common chats ({profile.common_chats.length})
@@ -252,228 +288,3 @@ function DetailRow({ icon, label, value }: { icon: React.ReactNode; label: strin
   )
 }
 
-// ---------------------------------------------------------------------------
-// Standalone Positions Section (for non-contact profiles)
-// ---------------------------------------------------------------------------
-
-function PositionsSection({
-  telegramId,
-  positions,
-  onPositionsChange,
-}: {
-  telegramId: number
-  positions: ContactPosition[]
-  onPositionsChange: (positions: ContactPosition[]) => void
-}) {
-  const [showAddPos, setShowAddPos] = useState(false)
-  const [newOrg, setNewOrg] = useState('')
-  const [newTitle, setNewTitle] = useState('')
-  const [newIsFormer, setNewIsFormer] = useState(false)
-  const [newEndedAt, setNewEndedAt] = useState('')
-  const [formerDrafts, setFormerDrafts] = useState<Record<number, string>>({})
-  const [confirmingFormer, setConfirmingFormer] = useState<Set<number>>(new Set())
-
-  const handleAddPosition = async () => {
-    if (!newOrg.trim()) return
-    const pos = await addPosition(
-      telegramId,
-      newOrg.trim(),
-      newTitle.trim() || undefined,
-      !newIsFormer,
-      newIsFormer ? newEndedAt || undefined : undefined,
-    )
-    onPositionsChange([...positions, pos])
-    setNewOrg('')
-    setNewTitle('')
-    setNewIsFormer(false)
-    setNewEndedAt('')
-    setShowAddPos(false)
-  }
-
-  const handleRemovePosition = async (posId: number) => {
-    await removePosition(telegramId, posId)
-    onPositionsChange(positions.filter((p) => p.id !== posId))
-  }
-
-  const handleMarkFormer = async (posId: number, endedAt: string) => {
-    const updatedPos = await updatePosition(telegramId, posId, {
-      is_active: false,
-      ended_at: endedAt || null,
-    })
-    onPositionsChange(positions.map((p) => p.id === posId ? updatedPos : p))
-  }
-
-  const handleReactivate = async (posId: number) => {
-    const updatedPos = await updatePosition(telegramId, posId, {
-      is_active: true,
-      ended_at: null,
-    })
-    onPositionsChange(positions.map((p) => p.id === posId ? updatedPos : p))
-  }
-
-  return (
-    <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4 flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-          <Building2 size={11} />
-          Positions
-        </h3>
-        <button
-          onClick={() => setShowAddPos((v) => !v)}
-          className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
-        >
-          <Plus size={11} />
-          Add
-        </button>
-      </div>
-
-      {positions.length === 0 && !showAddPos && (
-        <p className="text-xs text-slate-500">No positions added</p>
-      )}
-
-      {positions.map((p) => {
-        const isFormer = p.is_active === false
-        const isConfirming = confirmingFormer.has(p.id)
-        return (
-          <div key={p.id} className="flex flex-col gap-1">
-            <div className={`flex items-center gap-2 group ${isFormer ? 'opacity-60' : ''}`}>
-              <Building2 size={12} className={`flex-shrink-0 ${isFormer ? 'text-slate-600' : 'text-slate-500'}`} />
-              <div className="flex-1 min-w-0">
-                <p className={`text-xs truncate ${isFormer ? 'line-through text-slate-500' : 'text-gray-200'}`}>
-                  {p.title ? <><span className={isFormer ? 'text-slate-600' : 'text-slate-400'}>{p.title}</span> @ </> : ''}
-                  {p.organization}
-                </p>
-                {isFormer && p.ended_at && (
-                  <p className="text-[10px] text-slate-600">
-                    left {new Date(p.ended_at).toLocaleDateString()}
-                  </p>
-                )}
-                {isFormer && !p.ended_at && (
-                  <p className="text-[10px] text-slate-600 italic">former</p>
-                )}
-              </div>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                {isFormer && (
-                  <button
-                    onClick={() => handleReactivate(p.id)}
-                    title="Reactivate"
-                    className="text-slate-500 hover:text-emerald-400 transition-colors p-0.5"
-                  >
-                    <RotateCcw size={10} />
-                  </button>
-                )}
-                {!isFormer && (
-                  <button
-                    onClick={() => {
-                      setConfirmingFormer((prev) => {
-                        const next = new Set(prev)
-                        if (next.has(p.id)) { next.delete(p.id) } else { next.add(p.id) }
-                        return next
-                      })
-                      setFormerDrafts((prev) => ({ ...prev, [p.id]: '' }))
-                    }}
-                    title="Mark as former"
-                    className="text-slate-500 hover:text-amber-400 transition-colors p-0.5"
-                  >
-                    <UserMinus size={10} />
-                  </button>
-                )}
-                <button
-                  onClick={() => handleRemovePosition(p.id)}
-                  title="Remove position"
-                  className="text-slate-500 hover:text-rose-400 transition-colors p-0.5"
-                >
-                  <X size={10} />
-                </button>
-              </div>
-            </div>
-            {isConfirming && !isFormer && (
-              <div className="ml-5 flex items-center gap-2 rounded bg-slate-700/50 border border-slate-600 px-2 py-1.5">
-                <span className="text-[10px] text-slate-400 whitespace-nowrap">End date:</span>
-                <input
-                  type="date"
-                  value={formerDrafts[p.id] || ''}
-                  onChange={(e) => setFormerDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))}
-                  className="flex-1 bg-transparent text-[10px] text-slate-200 outline-none min-w-0"
-                />
-                <button
-                  onClick={async () => {
-                    await handleMarkFormer(p.id, formerDrafts[p.id] || '')
-                    setConfirmingFormer((prev) => { const next = new Set(prev); next.delete(p.id); return next })
-                  }}
-                  className="text-[10px] text-amber-400 hover:text-amber-300 transition-colors whitespace-nowrap font-medium"
-                >
-                  Mark former
-                </button>
-                <button
-                  onClick={() => setConfirmingFormer((prev) => { const next = new Set(prev); next.delete(p.id); return next })}
-                  className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
-                >
-                  <X size={9} />
-                </button>
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {showAddPos && (
-        <div className="flex flex-col gap-2 rounded-lg border border-slate-600 bg-slate-700/50 p-3">
-          <ComboInput
-            value={newOrg}
-            onChange={setNewOrg}
-            placeholder="Organization name..."
-            autoFocus
-          />
-          <input
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleAddPosition() }}
-            placeholder="Title (optional)..."
-            className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500"
-          />
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={newIsFormer}
-              onChange={(e) => {
-                setNewIsFormer(e.target.checked)
-                if (!e.target.checked) setNewEndedAt('')
-              }}
-              className="rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500/30"
-            />
-            <span className="text-xs text-slate-400">Former position</span>
-          </label>
-          {newIsFormer && (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-slate-500 whitespace-nowrap">End date (optional):</span>
-              <input
-                type="date"
-                value={newEndedAt}
-                onChange={(e) => setNewEndedAt(e.target.value)}
-                className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-0.5 text-xs text-slate-200 outline-none focus:border-amber-500 min-w-0"
-              />
-            </div>
-          )}
-          <div className="flex gap-2">
-            <button
-              onClick={handleAddPosition}
-              disabled={!newOrg.trim()}
-              className={`flex-1 rounded px-2 py-1 text-xs font-medium text-white disabled:opacity-40 transition-colors ${
-                newIsFormer ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-500 hover:bg-indigo-600'
-              }`}
-            >
-              {newIsFormer ? 'Add Former Position' : 'Add Position'}
-            </button>
-            <button
-              onClick={() => { setShowAddPos(false); setNewIsFormer(false); setNewEndedAt('') }}
-              className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200 transition-colors"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}

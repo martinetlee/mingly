@@ -3,16 +3,21 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, delete, desc, func
+from sqlalchemy import select, desc, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
 from backend.db.models import Contact, ContactPosition, Message, Organization
 from backend.db import crud
 from backend.api.validators import validate_linkedin_url
-from backend.telegram.client import get_client, ensure_connected
+from backend.serialization import iso_utc
+from backend.telegram.runtime import runtime
 
 router = APIRouter()
+# Mounted at /api/people: person-scoped routes keyed by telegram_id (works for
+# any Telegram user, saved contact or not). Local DB only — never Telegram.
+people_router = APIRouter()
 
 
 # --- Pydantic models ---
@@ -30,7 +35,8 @@ class ImportantRequest(BaseModel):
 
 
 class PositionCreate(BaseModel):
-    organization: str
+    organization: Optional[str] = None  # name; matched case-insensitively, created if new
+    organization_id: Optional[int] = None  # alternative to `organization`
     title: Optional[str] = None
     is_active: bool = True
     ended_at: Optional[str] = None  # ISO date string, only used when is_active=False
@@ -51,6 +57,17 @@ class ContactCreate(BaseModel):
 
 # --- Helpers ---
 
+def _position_dict(p: ContactPosition) -> dict:
+    return {
+        "id": p.id,
+        "organization_id": p.organization_id,  # null = detached (org deleted, history kept)
+        "organization": p.organization,
+        "title": p.title,
+        "is_active": p.is_active,
+        "ended_at": iso_utc(p.ended_at),
+    }
+
+
 def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None) -> dict:
     d = {
         "id": c.id,
@@ -66,10 +83,10 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
         "is_important": c.is_important,
         "relationship_status": c.relationship_status,
         "relationship_status_manual": c.relationship_status_manual,
-        "last_interaction_at": c.last_interaction_at.isoformat() if c.last_interaction_at else None,
-        "last_outgoing_at": c.last_outgoing_at.isoformat() if c.last_outgoing_at else None,
-        "last_incoming_at": c.last_incoming_at.isoformat() if c.last_incoming_at else None,
-        "synced_at": c.synced_at,
+        "last_interaction_at": iso_utc(c.last_interaction_at),
+        "last_outgoing_at": iso_utc(c.last_outgoing_at),
+        "last_incoming_at": iso_utc(c.last_incoming_at),
+        "synced_at": iso_utc(c.synced_at),
     }
     # Add status explanation
     status_info = crud.explain_relationship_status(
@@ -82,42 +99,36 @@ def _contact_dict(c: Contact, positions: Optional[List[ContactPosition]] = None)
     )
     d.update(status_info)
     if positions is not None:
-        d["positions"] = [
-            {
-                "id": p.id,
-                "organization": p.organization,
-                "title": p.title,
-                "is_active": p.is_active,
-                "ended_at": p.ended_at.isoformat() if p.ended_at else None,
-            }
-            for p in positions
-        ]
+        d["positions"] = [_position_dict(p) for p in positions]
     return d
 
 
-async def _get_positions(db: AsyncSession, contact_id: int = None, telegram_id: int = None) -> List[ContactPosition]:
-    """Fetch positions by telegram_id (preferred) or contact_id (legacy lookup via Contact)."""
-    if telegram_id is not None:
-        result = await db.execute(
-            select(ContactPosition)
-            .where(ContactPosition.telegram_id == telegram_id)
-            .order_by(ContactPosition.organization)
-        )
-    elif contact_id is not None:
-        # Legacy: resolve contact_id to telegram_id first
-        contact = (await db.execute(
-            select(Contact.telegram_id).where(Contact.id == contact_id)
-        )).scalar_one_or_none()
-        if not contact:
-            return []
-        result = await db.execute(
-            select(ContactPosition)
-            .where(ContactPosition.telegram_id == contact)
-            .order_by(ContactPosition.organization)
-        )
-    else:
-        return []
+def _positions_query():
+    # Current first, then by org name — the first active one is the "primary" position
+    return select(ContactPosition).order_by(
+        ContactPosition.is_active.desc(), func.lower(ContactPosition.organization), ContactPosition.id
+    )
+
+
+async def _get_positions(db: AsyncSession, telegram_id: int) -> List[ContactPosition]:
+    result = await db.execute(_positions_query().where(ContactPosition.telegram_id == telegram_id))
     return list(result.scalars().all())
+
+
+async def _positions_by_person(db: AsyncSession, telegram_ids: List[int]) -> Dict[int, List[ContactPosition]]:
+    pos_map: Dict[int, List[ContactPosition]] = {}
+    if telegram_ids:
+        result = await db.execute(_positions_query().where(ContactPosition.telegram_id.in_(telegram_ids)))
+        for p in result.scalars().all():
+            pos_map.setdefault(p.telegram_id, []).append(p)
+    return pos_map
+
+
+def _parse_date(raw: str) -> datetime:
+    try:
+        return datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ended_at date format")
 
 
 # --- Endpoints ---
@@ -125,31 +136,30 @@ async def _get_positions(db: AsyncSession, contact_id: int = None, telegram_id: 
 @router.post("/sync")
 async def sync_contacts(db: AsyncSession = Depends(get_db)):
     """Import contacts from Telegram into the local DB."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()  # TelegramUnavailable = 503
 
     from telethon.tl.functions.contacts import GetContactsRequest
-    from datetime import datetime
 
     result = await client(GetContactsRequest(hash=0))
-    users = result.users if hasattr(result, "users") else []
+    users = [u for u in (getattr(result, "users", None) or []) if not getattr(u, "bot", False)]
 
+    existing_by_id = {
+        c.telegram_id: c for c in (await db.execute(
+            select(Contact).where(Contact.telegram_id.in_([u.id for u in users]))
+        )).scalars().all()
+    } if users else {}
+
+    now = datetime.utcnow()
     imported = 0
     for u in users:
-        if getattr(u, "bot", False):
-            continue
-        existing = (await db.execute(
-            select(Contact).where(Contact.telegram_id == u.id)
-        )).scalar_one_or_none()
+        existing = existing_by_id.get(u.id)
         if existing:
             existing.first_name = u.first_name
             existing.last_name = u.last_name
             existing.username = u.username
             if u.phone and not existing.phone:
                 existing.phone = u.phone
-            existing.synced_at = datetime.utcnow()
+            existing.synced_at = now
         else:
             db.add(Contact(
                 telegram_id=u.id,
@@ -157,47 +167,77 @@ async def sync_contacts(db: AsyncSession = Depends(get_db)):
                 last_name=u.last_name,
                 username=u.username,
                 phone=u.phone,
-                synced_at=datetime.utcnow(),
+                synced_at=now,
             ))
             imported += 1
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Contacts changed during sync; run it again")
     return {"imported": imported, "total": len(users)}
 
 
 @router.get("")
 async def list_contacts(
     search: str = "",
+    status: str = "",
+    important: str = "",
     limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Contact)
-    if search:
-        pattern = f"%{search}%"
-        from sqlalchemy import or_
-        q = q.where(or_(
-            Contact.first_name.ilike(pattern),
-            Contact.last_name.ilike(pattern),
-            Contact.username.ilike(pattern),
+    """Paginated contacts, filtered server-side.
+
+    Returns {items, total, limit, offset, status_counts, important_count}:
+    `total` counts matches of search+status+important; `status_counts` counts
+    matches of search+important per relationship status (tab badges inside the
+    current view); `important_count` counts important matches of `search`
+    alone (Important tab badge). `important=true` (or 1) filters to important
+    contacts; anything else means no filter."""
+    if status and status != "all" and status not in crud.VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(sorted(crud.VALID_STATUSES))}")
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    filters = []
+    if search.strip():
+        term = search.strip()
+        filters.append(or_(
+            crud.contains_ci(Contact.first_name, term),
+            crud.contains_ci(Contact.last_name, term),
+            crud.contains_ci(Contact.username, term),
         ))
-    q = q.order_by(Contact.first_name, Contact.last_name).limit(limit).offset(offset)
-    result = await db.execute(q)
-    contacts = list(result.scalars().all())
+    important_count = (await db.execute(
+        select(func.count()).select_from(Contact).where(*filters, Contact.is_important.is_(True))
+    )).scalar() or 0
+    if important.strip().lower() in ("true", "1"):
+        filters.append(Contact.is_important.is_(True))
+    status_counts = {
+        (st or "none"): n for st, n in (await db.execute(
+            select(Contact.relationship_status, func.count()).where(*filters)
+            .group_by(Contact.relationship_status)
+        )).all()
+    }
+    if status and status != "all":
+        filters.append(Contact.relationship_status == status)
 
-    # Batch-load positions by telegram_id
-    if contacts:
-        telegram_ids = [c.telegram_id for c in contacts]
-        pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.telegram_id.in_(telegram_ids))
-        )
-        all_positions = list(pos_result.scalars().all())
-        pos_map: Dict[int, List[ContactPosition]] = {}
-        for p in all_positions:
-            pos_map.setdefault(p.telegram_id, []).append(p)
-    else:
-        pos_map = {}
+    total = (await db.execute(select(func.count()).select_from(Contact).where(*filters))).scalar() or 0
+    contacts = list((await db.execute(
+        select(Contact).where(*filters)
+        .order_by(Contact.first_name, Contact.last_name, Contact.id)
+        .limit(limit).offset(offset)
+    )).scalars().all())
 
-    return [_contact_dict(c, pos_map.get(c.telegram_id, [])) for c in contacts]
+    pos_map = await _positions_by_person(db, [c.telegram_id for c in contacts])
+    return {
+        "items": [_contact_dict(c, pos_map.get(c.telegram_id, [])) for c in contacts],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "status_counts": status_counts,
+        "important_count": important_count,
+    }
 
 
 @router.get("/by-telegram/{telegram_id}")
@@ -207,8 +247,27 @@ async def get_contact_by_telegram(telegram_id: int, db: AsyncSession = Depends(g
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    positions = await _get_positions(db, telegram_id=contact.telegram_id)
+    positions = await _get_positions(db, contact.telegram_id)
     return _contact_dict(contact, positions)
+
+
+async def _get_or_create_contact(db: AsyncSession, telegram_id: int, **fields) -> Contact:
+    """Race-safe get-or-create on the unique telegram_id."""
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    if contact:
+        return contact
+    contact = Contact(telegram_id=telegram_id, **fields)
+    db.add(contact)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        contact = (await db.execute(
+            select(Contact).where(Contact.telegram_id == telegram_id)
+        )).scalar_one()
+    return contact
 
 
 @router.post("/by-telegram/{telegram_id}/important")
@@ -218,18 +277,11 @@ async def set_contact_important_by_telegram(
     db: AsyncSession = Depends(get_db),
 ):
     """Get-or-create a contact by telegram_id and set its importance flag."""
-    contact = (await db.execute(
-        select(Contact).where(Contact.telegram_id == telegram_id)
-    )).scalar_one_or_none()
-    if not contact:
-        # Auto-create a minimal contact record
-        contact = Contact(telegram_id=telegram_id)
-        db.add(contact)
-        await db.flush()
+    contact = await _get_or_create_contact(db, telegram_id)
     contact.is_important = data.is_important
     await db.commit()
     await db.refresh(contact)
-    positions = await _get_positions(db, telegram_id=contact.telegram_id)
+    positions = await _get_positions(db, contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -238,22 +290,15 @@ async def create_contact(
     data: ContactCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    existing = (await db.execute(
-        select(Contact).where(Contact.telegram_id == data.telegram_id)
-    )).scalar_one_or_none()
-    if existing:
-        positions = await _get_positions(db, telegram_id=existing.telegram_id)
-        return _contact_dict(existing, positions)
-    contact = Contact(
-        telegram_id=data.telegram_id,
-        first_name=data.first_name,
-        last_name=data.last_name,
-        username=data.username,
+    """Get-or-create: re-adding an existing person returns the existing contact.
+    Positions recorded before the contact existed are included."""
+    contact = await _get_or_create_contact(
+        db, data.telegram_id,
+        first_name=data.first_name, last_name=data.last_name, username=data.username,
     )
-    db.add(contact)
-    await db.commit()
     await db.refresh(contact)
-    return _contact_dict(contact, [])
+    positions = await _get_positions(db, contact.telegram_id)
+    return _contact_dict(contact, positions)
 
 
 @router.get("/{contact_id}")
@@ -263,7 +308,7 @@ async def get_contact(contact_id: int, db: AsyncSession = Depends(get_db)):
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    positions = await _get_positions(db, telegram_id=contact.telegram_id)
+    positions = await _get_positions(db, contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
@@ -297,67 +342,120 @@ async def update_contact(
         contact.is_important = data.is_important
     await db.commit()
     await db.refresh(contact)
-    positions = await _get_positions(db, telegram_id=contact.telegram_id)
+    positions = await _get_positions(db, contact.telegram_id)
     return _contact_dict(contact, positions)
 
 
-# --- Positions ---
+# --- People (local-only person view) ---
 
-@router.post("/{contact_id}/positions")
-async def add_position(
-    contact_id: int,
+def _unknown_person(telegram_id: int, name: Optional[str]) -> dict:
+    return {
+        "telegram_id": telegram_id,
+        "name": name or str(telegram_id),
+        "username": None,
+        "is_important": False,
+        "contact_id": None,
+        "relationship_status": None,
+        "last_interaction_at": None,
+        "primary_position": None,
+        "phone": None,
+        "twitter_handle": None,
+        "linkedin_url": None,
+        "has_notes": False,
+    }
+
+
+async def _latest_sender_name(db: AsyncSession, telegram_id: int) -> Optional[str]:
+    row = (await db.execute(
+        select(Message.sender_name)
+        .where(Message.sender_id == telegram_id, Message.sender_name.isnot(None))
+        .order_by(desc(Message.date))
+        .limit(1)
+    )).first()
+    return row[0] if row else None
+
+
+@people_router.get("/{telegram_id}")
+async def get_person(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Everything Mingly stores locally about a person — works offline.
+
+    {telegram_id, name, contact: Contact|null (with positions), positions}.
+    `positions` is present even when the person isn't a saved contact."""
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    positions = await _get_positions(db, telegram_id)
+    if contact:
+        name = _contact_dict(contact)["name"]
+    else:
+        name = await _latest_sender_name(db, telegram_id) or str(telegram_id)
+    return {
+        "telegram_id": telegram_id,
+        "name": name,
+        "contact": _contact_dict(contact, positions) if contact else None,
+        "positions": [_position_dict(p) for p in positions],
+    }
+
+
+@people_router.get("/{telegram_id}/positions")
+async def list_person_positions(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    return [_position_dict(p) for p in await _get_positions(db, telegram_id)]
+
+
+@people_router.post("/{telegram_id}/positions")
+async def add_person_position(
+    telegram_id: int,
     data: PositionCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a position. contact_id here is the Telegram ID of the person."""
-    telegram_id = contact_id  # route param is the telegram_id
-    org_name = data.organization.strip()
-    # Auto-create Organization if it doesn't exist
-    existing_org = (await db.execute(
-        select(Organization).where(Organization.name == org_name)
-    )).scalar_one_or_none()
-    if not existing_org:
-        db.add(Organization(name=org_name))
-
+    """Add a position. The organization is given by id or by name (matched
+    case/whitespace-insensitively; created if new)."""
     ended_at_val = None
     if not data.is_active and data.ended_at and data.ended_at.strip():
+        ended_at_val = _parse_date(data.ended_at)
+
+    if data.organization_id is not None:
+        org = await db.get(Organization, data.organization_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+    else:
         try:
-            ended_at_val = datetime.fromisoformat(data.ended_at.strip())
-        except ValueError:
-            pass  # invalid date → leave as None
+            org, _created = await crud.get_or_create_organization(db, data.organization or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    duplicate = (await db.execute(select(ContactPosition.id).where(
+        ContactPosition.telegram_id == telegram_id, ContactPosition.organization_id == org.id,
+    ))).first()
+    if duplicate:
+        await db.commit()  # keep a newly created org / re-attached history
+        raise HTTPException(status_code=409, detail=f"Already has a position at {org.name}")
 
     pos = ContactPosition(
         telegram_id=telegram_id,
-        organization=org_name,
-        title=data.title.strip() if data.title else None,
+        organization_id=org.id,
+        organization=org.name,
+        title=(data.title or "").strip() or None,
         is_active=data.is_active,
         ended_at=ended_at_val,
     )
     db.add(pos)
     try:
         await db.commit()
-        await db.refresh(pos)
-    except Exception:
+    except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Position already exists")
-    return {
-        "id": pos.id,
-        "organization": pos.organization,
-        "title": pos.title,
-        "is_active": pos.is_active,
-        "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
-    }
+    await db.refresh(pos)
+    return _position_dict(pos)
 
 
-@router.put("/{contact_id}/positions/{position_id}")
-async def update_position(
-    contact_id: int,
+@people_router.put("/{telegram_id}/positions/{position_id}")
+async def update_person_position(
+    telegram_id: int,
     position_id: int,
     data: PositionUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a position. contact_id here is the Telegram ID of the person."""
-    telegram_id = contact_id
     pos = (await db.execute(
         select(ContactPosition).where(
             ContactPosition.id == position_id,
@@ -371,36 +469,22 @@ async def update_position(
     if data.is_active is not None:
         pos.is_active = data.is_active
     if data.ended_at is not None:
-        # Parse ISO date string; empty string clears the date
-        if data.ended_at.strip():
-            try:
-                pos.ended_at = datetime.fromisoformat(data.ended_at.strip())
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid ended_at date format")
-        else:
-            pos.ended_at = None
+        # Empty string clears the date
+        pos.ended_at = _parse_date(data.ended_at) if data.ended_at.strip() else None
     elif data.is_active is True:
         # Reactivating: clear ended_at
         pos.ended_at = None
     await db.commit()
     await db.refresh(pos)
-    return {
-        "id": pos.id,
-        "organization": pos.organization,
-        "title": pos.title,
-        "is_active": pos.is_active,
-        "ended_at": pos.ended_at.isoformat() if pos.ended_at else None,
-    }
+    return _position_dict(pos)
 
 
-@router.delete("/{contact_id}/positions/{position_id}")
-async def remove_position(
-    contact_id: int,
+@people_router.delete("/{telegram_id}/positions/{position_id}")
+async def delete_person_position(
+    telegram_id: int,
     position_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a position. contact_id here is the Telegram ID of the person."""
-    telegram_id = contact_id
     pos = (await db.execute(
         select(ContactPosition).where(
             ContactPosition.id == position_id,
@@ -414,23 +498,13 @@ async def remove_position(
     return {"success": True}
 
 
-@router.get("/{contact_id}/positions")
-async def get_positions_for_telegram_id(
-    contact_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get all positions for a telegram_id. contact_id param is actually telegram_id."""
-    positions = await _get_positions(db, telegram_id=contact_id)
-    return [
-        {
-            "id": p.id,
-            "organization": p.organization,
-            "title": p.title,
-            "is_active": p.is_active,
-            "ended_at": p.ended_at.isoformat() if p.ended_at else None,
-        }
-        for p in positions
-    ]
+# Deprecated aliases: /api/contacts/{telegram_id}/positions[/...] — the path
+# segment is a TELEGRAM id here, unlike the sibling /api/contacts/{contact_id}
+# routes. Use /api/people/{telegram_id}/positions instead.
+router.add_api_route("/{telegram_id}/positions", list_person_positions, methods=["GET"], deprecated=True)
+router.add_api_route("/{telegram_id}/positions", add_person_position, methods=["POST"], deprecated=True)
+router.add_api_route("/{telegram_id}/positions/{position_id}", update_person_position, methods=["PUT"], deprecated=True)
+router.add_api_route("/{telegram_id}/positions/{position_id}", delete_person_position, methods=["DELETE"], deprecated=True)
 
 
 # --- Relationship Status Endpoints ---
@@ -489,7 +563,7 @@ def _person_summary(c: Contact, positions: List[ContactPosition]) -> dict:
     primary = None
     if active_positions:
         p = active_positions[0]
-        primary = {"title": p.title, "organization": p.organization}
+        primary = {"title": p.title, "organization": p.organization, "organization_id": p.organization_id}
     return {
         "telegram_id": c.telegram_id,
         "name": f"{c.first_name or ''} {c.last_name or ''}".strip() or str(c.telegram_id),
@@ -497,7 +571,7 @@ def _person_summary(c: Contact, positions: List[ContactPosition]) -> dict:
         "is_important": c.is_important,
         "contact_id": c.id,
         "relationship_status": getattr(c, "relationship_status", None),
-        "last_interaction_at": getattr(c, "last_interaction_at", None),
+        "last_interaction_at": iso_utc(c.last_interaction_at),
         "primary_position": primary,
         "phone": c.phone,
         "twitter_handle": c.twitter_handle,
@@ -518,27 +592,7 @@ async def resolve_person(telegram_id: int, db: AsyncSession = Depends(get_db)):
         return _person_summary(contact, positions)
 
     # Fallback: look up sender_name from messages
-    row = (await db.execute(
-        select(Message.sender_name)
-        .where(Message.sender_id == telegram_id, Message.sender_name.isnot(None))
-        .order_by(desc(Message.date))
-        .limit(1)
-    )).first()
-    name = row[0] if row else str(telegram_id)
-    return {
-        "telegram_id": telegram_id,
-        "name": name,
-        "username": None,
-        "is_important": False,
-        "contact_id": None,
-        "relationship_status": None,
-        "last_interaction_at": None,
-        "primary_position": None,
-        "phone": None,
-        "twitter_handle": None,
-        "linkedin_url": None,
-        "has_notes": False,
-    }
+    return _unknown_person(telegram_id, await _latest_sender_name(db, telegram_id))
 
 
 class BatchResolveRequest(BaseModel):
@@ -560,23 +614,12 @@ async def resolve_persons_batch(
         select(Contact).where(Contact.telegram_id.in_(ids))
     )
     contacts = {c.telegram_id: c for c in result.scalars().all()}
+    pos_map = await _positions_by_person(db, list(contacts))
 
-    # Batch-load positions by telegram_id
-    pos_map: Dict[int, List[ContactPosition]] = {}
-    if contacts:
-        tids = [c.telegram_id for c in contacts.values()]
-        pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.telegram_id.in_(tids))
-        )
-        for p in pos_result.scalars().all():
-            pos_map.setdefault(p.telegram_id, []).append(p)
-
-    # For missing IDs, try Message.sender_name fallback
+    # For missing IDs, use each one's most recent Message.sender_name
     missing = [tid for tid in ids if tid not in contacts]
     name_map: Dict[int, str] = {}
     if missing:
-        from sqlalchemy import literal_column
-        # Get most recent sender_name for each missing telegram_id
         subq = (
             select(
                 Message.sender_id,
@@ -595,25 +638,8 @@ async def resolve_persons_batch(
         for sender_id, sender_name in rows:
             name_map[sender_id] = sender_name
 
-    # Build results
-    out: Dict[int, dict] = {}
-    for tid in ids:
-        if tid in contacts:
-            c = contacts[tid]
-            out[tid] = _person_summary(c, pos_map.get(c.telegram_id, []))
-        else:
-            out[tid] = {
-                "telegram_id": tid,
-                "name": name_map.get(tid, str(tid)),
-                "username": None,
-                "is_important": False,
-                "contact_id": None,
-                "relationship_status": None,
-                "last_interaction_at": None,
-                "primary_position": None,
-                "phone": None,
-                "twitter_handle": None,
-                "linkedin_url": None,
-                "has_notes": False,
-            }
-    return out
+    return {
+        tid: (_person_summary(contacts[tid], pos_map.get(tid, [])) if tid in contacts
+              else _unknown_person(tid, name_map.get(tid)))
+        for tid in ids
+    }

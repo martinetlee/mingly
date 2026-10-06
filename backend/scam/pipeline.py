@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from backend.config import DATA_DIR, BASE_DIR
+from backend.config import DATA_DIR
+from backend.fsutil import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +250,7 @@ def _load_signatures_file(config: PipelineConfig) -> None:
 
 def save_signatures(sigs_data: dict) -> None:
     """Save signatures to the separate signatures file."""
-    _SIGNATURES_FILE.write_text(
-        json.dumps(sigs_data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    atomic_write_text(_SIGNATURES_FILE, json.dumps(sigs_data, indent=2, ensure_ascii=False), 0o644)
     logger.info("Saved signatures to %s", _SIGNATURES_FILE)
 
 

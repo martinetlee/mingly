@@ -1,11 +1,24 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ChevronDown, ChevronRight, Bookmark, CheckCheck, ListChecks, Users } from 'lucide-react'
-import type { DashboardData, MentionGroup, MentionMessage } from '../api/types'
-import { getDashboard, getMentions, reactToMessage } from '../api/client'
-import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ListChecks, Users, AlertCircle } from 'lucide-react'
+import type { CatchUpItem } from '../api/types'
+import { getDashboard } from '../api/client'
+import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { useWebSocket } from '../hooks/useWebSocket'
-import CatchUpQueue from '../components/CatchUpQueue'
+import { useMentionNavigator, useMentions } from '../hooks/useMentions'
+import CatchUpQueue, { applyTriageUpdate } from '../components/CatchUpQueue'
+import MentionCard, {
+  MENTION_FILTER_OPTIONS,
+  countMentions,
+  filterMentions,
+  mentionFilterClass,
+  mentionKey,
+  type MentionFilter,
+} from '../components/MentionCard'
+import { BriefingEntryList } from '../components/BriefingEntryCard'
+import { errorMessage } from '../lib/toast'
+import { fmtRelative } from '../utils/time'
 
 function getGreeting(): string {
   const hour = new Date().getHours()
@@ -14,304 +27,65 @@ function getGreeting(): string {
   return 'Good evening'
 }
 
-function fmtRelative(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffMins = Math.floor(diffMs / 60000)
-  if (diffMins < 1) return 'Just now'
-  if (diffMins < 60) return `${diffMins}m ago`
-  const diffHours = Math.floor(diffMins / 60)
-  if (diffHours < 24) return `${diffHours}h ago`
-  const diffDays = Math.floor(diffHours / 24)
-  if (diffDays < 7) return `${diffDays}d ago`
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-}
-
-// ---------------------------------------------------------------------------
-// Mention components (simplified from Intelligence page)
-// ---------------------------------------------------------------------------
-
-function MentionMsgRow({ msg, highlighted }: { msg: MentionMessage; highlighted: boolean }) {
-  return (
-    <div className={`rounded-lg px-3 py-2 text-xs leading-relaxed transition-colors ${
-      highlighted ? 'bg-amber-500/10 border border-amber-500/30' : 'bg-slate-700/30'
-    }`}>
-      <div className="flex items-baseline justify-between gap-2 mb-0.5">
-        <span className={`font-medium truncate ${highlighted ? 'text-amber-300' : 'text-slate-300'}`}>
-          {msg.sender_name || 'Unknown'}
-        </span>
-        <span className="shrink-0 text-[10px] text-slate-500">{fmtRelative(msg.date)}</span>
-      </div>
-      {msg.text && <p className="text-slate-400 leading-snug line-clamp-3">{msg.text}</p>}
-      {msg.media_type && !msg.text && (
-        <span className="italic text-slate-500">[{msg.media_type}]</span>
-      )}
-      {!msg.text && !msg.media_type && (
-        <span className="italic text-slate-500">[no text]</span>
-      )}
-    </div>
-  )
-}
-
-function HomeMentionCard({
-  group,
-  onNavigate,
-  selected,
-}: {
-  group: MentionGroup
-  onNavigate: (chatId: number, msgId: number) => void
-  selected: boolean
-}) {
-  const [expanded, setExpanded] = useState(false)
-
-  const chatTypeColor = {
-    group: 'bg-purple-500/20 text-purple-400',
-    channel: 'bg-amber-500/20 text-amber-400',
-    private: 'bg-indigo-500/20 text-indigo-400',
-  }[group.chat.type] ?? 'bg-slate-500/20 text-slate-400'
-
-  const allMsgs = [
-    ...group.context_before.map((m) => ({ msg: m, highlighted: false })),
-    { msg: group.mention_msg, highlighted: true },
-    ...group.context_after.map((m) => ({ msg: m, highlighted: false })),
-  ]
-
-  const trackedBorder = group.chat.is_tracked
-    ? 'border-violet-500/40 bg-violet-900/10'
-    : 'border-slate-700/60 bg-slate-800/60'
-
-  const mentionText = group.mention_msg.text || ''
-  const senderName = group.mention_msg.sender_name || 'Unknown'
-
-  return (
-    <div className={`rounded-xl border ${trackedBorder} overflow-hidden transition-colors${selected ? ' ring-1 ring-amber-500/50' : ''}`}>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => setExpanded((v) => !v)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v) } }}
-        className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30 transition-colors select-none"
-      >
-        {expanded ? <ChevronDown size={12} className="shrink-0 text-slate-500" /> : <ChevronRight size={12} className="shrink-0 text-slate-500" />}
-        {group.chat.is_tracked && <Bookmark size={11} className="shrink-0 text-violet-400" />}
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${chatTypeColor}`}>
-          {group.chat.type}
-        </span>
-        <span className="flex-1 min-w-0 truncate text-xs font-semibold text-slate-200">{group.chat.name}</span>
-        {group.replied && (
-          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500/15 text-emerald-400 shrink-0">
-            <CheckCheck size={9} />
-            replied
-          </span>
-        )}
-        {group.mention_msg.my_reaction && !group.replied && (
-          <span className="flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-400 shrink-0">
-            <span className="text-[10px] leading-none">{group.mention_msg.my_reaction}</span>
-            ack
-          </span>
-        )}
-        <AtSign size={11} className="shrink-0 text-amber-400" />
-        <span className="shrink-0 text-[10px] text-slate-500">{fmtRelative(group.mention_msg.date)}</span>
-      </div>
-
-      {!expanded && (
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id) } }}
-          className="px-3 pb-2.5 cursor-pointer"
-        >
-          <p className="text-xs text-slate-500 truncate">
-            <span className="text-amber-300/70 font-medium">{senderName}: </span>
-            {mentionText || <span className="italic">{group.mention_msg.media_type ? `[${group.mention_msg.media_type}]` : '[no text]'}</span>}
-          </p>
-        </div>
-      )}
-
-      {expanded && (
-        <div className="border-t border-slate-700/50">
-          <div className="px-3 py-2.5 space-y-1.5">
-            {allMsgs.map(({ msg, highlighted }, i) => (
-              <MentionMsgRow key={`${msg.tg_message_id}-${i}`} msg={msg} highlighted={highlighted} />
-            ))}
-          </div>
-          {group.user_reply_msg && (
-            <div className="px-3 pb-2.5 space-y-1.5">
-              {group.reply_has_gap && (
-                <div className="text-center text-[11px] text-slate-500 py-0.5 select-none">
-                  <span className="rounded bg-slate-700/40 px-2 py-0.5">···</span>
-                </div>
-              )}
-              <MentionMsgRow msg={group.user_reply_msg} highlighted={false} />
-            </div>
-          )}
-          <div className="px-3 pb-3">
-            <button
-              onClick={() => onNavigate(group.chat.telegram_id, group.mention_msg.tg_message_id)}
-              className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors"
-            >
-              Jump to mention →
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+const DASHBOARD_POLL_MS = 60_000
+const DASHBOARD_REFETCH_INTERVAL_MS = 5000
 
 type HomeTab = 'catchup' | 'mentions'
-type MentionFilter = 'not_acted' | 'all' | 'acknowledged' | 'replied'
 type ContactsSubTab = 'needs_checkin' | 'all'
 
 export default function Home() {
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
-
-  // Tab state -- default to Catch Up triage queue
   const [activeTab, setActiveTab] = useState<HomeTab>('catchup')
-  const [catchUpCount, setCatchUpCount] = useState<number | null>(null)
-
-  // Important contacts sub-tab state
   const [contactsSubTab, setContactsSubTab] = useState<ContactsSubTab>('needs_checkin')
 
-  // Mentions state
-  const [mentions, setMentions] = useState<MentionGroup[]>([])
-  const [mentionsLoading, setMentionsLoading] = useState(true)
-  const [mentionFilter, setMentionFilter] = useState<MentionFilter>('not_acted')
-  const [selectedMentionIdx, setSelectedMentionIdx] = useState(0)
-  const selectedMentionRef = useRef<HTMLDivElement | null>(null)
-
-  const refreshDashboard = useCallback(() => {
-    getDashboard().then(setData).catch(() => {})
-  }, [])
+  // Dashboard: latest-only (a slow older response can't overwrite a newer one)
+  const dashboard = useLatestQuery(['dashboard'], (signal) => getDashboard(signal))
+  const { data, refetch: refetchDashboard, setData: setDashboard } = dashboard
+  const refreshDashboard = useCoalescedRefetch(refetchDashboard, DASHBOARD_REFETCH_INTERVAL_MS)
 
   useEffect(() => {
-    getDashboard()
-      .then(setData)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [])
+    const t = setInterval(refreshDashboard, DASHBOARD_POLL_MS)
+    return () => clearInterval(t)
+  }, [refreshDashboard])
 
-  // Auto-refresh dashboard every 60s
-  useEffect(() => {
-    const interval = setInterval(() => {
-      getDashboard().then(setData).catch(() => {})
-    }, 60000)
-    return () => clearInterval(interval)
-  }, [])
-
-  // Load mentions
-  const fetchMentions = useCallback(async () => {
-    setMentionsLoading(true)
-    try {
-      const data = await getMentions({ days: 7 })
-      setMentions(data)
-    } catch {}
-    setMentionsLoading(false)
-  }, [])
-
-  useEffect(() => {
-    fetchMentions()
-  }, [fetchMentions])
-
-  // Re-fetch data when new incoming messages arrive or sync completes
-  const handleWsEvent = useCallback((event: { type: string; is_outgoing?: boolean }) => {
-    if (event.type === 'new_message' && !event.is_outgoing) {
-      fetchMentions()
-    }
-    if (event.type === 'chat_synced' || event.type === 'bulk_sync_complete') {
-      fetchMentions()
+  // New incoming messages and syncs change needs-reply; storms collapse into one refetch
+  useWebSocket((evt) => {
+    if (
+      (evt.type === 'new_message' && !evt.is_outgoing) ||
+      evt.type === 'chats_synced' || evt.type === 'chat_synced' ||
+      evt.type === 'bulk_sync_complete' || evt.type === 'resync'
+    ) {
       refreshDashboard()
     }
-  }, [fetchMentions, refreshDashboard])
-  useWebSocket(handleWsEvent)
+  })
 
-  // Filter mentions client-side
-  const mentionCounts = useMemo(() => {
-    let notActed = 0, acknowledged = 0, replied = 0
-    for (const g of mentions) {
-      const r = g.replied
-      const a = !!g.mention_msg.my_reaction && !r
-      if (r) replied++
-      else if (a) acknowledged++
-      else notActed++
-    }
-    return { not_acted: notActed, all: mentions.length, acknowledged, replied }
-  }, [mentions])
-
-  const visibleMentions = useMemo(() => mentions.filter((g) => {
-    const isReplied = g.replied
-    const isAcknowledged = !!g.mention_msg.my_reaction && !isReplied
-    if (mentionFilter === 'replied') return isReplied
-    if (mentionFilter === 'acknowledged') return isAcknowledged
-    if (mentionFilter === 'not_acted') return !isReplied && !isAcknowledged
-    return true
-  }), [mentions, mentionFilter])
-
-  // Keep selectedIdx in bounds
-  useEffect(() => {
-    if (visibleMentions.length > 0) setSelectedMentionIdx((i) => Math.min(i, visibleMentions.length - 1))
-  }, [visibleMentions.length])
-
-  // Scroll selected into view
-  useEffect(() => {
-    selectedMentionRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [selectedMentionIdx])
-
-  const handleMentionNavigate = (chatId: number, msgId: number) => {
-    navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
+  const handleTriageChange = (item: CatchUpItem) => {
+    setDashboard((prev) => (prev ? applyTriageUpdate(prev, item) : prev))
+    void refetchDashboard()
   }
 
-  // Keyboard shortcuts for mentions
-  const mentionShortcuts = useMemo(() => {
-    if (activeTab !== 'mentions') return {} as Record<string, () => void>
-    return {
-      'j': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
-      'arrowdown': () => setSelectedMentionIdx((i) => Math.min(i + 1, visibleMentions.length - 1)),
-      'k': () => setSelectedMentionIdx((i) => Math.max(i - 1, 0)),
-      'arrowup': () => setSelectedMentionIdx((i) => Math.max(i - 1, 0)),
-      'a': () => {
-        const g = visibleMentions[selectedMentionIdx]
-        if (!g) return
-        const emoji = g.mention_msg.my_reaction ? null : '👀'
-        reactToMessage(g.chat.telegram_id, g.mention_msg.tg_message_id, emoji)
-          .then(() => {
-            setMentions((prev) => prev.map((pg) =>
-              pg.mention_msg.tg_message_id === g.mention_msg.tg_message_id
-                ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: emoji } }
-                : pg
-            ))
-          })
-          .catch((err) => console.error('Failed to react to mention:', err))
-      },
-      'r': () => {
-        const g = visibleMentions[selectedMentionIdx]
-        if (g) navigate(`/chats?chatId=${g.chat.telegram_id}&msgId=${g.mention_msg.tg_message_id}`)
-      },
+  // Mentions (shared with Intelligence)
+  const [mentionFilter, setMentionFilter] = useState<MentionFilter>('not_acted')
+  const mentions = useMentions({ days: 7 })
+  const mentionCounts = useMemo(() => countMentions(mentions.groups), [mentions.groups])
+  const visibleMentions = useMemo(() => filterMentions(mentions.groups, mentionFilter), [mentions.groups, mentionFilter])
+  const mentionNav = useMentionNavigator(visibleMentions, {
+    enabled: activeTab === 'mentions',
+    onAcknowledge: mentions.toggleAcknowledge,
+  })
+
+  if (!data) {
+    if (dashboard.error != null && !dashboard.fetching) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-slate-500">
+          <p className="flex items-center gap-1.5"><AlertCircle size={14} className="text-rose-400" />Failed to load dashboard: {errorMessage(dashboard.error)}</p>
+          <button onClick={() => void refetchDashboard()} className="text-xs text-indigo-400 hover:text-indigo-300">Retry</button>
+        </div>
+      )
     }
-  }, [activeTab, visibleMentions, selectedMentionIdx, navigate])
-
-  useKeyboardShortcuts(mentionShortcuts)
-
-  if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
         Loading dashboard...
-      </div>
-    )
-  }
-
-  if (!data) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
-        Failed to load dashboard
       </div>
     )
   }
@@ -348,9 +122,9 @@ export default function Home() {
               <span className="flex items-center gap-1.5">
                 <ListChecks size={13} />
                 Catch Up
-                {(catchUpCount ?? data.needs_reply.length) > 0 && (
+                {data.needs_reply.length > 0 && (
                   <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
-                    {catchUpCount ?? data.needs_reply.length}
+                    {data.needs_reply.length}
                   </span>
                 )}
               </span>
@@ -379,7 +153,13 @@ export default function Home() {
         {/* Catch Up triage tab content */}
         {activeTab === 'catchup' && (
           <div className="mb-8">
-            <CatchUpQueue needsReply={data.needs_reply} onRefreshDashboard={refreshDashboard} onBadgeCount={setCatchUpCount} />
+            <CatchUpQueue
+              needsReply={data.needs_reply}
+              recentlyHandled={data.recently_handled ?? []}
+              onTriageChange={handleTriageChange}
+              onRefreshDashboard={refreshDashboard}
+              refreshing={dashboard.fetching}
+            />
           </div>
         )}
 
@@ -388,43 +168,32 @@ export default function Home() {
           <div className="mb-8">
             {/* Filter buttons */}
             <div className="flex items-center gap-1.5 mb-3">
-              {([
-                { label: 'Not acted', value: 'not_acted' as MentionFilter },
-                { label: 'All', value: 'all' as MentionFilter },
-                { label: 'Acknowledged', value: 'acknowledged' as MentionFilter },
-                { label: 'Replied', value: 'replied' as MentionFilter },
-              ]).map((opt) => (
+              {MENTION_FILTER_OPTIONS.map((opt) => (
                 <button
                   key={opt.value}
                   onClick={() => setMentionFilter(opt.value)}
-                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
-                    mentionFilter === opt.value
-                      ? opt.value === 'not_acted'
-                        ? 'bg-slate-500/30 text-slate-200'
-                        : opt.value === 'acknowledged'
-                          ? 'bg-amber-500/25 text-amber-300'
-                          : opt.value === 'replied'
-                            ? 'bg-emerald-500/25 text-emerald-300'
-                            : 'bg-slate-600 text-slate-200'
-                      : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/50'
-                  }`}
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${mentionFilterClass(opt.value, mentionFilter === opt.value)}`}
                 >
                   {opt.label}{mentionCounts[opt.value] > 0 ? ` (${mentionCounts[opt.value]})` : ''}
                 </button>
               ))}
               <button
-                onClick={fetchMentions}
-                disabled={mentionsLoading}
+                onClick={() => void mentions.refetch()}
+                disabled={mentions.fetching}
                 className="ml-auto text-slate-500 hover:text-slate-300 disabled:opacity-50 transition-colors"
                 title="Refresh mentions"
               >
-                <RefreshCw size={12} className={mentionsLoading ? 'animate-spin' : ''} />
+                <RefreshCw size={12} className={mentions.fetching ? 'animate-spin' : ''} />
               </button>
             </div>
 
-            {mentionsLoading ? (
+            {mentions.loading ? (
               <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-8 text-center">
                 <p className="text-sm text-slate-500">Loading mentions...</p>
+              </div>
+            ) : mentions.error != null ? (
+              <div className="rounded-xl bg-slate-800 border border-rose-700/30 px-4 py-6 text-center">
+                <p className="text-sm text-rose-400">Could not load mentions: {errorMessage(mentions.error)}</p>
               </div>
             ) : visibleMentions.length === 0 ? (
               <div className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-8 text-center">
@@ -436,11 +205,12 @@ export default function Home() {
             ) : (
               <div className="space-y-2">
                 {visibleMentions.map((group, i) => (
-                  <div key={`${group.chat.telegram_id}-${group.mention_msg.tg_message_id}-${i}`} ref={i === selectedMentionIdx ? selectedMentionRef : null}>
-                    <HomeMentionCard
+                  <div key={mentionKey(group)} ref={i === mentionNav.selectedIdx ? mentionNav.selectedRef : null}>
+                    <MentionCard
                       group={group}
-                      onNavigate={handleMentionNavigate}
-                      selected={i === selectedMentionIdx}
+                      onNavigate={mentionNav.openInChat}
+                      selected={i === mentionNav.selectedIdx}
+                      onToggleExpand={() => mentionNav.setSelectedIdx(i)}
                     />
                   </div>
                 ))}
@@ -604,14 +374,8 @@ export default function Home() {
                   {fmtRelative(data.latest_briefing.generated_at)}
                 </span>
               </div>
-              <div className="flex flex-col gap-2">
-                {data.latest_briefing.entries.map((e) => (
-                  <div key={e.id} className="text-xs">
-                    <span className="font-medium text-slate-300">{e.chat_name}: </span>
-                    <span className="text-slate-400 line-clamp-2">{e.summary}</span>
-                  </div>
-                ))}
-              </div>
+              {/* Same cards as Intelligence → Briefing: [n] citations jump to the source message */}
+              <BriefingEntryList entries={data.latest_briefing.entries} />
             </div>
           )}
         </div>

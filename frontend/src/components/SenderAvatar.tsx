@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { authenticatedMediaUrl } from '../api/session'
 
@@ -13,17 +13,20 @@ const AVATAR_COLORS = [
   'bg-orange-600',
 ]
 
-// Module-level set of sender_ids whose photos failed to load (avoids repeated 404s)
+// Module-level set of ids whose photos failed to load (avoids repeated 404s)
 const failedPhotos = new Set<number>()
 
 interface SenderAvatarProps {
+  /** Telegram id of a user — or of a chat (profile photos share one store) */
   senderId: number | null
   senderName: string | null
   size?: number
   onContextMenu?: (e: React.MouseEvent) => void
+  /** Wrap in a link to the profile (default true; false for chat avatars) */
+  link?: boolean
 }
 
-export default function SenderAvatar({ senderId, senderName, size = 28, onContextMenu }: SenderAvatarProps) {
+function SenderAvatar({ senderId, senderName, size = 28, onContextMenu, link = true }: SenderAvatarProps) {
   const [imgFailed, setImgFailed] = useState(false)
 
   const initial = (senderName || '?')[0].toUpperCase()
@@ -44,7 +47,7 @@ export default function SenderAvatar({ senderId, senderName, size = 28, onContex
     <div
       className="relative flex-shrink-0"
       style={{ width: size, height: size }}
-      onContextMenu={onContextMenu}
+      onContextMenu={link ? undefined : onContextMenu}
     >
       {/* Fallback initial — always rendered underneath */}
       <div
@@ -58,7 +61,7 @@ export default function SenderAvatar({ senderId, senderName, size = 28, onContex
       {hasPhoto && photoUrl && (
         <img
           src={photoUrl}
-          alt={senderName || ''}
+          alt=""
           className="absolute inset-0 rounded-full object-cover"
           style={{ width: size, height: size }}
           onError={handleError}
@@ -67,9 +70,9 @@ export default function SenderAvatar({ senderId, senderName, size = 28, onContex
     </div>
   )
 
-  if (senderId != null) {
+  if (link && senderId != null) {
     return (
-      <Link to={`/profile/${senderId}`} className="flex-shrink-0" onContextMenu={onContextMenu}>
+      <Link to={`/profile/${senderId}`} className="flex-shrink-0" onContextMenu={onContextMenu} aria-label={senderName ?? undefined}>
         {avatar}
       </Link>
     )
@@ -77,3 +80,5 @@ export default function SenderAvatar({ senderId, senderName, size = 28, onContex
 
   return avatar
 }
+
+export default memo(SenderAvatar)

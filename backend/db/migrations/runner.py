@@ -609,7 +609,7 @@ async def _record_migration(
     )
 
 
-async def run_migrations(conn: AsyncConnection) -> None:
+async def run_migrations(conn: AsyncConnection, *, fresh: bool = False) -> None:
     """Apply all pending migrations in order.
 
     Raises on any unexpected failure so that the application does not start
@@ -617,36 +617,24 @@ async def run_migrations(conn: AsyncConnection) -> None:
     """
     await _ensure_migration_table(conn)
     applied = await _applied_versions(conn)
+    await conn.commit()
 
-    for version, description, stmts in MIGRATIONS:
+    for version, description, stmts in all_migrations():
         if version in applied:
             continue
 
         logger.info("Applying migration %d: %s", version, description)
-        for stmt in stmts:
-            try:
-                await conn.execute(sa.text(stmt))
-            except Exception as exc:
-                # ALTER TABLE ADD COLUMN is not idempotent on SQLite; a
-                # "duplicate column name" error means the column already
-                # exists (e.g. created by create_all on a fresh DB).
-                if stmt.upper().startswith("ALTER TABLE") and _is_duplicate_column_error(exc):
-                    logger.debug(
-                        "Column already exists, skipping: %s", stmt
-                    )
-                elif _is_no_such_column_error(exc):
-                    # On a fresh DB, data migrations referencing removed columns
-                    # are harmless — the table was created with the final schema.
-                    logger.debug(
-                        "Column does not exist (fresh DB), skipping: %s", stmt
-                    )
-                else:
-                    logger.error(
-                        "Migration %d failed on statement: %s -- %s",
-                        version, stmt, exc,
-                    )
-                    raise
-        await _record_migration(conn, version, description)
+        # pysqlite only opens a transaction implicitly before DML, so DDL
+        # would otherwise autocommit statement by statement. An explicit
+        # BEGIN makes the whole migration (DDL + its record) atomic.
+        await conn.exec_driver_sql("BEGIN")
+        try:
+            await _apply_statements(conn, version, stmts, fresh=fresh)
+            await _record_migration(conn, version, description)
+        except BaseException:
+            await conn.rollback()
+            raise
+        await conn.commit()
         logger.info("Migration %d applied successfully", version)
 
     # Seed default tags (idempotent via INSERT OR IGNORE)
@@ -662,3 +650,38 @@ async def run_migrations(conn: AsyncConnection) -> None:
                 {"n": tag_name, "c": tag_color, "d": datetime.utcnow()},
             )
         await _record_migration(conn, _SEED_VERSION, "Seed default tags")
+        await conn.commit()
+
+
+async def _apply_statements(
+    conn: AsyncConnection, version: int, stmts: list[str], *, fresh: bool = False
+) -> None:
+    for stmt in stmts:
+        try:
+            await conn.execute(sa.text(stmt))
+        except Exception as exc:
+            # ADD COLUMN for a column that already exists means the table was
+            # just created by create_all with the final schema — the intended
+            # end state. Only on a fresh DB may data migrations reference
+            # columns that later migrations removed; on an existing DB that
+            # error is a real bug and must abort.
+            if stmt.upper().startswith("ALTER TABLE") and _is_duplicate_column_error(exc):
+                logger.debug("Column already exists, skipping: %s", stmt)
+            elif fresh and _is_no_such_column_error(exc):
+                logger.debug("Column does not exist (fresh DB), skipping: %s", stmt)
+            else:
+                logger.error("Migration %d failed on statement: %s -- %s", version, stmt, exc)
+                raise
+
+
+def all_migrations() -> list[tuple[int, str, list[str]]]:
+    """Core migrations plus per-area modules, ordered by version."""
+    from backend.db.migrations import areas
+
+    combined = list(MIGRATIONS)
+    for mod in areas.MODULES:
+        combined.extend(mod.MIGRATIONS)
+    versions = [v for v, _, _ in combined]
+    if len(versions) != len(set(versions)):
+        raise RuntimeError("Duplicate migration version numbers")
+    return sorted(combined, key=lambda m: m[0])
