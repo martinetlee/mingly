@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import or_, select, text as sa_text, update
 from telethon import events, utils as tl_utils
+from telethon.tl.types import User
 
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
@@ -104,6 +105,10 @@ def _send_native_notification(
 # Dialogs
 # ---------------------------------------------------------------------------
 
+# When the last complete enumeration (every folder, no limit) finished.
+last_full_dialog_sync: Optional[datetime] = None
+
+
 async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = False) -> list[int]:
     """Fetch dialogs and upsert them into the chats table (one transaction).
 
@@ -119,10 +124,20 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
     if not client:
         return []
 
+    # Telethon 1.45: folder=None asks Telegram without folder_id, documented
+    # as "all dialogs (including those from folders)"; folder=1 is the
+    # Archive. Scan both when asked and dedupe, so archived chats are found
+    # whichever way the server answers. Dialog.folder_id == 1 marks archived.
     folders = [None, 1] if include_archived else [None]
     dialogs = []
+    seen: dict[int, int] = {}
     for folder in folders:
         async for dialog in client.iter_dialogs(limit=limit, folder=folder):
+            if dialog.id in seen:
+                if folder == 1:
+                    dialogs[seen[dialog.id]] = dialog  # carries folder_id for sure
+                continue
+            seen[dialog.id] = len(dialogs)
             dialogs.append(dialog)
 
     new_chats = []
@@ -131,6 +146,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
         known = await crud.get_existing_chat_ids(db, [d.id for d in dialogs])
         for dialog in dialogs:
             entity = dialog.entity
+            is_user = isinstance(entity, User)
             name = display_name(entity, dialog.id, dialog.name)
             last_msg_date = getattr(dialog, "date", None)
             if last_msg_date is not None:
@@ -147,6 +163,10 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
                 slow_mode_seconds=getattr(entity, "slowmode_seconds", 0) or 0,
                 last_message_date=last_msg_date,
                 is_deactivated=is_deactivated(entity),
+                is_archived=getattr(dialog, "folder_id", None) == 1,
+                is_bot=bool(getattr(entity, "bot", False)) if is_user else False,
+                is_deleted_account=bool(getattr(entity, "deleted", False)) if is_user else False,
+                is_self=bool(getattr(entity, "is_self", False)) if is_user else False,
                 commit=False,
             )
             if dialog.id not in known:
@@ -159,6 +179,9 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
             if unread_mentions > 0:
                 mention_chats.append((dialog.id, unread_mentions))
         await db.commit()
+    if limit is None and include_archived:
+        global last_full_dialog_sync
+        last_full_dialog_sync = datetime.utcnow()
 
     if new_chats:
         logger.info("Discovered %d new chats during dialog sync", len(new_chats))
@@ -526,6 +549,20 @@ def _serialize(saved) -> dict:
     return _serialize_msg((saved, None, None, None))
 
 
+async def _sync_after_service_message(chat_id: int) -> None:
+    async with AsyncSessionLocal() as db:
+        if await crud.get_chat_by_telegram_id(db, chat_id) is None:
+            return  # unknown chat: dialog sync will pick it up
+    res = await coordinator.sync_chat(chat_id, 20, max_wait=60)
+    if res.changed:
+        await broadcast_chats_synced([chat_id])
+
+
+def _schedule_service_sync(chat_id: int) -> None:
+    from backend.jobs import run_single
+    run_single(f"service_sync:{chat_id}", lambda: _sync_after_service_message(chat_id))
+
+
 def register_event_handlers(client) -> list:
     """Register Telethon event handlers on ``client``.
 
@@ -534,7 +571,8 @@ def register_event_handlers(client) -> list:
     this, once per client.
     """
     from telethon.tl.types import (
-        PeerChannel, UpdateMessageReactions, UpdatePinnedChannelMessages, UpdatePinnedMessages,
+        MessageService, PeerChannel, UpdateMessageReactions, UpdateNewChannelMessage, UpdateNewMessage,
+        UpdatePinnedChannelMessages, UpdatePinnedMessages,
     )
 
     async def on_new_message(event):
@@ -630,6 +668,15 @@ def register_event_handlers(client) -> list:
             await _enqueue_scam(event.chat_id, [saved.tg_message_id], "edit")
 
     async def on_raw_update(update_obj):
+        if isinstance(update_obj, (UpdateNewMessage, UpdateNewChannelMessage)):
+            # NewMessage skips MessageService (joins, calls, pins…) and the raw
+            # update has no resolved entities: fetch the chat's newest page
+            # through the coordinator so the service row is stored like any
+            # history row (single-flight per chat collapses bursts).
+            msg = update_obj.message
+            if isinstance(msg, MessageService) and msg.peer_id is not None:
+                _schedule_service_sync(tl_utils.get_peer_id(msg.peer_id))
+            return
         if isinstance(update_obj, UpdateMessageReactions):
             chat_id = tl_utils.get_peer_id(update_obj.peer)
             async with AsyncSessionLocal() as db:
@@ -724,7 +771,10 @@ def register_event_handlers(client) -> list:
     handlers = [
         (on_new_message, events.NewMessage()),
         (on_message_edited, events.MessageEdited()),
-        (on_raw_update, events.Raw(types=[UpdateMessageReactions, UpdatePinnedMessages, UpdatePinnedChannelMessages])),
+        (on_raw_update, events.Raw(types=[
+            UpdateMessageReactions, UpdatePinnedMessages, UpdatePinnedChannelMessages,
+            UpdateNewMessage, UpdateNewChannelMessage,
+        ])),
         (on_message_deleted, events.MessageDeleted()),
         (on_user_update, events.UserUpdate()),
     ]

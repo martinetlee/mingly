@@ -1162,6 +1162,47 @@ export const generateMcpKey = () =>
 export const revealMcpKey = () =>
   request<{ key: string }>('/api/settings/prefs/mcp/reveal-key', { method: 'POST' })
 
+export const setMcpWriteEnabled = (enabled: boolean) =>
+  request<{ write_enabled: boolean }>('/api/settings/prefs/mcp/write', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
+
+// ── DM archive ──
+
+export const getArchiveStatus = (signal?: AbortSignal) =>
+  request<import('./types').ArchiveStatus>('/api/archive/status', { signal })
+
+export const startArchive = () =>
+  request<import('./types').ArchiveStatus>('/api/archive/start', { method: 'POST' })
+
+export const pauseArchive = () =>
+  request<import('./types').ArchiveStatus>('/api/archive/pause', { method: 'POST' })
+
+/** Queue a full-history walk of one chat (DM, group or channel) */
+export const archiveChat = (telegramId: number) =>
+  request<import('./types').ChatArchiveResponse>(`/api/chats/${telegramId}/archive-history`, { method: 'POST' })
+
+// ── Person notes ──
+
+export const getPersonNotes = (telegramId: number, signal?: AbortSignal) =>
+  request<import('./types').PersonNote[]>(`/api/people/${telegramId}/notes`, { signal })
+
+export const createPersonNote = (telegramId: number, note: import('./types').PersonNoteInput) =>
+  request<import('./types').PersonNote>(`/api/people/${telegramId}/notes`, {
+    method: 'POST',
+    body: JSON.stringify(note),
+  })
+
+export const updatePersonNote = (telegramId: number, noteId: number, note: Partial<import('./types').PersonNoteInput>) =>
+  request<import('./types').PersonNote>(`/api/people/${telegramId}/notes/${noteId}`, {
+    method: 'PUT',
+    body: JSON.stringify(note),
+  })
+
+export const deletePersonNote = (telegramId: number, noteId: number) =>
+  request<{ success: boolean } | undefined>(`/api/people/${telegramId}/notes/${noteId}`, { method: 'DELETE' })
+
 // ── Features ────────────────────────────────────────────────────────────────
 
 export function getFeatures(signal?: AbortSignal): Promise<Features> {

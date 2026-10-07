@@ -2,7 +2,8 @@
 Hand-rolled MCP (Model Context Protocol) streamable-HTTP endpoint.
 
 Implements the JSON-RPC 2.0 subset generic MCP clients need over plain HTTP
-POST (no SSE): initialize, notifications/*, ping, tools/list, tools/call.
+POST (no SSE): initialize, notifications/*, ping, tools/list, tools/call,
+prompts/list, prompts/get.
 The official `mcp` SDK needs Python >= 3.10, so this is dependency-free.
 
 Security model (see also backend/api/settings.py MCP section):
@@ -10,7 +11,10 @@ Security model (see also backend/api/settings.py MCP section):
 - Bearer key stored encrypted in the Fernet vault; while the vault is locked
   or the feature is disabled the endpoint answers a bare 404.
 - Host/Origin validation against loopback to block DNS-rebinding.
-- Read-only: every tool wraps an existing local DB query.
+- Read tools query the local DB (fetch_history also asks the archive to pull a
+  chat's history from Telegram). Write tools (notes, person fields, tags,
+  review marks) only run while the user enables them (pref
+  mcp_write_enabled, default off); nothing ever sends Telegram messages.
 """
 import json
 import logging
@@ -26,7 +30,7 @@ from backend.config import API_PORT
 from backend import secrets as vault
 from backend.api.dependencies import _is_allowed_origin, is_allowed_host
 from backend.api.mcp_tools import TOOLS, ToolError, tool_descriptors, validate_args
-from backend.api.settings import get_mcp_enabled
+from backend.api.settings import get_mcp_enabled, get_mcp_write_enabled
 from backend.db.database import get_db
 from backend.secrets import get_secret
 
@@ -38,24 +42,66 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
 LATEST_PROTOCOL_VERSION = "2025-06-18"
 
 SERVER_INFO = {"name": "mingly", "version": "1.0"}
-SERVER_INSTRUCTIONS = (
-    "Read-only access to Mingly's local Telegram archive: list and search "
-    "chats, read messages, query chats by tag, and look up contacts and "
-    "organizations. All data stays on this machine; no tool sends messages "
-    "or modifies anything."
+KNOWN_LIMITS = (
+    "Known limits: a DM whose history was deleted for both sides, or whose dialog was "
+    "deleted, no longer exists on Telegram and cannot be recovered; secret chats are not "
+    "available through the API; messages the other party deleted are gone; bots are "
+    "excluded from list_dms unless include_bots=true; Saved Messages is not a DM."
 )
 
-# In-memory MCP sessions (existence check only — no per-session state).
-_sessions: "dict[str, float]" = {}
+REVIEW_PROCEDURE = (
+    "1. get_archive_status. If telegram_connected is false, stop and tell the user to open and "
+    "unlock Mingly (archiving resumes automatically; stored messages stay readable, but no "
+    "review can be completed for DMs whose history is incomplete). If DMs are still archiving, "
+    "wait (or call fetch_history on the DMs you need) — list_dms(filter='incomplete') shows which "
+    "histories are not complete.\n"
+    "2. list_dms(filter='unreviewed'), following next_cursor until it is null.\n"
+    "3. For each DM: if history_complete is false, fetch_history(chat_id) until it is (if it reports "
+    "telegram_connected: false, stop retrying and tell the user). Then read "
+    "get_messages(chat_id, order='asc') from the start (or after_tg_message_id = "
+    "review.reviewed_through_tg_id when re-reviewing), following next_cursor to the end.\n"
+    "4. Record what you learned with add_person_note (kind: context, due_diligence, risk, "
+    "relationship or todo), citing the messages ({chat_id, tg_message_id}) each claim rests on; "
+    "use get_person first to avoid repeating existing notes. Optionally set_person_fields / "
+    "add_position / tag_chat.\n"
+    "5. mark_reviewed(chat_id, through_tg_message_id = the newest tg_message_id you read; 0 for an "
+    "empty chat).\n"
+    "6. Repeat from step 2 until list_dms(filter='unreviewed') returns no DMs. New messages "
+    "put a DM back in that queue, so nothing is silently skipped."
+)
+
+SERVER_INSTRUCTIONS = (
+    "Access to Mingly's local Telegram archive: list and search chats and DMs, read full "
+    "message histories (including service events), look up people, contacts and "
+    "organizations, and ask the archive to fetch missing history. Write tools "
+    "(add_person_note, update_person_note, set_person_fields, add_position, tag_chat, "
+    "mark_reviewed) work only while the user allows agent writes in Mingly Settings › MCP. "
+    "No tool sends Telegram messages. Paged tools return next_cursor; pass it back unchanged.\n\n"
+    "To review everyone the user has DMed (the review_dms prompt has the same steps):\n"
+    + REVIEW_PROCEDURE + "\n\n" + KNOWN_LIMITS
+)
+
+PROMPTS = {
+    "review_dms": {
+        "description": "Review every DM and record context / due diligence about each person, missing no one.",
+        "arguments": [
+            {"name": "focus", "description": "Optional emphasis, e.g. 'investors' or 'scam risk'", "required": False},
+        ],
+    },
+}
+
+# In-memory MCP sessions: creation time and the client's self-reported name
+# (used as the default agent_label on writes).
+_sessions: "dict[str, dict]" = {}
 _MAX_SESSIONS = 64
 
 
-def _new_session() -> str:
+def _new_session(client_name: Optional[str] = None) -> str:
     sid = pysecrets.token_urlsafe(16)
     if len(_sessions) >= _MAX_SESSIONS:
-        oldest = min(_sessions, key=_sessions.get)
+        oldest = min(_sessions, key=lambda k: _sessions[k]["created"])
         _sessions.pop(oldest, None)
-    _sessions[sid] = time.monotonic()
+    _sessions[sid] = {"created": time.monotonic(), "client_name": client_name}
     return sid
 
 
@@ -128,14 +174,17 @@ def _check_session(request: Request) -> Optional[Response]:
 # ── Method handlers ──────────────────────────────────────────────────────────
 
 def _handle_initialize(req_id, params: dict) -> JSONResponse:
-    requested = (params or {}).get("protocolVersion")
+    params = params if isinstance(params, dict) else {}
+    requested = params.get("protocolVersion")
     version = requested if requested in SUPPORTED_PROTOCOL_VERSIONS else LATEST_PROTOCOL_VERSION
-    sid = _new_session()
+    client_info = params.get("clientInfo")
+    client_name = client_info.get("name") if isinstance(client_info, dict) else None
+    sid = _new_session(str(client_name)[:100] if client_name else None)
     return _rpc_result(
         req_id,
         {
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": False}, "prompts": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
             "instructions": SERVER_INSTRUCTIONS,
         },
@@ -143,8 +192,14 @@ def _handle_initialize(req_id, params: dict) -> JSONResponse:
     )
 
 
-async def _handle_tools_call(req_id, params: dict, db: AsyncSession) -> JSONResponse:
-    params = params or {}
+WRITE_DISABLED_MESSAGE = (
+    "Write tools are turned off. The user can allow them in Mingly Settings › MCP "
+    "(\"Allow agent to write\"). Read tools keep working."
+)
+
+
+async def _handle_tools_call(req_id, params: dict, db: AsyncSession, ctx: dict) -> JSONResponse:
+    params = params if isinstance(params, dict) else {}
     name = params.get("name")
     args = params.get("arguments") or {}
     if name not in TOOLS:
@@ -154,14 +209,43 @@ async def _handle_tools_call(req_id, params: dict, db: AsyncSession) -> JSONResp
     validation_error = validate_args(name, args)
     if validation_error:
         return _rpc_error(req_id, -32602, validation_error)
+    if TOOLS[name]["access"] != "read" and not get_mcp_write_enabled():
+        return _rpc_result(req_id, _tool_text_result(WRITE_DISABLED_MESSAGE, is_error=True))
     try:
-        payload = await TOOLS[name]["handler"](db, args)
+        payload = await TOOLS[name]["handler"](db, args, ctx)
     except ToolError as exc:
         return _rpc_result(req_id, _tool_text_result(str(exc), is_error=True))
     except Exception:
         logger.exception("MCP tool %s failed", name)
         return _rpc_result(req_id, _tool_text_result("Internal error executing tool", is_error=True))
     return _rpc_result(req_id, _tool_text_result(payload))
+
+
+def _review_prompt_text(focus: Optional[str]) -> str:
+    text = (
+        "Review everyone I have DMed on Telegram using the Mingly tools and record context and "
+        "due diligence about each person. Nobody and no message may be skipped.\n\n"
+        + REVIEW_PROCEDURE + "\n\n" + KNOWN_LIMITS
+    )
+    if focus:
+        text += f"\n\nPay particular attention to: {focus}"
+    return text
+
+
+def _handle_prompts_get(req_id, params: dict) -> JSONResponse:
+    params = params if isinstance(params, dict) else {}
+    name = params.get("name")
+    if name not in PROMPTS:
+        return _rpc_error(req_id, -32602, f"Unknown prompt: {name}")
+    arguments = params.get("arguments") or {}
+    focus = arguments.get("focus") if isinstance(arguments, dict) else None
+    return _rpc_result(req_id, {
+        "description": PROMPTS[name]["description"],
+        "messages": [{
+            "role": "user",
+            "content": {"type": "text", "text": _review_prompt_text(str(focus).strip() if focus else None)},
+        }],
+    })
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -229,6 +313,11 @@ async def mcp_post(request: Request, db: AsyncSession = Depends(get_db)):
     if method == "tools/list":
         return _rpc_result(req_id, {"tools": tool_descriptors()})
     if method == "tools/call":
-        return await _handle_tools_call(req_id, params, db)
+        ctx = {"client_name": _sessions[request.headers["mcp-session-id"]].get("client_name")}
+        return await _handle_tools_call(req_id, params, db, ctx)
+    if method == "prompts/list":
+        return _rpc_result(req_id, {"prompts": [{"name": n, **p} for n, p in PROMPTS.items()]})
+    if method == "prompts/get":
+        return _handle_prompts_get(req_id, params)
 
     return _rpc_error(req_id, -32601, f"Method not found: {method}")

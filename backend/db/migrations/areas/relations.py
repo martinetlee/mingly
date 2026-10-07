@@ -182,4 +182,36 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "Organizations: merge duplicates, backfill from positions, key positions by organization_id",
         _ORG_FK,
     ),
+    (
+        93,
+        "Person notes: context / due-diligence notes per Telegram user (user or MCP agent)",
+        [
+            "CREATE TABLE IF NOT EXISTS person_notes ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  telegram_id BIGINT NOT NULL,"
+            "  kind VARCHAR NOT NULL,"
+            "  title VARCHAR NOT NULL,"
+            "  body TEXT NOT NULL DEFAULT '',"
+            "  citations_json TEXT,"
+            "  author VARCHAR NOT NULL DEFAULT 'user',"
+            "  agent_label VARCHAR,"
+            "  created_at DATETIME,"
+            "  updated_at DATETIME"
+            ")",
+            "CREATE INDEX IF NOT EXISTS ix_person_notes_telegram_id ON person_notes (telegram_id)",
+        ],
+    ),
+    (
+        94,
+        "Agent reviews: how far an MCP agent has reviewed each chat",
+        [
+            "CREATE TABLE IF NOT EXISTS agent_reviews ("
+            "  chat_id BIGINT PRIMARY KEY,"
+            "  reviewed_through_tg_id BIGINT NOT NULL DEFAULT 0,"
+            "  reviewed_message_count INTEGER NOT NULL DEFAULT 0,"
+            "  reviewed_at DATETIME,"
+            "  agent_label VARCHAR"
+            ")",
+        ],
+    ),
 ]

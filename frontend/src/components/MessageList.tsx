@@ -6,7 +6,7 @@ import { ArrowDown, Loader2 } from 'lucide-react'
 import type { Message } from '../api/types'
 import type { ScrollIntent } from '../hooks/useChatMessages'
 import { parseServerDate } from '../utils/time'
-import MessageBubble from './MessageBubble'
+import MessageBubble, { ServiceMessage } from './MessageBubble'
 import type { ScamVerdictScope } from './MessageBubble'
 
 interface Props {
@@ -51,7 +51,8 @@ interface Props {
 }
 
 export interface Item {
-  type: 'single' | 'album'
+  /** 'service' = a system line (joined, pinned, call…), never grouped with bubbles */
+  type: 'single' | 'album' | 'service'
   /** Stable across window merges (albums keyed by grouped_id, so loading more of an album keeps its key) */
   key: string
   message: Message
@@ -70,9 +71,10 @@ export function buildItems(messages: Message[], isGroup: boolean): Item[] {
   let i = 0
   while (i < messages.length) {
     const msg = messages[i]
+    const isService = msg.kind === 'service'
     let j = i + 1
-    if (msg.grouped_id) {
-      while (j < messages.length && messages[j].grouped_id === msg.grouped_id) j++
+    if (msg.grouped_id && !isService) {
+      while (j < messages.length && messages[j].grouped_id === msg.grouped_id && messages[j].kind !== 'service') j++
     }
     const group = messages.slice(i, j)
     const isAlbum = group.length > 1
@@ -81,12 +83,14 @@ export function buildItems(messages: Message[], isGroup: boolean): Item[] {
     const date = parseServerDate(primary.date)
     const prevDate = prevMsg ? parseServerDate(prevMsg.date) : null
     result.push({
-      type: isAlbum ? 'album' : 'single',
+      type: isService ? 'service' : isAlbum ? 'album' : 'single',
       key: isAlbum ? `a${msg.grouped_id}` : `m${msg.tg_message_id}`,
       message: primary,
       album: isAlbum ? group : undefined,
       ids: group.map((m) => m.tg_message_id),
-      showSender: isGroup && !primary.is_outgoing && primary.sender_name !== prevMsg?.sender_name,
+      // A bubble after a service line starts a new sender run
+      showSender: !isService && isGroup && !primary.is_outgoing
+        && (prevMsg?.kind === 'service' || primary.sender_name !== prevMsg?.sender_name),
       dateLabel: date && (!prevDate || date.toDateString() !== prevDate.toDateString())
         ? date.toLocaleDateString([], { day: 'numeric', month: 'long', year: date.getFullYear() !== thisYear ? 'numeric' : undefined })
         : null,
@@ -276,28 +280,36 @@ export default function MessageList({
           </div>
         )}
         {firstUnreadTgId != null && item.ids.includes(firstUnreadTgId) && <UnreadSeparator />}
-        <MessageBubble
-          message={msg}
-          album={item.album}
-          showSender={item.showSender}
-          showAvatar={item.showSender}
-          isGroupChat={isGroup}
-          highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
-          onReply={onReply}
-          onReact={onReact}
-          onEdit={onEdit}
-          onDelete={onDelete}
-          onForward={onForward}
-          onPin={onPin}
-          onJumpToMessage={onJumpToMessage}
-          isFlaggedSender={msg.sender_id != null && !!flaggedSenderIds?.has(msg.sender_id)}
-          onReportScam={onReportScam}
-          onScamVerdict={onScamVerdict}
-          onOpenProfile={onOpenProfile}
-          onSendMessage={onSendMessage}
-          onMention={onMention}
-          onRestrict={onRestrict}
-        />
+        {item.type === 'service' ? (
+          <ServiceMessage
+            message={msg}
+            highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
+            onJumpToMessage={onJumpToMessage}
+          />
+        ) : (
+          <MessageBubble
+            message={msg}
+            album={item.album}
+            showSender={item.showSender}
+            showAvatar={item.showSender}
+            isGroupChat={isGroup}
+            highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
+            onReply={onReply}
+            onReact={onReact}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onForward={onForward}
+            onPin={onPin}
+            onJumpToMessage={onJumpToMessage}
+            isFlaggedSender={msg.sender_id != null && !!flaggedSenderIds?.has(msg.sender_id)}
+            onReportScam={onReportScam}
+            onScamVerdict={onScamVerdict}
+            onOpenProfile={onOpenProfile}
+            onSendMessage={onSendMessage}
+            onMention={onMention}
+            onRestrict={onRestrict}
+          />
+        )}
       </div>
     )
   }, [firstUnreadTgId, isGroup, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,

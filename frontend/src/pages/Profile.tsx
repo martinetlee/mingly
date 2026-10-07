@@ -5,12 +5,15 @@ import type { Contact, ContactPosition, PersonDetail } from '../api/types'
 import { getProfile, getPerson, setContactImportantByTelegram, createContact, ApiError } from '../api/client'
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useAsyncAction } from '../hooks/useAsyncAction'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { invalidatePerson } from '../hooks/usePersonSummary'
 import { errorMessage } from '../lib/toast'
 import { fmtRelative } from '../utils/time'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PositionsEditor from '../components/PositionsEditor'
 import PersonCard from '../components/PersonCard'
+import PersonNotes from '../components/PersonNotes'
 
 /**
  * Two independent sources:
@@ -44,6 +47,18 @@ export default function Profile() {
 
   const idRef = useRef(numericId)
   idRef.current = numericId
+
+  // An agent (MCP) changed this person. The editors refresh themselves in
+  // place (keeping open edits; ContactInfoSection patches the contact through
+  // setContact); without a contact, reload the local data here — the agent
+  // may have created one or changed the header's position.
+  const refetchPerson = useCoalescedRefetch(() => personQ.refetch(), 1000)
+  useWsEvent('person_changed', (e) => {
+    if (e.telegram_id !== idRef.current) return
+    invalidatePerson(e.telegram_id)
+    if (!personQ.data?.contact) refetchPerson()
+  })
+  useWsEvent('resync', () => { if (hasId) void personQ.refetch() })
 
   /** Patch the local person — only if it's still the one on screen */
   const patchPerson = useCallback((tid: number, fn: (p: PersonDetail) => PersonDetail) => {
@@ -248,10 +263,13 @@ export default function Profile() {
               className="flex items-center gap-2 rounded-lg border border-dashed border-slate-600 px-4 py-3 text-xs text-slate-400 hover:border-slate-500 hover:text-slate-300 transition-colors w-full justify-center disabled:opacity-60"
             >
               {addContact.pending ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
-              Add to contacts to manage notes, socials & more
+              Add to contacts to manage status, socials & more
             </button>
           </div>
         )}
+
+        {/* Notes timeline (agent + user), for any person */}
+        {isUser && Number.isFinite(tid) && tid !== 0 && <PersonNotes telegramId={tid} />}
 
         {/* Common chats */}
         {profile?.common_chats && profile.common_chats.length > 0 && (

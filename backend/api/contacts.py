@@ -8,9 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import Contact, ContactPosition, Message, Organization
+from backend.db.models import Contact, ContactPosition, Message
 from backend.db import crud
-from backend.api.validators import validate_linkedin_url
 from backend.serialization import iso_utc
 from backend.telegram.runtime import runtime
 
@@ -251,23 +250,7 @@ async def get_contact_by_telegram(telegram_id: int, db: AsyncSession = Depends(g
     return _contact_dict(contact, positions)
 
 
-async def _get_or_create_contact(db: AsyncSession, telegram_id: int, **fields) -> Contact:
-    """Race-safe get-or-create on the unique telegram_id."""
-    contact = (await db.execute(
-        select(Contact).where(Contact.telegram_id == telegram_id)
-    )).scalar_one_or_none()
-    if contact:
-        return contact
-    contact = Contact(telegram_id=telegram_id, **fields)
-    db.add(contact)
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        contact = (await db.execute(
-            select(Contact).where(Contact.telegram_id == telegram_id)
-        )).scalar_one()
-    return contact
+_get_or_create_contact = crud.get_or_create_contact
 
 
 @router.post("/by-telegram/{telegram_id}/important")
@@ -323,23 +306,17 @@ async def update_contact(
     )).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    if data.twitter_handle is not None:
-        contact.twitter_handle = data.twitter_handle.strip() or None
-    if data.linkedin_url is not None:
-        raw = data.linkedin_url.strip()
-        if raw:
-            try:
-                contact.linkedin_url = validate_linkedin_url(raw)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-        else:
-            contact.linkedin_url = None
-    if data.phone is not None:
-        contact.phone = data.phone.strip() or None
-    if data.notes is not None:
-        contact.notes = data.notes.strip() or None
-    if data.is_important is not None:
-        contact.is_important = data.is_important
+    try:
+        crud.apply_contact_fields(
+            contact,
+            twitter_handle=data.twitter_handle,
+            linkedin_url=data.linkedin_url,
+            phone=data.phone,
+            notes=data.notes,
+            is_important=data.is_important,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     await db.commit()
     await db.refresh(contact)
     positions = await _get_positions(db, contact.telegram_id)
@@ -414,38 +391,21 @@ async def add_person_position(
     if not data.is_active and data.ended_at and data.ended_at.strip():
         ended_at_val = _parse_date(data.ended_at)
 
-    if data.organization_id is not None:
-        org = await db.get(Organization, data.organization_id)
-        if not org:
-            raise HTTPException(status_code=404, detail="Organization not found")
-    else:
-        try:
-            org, _created = await crud.get_or_create_organization(db, data.organization or "")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    duplicate = (await db.execute(select(ContactPosition.id).where(
-        ContactPosition.telegram_id == telegram_id, ContactPosition.organization_id == org.id,
-    ))).first()
-    if duplicate:
-        await db.commit()  # keep a newly created org / re-attached history
-        raise HTTPException(status_code=409, detail=f"Already has a position at {org.name}")
-
-    pos = ContactPosition(
-        telegram_id=telegram_id,
-        organization_id=org.id,
-        organization=org.name,
-        title=(data.title or "").strip() or None,
-        is_active=data.is_active,
-        ended_at=ended_at_val,
-    )
-    db.add(pos)
     try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Position already exists")
-    await db.refresh(pos)
+        pos = await crud.add_person_position(
+            db, telegram_id,
+            organization=data.organization,
+            organization_id=data.organization_id,
+            title=data.title,
+            is_active=data.is_active,
+            ended_at=ended_at_val,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except crud.PositionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return _position_dict(pos)
 
 
@@ -524,8 +484,7 @@ async def set_relationship_status(
     contact = (await db.execute(select(Contact).where(Contact.id == contact_id))).scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
-    contact.relationship_status = req.status
-    contact.relationship_status_manual = True
+    crud.set_manual_relationship_status(contact, req.status)
     await db.commit()
     await db.refresh(contact)
     positions = await _get_positions(db, telegram_id=contact.telegram_id)

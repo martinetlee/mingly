@@ -328,20 +328,9 @@ def _qname(name, fallback: str = "") -> str:
 
 
 async def _find_or_create_tag(db: AsyncSession, tag_name: str):
-    """User tag by name (never a board stage tag), created if missing.
-    Returns (tag, None) or (None, readable tool error)."""
-    tag = await crud.find_tag_by_name(db, tag_name)
-    if tag is not None:
-        return tag, None
-    try:
-        return await crud.create_tag(db, name=tag_name), None
-    except crud.NameConflict as exc:  # created concurrently
-        await db.rollback()
-        tag = await crud.find_tag_by_name(db, tag_name)
-        return (tag, None) if tag is not None else (None, f"Tool error: {exc}")
-    except ValueError as exc:
-        await db.rollback()
-        return None, f"Tool error: {exc}"
+    """crud.find_or_create_tag with the error phrased as a tool error."""
+    tag, err = await crud.find_or_create_tag(db, tag_name)
+    return tag, (f"Tool error: {err}" if err else None)
 
 
 async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:

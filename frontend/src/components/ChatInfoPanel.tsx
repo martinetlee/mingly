@@ -1,13 +1,14 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp, History, CheckCircle2, Loader2 } from 'lucide-react'
 import type { Chat, ChatMember, Contact, SharedMediaItem, Tag, TagSuggestion, AdminPermissions, InviteLink, GroupSettings, AdminActionLog } from '../api/types'
-import { getTags, getChatTags, addTagToChat, removeTagFromChat, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError } from '../api/client'
+import { getTags, getChatTags, addTagToChat, removeTagFromChat, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError, archiveChat } from '../api/client'
 import { authenticatedMediaUrl } from '../api/session'
 import ContactInfoSection from './ContactInfoSection'
 import ModerationPanel from './ModerationPanel'
 import { useConfirm } from './ui'
 import { reportError, toast } from '../lib/toast'
+import { useAsyncAction } from '../hooks/useAsyncAction'
 import { fmtDateTime, fmtShortDate } from '../utils/time'
 import { createOrFindTag, tagErrorMessage } from './chatTags'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from './PersonCard'
@@ -733,6 +734,62 @@ function AdminActionLogSection({ chat }: { chat: Chat }) {
   )
 }
 
+/**
+ * "Archive full history": queues a complete walk of this chat's history
+ * (DMs are also covered by the background archive). Complete once every
+ * message from the first one is stored locally.
+ */
+export function ArchiveHistorySection({ chat }: { chat: Chat }) {
+  const [queued, setQueued] = useState(false)
+  const [complete, setComplete] = useState(!!chat.history_complete)
+  const [count, setCount] = useState<number | null>(null)
+  useEffect(() => { if (chat.history_complete) setComplete(true) }, [chat.history_complete])
+
+  const archive = useAsyncAction(async () => {
+    const res = await archiveChat(chat.telegram_id)
+    setCount(res.coverage.message_count)
+    if (res.coverage.history_complete) {
+      setComplete(true)
+      toast.success('Full history is already stored')
+    } else {
+      setQueued(res.queued)
+      toast.info('Archiving full history in the background')
+    }
+  }, { errorContext: 'Couldn’t start archiving' })
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-slate-700/50 px-4 py-4" data-testid="archive-history">
+      <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-400">
+        <History size={11} /> History
+      </div>
+      {complete ? (
+        <p className="flex items-center gap-1.5 text-xs text-emerald-400">
+          <CheckCircle2 size={12} /> Full history archived{count != null ? ` · ${count.toLocaleString()} messages` : ''}
+        </p>
+      ) : queued ? (
+        <p className="flex items-center gap-1.5 text-xs text-indigo-300">
+          <Loader2 size={12} className="animate-spin" /> Archiving…{count != null ? ` ${count.toLocaleString()} messages so far` : ''}
+        </p>
+      ) : (
+        <>
+          <p className="text-[11px] text-slate-500">
+            Only part of this chat's history is stored locally. Archive it so search and agents see every message.
+          </p>
+          <button
+            type="button"
+            onClick={() => void archive.run()}
+            disabled={archive.pending}
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            {archive.pending ? <Loader2 size={12} className="animate-spin" /> : <History size={12} />}
+            Archive full history
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [chatTags, setChatTags] = useState<Tag[]>([])
@@ -1049,6 +1106,11 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
           </div>
         )}
       </div>
+
+      {/* Full-history archive: groups/channels on demand, DMs until complete */}
+      {(chat.type !== 'private' || !chat.history_complete) && (
+        <ArchiveHistorySection key={chat.telegram_id} chat={chat} />
+      )}
 
       {/* Shared media section */}
       <SharedMediaSection chat={chat} />

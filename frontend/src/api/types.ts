@@ -41,6 +41,10 @@ export interface Chat {
     sender_name: string | null
     date: string | null
   } | null
+  is_bot?: boolean
+  is_deleted_account?: boolean
+  /** Every message from the chat's first up to the newest is stored locally */
+  history_complete?: boolean
 }
 
 export interface Tag {
@@ -143,6 +147,11 @@ export interface Message {
   scam_error?: string | null
   /** THE verdict (manual wins, else a successful scan > 0.5). Never re-derive it from scam_score. */
   effective_is_scam?: boolean
+  /** 'service' = a system line (joined, pinned, call…); `text` holds the readable description */
+  kind?: 'message' | 'service'
+  /** Structured content of polls, locations, contacts, forwards and service actions */
+  meta?: Record<string, unknown> | null
+  fwd_from_name?: string | null
 }
 
 export type ScamManualVerdict = 'scam' | 'not_scam' | null
@@ -890,6 +899,10 @@ export type WSEvent =
   | { type: 'chat_sync_failed'; chat_id: number; status: 'unavailable' | 'error' | 'skipped'; error: string | null }
   | { type: 'telegram_status'; state: TelegramRuntimeState; error: string | null }
   | { type: 'catchup_summaries_updated'; job_id: string }
+  | ({ type: 'archive_progress' } & ArchiveStatus)
+  | { type: 'person_notes_changed'; telegram_id: number }
+  /** An MCP agent changed a person's contact fields or positions */
+  | { type: 'person_changed'; telegram_id: number }
   /** Client-side only: emitted by WebSocketProvider after a reconnect — events may have been missed, refetch */
   | { type: 'resync' }
 
@@ -904,6 +917,67 @@ export interface McpSettings {
   key_set: boolean
   url: string
   vault_unlocked: boolean
+  /** Opt-in: MCP clients may write person notes, fields, positions, tags and review marks */
+  write_enabled?: boolean
+}
+
+// ── DM archive ──
+
+export type ArchiveState = 'idle' | 'running' | 'paused' | 'waiting_flood' | 'stopped'
+
+/** GET /api/archive/status (also the `archive_progress` WS payload) */
+export interface ArchiveStatus {
+  state: ArchiveState
+  /** While waiting on a Telegram FloodWait: when the archive resumes */
+  flood_wait_until: string | null
+  dms: { total: number; complete: number; pending: number; failed: number; bots_skipped: number }
+  current_chat: { telegram_id: number; name: string } | null
+  started_at: string | null
+  last_topup_at: string | null
+  groups_queued: number
+}
+
+export interface HistoryCoverage {
+  history_complete: boolean
+  message_count: number
+  oldest_tg_id: number | null
+  newest_contiguous_tg_id: number | null
+}
+
+/** POST /api/chats/{telegram_id}/archive */
+export interface ChatArchiveResponse {
+  queued: boolean
+  coverage: HistoryCoverage
+}
+
+// ── Person notes ──
+
+export type PersonNoteKind = 'context' | 'due_diligence' | 'risk' | 'relationship' | 'todo'
+
+export interface PersonNoteCitation {
+  chat_id: number
+  tg_message_id: number
+}
+
+export interface PersonNote {
+  id: number
+  telegram_id: number
+  kind: PersonNoteKind
+  title: string
+  /** Markdown */
+  body: string
+  citations: PersonNoteCitation[]
+  author: 'agent' | 'user'
+  agent_label: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PersonNoteInput {
+  kind: PersonNoteKind
+  title: string
+  body: string
+  citations?: PersonNoteCitation[]
 }
 
 /** GET /api/features — backend feature switches the UI follows */

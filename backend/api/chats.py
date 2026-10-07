@@ -93,6 +93,15 @@ async def list_folders():
     return result
 
 
+def _parse_meta(raw: Optional[str]):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
 def _serialize_msg(row) -> dict:
     m, reply_sender, reply_text, reply_media_type = row
     reply_preview = None
@@ -127,6 +136,9 @@ def _serialize_msg(row) -> dict:
         "grouped_id": m.grouped_id,
         "delivery_state": m.delivery_state or "sent",
         "is_edited": m.is_edited,
+        "kind": getattr(m, "kind", None) or "message",
+        "meta": _parse_meta(getattr(m, "meta_json", None)),
+        "fwd_from_name": getattr(m, "fwd_from_name", None),
         **scam_fields(m),
     }
 
@@ -150,6 +162,9 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         "slow_mode_seconds": c.slow_mode_seconds if hasattr(c, 'slow_mode_seconds') else 0,
         "is_pinned": c.is_pinned,
         "is_archived": c.is_archived,
+        "is_bot": bool(getattr(c, "is_bot", False)),
+        "is_deleted_account": bool(getattr(c, "is_deleted_account", False)),
+        "history_complete": bool(getattr(c, "history_complete", False)),
         "is_muted": c.is_muted,
         "muted_until": iso_utc(c.muted_until),
         "is_marked_unread": c.is_marked_unread,
@@ -542,6 +557,28 @@ async def toggle_archive(
             logger.warning("Failed to sync archive to Telegram: %s", e)
 
     return {"telegram_id": telegram_id, "is_archived": chat.is_archived}
+
+
+@router.post("/{telegram_id}/archive-history")
+async def archive_chat_history(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Queue a full-history walk (or top-up) for one chat — DM, group or
+    channel — ahead of the background DM archive. Distinct from
+    ``/archive`` (the Telegram Archive folder toggle)."""
+    from backend.telegram import archive
+
+    if await crud.get_chat_by_telegram_id(db, telegram_id) is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    await archive.request_chat(telegram_id, priority=True)
+    cov = (await crud.get_coverage(db, [telegram_id])).get(telegram_id)
+    return {
+        "queued": True,
+        "coverage": {
+            "history_complete": bool(cov and cov.history_complete),
+            "message_count": await crud.count_chat_messages(db, telegram_id),
+            "oldest_tg_id": cov.oldest_tg_id if cov else None,
+            "newest_contiguous_tg_id": cov.newest_contiguous_tg_id if cov else None,
+        },
+    }
 
 
 @router.get("/archived")

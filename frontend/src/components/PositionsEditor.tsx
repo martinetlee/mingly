@@ -3,6 +3,8 @@ import { Plus, Building2, X, UserMinus, RotateCcw, Loader2 } from 'lucide-react'
 import type { ContactPosition } from '../api/types'
 import { getPositions, addPosition, removePosition, updatePosition } from '../api/client'
 import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { useWsEvent } from '../hooks/useWebSocket'
 import { invalidatePerson } from '../hooks/usePersonSummary'
 import { useConfirm } from './ui'
 import { errorMessage } from '../lib/toast'
@@ -47,7 +49,7 @@ export default function PositionsEditor({
   compact?: boolean
 }) {
   const confirm = useConfirm()
-  const { data, error: loadError, setData } = useLatestQuery(
+  const { data, error: loadError, setData, refetch } = useLatestQuery(
     ['positions', telegramId],
     (signal) => getPositions(telegramId, signal),
   )
@@ -72,6 +74,15 @@ export default function PositionsEditor({
 
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+
+  // An agent (MCP) changed this person: reload the list in place. The add
+  // form and end-date picker are local drafts and survive the reload.
+  const refreshingRef = useRef(false)
+  const refresh = useCoalescedRefetch(async () => {
+    refreshingRef.current = true
+    try { await refetch() } finally { refreshingRef.current = false }
+  }, 1000)
+  useWsEvent('person_changed', (e) => { if (e.telegram_id === keyRef.current) refresh() })
 
   const [showAdd, setShowAdd] = useState(false)
   const [newOrg, setNewOrg] = useState('')
@@ -101,6 +112,8 @@ export default function PositionsEditor({
     listRef.current = next
     setData(next)
     onChangeRef.current?.(next)
+    // setData discards an in-flight agent refresh; run it again on top of this result
+    if (refreshingRef.current) refresh()
   }
 
   const setRowBusy = (id: number, on: boolean) =>

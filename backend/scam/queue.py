@@ -409,6 +409,7 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
                 unscanned_condition(now),
                 Message.scam_attempts < MAX_AUTO_ATTEMPTS,
                 Message.is_outgoing == False,  # noqa: E712
+                Message.kind == "message",  # service lines are generated text
                 Message.text.isnot(None),
                 Message.text != "",
                 Message.date >= cutoff,

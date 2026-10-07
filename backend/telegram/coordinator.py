@@ -28,7 +28,7 @@ from backend.db.database import AsyncSessionLocal
 from backend.db.models import Message
 from backend.tasks import spawn
 from backend.telegram.runtime import runtime
-from backend.telegram.convert import GENERAL_TOPIC_ID, is_storable, message_to_row, media_type
+from backend.telegram.convert import GENERAL_TOPIC_ID, is_service, is_storable, message_to_row, media_type
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -231,7 +231,7 @@ class SyncCoordinator:
                 seen_ids.add(msg.id)
                 oldest = msg_date if oldest is None or msg_date < oldest else oldest
                 newest = msg_date if newest is None or msg_date > newest else newest
-                if not msg.out and (newest_incoming is None or msg_date > newest_incoming):
+                if not msg.out and not is_service(msg) and (newest_incoming is None or msg_date > newest_incoming):
                     newest_incoming = msg_date
                 page.append(message_to_row(msg, chat_id, forum=forum))
                 if media_type(msg) == "photo":

@@ -1,5 +1,5 @@
 import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react'
-import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy, User, MessageSquare, AtSign, ShieldBan, Pin, PinOff } from 'lucide-react'
+import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy, User, MessageSquare, AtSign, ShieldBan, Pin, PinOff, BarChart3, MapPin, Contact as ContactIcon } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Message } from '../api/types'
 import { translateMessage, getPrefs, openExternalUrl } from '../api/client'
@@ -124,6 +124,155 @@ const FormattedText = memo(function FormattedText({ text, html, isOut }: { text:
       dangerouslySetInnerHTML={{ __html: safe }}
       onClick={handleClick}
     />
+  )
+})
+
+type Meta = Record<string, unknown>
+const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v : null)
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+export type MetaKind = 'poll' | 'geo' | 'contact'
+
+/**
+ * The structured part of a message's `meta` we render: `{poll}`, `{venue}`,
+ * `{location}` or `{contact}` (backend convert.media_meta). Other keys
+ * (forward, service, dice, game…) fall back to the stored text.
+ */
+export function structuredMeta(meta: Meta | null | undefined): { kind: MetaKind; data: Meta } | null {
+  if (!meta || typeof meta !== 'object') return null
+  const obj = (v: unknown): Meta | null => (v && typeof v === 'object' && !Array.isArray(v) ? v as Meta : null)
+  const poll = obj(meta.poll)
+  if (poll && str(poll.question)) return { kind: 'poll', data: poll }
+  const venue = obj(meta.venue)
+  if (venue) return { kind: 'geo', data: venue }
+  const location = obj(meta.location)
+  if (location) return { kind: 'geo', data: location }
+  const contact = obj(meta.contact)
+  if (contact) return { kind: 'contact', data: contact }
+  return null
+}
+
+interface PollOption { text: string; voters: number | null }
+
+function pollOptions(meta: Meta): PollOption[] {
+  const list = Array.isArray(meta.options) ? meta.options : []
+  return list.flatMap((o): PollOption[] => {
+    if (typeof o === 'string') return [{ text: o, voters: null }]
+    if (o && typeof o === 'object') {
+      const r = o as Meta
+      const text = str(r.text)
+      return text ? [{ text, voters: num(r.voters) }] : []
+    }
+    return []
+  })
+}
+
+/** Compact readable render of a poll, location/venue or shared contact */
+export function MetaContent({ meta: raw, isOut }: { meta: Meta; isOut: boolean }) {
+  const structured = structuredMeta(raw)
+  if (!structured) return null
+  const { kind, data: meta } = structured
+  const muted = isOut ? 'text-indigo-200' : 'text-slate-400'
+  if (kind === 'poll') {
+    const options = pollOptions(meta)
+    const total = num(meta.total_voters)
+    const closed = meta.closed === true
+    return (
+      <div className="px-3 py-2" data-testid="meta-poll">
+        <p className={`mb-1 flex items-center gap-1 text-[11px] ${muted}`}>
+          <BarChart3 size={11} /> {meta.quiz === true ? 'Quiz' : 'Poll'}{closed ? ' · closed' : ''}
+        </p>
+        <p className="font-medium">{str(meta.question) ?? 'Poll'}</p>
+        {options.length > 0 && (
+          <ul className="mt-1 space-y-0.5">
+            {options.map((o, i) => (
+              <li key={i} className="flex items-center gap-2 text-[13px]">
+                <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${isOut ? 'bg-indigo-200' : 'bg-slate-400'}`} />
+                <span className="flex-1">{o.text}</span>
+                {o.voters != null && <span className={`text-[11px] ${muted}`}>{o.voters}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        {total != null && <p className={`mt-1 text-[11px] ${muted}`}>{total} vote{total === 1 ? '' : 's'}</p>}
+      </div>
+    )
+  }
+  if (kind === 'geo') {
+    const lat = num(meta.lat)
+    const long = num(meta.long)
+    const title = str(meta.title)
+    const address = str(meta.address)
+    const coords = lat != null && long != null ? `${lat.toFixed(5)}, ${long.toFixed(5)}` : null
+    const live = num(meta.live_period) != null
+    return (
+      <div className="flex items-start gap-2 px-3 py-2" data-testid="meta-geo">
+        <MapPin size={15} className={`mt-0.5 flex-shrink-0 ${muted}`} />
+        <div className="min-w-0">
+          <p className="font-medium">{title ?? (live ? 'Live location' : 'Location')}</p>
+          {address && <p className={`text-[12px] ${muted}`}>{address}</p>}
+          {coords && (
+            <a
+              href={`https://www.openstreetmap.org/?mlat=${lat}&mlon=${long}#map=16/${lat}/${long}`}
+              onClick={(e) => { e.preventDefault(); openExternalUrl(`https://www.openstreetmap.org/?mlat=${lat}&mlon=${long}#map=16/${lat}/${long}`) }}
+              className={`text-[11px] underline underline-offset-2 ${muted}`}
+            >
+              {coords}
+            </a>
+          )}
+        </div>
+      </div>
+    )
+  }
+  if (kind === 'contact') {
+    const name = [str(meta.first_name), str(meta.last_name)].filter(Boolean).join(' ') || 'Contact'
+    const phone = str(meta.phone)
+    const userId = num(meta.user_id)
+    return (
+      <div className="flex items-start gap-2 px-3 py-2" data-testid="meta-contact">
+        <ContactIcon size={15} className={`mt-0.5 flex-shrink-0 ${muted}`} />
+        <div className="min-w-0">
+          {userId ? <Link to={`/profile/${userId}`} className="font-medium hover:underline">{name}</Link> : <p className="font-medium">{name}</p>}
+          {phone && <p className={`text-[12px] ${muted}`}>{phone.startsWith('+') ? phone : `+${phone}`}</p>}
+        </div>
+      </div>
+    )
+  }
+  return null
+}
+
+/**
+ * A service message (joined, left, pinned, call, title change…): a centered
+ * system line with no bubble and no actions. `text` is the backend's readable
+ * description.
+ */
+export const ServiceMessage = memo(function ServiceMessage({ message, highlighted, onJumpToMessage }: {
+  message: Message
+  highlighted?: boolean
+  /** A pin line jumps to the pinned message (its reply_to_tg_message_id) */
+  onJumpToMessage?: (tgId: number) => void
+}) {
+  const service = message.meta?.service as { action?: string } | undefined
+  const target = service?.action === 'pin_message' ? message.reply_to_tg_message_id ?? null : null
+  const cls = `max-w-[85%] rounded-full bg-slate-800/80 px-3 py-1 text-center text-[11px] text-slate-400 ${
+    highlighted ? 'ring-2 ring-amber-400/50 transition-all duration-700' : ''
+  }`
+  const content = (
+    <>
+      {message.text || 'Service message'}
+      <span className="ml-1.5 text-[10px] text-slate-500">{fmtTime(message.date)}</span>
+    </>
+  )
+  return (
+    <div className="my-1.5 flex justify-center" data-testid="service-message">
+      {target != null && onJumpToMessage ? (
+        <button type="button" onClick={() => onJumpToMessage(target)} title="Go to the pinned message" className={`${cls} hover:text-slate-200`}>
+          {content}
+        </button>
+      ) : (
+        <span className={cls}>{content}</span>
+      )}
+    </div>
   )
 })
 
@@ -436,7 +585,10 @@ function MessageBubble({
   )
 
   const senderLabelCls = isFlaggedSender ? 'text-red-400 hover:text-red-300' : 'text-purple-400 hover:text-purple-300'
-  const mediaOnly = !album && message.media_type && !RENDERED_MEDIA.has(message.media_type) && !message.text
+  const meta = !album && structuredMeta(message.meta) ? message.meta! : null
+  // Polls, locations and contacts carry no caption; `text` is only their plain fallback
+  const showText = !!message.text && !meta
+  const mediaOnly = !album && !meta && message.media_type && !RENDERED_MEDIA.has(message.media_type) && !message.text
 
   return (
     <div
@@ -529,12 +681,19 @@ function MessageBubble({
               </div>
             </button>
           )}
+          {message.fwd_from_name && (
+            <p className={`px-3 pt-2 text-[11px] ${isOut ? 'text-indigo-200' : 'text-sky-300'}`} data-testid="forward-header">
+              <Forward size={10} className="mr-1 inline align-[-1px]" />
+              Forwarded from <span className="font-medium">{message.fwd_from_name}</span>
+            </p>
+          )}
           {album
             ? <MediaAlbumGrid messages={album} isOut={isOut} />
+            : meta ? <MetaContent meta={meta} isOut={isOut} />
             : message.media_type && <MediaView message={message} isOut={isOut} />}
-          {message.text && (
+          {showText && (
             <p className="px-3 py-2 select-text">
-              <FormattedText text={message.text} html={message.text_html} isOut={isOut} />
+              <FormattedText text={message.text!} html={message.text_html} isOut={isOut} />
             </p>
           )}
           {translating && (

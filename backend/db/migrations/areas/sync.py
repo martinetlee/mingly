@@ -35,4 +35,38 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "OR text LIKE '%`%' OR text LIKE '%](%'",
         ],
     ),
+    (
+        49,
+        "History coverage per chat for the DM archive (absent row = nothing known)",
+        [
+            "CREATE TABLE IF NOT EXISTS chat_history_coverage ("
+            "chat_id BIGINT NOT NULL PRIMARY KEY, "
+            "history_complete BOOLEAN NOT NULL DEFAULT 0, "
+            "oldest_tg_id BIGINT, "
+            "newest_contiguous_tg_id BIGINT, "
+            "walk_cursor_tg_id BIGINT, "
+            "last_walk_at DATETIME, "
+            "last_topup_at DATETIME, "
+            "error TEXT, "
+            "attempts INTEGER NOT NULL DEFAULT 0)",
+        ],
+    ),
+    (
+        50,
+        "Chat flags from the dialog entity: bot, deleted account, Saved Messages",
+        [
+            "ALTER TABLE chats ADD COLUMN is_bot BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_deleted_account BOOLEAN NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN is_self BOOLEAN NOT NULL DEFAULT 0",
+        ],
+    ),
+    (
+        51,
+        "Store every message kind: service rows, structured meta, forward source",
+        [
+            "ALTER TABLE messages ADD COLUMN kind VARCHAR NOT NULL DEFAULT 'message'",
+            "ALTER TABLE messages ADD COLUMN meta_json TEXT",
+            "ALTER TABLE messages ADD COLUMN fwd_from_name VARCHAR",
+        ],
+    ),
 ]

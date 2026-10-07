@@ -8,9 +8,14 @@ first. Only Telegram-owned columns are produced here; local-only columns
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Optional, Tuple
 
+from telethon import utils as tl_utils
+from telethon.tl import types
+
+from backend.serialization import iso_utc
 from backend.telegram.entities import is_forum as _entity_is_forum, sender_name as _sender_name
 from backend.telegram.formatting import entities_to_html
 
@@ -24,9 +29,21 @@ def raw_text(msg) -> str:
     return getattr(msg, "message", None) or ""
 
 
+def is_service(msg) -> bool:
+    action = getattr(msg, "action", None)
+    return action is not None and not isinstance(action, types.MessageActionEmpty)
+
+
 def is_storable(msg) -> bool:
-    """Service messages (joins, pins, topic creation…) carry no text or media."""
-    return bool(raw_text(msg) or getattr(msg, "media", None))
+    """Everything Telegram shows in a chat: text, media (polls, locations,
+    contacts… included) and service messages (joins, pins, calls…). Only
+    empty shells (MessageEmpty, no content at all) are skipped."""
+    if msg is None or isinstance(msg, types.MessageEmpty):
+        return False
+    media = getattr(msg, "media", None)
+    if isinstance(media, types.MessageMediaEmpty):
+        media = None
+    return bool(raw_text(msg) or media or is_service(msg))
 
 
 def media_type(msg) -> Optional[str]:
@@ -125,6 +142,285 @@ def _naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.replace(tzinfo=None) if dt is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Service messages and structured media → readable text + meta
+# ---------------------------------------------------------------------------
+
+def _twe(value) -> str:
+    """Plain text of a TextWithEntities (newer layers) or a bare string."""
+    if value is None:
+        return ""
+    return getattr(value, "text", value) if not isinstance(value, str) else value
+
+
+def _duration(seconds: Optional[int]) -> str:
+    seconds = int(seconds or 0)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _period(seconds: int) -> str:
+    for unit, size in (("month", 2592000), ("week", 604800), ("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = seconds // size
+            return f"{n} {unit}{'s' if n != 1 else ''}"
+    return f"{seconds} seconds"
+
+
+def _action_name(action) -> str:
+    name = type(action).__name__
+    if name.startswith("MessageAction"):
+        name = name[len("MessageAction"):]
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _names(entities, ids) -> str:
+    out = []
+    by_id = {getattr(e, "id", None): e for e in (entities or []) if e is not None}
+    for uid in ids or []:
+        e = by_id.get(uid)
+        out.append((_sender_name(e) if e is not None else None) or f"user {uid}")
+    return ", ".join(out)
+
+
+def service_text(msg, sender=None) -> Tuple[str, dict]:
+    """Readable one-line description of a service message plus its meta."""
+    action = msg.action
+    out = bool(getattr(msg, "out", False))
+    actor = "You" if out else (_sender_name(sender) or "Someone")
+    ents = getattr(msg, "action_entities", None)
+    meta: dict = {"action": _action_name(action)}
+    A = types
+
+    if isinstance(action, A.MessageActionPhoneCall):
+        kind = "Video call" if action.video else "Call"
+        reason = action.reason
+        meta.update(duration=action.duration, video=bool(action.video))
+        if isinstance(reason, A.PhoneCallDiscardReasonMissed):
+            meta["reason"] = "missed"
+            text = f"Cancelled {kind.lower()}" if out else f"Missed {kind.lower()}"
+        elif isinstance(reason, A.PhoneCallDiscardReasonBusy):
+            meta["reason"] = "busy"
+            text = f"Declined {kind.lower()}"
+        else:
+            text = f"{'Outgoing' if out else 'Incoming'} {kind.lower()}"
+            if action.duration:
+                text += f" ({_duration(action.duration)})"
+        return text, meta
+    if isinstance(action, A.MessageActionConferenceCall):
+        meta.update(duration=action.duration, video=bool(action.video), missed=bool(action.missed))
+        if action.missed:
+            return "Missed group call", meta
+        return "Group call" + (f" ({_duration(action.duration)})" if action.duration else ""), meta
+    if isinstance(action, A.MessageActionGroupCall):
+        meta["duration"] = action.duration
+        if action.duration:
+            return f"Voice chat ended ({_duration(action.duration)})", meta
+        return f"{actor} started a voice chat", meta
+    if isinstance(action, A.MessageActionGroupCallScheduled):
+        meta["schedule_date"] = iso_utc(action.schedule_date)
+        return f"{actor} scheduled a voice chat", meta
+    if isinstance(action, A.MessageActionInviteToGroupCall):
+        meta["user_ids"] = list(action.users)
+        return f"{actor} invited {_names(ents, action.users)} to the voice chat", meta
+    if isinstance(action, A.MessageActionChatAddUser):
+        meta["user_ids"] = list(action.users)
+        if getattr(msg, "sender_id", None) in action.users:
+            return f"{actor} joined the group", meta
+        return f"{actor} added {_names(ents, action.users)}", meta
+    if isinstance(action, A.MessageActionChatDeleteUser):
+        meta["user_id"] = action.user_id
+        if getattr(msg, "sender_id", None) == action.user_id:
+            return f"{actor} left the group", meta
+        return f"{actor} removed {_names(ents, [action.user_id])}", meta
+    if isinstance(action, A.MessageActionChatJoinedByLink):
+        meta["inviter_id"] = action.inviter_id
+        return f"{actor} joined the group via invite link", meta
+    if isinstance(action, A.MessageActionChatJoinedByRequest):
+        return f"{actor} was accepted into the group", meta
+    if isinstance(action, A.MessageActionChatCreate):
+        meta.update(title=action.title, user_ids=list(action.users))
+        return f'{actor} created the group "{action.title}"', meta
+    if isinstance(action, A.MessageActionChannelCreate):
+        meta["title"] = action.title
+        return f'Channel "{action.title}" created', meta
+    if isinstance(action, A.MessageActionChatEditTitle):
+        meta["title"] = action.title
+        return f'{actor} changed the group name to "{action.title}"', meta
+    if isinstance(action, A.MessageActionChatEditPhoto):
+        return f"{actor} changed the group photo", meta
+    if isinstance(action, A.MessageActionChatDeletePhoto):
+        return f"{actor} removed the group photo", meta
+    if isinstance(action, A.MessageActionChatMigrateTo):
+        meta["channel_id"] = tl_utils.get_peer_id(A.PeerChannel(action.channel_id))
+        return "Group upgraded to a supergroup", meta
+    if isinstance(action, A.MessageActionChannelMigrateFrom):
+        meta.update(title=action.title, chat_id=-action.chat_id)
+        return f'Supergroup created from the group "{action.title}"', meta
+    if isinstance(action, A.MessageActionPinMessage):
+        return f"{actor} pinned a message", meta
+    if isinstance(action, A.MessageActionHistoryClear):
+        return "Chat history was cleared", meta
+    if isinstance(action, A.MessageActionScreenshotTaken):
+        return f"{actor} took a screenshot", meta
+    if isinstance(action, A.MessageActionContactSignUp):
+        return f"{actor} joined Telegram", meta
+    if isinstance(action, A.MessageActionSetMessagesTTL):
+        meta["period"] = action.period
+        if not action.period:
+            return f"{actor} disabled auto-delete", meta
+        return f"{actor} set messages to auto-delete after {_period(action.period)}", meta
+    if isinstance(action, A.MessageActionTopicCreate):
+        meta["title"] = action.title
+        return f'{actor} created the topic "{action.title}"', meta
+    if isinstance(action, A.MessageActionTopicEdit):
+        meta.update(title=action.title, closed=action.closed, hidden=action.hidden)
+        if action.title:
+            return f'{actor} renamed the topic to "{action.title}"', meta
+        if action.closed is not None:
+            return f"{actor} {'closed' if action.closed else 'reopened'} the topic", meta
+        if action.hidden is not None:
+            return f"{actor} {'hid' if action.hidden else 'unhid'} the topic", meta
+        return f"{actor} edited the topic", meta
+    if isinstance(action, A.MessageActionGameScore):
+        meta.update(game_id=action.game_id, score=action.score)
+        return f"{actor} scored {action.score}", meta
+    if isinstance(action, A.MessageActionCustomAction):
+        return action.message or "Service message", meta
+    if isinstance(action, (A.MessageActionPaymentSent, A.MessageActionPaymentSentMe)):
+        meta.update(currency=action.currency, total_amount=action.total_amount)
+        return f"Payment of {action.total_amount / 100:.2f} {action.currency}", meta
+    if isinstance(action, (A.MessageActionGiftPremium, A.MessageActionGiftCode)):
+        meta["days"] = getattr(action, "days", None)
+        return f"{actor} gifted Telegram Premium", meta
+    if isinstance(action, (A.MessageActionStarGift, A.MessageActionStarGiftUnique, A.MessageActionGiftStars)):
+        return f"{actor} sent a gift", meta
+    if isinstance(action, A.MessageActionSetChatTheme):
+        return f"{actor} changed the chat theme", meta
+    if isinstance(action, A.MessageActionSetChatWallPaper):
+        return f"{actor} changed the chat wallpaper", meta
+    if isinstance(action, A.MessageActionSuggestProfilePhoto):
+        return f"{actor} suggested a profile photo", meta
+    if isinstance(action, A.MessageActionBotAllowed):
+        return "You allowed this bot to message you", meta
+    if isinstance(action, A.MessageActionGeoProximityReached):
+        meta["distance"] = action.distance
+        return f"Within {action.distance} m of each other", meta
+    if isinstance(action, A.MessageActionWebViewDataSent):
+        return f"Data sent to bot: {action.text}", meta
+    if isinstance(action, A.MessageActionBoostApply):
+        meta["boosts"] = action.boosts
+        return f"{actor} boosted the group", meta
+    if isinstance(action, A.MessageActionRequestedPeer):
+        return f"{actor} shared a chat with the bot", meta
+    # Anything newer than this table: the action's own name, still readable
+    return meta["action"].replace("_", " ").capitalize(), meta
+
+
+def _poll_meta(media) -> Tuple[str, dict]:
+    poll = media.poll
+    results = getattr(media, "results", None)
+    votes = {}
+    for r in (getattr(results, "results", None) or []):
+        votes[bytes(r.option)] = r.voters
+    question = _twe(poll.question)
+    options = [{"text": _twe(a.text), "voters": votes.get(bytes(a.option))} for a in poll.answers]
+    lines = [f"{'Quiz' if poll.quiz else 'Poll'}: {question}"]
+    for o in options:
+        lines.append(f"• {o['text']}" + (f" ({o['voters']})" if o["voters"] is not None else ""))
+    return "\n".join(lines), {
+        "question": question,
+        "options": options,
+        "total_voters": getattr(results, "total_voters", None),
+        "closed": bool(poll.closed),
+        "quiz": bool(poll.quiz),
+        "multiple_choice": bool(poll.multiple_choice),
+    }
+
+
+def media_meta(msg) -> Tuple[Optional[str], dict]:
+    """(fallback text, meta) for content that isn't a file: polls, locations,
+    venues, contacts, games, dice, stories, checklists, invoices, giveaways.
+    The text is used only when the message has no caption of its own."""
+    media = getattr(msg, "media", None)
+    A = types
+    if media is None or isinstance(media, A.MessageMediaEmpty):
+        return None, {}
+    if isinstance(media, A.MessageMediaPoll):
+        text, poll = _poll_meta(media)
+        return text, {"poll": poll}
+    if isinstance(media, A.MessageMediaVenue):
+        geo = media.geo
+        venue = {"title": media.title, "address": media.address,
+                 "lat": getattr(geo, "lat", None), "long": getattr(geo, "long", None)}
+        return f"Venue: {media.title}" + (f", {media.address}" if media.address else ""), {"venue": venue}
+    if isinstance(media, (A.MessageMediaGeo, A.MessageMediaGeoLive)):
+        geo = media.geo
+        lat, lon = getattr(geo, "lat", None), getattr(geo, "long", None)
+        loc = {"lat": lat, "long": lon}
+        label = "Location"
+        if isinstance(media, A.MessageMediaGeoLive):
+            loc["live_period"] = media.period
+            label = "Live location"
+        text = f"{label}: {lat:.5f}, {lon:.5f}" if lat is not None and lon is not None else label
+        return text, {"location": loc}
+    if isinstance(media, A.MessageMediaContact):
+        name = f"{media.first_name or ''} {media.last_name or ''}".strip()
+        contact = {"first_name": media.first_name, "last_name": media.last_name,
+                   "phone": media.phone_number, "user_id": media.user_id or None}
+        parts = [p for p in (name, media.phone_number) if p]
+        return "Contact: " + (", ".join(parts) or "shared contact"), {"contact": contact}
+    if isinstance(media, A.MessageMediaGame):
+        title = getattr(media.game, "title", None) or "game"
+        return f"Game: {title}", {"game": {"title": title}}
+    if isinstance(media, A.MessageMediaDice):
+        return f"{media.emoticon} {media.value}", {"dice": {"emoticon": media.emoticon, "value": media.value}}
+    if isinstance(media, A.MessageMediaStory):
+        story = {"peer_id": tl_utils.get_peer_id(media.peer) if media.peer else None, "id": media.id,
+                 "via_mention": bool(media.via_mention)}
+        caption = _twe(getattr(media.story, "caption", None)) if media.story is not None else ""
+        return ("Story: " + caption) if caption else "Story", {"story": story}
+    if isinstance(media, getattr(A, "MessageMediaToDo", ())):
+        title = _twe(media.todo.title)
+        items = [_twe(i.title) for i in media.todo.list]
+        done = {c.id for c in (media.completions or [])}
+        todo = {"title": title, "items": [{"text": _twe(i.title), "done": i.id in done} for i in media.todo.list]}
+        return "\n".join([f"Checklist: {title}"] + [f"• {t}" for t in items]), {"todo": todo}
+    if isinstance(media, A.MessageMediaInvoice):
+        inv = {"title": media.title, "description": media.description,
+               "currency": media.currency, "total_amount": media.total_amount}
+        return f"Invoice: {media.title} ({media.total_amount / 100:.2f} {media.currency})", {"invoice": inv}
+    if isinstance(media, A.MessageMediaGiveaway):
+        return f"Giveaway: {media.quantity} prizes", {"giveaway": {"quantity": media.quantity}}
+    if isinstance(media, A.MessageMediaUnsupported):
+        return "Unsupported message (update Telegram to view)", {"unsupported": True}
+    return None, {}
+
+
+def forward_info(msg) -> Tuple[Optional[str], Optional[dict]]:
+    """(display name of the original author, forward meta) or (None, None)."""
+    hdr = getattr(msg, "fwd_from", None)
+    if hdr is None:
+        return None, None
+    name = None
+    fwd = getattr(msg, "forward", None)
+    if fwd is not None:
+        ent = getattr(fwd, "sender", None) or getattr(fwd, "chat", None)
+        if ent is not None:
+            name = _sender_name(ent)
+    name = name or hdr.from_name or hdr.post_author or getattr(hdr, "saved_from_name", None)
+    from_id = tl_utils.get_peer_id(hdr.from_id) if hdr.from_id else None
+    meta = {
+        "from_id": from_id,
+        "from_name": name,
+        "date": iso_utc(hdr.date),
+        "channel_post": hdr.channel_post,
+        "post_author": hdr.post_author,
+    }
+    return name, meta
+
+
 def message_to_row(
     msg,
     chat_id: Optional[int] = None,
@@ -140,18 +436,37 @@ def message_to_row(
     if sender is None:
         sender = getattr(msg, "sender", None)
     text = raw_text(msg)
+    text_html = entities_to_html(text, getattr(msg, "entities", None))
     topic_id, reply_to_id = topic_and_reply(msg, forum)
     from_id = getattr(msg, "from_id", None)
     sender_id = getattr(msg, "sender_id", None)
     if sender_id is None and from_id is not None:
         sender_id = getattr(from_id, "user_id", None)
+
+    meta: dict = {}
+    kind = "message"
+    if is_service(msg):
+        kind = "service"
+        text, meta["service"] = service_text(msg, sender)
+        text_html = None
+    else:
+        fallback, extra = media_meta(msg)
+        meta.update(extra)
+        if not text and fallback:
+            text, text_html = fallback, None
+    fwd_name, fwd_meta = forward_info(msg)
+    if fwd_meta is not None:
+        meta["forward"] = fwd_meta
     return {
         "tg_message_id": msg.id,
         "chat_id": chat_id,
         "sender_id": sender_id,
         "sender_name": _sender_name(sender),
         "text": text,
-        "text_html": entities_to_html(text, getattr(msg, "entities", None)),
+        "text_html": text_html,
+        "kind": kind,
+        "meta_json": json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
+        "fwd_from_name": fwd_name,
         "reactions_json": extract_reactions(msg),
         "date": _naive_utc(msg.date) or datetime.utcnow(),
         "is_outgoing": bool(getattr(msg, "out", False)),

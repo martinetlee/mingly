@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pencil, Twitter, Linkedin, Phone, StickyNote, Loader2 } from 'lucide-react'
 import type { Contact } from '../api/types'
-import { updateContact } from '../api/client'
+import { getPerson, updateContact } from '../api/client'
 import { sanitizeUrl } from '../utils/sanitizeUrl'
-import { errorMessage } from '../lib/toast'
+import { errorMessage, reportError } from '../lib/toast'
 import { invalidatePerson } from '../hooks/usePersonSummary'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { useWsEvent } from '../hooks/useWebSocket'
 import PositionsEditor from './PositionsEditor'
 
 // ---------------------------------------------------------------------------
@@ -147,12 +149,39 @@ export default function ContactInfoSection({ contact, onContactChange, compact }
   const onChangeRef = useRef(onContactChange)
   onChangeRef.current = onContactChange
 
+  // Bumped when a local field save starts and ends: a refresh that overlapped
+  // one is stale (it may predate the save) and is redone instead of applied
+  const writeSeqRef = useRef(0)
+
+  // An agent (MCP) changed this person: reload the contact in place. Fields
+  // being edited keep their draft (EditableField adopts outside values only
+  // when not editing), so the new value shows once the edit closes.
+  const refreshContact = useCoalescedRefetch(async () => {
+    const { id, telegram_id: tid } = contactRef.current
+    const seq = writeSeqRef.current
+    try {
+      const person = await getPerson(tid)
+      if (contactRef.current.id !== id || !person.contact) return
+      if (seq !== writeSeqRef.current) { refreshContact(); return }
+      onChangeRef.current({ ...person.contact, positions: person.positions })
+    } catch (e) {
+      reportError(e, "Couldn't refresh contact")
+    }
+  }, 1000)
+  useWsEvent('person_changed', (e) => { if (e.telegram_id === contactRef.current.telegram_id) refreshContact() })
+
   const iconSize = compact ? 12 : 13
   const pad = compact ? 'p-3' : 'p-4'
 
   const handleUpdateField = async (field: 'phone' | 'twitter_handle' | 'linkedin_url' | 'notes', value: string) => {
     const id = contact.id
-    const updated = await updateContact(id, { [field]: value })
+    writeSeqRef.current++
+    let updated: Contact
+    try {
+      updated = await updateContact(id, { [field]: value })
+    } finally {
+      writeSeqRef.current++
+    }
     invalidatePerson(updated.telegram_id)
     // Server response is the full contact (positions included)
     if (contactRef.current.id === id) onChangeRef.current(updated)

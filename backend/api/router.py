@@ -19,7 +19,7 @@ from backend import instance
 from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import admin, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, session, settings, llm, tags, intelligence, profiles, translate, workspaces
+from backend.api import admin, archive, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, session, settings, llm, tags, intelligence, profiles, translate, workspaces
 from backend.api.dependencies import HostOriginMiddleware, is_valid_session_token, require_session_token, validate_ws_origin
 
 logger = logging.getLogger(__name__)
@@ -121,11 +121,14 @@ def create_app() -> FastAPI:
     protected = [Depends(require_session_token)]
     app.include_router(admin.router, prefix="/api/admin", tags=["admin"], dependencies=protected)
     app.include_router(chats.router, prefix="/api/chats", tags=["chats"], dependencies=protected)
+    app.include_router(archive.router, prefix="/api/archive", tags=["archive"], dependencies=protected)
     app.include_router(compose.router, prefix="/api/compose", tags=["compose"], dependencies=protected)
     app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"], dependencies=protected)
     people_router = getattr(contacts, "people_router", None)
     if people_router is not None:
         app.include_router(people_router, prefix="/api/people", tags=["people"], dependencies=protected)
+    from backend.api import person_notes
+    app.include_router(person_notes.router, prefix="/api/people", tags=["people"], dependencies=protected)
     app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"], dependencies=protected)
     app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"], dependencies=protected)
     app.include_router(settings.router, prefix="/api/settings", tags=["settings"], dependencies=protected)

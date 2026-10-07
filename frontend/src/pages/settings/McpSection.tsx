@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { generateMcpKey, getMcpSettings, revealMcpKey, setMcpEnabled as apiSetMcpEnabled } from '../../api/client'
+import { generateMcpKey, getMcpSettings, revealMcpKey, setMcpEnabled as apiSetMcpEnabled, setMcpWriteEnabled } from '../../api/client'
 import { useConfirm } from '../../components/ui'
 import { useAsyncAction } from '../../hooks/useAsyncAction'
 import { reportError } from '../../lib/toast'
 import { Card, Section, Switch, copyText } from './shared'
+import ArchiveCard from './ArchiveCard'
 
 const smallButton = 'rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-600 disabled:opacity-50'
 
@@ -13,6 +14,7 @@ export default function McpSection() {
   const [keySet, setKeySet] = useState(false)
   const [url, setUrl] = useState('')
   const [key, setKey] = useState<string | null>(null)
+  const [writeEnabled, setWriteEnabled] = useState(false)
 
   useEffect(() => {
     getMcpSettings()
@@ -20,6 +22,7 @@ export default function McpSection() {
         setEnabled(s.enabled)
         setKeySet(s.key_set)
         setUrl(s.url)
+        setWriteEnabled(!!s.write_enabled)
       })
       .catch((e) => reportError(e, 'Failed to load MCP settings'))
   }, [])
@@ -29,6 +32,18 @@ export default function McpSection() {
     setEnabled(res.enabled)
     setKeySet(res.key_set)
   }, { errorContext: "Couldn't update the MCP server" })
+
+  // Optimistic; a failed write reverts the switch (useAsyncAction toasts the error)
+  const toggleWrite = useAsyncAction(async (next: boolean) => {
+    setWriteEnabled(next)
+    try {
+      const res = await setMcpWriteEnabled(next)
+      setWriteEnabled(res.write_enabled)
+    } catch (e) {
+      setWriteEnabled(!next)
+      throw e
+    }
+  }, { errorContext: "Couldn't update agent write access" })
 
   const generate = useAsyncAction(async () => {
     const res = await generateMcpKey()
@@ -63,7 +78,7 @@ export default function McpSection() {
   return (
     <Section
       title="MCP Server"
-      description="Let external AI tools (Claude Code, other MCP clients) read your chats, messages, tags, contacts, and organizations. Read-only, local-only, and active only while Mingly is running and unlocked."
+      description="Let external AI tools (Claude Code, other MCP clients) read your chats (including hidden and archived ones; deactivated groups excluded), messages, tags, contacts, and organizations — and, if you allow it, record notes about people. Local-only, and active only while Mingly is running and unlocked. Nothing ever sends Telegram messages."
     >
       <Card>
         <div className="flex items-center justify-between gap-3">
@@ -72,6 +87,24 @@ export default function McpSection() {
             <p className="text-xs text-slate-400 mt-0.5">Off by default. Requires an access key.</p>
           </div>
           <Switch checked={enabled} disabled={busy} onChange={(next) => void toggle.run(next)} label="Enable MCP server" />
+        </div>
+
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-700 pt-4">
+          <div>
+            <p className="text-sm text-slate-200">Allow agent to write notes and context</p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Read tools are always available to a connected client. Write tools are opt-in and off by default: adding
+              and updating its own person notes, setting important / relationship status / Twitter / LinkedIn (never
+              your own contact notes), adding positions, tagging chats, and marking DMs reviewed. Agent notes appear on
+              each person's Profile, where you can edit or delete them. Telegram itself is never modified.
+            </p>
+          </div>
+          <Switch
+            checked={writeEnabled}
+            disabled={toggleWrite.pending}
+            onChange={(next) => void toggleWrite.run(next)}
+            label="Allow agent to write notes and context"
+          />
         </div>
 
         {enabled && (
@@ -135,6 +168,7 @@ export default function McpSection() {
           </div>
         )}
       </Card>
+      <ArchiveCard />
     </Section>
   )
 }

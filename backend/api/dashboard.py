@@ -57,6 +57,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         .where(
             Message.date >= cutoff_24h,
             Message.is_outgoing == False,  # noqa: E712
+            Message.kind == "message",
             Chat.is_hidden == False,  # noqa: E712
             Chat.is_deactivated == False,  # noqa: E712
             relevant_chat_filter,

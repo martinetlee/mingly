@@ -162,6 +162,7 @@ class TelegramRuntime:
 
     async def stop(self, *, disconnect: bool = True) -> None:
         """Cancel runtime tasks, remove handlers and (optionally) disconnect."""
+        from backend.telegram import archive
         from backend.telegram.media import stop_media_workers
         from backend.telegram.sync import cancel_tag_sync
 
@@ -169,6 +170,7 @@ class TelegramRuntime:
             self._teardown_locked()
             stop_media_workers()
             cancel_tag_sync()
+            archive.stop()
             if disconnect:
                 await tg_client.disconnect()
             await self._set_state("stopped")
@@ -198,6 +200,11 @@ class TelegramRuntime:
         await self._step("numeric_names", resolve_numeric_names())
         await self._step("unscanned_scan", self._scan_unscanned())
         await self._step("text_repair", repair_garbled_text())
+        # Full DM history archive: its own single-flight job, so it never
+        # blocks unlock or this sequence (its first step reuses the dialog
+        # enumeration done above).
+        from backend.telegram import archive
+        archive.auto_start()
 
     async def _scan_unscanned(self) -> None:
         try:

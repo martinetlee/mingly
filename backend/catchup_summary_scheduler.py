@@ -185,6 +185,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
                 Message.chat_id == chat_telegram_id,
                 Message.date > anchor_date,
                 Message.is_outgoing == False,  # noqa: E712
+                Message.kind == "message",
             )
             .order_by(desc(Message.date)).limit(POST_ANCHOR_LIMIT)
         )).scalars().all()
@@ -194,7 +195,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
     else:
         recent_incoming = (await db.execute(
             select(Message)
-            .where(Message.chat_id == chat_telegram_id, Message.is_outgoing == False)  # noqa: E712
+            .where(Message.chat_id == chat_telegram_id, Message.is_outgoing == False, Message.kind == "message")  # noqa: E712
             .order_by(desc(Message.date)).limit(5)
         )).scalars().all()
         for m in reversed(recent_incoming):

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import select, delete, update, desc, asc, func, or_, and_, case, exists, true
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
     Chat, Message, Tag, ChatTag, BriefingRun, BriefingEntry, Conversation, ConversationMessage, Contact,
-    Workspace, WorkspaceTag, WorkspaceColumn, WorkspaceChatOverride, WorkspaceBoard,
+    Workspace, WorkspaceTag, WorkspaceColumn, WorkspaceChatOverride, WorkspaceBoard, ChatHistoryCoverage,
 )
 
 
@@ -155,6 +156,10 @@ async def upsert_chat(
     slow_mode_seconds: Optional[int] = None,
     last_message_date: Optional[datetime] = None,
     is_deactivated: Optional[bool] = None,
+    is_archived: Optional[bool] = None,
+    is_bot: Optional[bool] = None,
+    is_deleted_account: Optional[bool] = None,
+    is_self: Optional[bool] = None,
     commit: bool = True,
 ) -> Chat:
     """Insert or update a chat in one statement (race-free).
@@ -174,6 +179,10 @@ async def upsert_chat(
         slow_mode_seconds=slow_mode_seconds if slow_mode_seconds is not None else 0,
         last_activity_at=last_message_date,
         is_deactivated=is_deactivated if is_deactivated is not None else False,
+        is_archived=bool(is_archived),
+        is_bot=bool(is_bot),
+        is_deleted_account=bool(is_deleted_account),
+        is_self=bool(is_self),
         created_at=datetime.utcnow(),
     )
     stmt = sqlite_insert(Chat).values(**values)
@@ -187,8 +196,12 @@ async def upsert_chat(
         set_["is_forum"] = ex.is_forum
     if slow_mode_seconds is not None:
         set_["slow_mode_seconds"] = ex.slow_mode_seconds
-    if is_deactivated is not None:
-        set_["is_deactivated"] = ex.is_deactivated
+    for flag, value in (
+        ("is_deactivated", is_deactivated), ("is_archived", is_archived), ("is_bot", is_bot),
+        ("is_deleted_account", is_deleted_account), ("is_self", is_self),
+    ):
+        if value is not None:
+            set_[flag] = getattr(ex, flag)
     if last_message_date is not None:
         set_["last_activity_at"] = case(
             (or_(Chat.last_activity_at.is_(None), Chat.last_activity_at < ex.last_activity_at), ex.last_activity_at),
@@ -423,6 +436,7 @@ async def message_exists(db: AsyncSession, telegram_id: int, chat_id: int) -> bo
 _MSG_TG_OWNED = (
     "text", "text_html", "reactions_json", "is_pinned", "is_edited", "media_type",
     "media_filename", "media_size", "grouped_id", "reply_to_tg_message_id", "is_outgoing",
+    "kind", "meta_json", "fwd_from_name",
 )
 # Telegram-owned but not always known by every writer (e.g. compose has no
 # sender name, mention search has no forum flag): keep the old value on None.
@@ -777,6 +791,38 @@ async def get_oldest_message_id(db: AsyncSession, chat_id: int, topic_id: Option
         .limit(1)
     )
     return res.scalar()
+
+
+# --- History coverage (backend.telegram.archive) ---
+
+async def get_coverage(db: AsyncSession, chat_ids: list[int]) -> dict[int, ChatHistoryCoverage]:
+    """Coverage rows by chat id; chats without a row are absent (= nothing known)."""
+    if not chat_ids:
+        return {}
+    out: dict[int, ChatHistoryCoverage] = {}
+    ids = list(set(chat_ids))
+    for i in range(0, len(ids), 500):
+        res = await db.execute(select(ChatHistoryCoverage).where(ChatHistoryCoverage.chat_id.in_(ids[i:i + 500])))
+        out.update({c.chat_id: c for c in res.scalars().all()})
+    return out
+
+
+async def get_or_create_coverage(db: AsyncSession, chat_id: int) -> ChatHistoryCoverage:
+    await db.execute(
+        sqlite_insert(ChatHistoryCoverage).values(chat_id=chat_id, history_complete=False, attempts=0)
+        .on_conflict_do_nothing(index_elements=[ChatHistoryCoverage.chat_id])
+    )
+    res = await db.execute(
+        select(ChatHistoryCoverage).where(ChatHistoryCoverage.chat_id == chat_id)
+        .execution_options(populate_existing=True)
+    )
+    return res.scalar_one()
+
+
+async def count_chat_messages(db: AsyncSession, chat_id: int) -> int:
+    return (await db.execute(
+        select(func.count()).select_from(Message).where(Message.chat_id == chat_id)
+    )).scalar() or 0
 
 
 # --- Tags ---
@@ -2084,6 +2130,7 @@ async def get_needs_reply(
                 order_by=(desc(Message.date), desc(Message.tg_message_id)),
             ).label("rn"),
         )
+        .where(Message.kind == "message")  # service lines (joins, calls…) need no reply
         .subquery()
     )
     base = (
@@ -2364,13 +2411,13 @@ async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tup
     # Get last outgoing and incoming message dates
     last_out_result = await db.execute(
         select(func.max(Message.date))
-        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == True)  # noqa: E712
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == True, Message.kind == "message")  # noqa: E712
     )
     last_outgoing = last_out_result.scalar()
 
     last_in_result = await db.execute(
         select(func.max(Message.date))
-        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == False)  # noqa: E712
+        .where(Message.chat_id == contact.telegram_id, Message.is_outgoing == False, Message.kind == "message")  # noqa: E712
     )
     last_incoming = last_in_result.scalar()
 
@@ -2391,6 +2438,7 @@ async def compute_relationship_status(db: AsyncSession, contact: Contact) -> tup
             .where(
                 Message.chat_id == contact.telegram_id,
                 Message.is_outgoing == False,  # noqa: E712
+                Message.kind == "message",
             )
             .order_by(desc(Message.date))
             .limit(1)
@@ -2700,3 +2748,368 @@ async def delete_organization(db: AsyncSession, org: Organization, mode: str = "
     await db.delete(org)
     await db.flush()
     return counts
+
+
+# --- Person writes shared by REST routes and MCP tools ---
+
+from backend.db.models import AgentReview, PersonNote  # noqa: E402
+
+
+class PositionConflict(ValueError):
+    """The person already has a position at this organization."""
+
+
+async def get_or_create_contact(db: AsyncSession, telegram_id: int, **fields) -> Contact:
+    """Race-safe get-or-create on the unique telegram_id. Commits a new row."""
+    contact = (await db.execute(
+        select(Contact).where(Contact.telegram_id == telegram_id)
+    )).scalar_one_or_none()
+    if contact:
+        return contact
+    contact = Contact(telegram_id=telegram_id, **fields)
+    db.add(contact)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        contact = (await db.execute(
+            select(Contact).where(Contact.telegram_id == telegram_id)
+        )).scalar_one()
+    return contact
+
+
+def apply_contact_fields(
+    contact: Contact,
+    *,
+    twitter_handle: Optional[str] = None,
+    linkedin_url: Optional[str] = None,
+    phone: Optional[str] = None,
+    notes: Optional[str] = None,
+    is_important: Optional[bool] = None,
+) -> None:
+    """Set the given fields (None = leave alone, "" = clear). Raises ValueError
+    for an invalid LinkedIn URL before touching anything. Doesn't commit."""
+    from backend.api.validators import validate_linkedin_url
+
+    linkedin = None
+    if linkedin_url is not None:
+        raw = linkedin_url.strip()
+        linkedin = validate_linkedin_url(raw) if raw else ""
+    if twitter_handle is not None:
+        contact.twitter_handle = twitter_handle.strip() or None
+    if linkedin is not None:
+        contact.linkedin_url = linkedin or None
+    if phone is not None:
+        contact.phone = phone.strip() or None
+    if notes is not None:
+        contact.notes = notes.strip() or None
+    if is_important is not None:
+        contact.is_important = is_important
+
+
+def set_manual_relationship_status(contact: Contact, status: str) -> None:
+    """Pin a relationship status by hand. Raises ValueError for an unknown status."""
+    if status not in VALID_STATUSES:
+        raise ValueError(f"Invalid status. Must be one of: {', '.join(sorted(VALID_STATUSES))}")
+    contact.relationship_status = status
+    contact.relationship_status_manual = True
+
+
+async def add_person_position(
+    db: AsyncSession,
+    telegram_id: int,
+    *,
+    organization: Optional[str] = None,
+    organization_id: Optional[int] = None,
+    title: Optional[str] = None,
+    is_active: bool = True,
+    ended_at: Optional[datetime] = None,
+) -> ContactPosition:
+    """Add a position; the org is given by id or by name (matched
+    case/whitespace-insensitively, created if new). Commits. Raises LookupError
+    for an unknown organization_id, ValueError for an empty name and
+    PositionConflict when the person already has a position there."""
+    if organization_id is not None:
+        org = await db.get(Organization, organization_id)
+        if not org:
+            raise LookupError("Organization not found")
+    else:
+        org, _created = await get_or_create_organization(db, organization or "")
+
+    duplicate = (await db.execute(select(ContactPosition.id).where(
+        ContactPosition.telegram_id == telegram_id, ContactPosition.organization_id == org.id,
+    ))).first()
+    if duplicate:
+        await db.commit()  # keep a newly created org / re-attached history
+        raise PositionConflict(f"Already has a position at {org.name}")
+
+    pos = ContactPosition(
+        telegram_id=telegram_id,
+        organization_id=org.id,
+        organization=org.name,
+        title=(title or "").strip() or None,
+        is_active=is_active,
+        ended_at=ended_at if not is_active else None,
+    )
+    db.add(pos)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise PositionConflict("Position already exists")
+    await db.refresh(pos)
+    return pos
+
+
+async def find_or_create_tag(db: AsyncSession, tag_name: str):
+    """User tag by name (never a board stage tag), created if missing.
+    Returns (tag, None) or (None, readable error)."""
+    tag = await find_tag_by_name(db, tag_name)
+    if tag is not None:
+        return tag, None
+    try:
+        return await create_tag(db, name=tag_name), None
+    except NameConflict as exc:  # created concurrently
+        await db.rollback()
+        tag = await find_tag_by_name(db, tag_name)
+        return (tag, None) if tag is not None else (None, str(exc))
+    except ValueError as exc:
+        await db.rollback()
+        return None, str(exc)
+
+
+# --- Person notes ---
+
+NOTE_KINDS = ("context", "due_diligence", "risk", "relationship", "todo")
+NOTE_AUTHORS = ("user", "agent")
+NOTE_TITLE_MAX = 200
+NOTE_BODY_MAX = 20000
+NOTE_CITATIONS_MAX = 50
+
+
+def normalize_citations(raw) -> list:
+    """[{chat_id, tg_message_id}] with int ids, deduplicated, order kept.
+    Raises ValueError on a malformed list."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("citations must be a list of {chat_id, tg_message_id}")
+    if len(raw) > NOTE_CITATIONS_MAX:
+        raise ValueError(f"At most {NOTE_CITATIONS_MAX} citations per note")
+    out, seen = [], set()
+    for c in raw:
+        if not isinstance(c, dict):
+            raise ValueError("Each citation must be an object {chat_id, tg_message_id}")
+        try:
+            key = (int(c["chat_id"]), int(c["tg_message_id"]))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Each citation needs integer chat_id and tg_message_id")
+        if isinstance(c["chat_id"], bool) or isinstance(c["tg_message_id"], bool):
+            raise ValueError("Each citation needs integer chat_id and tg_message_id")
+        if key not in seen:
+            seen.add(key)
+            out.append({"chat_id": key[0], "tg_message_id": key[1]})
+    return out
+
+
+async def missing_citations(db: AsyncSession, citations: list) -> list:
+    """Citations whose message isn't stored locally."""
+    if not citations:
+        return []
+    keys = [(c["chat_id"], c["tg_message_id"]) for c in citations]
+    found = set((await db.execute(
+        select(Message.chat_id, Message.tg_message_id).where(
+            or_(*[and_(Message.chat_id == ch, Message.tg_message_id == m) for ch, m in keys])
+        )
+    )).all())
+    return [c for c, k in zip(citations, keys) if k not in found]
+
+
+def validate_note_fields(kind: Optional[str], title: Optional[str], body: Optional[str]) -> None:
+    """Raise ValueError for a bad kind / empty or oversized title / oversized body
+    (None = not being set)."""
+    if kind is not None and kind not in NOTE_KINDS:
+        raise ValueError(f"kind must be one of: {', '.join(NOTE_KINDS)}")
+    if title is not None:
+        if not title.strip():
+            raise ValueError("title cannot be empty")
+        if len(title) > NOTE_TITLE_MAX:
+            raise ValueError(f"title is longer than {NOTE_TITLE_MAX} characters")
+    if body is not None and len(body) > NOTE_BODY_MAX:
+        raise ValueError(f"body is longer than {NOTE_BODY_MAX} characters")
+
+
+async def _checked_citations(db: AsyncSession, raw) -> list:
+    citations = normalize_citations(raw)
+    missing = await missing_citations(db, citations)
+    if missing:
+        listed = ", ".join(f"{c['chat_id']}/{c['tg_message_id']}" for c in missing[:10])
+        raise ValueError(f"Cited messages not found locally (chat_id/tg_message_id): {listed}")
+    return citations
+
+
+async def list_person_notes(db: AsyncSession, telegram_id: int) -> list:
+    return list((await db.execute(
+        select(PersonNote).where(PersonNote.telegram_id == telegram_id)
+        .order_by(desc(PersonNote.created_at), desc(PersonNote.id))
+    )).scalars().all())
+
+
+async def count_person_notes(db: AsyncSession, telegram_ids: list) -> dict:
+    if not telegram_ids:
+        return {}
+    return dict((await db.execute(
+        select(PersonNote.telegram_id, func.count()).where(PersonNote.telegram_id.in_(telegram_ids))
+        .group_by(PersonNote.telegram_id)
+    )).all())
+
+
+async def get_person_note(db: AsyncSession, note_id: int) -> Optional[PersonNote]:
+    return await db.get(PersonNote, note_id)
+
+
+async def create_person_note(
+    db: AsyncSession,
+    telegram_id: int,
+    *,
+    kind: str,
+    title: str,
+    body: str = "",
+    citations=None,
+    author: str = "user",
+    agent_label: Optional[str] = None,
+) -> PersonNote:
+    """Validates fields and that every citation is stored locally (ValueError). Commits."""
+    if author not in NOTE_AUTHORS:
+        raise ValueError("author must be 'user' or 'agent'")
+    validate_note_fields(kind, title, body)
+    checked = await _checked_citations(db, citations)
+    now = datetime.utcnow()
+    note = PersonNote(
+        telegram_id=telegram_id, kind=kind, title=title.strip(), body=body or "",
+        citations_json=json.dumps(checked) if checked else None,
+        author=author, agent_label=(agent_label or "").strip()[:100] or None,
+        created_at=now, updated_at=now,
+    )
+    db.add(note)
+    await db.commit()
+    await db.refresh(note)
+    return note
+
+
+async def update_person_note(
+    db: AsyncSession,
+    note: PersonNote,
+    *,
+    kind: Optional[str] = None,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    citations=None,
+) -> PersonNote:
+    """Partial update (None = unchanged; citations=[] clears). Commits."""
+    validate_note_fields(kind, title, body)
+    if citations is not None:
+        checked = await _checked_citations(db, citations)
+        note.citations_json = json.dumps(checked) if checked else None
+    if kind is not None:
+        note.kind = kind
+    if title is not None:
+        note.title = title.strip()
+    if body is not None:
+        note.body = body
+    note.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(note)
+    return note
+
+
+async def delete_person_note(db: AsyncSession, note: PersonNote) -> None:
+    await db.delete(note)
+    await db.commit()
+
+
+def note_citations(note: PersonNote) -> list:
+    try:
+        return json.loads(note.citations_json) if note.citations_json else []
+    except ValueError:
+        return []
+
+
+# --- Agent reviews ---
+
+def newest_stored_tg_id():
+    """Correlated scalar: the newest stored message id of Chat (NULL if none)."""
+    return (
+        select(func.max(Message.tg_message_id))
+        .where(Message.chat_id == Chat.telegram_id)
+        .correlate(Chat)
+        .scalar_subquery()
+    )
+
+
+def review_up_to_date():
+    """SQL predicate over Chat outer-joined to ChatHistoryCoverage and
+    AgentReview: history complete, reviewed through the newest stored message,
+    and no older message has appeared since the review."""
+    from backend.db.models import ChatHistoryCoverage
+
+    newest = newest_stored_tg_id()
+    stored_le_through = (
+        select(func.count()).select_from(Message)
+        .where(Message.chat_id == Chat.telegram_id,
+               Message.tg_message_id <= AgentReview.reviewed_through_tg_id)
+        .correlate(Chat, AgentReview)
+        .scalar_subquery()
+    )
+    return and_(
+        func.coalesce(ChatHistoryCoverage.history_complete, False) == True,  # noqa: E712
+        AgentReview.chat_id.isnot(None),
+        or_(newest.is_(None), AgentReview.reviewed_through_tg_id >= newest),
+        stored_le_through <= AgentReview.reviewed_message_count,
+    )
+
+
+async def get_agent_reviews(db: AsyncSession, chat_ids: list) -> dict:
+    if not chat_ids:
+        return {}
+    rows = (await db.execute(select(AgentReview).where(AgentReview.chat_id.in_(chat_ids)))).scalars().all()
+    return {r.chat_id: r for r in rows}
+
+
+async def mark_chat_reviewed(
+    db: AsyncSession, chat_id: int, through_tg_id: int, agent_label: Optional[str] = None,
+) -> AgentReview:
+    """Record a review through `through_tg_id` (never moves backwards). The
+    message must be stored in the chat, or 0 for a chat with no stored
+    messages (ValueError otherwise). Commits."""
+    if through_tg_id == 0:
+        has_any = (await db.execute(
+            select(Message.id).where(Message.chat_id == chat_id).limit(1)
+        )).first()
+        if has_any:
+            raise ValueError("through_tg_message_id must be a stored message id (0 only for an empty chat)")
+    elif not await message_exists_in_chat(db, chat_id, through_tg_id):
+        raise ValueError(f"Message {through_tg_id} is not stored in chat {chat_id}")
+
+    review = await db.get(AgentReview, chat_id)
+    through = max(through_tg_id, review.reviewed_through_tg_id) if review else through_tg_id
+    count = (await db.execute(
+        select(func.count()).select_from(Message)
+        .where(Message.chat_id == chat_id, Message.tg_message_id <= through)
+    )).scalar() or 0
+    if review is None:
+        review = AgentReview(chat_id=chat_id)
+        db.add(review)
+    review.reviewed_through_tg_id = through
+    review.reviewed_message_count = count
+    review.reviewed_at = datetime.utcnow()
+    review.agent_label = (agent_label or "").strip()[:100] or None
+    await db.commit()
+    await db.refresh(review)
+    return review
+
+
+async def message_exists_in_chat(db: AsyncSession, chat_id: int, tg_message_id: int) -> bool:
+    return (await db.execute(
+        select(Message.id).where(Message.chat_id == chat_id, Message.tg_message_id == tg_message_id).limit(1)
+    )).first() is not None

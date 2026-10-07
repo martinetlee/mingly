@@ -541,18 +541,28 @@ def get_mcp_enabled() -> bool:
     return bool(_load_prefs().get("mcp_enabled", False))
 
 
+def get_mcp_write_enabled() -> bool:
+    """Whether MCP write tools (notes, person fields, tags, review marks) may run (default off)."""
+    return bool(_load_prefs().get("mcp_write_enabled", False))
+
+
 class McpSettingsRequest(BaseModel):
+    enabled: bool
+
+
+class McpWriteRequest(BaseModel):
     enabled: bool
 
 
 @router.get("/prefs/mcp")
 async def get_mcp_settings():
-    """MCP server status: enabled flag, whether a key exists, and the live URL."""
+    """MCP server status: enabled flag, write access, whether a key exists, and the live URL."""
     from backend.config import API_PORT
     from backend.secrets import get_secret, vault_status
 
     return {
         "enabled": get_mcp_enabled(),
+        "write_enabled": get_mcp_write_enabled(),
         "key_set": get_secret("mcp_api_key") is not None,
         "url": f"http://127.0.0.1:{API_PORT}/mcp",
         "vault_unlocked": vault_status() == "unlocked",
@@ -571,6 +581,15 @@ async def set_mcp_settings(req: McpSettingsRequest):
         "enabled": req.enabled,
         "key_set": get_secret("mcp_api_key") is not None,
     }
+
+
+@router.post("/prefs/mcp/write")
+async def set_mcp_write(req: McpWriteRequest):
+    """Allow or forbid the MCP write tools. Read tools are unaffected."""
+    prefs = _load_prefs()
+    prefs["mcp_write_enabled"] = req.enabled
+    _save_prefs(prefs)
+    return {"write_enabled": req.enabled}
 
 
 @router.post("/prefs/mcp/generate-key")
