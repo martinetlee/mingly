@@ -1,145 +1,157 @@
 """Shared helper to resolve organizational context for LLM prompts.
 
-Given a list of sender names from a chat, identifies which ones are
-colleagues of the user (belong to the same organizations) and returns
-a concise context string for injection into LLM prompts.
+Given sender names from a chat, identifies which ones are colleagues of the
+user (active position in one of the user's organizations) and returns a
+concise context string for injection into LLM prompts.
+
+``OrgDirectory`` loads the colleague list once (filtered in SQL to the user's
+orgs) so a briefing run with many chats does one query, not one per chat.
 """
 
 import logging
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.settings import _load_prefs
-from backend.db.models import Contact, ContactPosition
+from backend.db.models import Contact, ContactPosition, Organization
 
 logger = logging.getLogger(__name__)
 
 
 def get_user_organizations() -> list[str]:
     """Return the list of org names the user belongs to (from prefs)."""
-    prefs = _load_prefs()
-    return prefs.get("user_organizations", [])
+    orgs = _load_prefs().get("user_organizations", [])
+    return [o for o in orgs if isinstance(o, str) and o.strip()]
+
+
+def get_user_organization_ids() -> Optional[list[int]]:
+    """Org ids the user belongs to (prefs ``user_organization_ids``, kept by
+    backend.user_orgs), or None when only legacy names are stored."""
+    ids = _load_prefs().get("user_organization_ids")
+    if not isinstance(ids, list):
+        return None
+    return [i for i in ids if isinstance(i, int) and not isinstance(i, bool)]
+
+
+async def resolve_user_org_ids(
+    db: AsyncSession,
+    names: Optional[list[str]] = None,
+    ids: Optional[list[int]] = None,
+) -> list[int]:
+    """The user's organizations as existing organization ids: stored ids that
+    still exist, plus names resolved through the normalized name key
+    lower(trim(name)) (legacy prefs / name-only entries). Renames can't break
+    the id part; unknown ids and unresolvable names are dropped."""
+    found: list[int] = []
+    if ids:
+        found += (await db.execute(
+            select(Organization.id).where(Organization.id.in_(ids))
+        )).scalars().all()
+    names = [n.strip() for n in (names or []) if n and n.strip()]
+    if names:
+        found += (await db.execute(
+            select(Organization.id).where(
+                func.lower(func.trim(Organization.name)).in_([n.lower() for n in names])
+            )
+        )).scalars().all()
+    return list(dict.fromkeys(found))
+
+
+class OrgDirectory:
+    """Colleagues of the user, keyed by lowercased first name and full name.
+
+    A colleague is a contact with an ACTIVE position ATTACHED to one of the
+    user's organizations (organization_id set); detached positions — org
+    deleted with mode=detach — never count."""
+
+    def __init__(self, rows: list[tuple]):
+        # name_lower -> list of (title, org)
+        self._by_name: dict[str, list[tuple[str, str]]] = {}
+        for first_name, last_name, title, org in rows:
+            entry = (title or "", org)
+            first = (first_name or "").strip()
+            full = f"{first} {(last_name or '').strip()}".strip()
+            for key in {first.lower(), full.lower()}:
+                if key:
+                    self._by_name.setdefault(key, []).append(entry)
+
+    @classmethod
+    async def load(
+        cls,
+        db: AsyncSession,
+        user_orgs: Optional[list[str]] = None,
+        user_org_ids: Optional[list[int]] = None,
+    ) -> "OrgDirectory":
+        """With neither argument, the user's orgs are read from prefs."""
+        if user_orgs is None and user_org_ids is None:
+            # Prefs path: backend.user_orgs owns the representation (and
+            # migrates legacy names to ids as it reads).
+            from backend.user_orgs import resolve_user_orgs
+            org_ids = [e["id"] for e in await resolve_user_orgs(db) if e.get("id") is not None]
+        else:
+            org_ids = await resolve_user_org_ids(db, user_orgs, user_org_ids)
+        if not org_ids:
+            return cls([])
+        rows = (await db.execute(
+            select(Contact.first_name, Contact.last_name, ContactPosition.title, Organization.name)
+            .join(ContactPosition, ContactPosition.telegram_id == Contact.telegram_id)
+            .join(Organization, Organization.id == ContactPosition.organization_id)
+            .where(
+                ContactPosition.is_active == True,  # noqa: E712
+                ContactPosition.organization_id.in_(org_ids),
+            )
+        )).all()
+        return cls(list(rows))
+
+    def for_senders(self, sender_names: list[str]) -> Optional[str]:
+        """'Your colleagues in this chat: Alice (Engineer at Zircuit), Bob (at Zircuit).' or None."""
+        parts: list[str] = []
+        for name in dict.fromkeys(n for n in sender_names if n):
+            for title, org in self._by_name.get(name.lower(), []):
+                parts.append(f"{name} ({title} at {org})" if title else f"{name} (at {org})")
+        if not parts:
+            return None
+        return "Your colleagues in this chat: " + ", ".join(parts) + "."
+
+    def for_contact(self, contact_name: str) -> Optional[str]:
+        matches = self._by_name.get((contact_name or "").lower())
+        if not matches:
+            return None
+        title, org = matches[0]
+        if title:
+            return f"This person is your colleague: {contact_name} ({title} at {org})."
+        return f"This person is your colleague at {org}."
 
 
 async def get_org_context_for_senders(
     db: AsyncSession,
     sender_names: list[str],
 ) -> Optional[str]:
-    """Look up which senders are colleagues (share an org with the user).
-
-    Returns a string like:
-        "Your colleagues in this chat: Alice (Engineer at Zircuit), Bob (PM at Zircuit)."
-    or None if no matches / user has no orgs configured.
-    """
-    user_orgs = get_user_organizations()
-    if not user_orgs or not sender_names:
+    """One-off lookup; prefer ``OrgDirectory.load`` once per batch."""
+    if not sender_names:
         return None
-
-    # Normalize for case-insensitive matching
-    user_orgs_lower = {o.lower() for o in user_orgs}
-
-    # Find contacts whose first_name (or first_name + last_name) matches sender names
-    # and who have an active position in one of the user's orgs
-    q = (
-        select(
-            Contact.first_name,
-            Contact.last_name,
-            ContactPosition.title,
-            ContactPosition.organization,
-        )
-        .join(ContactPosition, ContactPosition.telegram_id == Contact.telegram_id)
-        .where(
-            ContactPosition.is_active == True,  # noqa: E712
-        )
-    )
-    rows = (await db.execute(q)).all()
-
-    # Build lookup: sender_name -> list of (title, org)
-    matches: dict[str, list[tuple[str, str]]] = {}
-    sender_names_lower = {s.lower(): s for s in sender_names}
-
-    for first_name, last_name, title, org in rows:
-        if org.lower() not in user_orgs_lower:
-            continue
-        # Try matching against sender names
-        full_name = f"{first_name} {last_name}".strip() if last_name else (first_name or "")
-        for candidate_lower, candidate_original in sender_names_lower.items():
-            if (
-                (first_name and first_name.lower() == candidate_lower)
-                or (full_name and full_name.lower() == candidate_lower)
-            ):
-                matches.setdefault(candidate_original, []).append((title or "", org))
-
-    if not matches:
-        return None
-
-    parts = []
-    for name, positions in matches.items():
-        for title, org in positions:
-            if title:
-                parts.append(f"{name} ({title} at {org})")
-            else:
-                parts.append(f"{name} (at {org})")
-
-    return "Your colleagues in this chat: " + ", ".join(parts) + "."
+    return (await OrgDirectory.load(db)).for_senders(sender_names)
 
 
 async def get_org_context_for_contact(
     db: AsyncSession,
     contact_name: str,
 ) -> Optional[str]:
-    """Get org context for a single contact (used in 1-on-1 briefings).
-
-    Returns a string like:
-        "This person is your colleague: Alice (Engineer at Zircuit)."
-    or None if no match.
-    """
-    user_orgs = get_user_organizations()
-    if not user_orgs:
-        return None
-
-    user_orgs_lower = {o.lower() for o in user_orgs}
-
-    q = (
-        select(
-            Contact.first_name,
-            Contact.last_name,
-            ContactPosition.title,
-            ContactPosition.organization,
-        )
-        .join(ContactPosition, ContactPosition.telegram_id == Contact.telegram_id)
-        .where(ContactPosition.is_active == True)  # noqa: E712
-    )
-    rows = (await db.execute(q)).all()
-
-    contact_lower = contact_name.lower()
-    for first_name, last_name, title, org in rows:
-        if org.lower() not in user_orgs_lower:
-            continue
-        full_name = f"{first_name} {last_name}".strip() if last_name else (first_name or "")
-        if (
-            (first_name and first_name.lower() == contact_lower)
-            or (full_name and full_name.lower() == contact_lower)
-        ):
-            if title:
-                return f"This person is your colleague: {contact_name} ({title} at {org})."
-            else:
-                return f"This person is your colleague at {org}."
-
-    return None
+    """One-off lookup for a 1-on-1 contact; prefer ``OrgDirectory.load`` once per batch."""
+    return (await OrgDirectory.load(db)).for_contact(contact_name)
 
 
-def get_user_orgs_system_context() -> Optional[str]:
+def get_user_orgs_system_context(user_orgs: Optional[list[str]] = None) -> Optional[str]:
     """Return a system-level context string about the user's organizations.
 
     Used for intelligence chat where we don't have specific senders yet.
     """
-    user_orgs = get_user_organizations()
-    if not user_orgs:
+    orgs = user_orgs if user_orgs is not None else get_user_organizations()
+    if not orgs:
         return None
-    org_list = ", ".join(user_orgs)
+    org_list = ", ".join(orgs)
     return (
         f"The user belongs to these organizations: {org_list}. "
         "When you encounter people from these organizations in chats or messages, "

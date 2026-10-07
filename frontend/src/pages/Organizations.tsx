@@ -1,9 +1,17 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw, Sparkles, Loader2, ChevronDown, ChevronRight, UserMinus } from 'lucide-react'
+import { Plus, Search, Building2, Pencil, Trash2, Users, MessageSquare, FileText, RefreshCw, Sparkles, Loader2, ChevronDown, ChevronRight, UserMinus, GitMerge } from 'lucide-react'
 import type { OrgSummary, OrgDetail } from '../api/types'
-import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs, generateOrgContext } from '../api/client'
+import { getOrganizations, getOrganization, createOrganization, updateOrganization, deleteOrganization, autoDiscoverOrgs, generateOrgContext, ApiError } from '../api/client'
+import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useDebouncedValue } from '../hooks/useDebouncedQuery'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { invalidateAllPeople } from '../hooks/usePersonSummary'
+import { useConfirm } from '../components/ui'
+import { errorMessage, reportError, toast } from '../lib/toast'
+import { fmtDateTime, parseServerDate } from '../utils/time'
 import PersonCard from '../components/PersonCard'
+import MergeOrgDialog from '../components/MergeOrgDialog'
 
 function OrgCard({
   org,
@@ -39,137 +47,216 @@ function OrgCard({
   )
 }
 
+/** 409 `organization_exists` → the org that already holds the name */
+function existingOrg(e: unknown): { id: number; name: string } | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.serverCode !== 'organization_exists') return null
+  const id = Number(e.body?.existing_id)
+  return Number.isFinite(id) ? { id, name: String(e.body?.existing_name ?? '') } : null
+}
+
+/** End dates are calendar dates: show them in UTC so they don't shift a day. */
+function fmtEndDate(iso: string): string {
+  const d = parseServerDate(iso)
+  return d ? d.toLocaleDateString(undefined, { timeZone: 'UTC' }) : iso
+}
+
 export default function Organizations() {
   const location = useLocation()
-  const [orgs, setOrgs] = useState<OrgSummary[]>([])
-  const [selected, setSelected] = useState<OrgDetail | null>(null)
+  const confirm = useConfirm()
   const [search, setSearch] = useState('')
-  const [loading, setLoading] = useState(true)
+  const debouncedSearch = useDebouncedValue(search.trim(), 200)
+  const [selectedId, setSelectedId] = useState<number | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
   const [editingContext, setEditingContext] = useState(false)
   const [contextDraft, setContextDraft] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
-  const [generatingContext, setGeneratingContext] = useState(false)
+  const [nameError, setNameError] = useState<string | null>(null)
+  const [savingContext, setSavingContext] = useState(false)
+  const [generating, setGenerating] = useState<Set<number>>(new Set())
   const [showFormerMembers, setShowFormerMembers] = useState(false)
-  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [mergeSource, setMergeSource] = useState<OrgDetail | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(300)
   const dragging = useRef(false)
-  const pendingSelectRef = useRef<number | null>(null)
+  const savingNameRef = useRef(false)
 
-  // Monotonic guards: rapid searches / org clicks must resolve to the latest
-  // request, not the slowest response
-  const orgsSeqRef = useRef(0)
-  const selectSeqRef = useRef(0)
+  // Latest-only list and detail, each bound to its own key
+  const orgsQ = useLatestQuery(
+    ['orgs', debouncedSearch],
+    (signal) => getOrganizations(debouncedSearch, signal),
+    { keepPreviousData: true },
+  )
+  const orgs = orgsQ.data ?? []
+  const loading = orgsQ.data === undefined && orgsQ.loading
+  const detailQ = useLatestQuery(
+    ['org', selectedId],
+    (signal) => getOrganization(selectedId as number, signal),
+    { enabled: selectedId != null },
+  )
+  const selected = detailQ.data ?? null
 
-  const loadOrgs = useCallback(async (q = '') => {
-    const seq = ++orgsSeqRef.current
-    const data = await getOrganizations(q)
-    if (seq !== orgsSeqRef.current) return
-    setOrgs(data)
-    setLoading(false)
-  }, [])
+  const selectedIdRef = useRef(selectedId)
+  selectedIdRef.current = selectedId
 
-  // Parse URL param for deep-link selection: ?select=<orgId>
+  // Deep link: ?select=<orgId>
   useEffect(() => {
-    const params = new URLSearchParams(location.search)
-    const selectParam = params.get('select')
-    if (selectParam) {
-      const orgId = parseInt(selectParam, 10)
-      if (!isNaN(orgId)) {
-        pendingSelectRef.current = orgId
-      }
-    }
-    loadOrgs()
-  }, [loadOrgs, location.search])
+    const orgId = parseInt(new URLSearchParams(location.search).get('select') ?? '', 10)
+    if (!isNaN(orgId)) setSelectedId(orgId)
+  }, [location.search])
 
-  // When orgs load, auto-select the org from URL params if pending
+  // Per-org UI resets on every selection change
   useEffect(() => {
-    if (orgs.length === 0 || pendingSelectRef.current === null) return
-    const orgId = pendingSelectRef.current
-    pendingSelectRef.current = null
-    const target = orgs.find((o) => o.id === orgId)
-    if (target) {
-      getOrganization(target.id).then((detail) => {
-        setSelected(detail)
-        setEditingContext(false)
-        setEditingName(false)
-        setShowFormerMembers(false)
-      })
-    }
-  }, [orgs])
-
-  useEffect(() => {
-    const timer = setTimeout(() => loadOrgs(search), 200)
-    return () => clearTimeout(timer)
-  }, [search, loadOrgs])
-
-  const handleSelect = async (org: OrgSummary) => {
-    const seq = ++selectSeqRef.current
-    const detail = await getOrganization(org.id)
-    if (seq !== selectSeqRef.current) return
-    setSelected(detail)
     setEditingContext(false)
     setEditingName(false)
+    setNameError(null)
     setShowFormerMembers(false)
-  }
+  }, [selectedId])
+
+  /** Show `detail` (optionally switching to it) — never over a different org. */
+  const showDetail = useCallback((detail: OrgDetail, select = false) => {
+    if (select) {
+      selectedIdRef.current = detail.id
+      setSelectedId(detail.id)
+    }
+    if (selectedIdRef.current === detail.id) detailQ.setData(detail)
+  }, [detailQ])
+
+  const refreshList = useCallback(() => { void orgsQ.refetch() }, [orgsQ])
+
+  const handleSelect = (org: OrgSummary) => setSelectedId(org.id)
 
   const handleCreate = async () => {
-    if (!newName.trim()) return
+    const name = newName.trim()
+    if (!name) return
     try {
-      const detail = await createOrganization(newName.trim())
-      setSelected(detail)
+      const detail = await createOrganization(name)
+      showDetail(detail, true)
       setNewName('')
       setShowCreate(false)
-      await loadOrgs(search)
-    } catch {
-      // already exists
+      refreshList()
+    } catch (e) {
+      const existing = existingOrg(e)
+      if (existing) {
+        toast.info(`"${existing.name || name}" already exists — showing it`)
+        setSelectedId(existing.id)
+        setNewName('')
+        setShowCreate(false)
+      } else {
+        reportError(e, 'Couldn\'t create organization')
+      }
     }
   }
 
-  const handleDiscover = async () => {
-    await autoDiscoverOrgs()
-    await loadOrgs(search)
-  }
+  const discover = useAsyncAction(async () => {
+    const r = await autoDiscoverOrgs()
+    refreshList()
+    invalidateAllPeople()
+    toast.success(r.created ? `Created ${r.created} organization${r.created !== 1 ? 's' : ''} from positions` : 'No new organizations found')
+  }, { errorContext: 'Auto-discover failed' })
 
   const handleSaveContext = async () => {
-    if (!selected) return
-    const updated = await updateOrganization(selected.id, { context: contextDraft })
-    setSelected(updated)
-    setEditingContext(false)
-    await loadOrgs(search)
+    if (!selected || savingContext) return
+    const id = selected.id
+    setSavingContext(true)
+    try {
+      const updated = await updateOrganization(id, { context: contextDraft })
+      showDetail(updated)
+      if (selectedIdRef.current === id) setEditingContext(false)
+      refreshList()
+    } catch (e) {
+      // Stay in edit mode with the draft intact
+      reportError(e, 'Couldn\'t save context')
+    } finally {
+      setSavingContext(false)
+    }
   }
 
   const handleSaveName = async () => {
-    if (!selected || !nameDraft.trim()) return
-    const updated = await updateOrganization(selected.id, { name: nameDraft.trim() })
-    setSelected(updated)
-    setEditingName(false)
-    await loadOrgs(search)
+    if (!selected || savingNameRef.current) return
+    const id = selected.id
+    const oldName = selected.name
+    const name = nameDraft.trim()
+    if (!name || name === oldName) { setEditingName(false); setNameError(null); return }
+    savingNameRef.current = true
+    setNameError(null)
+    try {
+      const updated = await updateOrganization(id, { name })
+      showDetail(updated)
+      if (selectedIdRef.current === id) setEditingName(false)
+      refreshList()
+      invalidateAllPeople()
+    } catch (e) {
+      const existing = existingOrg(e)
+      if (!existing) {
+        if (selectedIdRef.current === id) setNameError(errorMessage(e))
+        return
+      }
+      // Renaming onto another org's name: offer to merge into it
+      const merged = await confirm({
+        title: `Merge into "${existing.name}"?`,
+        message: `An organization named "${existing.name}" already exists. Merging moves every member and position of "${oldName}" into it and deletes "${oldName}". People with positions at both keep one.`,
+        confirmLabel: 'Merge',
+        onConfirm: async () => {
+          const result = await updateOrganization(id, { name, merge: true })
+          if (selectedIdRef.current === id) showDetail(result, true)
+        },
+      })
+      if (merged) {
+        setEditingName(false)
+        refreshList()
+        invalidateAllPeople()
+        toast.success(`Merged "${oldName}" into "${existing.name}"`)
+      }
+    } finally {
+      savingNameRef.current = false
+    }
   }
 
   const handleGenerateContext = async () => {
-    if (!selected || generatingContext) return
-    setGeneratingContext(true)
+    if (!selected || generating.has(selected.id)) return
+    const id = selected.id
+    setGenerating((prev) => new Set(prev).add(id))
     try {
-      const updated = await generateOrgContext(selected.id)
-      setSelected(updated)
-      await loadOrgs(search)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to generate context'
-      setErrorMsg(msg)
-      setTimeout(() => setErrorMsg(null), 5000)
+      const updated = await generateOrgContext(id)
+      // Applied only if this org is still the one on screen
+      showDetail(updated)
+      refreshList()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        toast.info('The context was edited while generating — your edit was kept')
+        if (selectedIdRef.current === id) void detailQ.refetch()
+      } else {
+        reportError(e, 'Couldn\'t generate context')
+      }
     } finally {
-      setGeneratingContext(false)
+      setGenerating((prev) => { const next = new Set(prev); next.delete(id); return next })
     }
   }
 
   const handleDelete = async () => {
     if (!selected) return
-    await deleteOrganization(selected.id)
-    setSelected(null)
-    await loadOrgs(search)
+    const org = selected
+    const current = org.members.length
+    const former = org.former_members.length
+    const people = current + former
+    const base = {
+      title: `Delete "${org.name}"?`,
+      message: people > 0
+        ? `${current} current and ${former} former member${people !== 1 ? 's' : ''} have a position here. By default their positions are kept as history (no longer linked to an organization).`
+        : 'No one has a position at this organization.',
+      confirmLabel: 'Delete',
+      destructive: true,
+      onConfirm: (checked: boolean) => deleteOrganization(org.id, checked ? 'delete' : 'detach'),
+    }
+    const ok = people > 0
+      ? (await confirm({ ...base, checkbox: { label: 'Also delete their positions at this organization' } })).confirmed
+      : await confirm(base)
+    if (!ok) return
+    if (selectedIdRef.current === org.id) setSelectedId(null)
+    refreshList()
+    invalidateAllPeople()
+    toast.success(`Deleted "${org.name}"`)
   }
 
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -192,13 +279,6 @@ export default function Organizations() {
 
   return (
     <div className="flex flex-1 overflow-hidden relative">
-      {/* Error toast */}
-      {errorMsg && (
-        <div className="absolute top-4 right-4 z-50 flex items-center gap-2 rounded-lg bg-red-900/90 px-4 py-2.5 text-sm text-red-200 shadow-lg border border-red-700/50">
-          <span>{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="ml-1 text-red-400 hover:text-red-200">✕</button>
-        </div>
-      )}
       {/* Sidebar */}
       <div className="flex flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800 relative" style={{ width: sidebarWidth }}>
         <div
@@ -210,11 +290,12 @@ export default function Organizations() {
           <h2 className="text-sm font-semibold text-gray-100">Organizations</h2>
           <div className="flex items-center gap-1">
             <button
-              onClick={handleDiscover}
+              onClick={() => discover.run()}
+              disabled={discover.pending}
               title="Auto-discover from contacts"
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 transition-colors"
+              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 transition-colors disabled:opacity-50"
             >
-              <RefreshCw size={13} />
+              <RefreshCw size={13} className={discover.pending ? 'animate-spin' : ''} />
             </button>
             <button
               onClick={() => setShowCreate((v) => !v)}
@@ -262,6 +343,11 @@ export default function Organizations() {
         <div className="flex-1 overflow-y-auto">
           {loading ? (
             <p className="px-4 py-6 text-center text-sm text-slate-500">Loading...</p>
+          ) : orgsQ.error != null && orgs.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-sm text-rose-400">Couldn't load organizations: {errorMessage(orgsQ.error)}</p>
+              <button onClick={refreshList} className="mt-2 text-xs text-indigo-400 hover:text-indigo-300">Retry</button>
+            </div>
           ) : orgs.length === 0 ? (
             <div className="px-4 py-6 text-center">
               <p className="text-sm text-slate-500">No organizations</p>
@@ -272,7 +358,7 @@ export default function Organizations() {
               <OrgCard
                 key={org.id}
                 org={org}
-                selected={selected?.id === org.id}
+                selected={selectedId === org.id}
                 onClick={() => handleSelect(org)}
               />
             ))
@@ -282,7 +368,18 @@ export default function Organizations() {
 
       {/* Detail */}
       <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
-        {selected ? (
+        {selectedId != null && !selected ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-slate-500">
+            {detailQ.error != null ? (
+              <>
+                <p className="text-rose-400">Couldn't load organization: {errorMessage(detailQ.error)}</p>
+                <button onClick={() => detailQ.refetch()} className="text-xs text-indigo-400 hover:text-indigo-300">Retry</button>
+              </>
+            ) : (
+              <Loader2 size={16} className="animate-spin" />
+            )}
+          </div>
+        ) : selected ? (
           <div className="flex-1 overflow-y-auto px-6 py-6 max-w-3xl">
             {/* Header */}
             <div className="flex items-start justify-between mb-6">
@@ -292,18 +389,25 @@ export default function Organizations() {
                 </div>
                 <div>
                   {editingName ? (
-                    <input
-                      autoFocus
-                      value={nameDraft}
-                      onChange={(e) => setNameDraft(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveName(); if (e.key === 'Escape') setEditingName(false) }}
-                      onBlur={handleSaveName}
-                      className="bg-slate-700 border border-slate-600 rounded px-2 py-0.5 text-lg font-bold text-gray-100 outline-none focus:border-indigo-500"
-                    />
+                    <div>
+                      <input
+                        autoFocus
+                        aria-label="Organization name"
+                        value={nameDraft}
+                        onChange={(e) => { setNameDraft(e.target.value); setNameError(null) }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveName()
+                          if (e.key === 'Escape') { e.stopPropagation(); setEditingName(false); setNameError(null) }
+                        }}
+                        onBlur={() => { if (!nameError) handleSaveName() }}
+                        className={`bg-slate-700 border rounded px-2 py-0.5 text-lg font-bold text-gray-100 outline-none focus:border-indigo-500 ${nameError ? 'border-rose-500/60' : 'border-slate-600'}`}
+                      />
+                      {nameError && <p role="alert" className="mt-1 text-xs text-rose-400">{nameError}</p>}
+                    </div>
                   ) : (
                     <h1
                       className="text-lg font-bold text-gray-100 cursor-pointer hover:text-indigo-300 transition-colors group inline-flex items-center gap-1.5"
-                      onClick={() => { setEditingName(true); setNameDraft(selected.name) }}
+                      onClick={() => { setEditingName(true); setNameDraft(selected.name); setNameError(null) }}
                     >
                       {selected.name}
                       <Pencil size={12} className="opacity-0 group-hover:opacity-100 text-slate-500 transition-opacity" />
@@ -312,13 +416,22 @@ export default function Organizations() {
                   <p className="text-xs text-slate-500">{selected.members.length} member{selected.members.length !== 1 ? 's' : ''}</p>
                 </div>
               </div>
-              <button
-                onClick={handleDelete}
-                title="Delete organization"
-                className="rounded p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
-              >
-                <Trash2 size={14} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setMergeSource(selected)}
+                  title="Merge into another organization"
+                  className="rounded p-1.5 text-slate-500 hover:text-indigo-300 transition-colors"
+                >
+                  <GitMerge size={14} />
+                </button>
+                <button
+                  onClick={handleDelete}
+                  title="Delete organization"
+                  className="rounded p-1.5 text-slate-500 hover:text-rose-400 transition-colors"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
             </div>
 
             {/* Context */}
@@ -332,11 +445,11 @@ export default function Organizations() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={handleGenerateContext}
-                      disabled={generatingContext}
+                      disabled={generating.has(selected.id)}
                       title="Generate context with AI"
                       className="text-xs text-violet-400 hover:text-violet-300 transition-colors flex items-center gap-1 disabled:opacity-40"
                     >
-                      {generatingContext ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} />}
+                      {generating.has(selected.id) ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} />}
                       Generate
                     </button>
                     <button
@@ -362,9 +475,10 @@ export default function Organizations() {
                   <div className="flex gap-2">
                     <button
                       onClick={handleSaveContext}
-                      className="rounded bg-indigo-500 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-600 transition-colors"
+                      disabled={savingContext}
+                      className="rounded bg-indigo-500 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
                     >
-                      Save
+                      {savingContext ? 'Saving…' : 'Save'}
                     </button>
                     <button
                       onClick={() => setEditingContext(false)}
@@ -393,11 +507,10 @@ export default function Organizations() {
                 <div className="flex flex-col gap-1">
                   {selected.members.map((m) => (
                     <PersonCard
-                      key={m.contact_id}
+                      key={m.telegram_id}
                       telegramId={m.telegram_id}
                       name={m.name}
                       username={m.username}
-                      contactId={m.contact_id}
                       extraBadge={
                         m.title ? (
                           <span title={m.title} className="flex-shrink-0 rounded-full bg-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
@@ -432,17 +545,16 @@ export default function Organizations() {
                   <div className="flex flex-col gap-1 mt-3">
                     {selected.former_members.map((m) => (
                       <PersonCard
-                        key={m.contact_id}
+                        key={m.telegram_id}
                         telegramId={m.telegram_id}
                         name={m.name}
                         username={m.username}
-                        contactId={m.contact_id}
                         muted
                         extraBadge={
                           <div className="flex items-center gap-2">
                             {m.ended_at && (
                               <span className="text-[10px] text-slate-600">
-                                left {new Date(m.ended_at).toLocaleDateString()}
+                                left {fmtEndDate(m.ended_at)}
                               </span>
                             )}
                             {m.title && (
@@ -484,7 +596,7 @@ export default function Organizations() {
                           </p>
                           {rc.last_message.date && (
                             <p className="text-[10px] text-slate-600 mt-0.5">
-                              {new Date(rc.last_message.date).toLocaleString()}
+                              {fmtDateTime(rc.last_message.date)}
                             </p>
                           )}
                         </div>
@@ -504,6 +616,21 @@ export default function Organizations() {
           </div>
         )}
       </div>
+
+      {mergeSource && (
+        <MergeOrgDialog
+          source={mergeSource}
+          onClose={() => setMergeSource(null)}
+          onMerged={(into, moved) => {
+            const from = mergeSource.name
+            setMergeSource(null)
+            if (selectedIdRef.current === mergeSource.id) showDetail(into, true)
+            refreshList()
+            invalidateAllPeople()
+            toast.success(`Merged "${from}" into "${into.name}" (${moved} position${moved !== 1 ? 's' : ''} moved)`)
+          }}
+        />
+      )}
     </div>
   )
 }

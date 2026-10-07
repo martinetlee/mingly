@@ -9,6 +9,7 @@ from backend.api.dependencies import (
     generate_session_token,
     get_session_token,
     clear_session_token,
+    is_valid_session_token,
     validate_ws_origin,
 )
 
@@ -36,11 +37,14 @@ def test_clear_session_token():
     assert get_session_token() is None
 
 
-def test_generate_new_token_replaces_old():
+def test_generate_new_token_keeps_old_valid():
+    """A second window's unlock must not invalidate the first window's token."""
     t1 = generate_session_token()
     t2 = generate_session_token()
     assert t1 != t2
     assert get_session_token() == t2
+    assert is_valid_session_token(t1)
+    assert is_valid_session_token(t2)
 
 
 # ── Integration tests against the FastAPI app ────────────────────────────────
@@ -58,7 +62,7 @@ def app():
 async def test_protected_route_rejects_without_token(app):
     """A protected route should return 401 when no session token is active."""
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
         resp = await client.get("/api/chats")
         assert resp.status_code == 401
@@ -69,7 +73,7 @@ async def test_protected_route_rejects_wrong_token(app):
     """A protected route should reject an incorrect token."""
     token = generate_session_token()
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
         resp = await client.get(
             "/api/chats",
@@ -82,7 +86,7 @@ async def test_protected_route_rejects_wrong_token(app):
 async def test_auth_routes_accessible_without_token(app):
     """Auth/vault routes should be accessible without a session token."""
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
         resp = await client.get("/api/auth/vault-status")
         assert resp.status_code == 200
@@ -94,7 +98,7 @@ async def test_vault_init_returns_session_token(app):
     with patch("backend.api.auth.vault_status", return_value="unset"), \
          patch("backend.api.auth.initialize_vault"):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app), base_url="http://127.0.0.1"
         ) as client:
             resp = await client.post(
                 "/api/auth/vault/init",
@@ -112,7 +116,7 @@ async def test_vault_unlock_returns_session_token(app):
     with patch("backend.api.auth.unlock_vault_fn", return_value=True), \
          patch("backend.api.auth.has_credentials", return_value=False):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app), base_url="http://127.0.0.1"
         ) as client:
             resp = await client.post(
                 "/api/auth/vault/unlock",
@@ -132,11 +136,12 @@ async def test_vault_reset_clears_session_token(app):
 
     with patch("backend.api.auth.reset_vault"):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app), base_url="http://127.0.0.1"
         ) as client:
             resp = await client.post(
                 "/api/auth/vault/reset",
                 headers={"X-Session-Token": token},
+                json={"confirm": "RESET"},
             )
             assert resp.status_code == 200
             assert get_session_token() is None

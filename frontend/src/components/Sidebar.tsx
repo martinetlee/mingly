@@ -1,44 +1,28 @@
 import React, { useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import logo from '../assets/logo.png'
-import {
-  Home,
-  MessageSquare,
-  Users,
-  Building2,
-  Radio,
-  Shield,
-  Brain,
-  RefreshCw,
-  Settings,
-  Search,
-  Plus,
-} from 'lucide-react'
+import { RefreshCw, Search, Plus } from 'lucide-react'
 import { bulkSync } from '../api/client'
 import { useWorkspaces } from '../context/WorkspaceContext'
 import WorkspaceDialog from './WorkspaceDialog'
+import { SETTINGS_NAV, LOCK_ACTION } from '../lib/nav'
+import { useNav } from '../context/FeaturesContext'
+import { useLockVault } from '../hooks/useLockVault'
+import { reportError } from '../lib/toast'
 
 const WS_RING: Record<string, string> = {
   indigo: 'ring-indigo-400', emerald: 'ring-emerald-400', rose: 'ring-rose-400',
   amber: 'ring-amber-400', violet: 'ring-violet-400', sky: 'ring-sky-400', slate: 'ring-slate-400',
 }
 
-const NAV = [
-  { to: '/home', icon: Home, label: 'Home' },
-  { to: '/chats', icon: MessageSquare, label: 'Chats' },
-{ to: '/contacts', icon: Users, label: 'Contacts' },
-  { to: '/organizations', icon: Building2, label: 'Orgs' },
-  { to: '/tracked', icon: Radio, label: 'Tracked' },
-  { to: '/shield', icon: Shield, label: 'Shield' },
-  { to: '/intelligence', icon: Brain, label: 'Intelligence' },
-]
-
 export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void }) {
   const location = useLocation()
   const [syncing, setSyncing] = useState(false)
   const navigate = useNavigate()
+  const { nav } = useNav()
   const { workspaces, activeWorkspace, setActiveWorkspaceId, refreshWorkspaces } = useWorkspaces()
   const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false)
+  const { lock, locking } = useLockVault()
   const [editingWorkspace, setEditingWorkspace] = useState<import('../api/types').Workspace | null>(null)
 
   // Kanban workspaces land on their board; list workspaces (and "All") on the chat list.
@@ -54,6 +38,8 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
     setSyncing(true)
     try {
       await bulkSync()
+    } catch (e) {
+      reportError(e, 'Sync failed')
     } finally {
       setSyncing(false)
     }
@@ -129,7 +115,7 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1">
-        {NAV.map(({ to, icon: Icon, label }) => {
+        {nav.map(({ to, icon: Icon, label }) => {
           // Custom active detection for intelligence tabs
           const url = new URL(to, 'http://x')
           const isActive = url.searchParams.has('tab')
@@ -178,10 +164,21 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
         <span className="text-[9px] leading-tight">Sync</span>
       </button>
 
+      {/* Lock */}
+      <button
+        onClick={() => { void lock() }}
+        disabled={locking}
+        title={`${LOCK_ACTION.label} (${LOCK_ACTION.keys})`}
+        className="mb-1 flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors disabled:opacity-40"
+      >
+        <LOCK_ACTION.icon size={18} />
+        <span className="text-[9px] leading-tight">{LOCK_ACTION.label}</span>
+      </button>
+
       {/* Settings at bottom */}
       <NavLink
-        to="/settings"
-        title="Settings"
+        to={SETTINGS_NAV.to}
+        title={SETTINGS_NAV.label}
         className={({ isActive }) =>
           `flex flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1.5 transition-colors ${
             isActive
@@ -190,8 +187,8 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
           }`
         }
       >
-        <Settings size={18} />
-        <span className="text-[9px] leading-tight">Settings</span>
+        <SETTINGS_NAV.icon size={18} />
+        <span className="text-[9px] leading-tight">{SETTINGS_NAV.label}</span>
       </NavLink>
     </aside>
   )

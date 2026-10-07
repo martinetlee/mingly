@@ -1,12 +1,12 @@
 """LLM-based message translation."""
 
 import json
-import re
 import logging
 from typing import Optional
 
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.registry import get_registry
+from backend.llm.resolve import get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +25,7 @@ async def translate_message(
     Translate text into target_language using the local LLM.
     Returns the translated text. Raises LLMError on failure.
     """
-    registry = get_registry()
-
-    if instance_name:
-        provider = registry.get(instance_name)
-    else:
-        provider = registry.get_any()
-        if provider is None:
-            raise LLMError("No LLM instances registered", provider="")
+    provider = get_registry().get(instance_name) if instance_name else get_provider("translate")
 
     system_prompt = TRANSLATE_SYSTEM_PROMPT.format(target_language=target_language)
 

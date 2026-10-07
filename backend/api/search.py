@@ -3,15 +3,17 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, desc, or_, func, asc
+from sqlalchemy import select, desc, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import utils as tl_utils
 from telethon.tl.functions.contacts import SearchRequest as TgSearchRequest, GetContactsRequest
-from telethon.tl.types import User, Channel, Chat as TgChat
 
+from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Chat, Message, Contact, ContactPosition, Organization
-from backend.telegram.client import get_client, ensure_connected
+from backend.serialization import iso_utc
+from backend.telegram.runtime import runtime
+from backend.telegram.entities import chat_type as _tg_chat_type
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,6 @@ async def global_search(
     limit: int = Query(default=20, le=50),
     db: AsyncSession = Depends(get_db),
 ):
-    pattern = f"%{q}%"
 
     # Messages — join with Chat for chat_name, limit text to 200 chars
     msg_q = (
@@ -37,19 +38,19 @@ async def global_search(
             Message.date,
         )
         .join(Chat, Chat.telegram_id == Message.chat_id)
-        .where(Message.text.ilike(pattern))
+        .where(crud.contains_ci(Message.text, q))
         .order_by(desc(Message.date))
         .limit(limit)
     )
     msg_rows = (await db.execute(msg_q)).all()
     messages = [
         {
-            "telegram_id": r.telegram_id,
+            "tg_message_id": r.tg_message_id,
             "chat_id": r.chat_id,
             "chat_name": r.chat_name,
             "sender_name": r.sender_name,
             "text": r.text,
-            "date": r.date,
+            "date": iso_utc(r.date),
         }
         for r in msg_rows
     ]
@@ -65,7 +66,7 @@ async def global_search(
     )
     chat_q = (
         select(Chat)
-        .where(Chat.is_hidden == False, Chat.is_deactivated == False, Chat.name.ilike(pattern))  # noqa: E712
+        .where(Chat.is_hidden == False, Chat.is_deactivated == False, crud.contains_ci(Chat.name, q))  # noqa: E712
         .outerjoin(last_msg, Chat.telegram_id == last_msg.c.chat_id)
         .order_by(desc(last_msg.c.last_date), Chat.name)
         .limit(limit)
@@ -83,7 +84,7 @@ async def global_search(
             "is_briefing": c.is_briefing,
             "is_tracked": c.is_tracked,
             "unread_count": c.unread_count or 0,
-            "last_synced_at": c.last_synced_at,
+            "last_synced_at": iso_utc(c.last_synced_at),
         }
         for c in chat_rows
     ]
@@ -92,10 +93,10 @@ async def global_search(
     contact_q = (
         select(Contact)
         .where(or_(
-            Contact.first_name.ilike(pattern),
-            Contact.last_name.ilike(pattern),
-            Contact.username.ilike(pattern),
-            Contact.notes.ilike(pattern),
+            crud.contains_ci(Contact.first_name, q),
+            crud.contains_ci(Contact.last_name, q),
+            crud.contains_ci(Contact.username, q),
+            crud.contains_ci(Contact.notes, q),
         ))
         .order_by(Contact.first_name, Contact.last_name)
         .limit(limit)
@@ -125,14 +126,15 @@ async def global_search(
             "linkedin_url": c.linkedin_url,
             "notes": c.notes,
             "is_important": c.is_important,
-            "synced_at": c.synced_at,
+            "synced_at": iso_utc(c.synced_at),
             "positions": [
                 {
                     "id": p.id,
+                    "organization_id": p.organization_id,
                     "organization": p.organization,
                     "title": p.title,
                     "is_active": p.is_active,
-                    "ended_at": p.ended_at.isoformat() if p.ended_at else None,
+                    "ended_at": iso_utc(p.ended_at),
                 }
                 for p in pos_map.get(c.telegram_id, [])
             ],
@@ -144,8 +146,8 @@ async def global_search(
     org_q = (
         select(Organization)
         .where(or_(
-            Organization.name.ilike(pattern),
-            Organization.context.ilike(pattern),
+            crud.contains_ci(Organization.name, q),
+            crud.contains_ci(Organization.context, q),
         ))
         .order_by(Organization.name)
         .limit(limit)
@@ -168,17 +170,6 @@ async def global_search(
     }
 
 
-def _tg_chat_type(entity) -> str:
-    """Derive chat type string from a Telethon entity."""
-    if isinstance(entity, User):
-        return "private"
-    if isinstance(entity, Channel) and entity.megagroup:
-        return "group"
-    if isinstance(entity, Channel):
-        return "channel"
-    return "group"
-
-
 @router.get("/telegram")
 async def telegram_search(
     q: str = Query(..., min_length=2),
@@ -186,13 +177,9 @@ async def telegram_search(
     db: AsyncSession = Depends(get_db),
 ):
     """Search Telegram dialogs that aren't synced locally yet."""
-    client = get_client()
-    if not client:
-        return {"telegram_dialogs": []}
-
-    try:
-        await ensure_connected()
-    except Exception:
+    # Offline is an empty result here, not an error (local hits still show)
+    client = await runtime.client(require=False)
+    if client is None:
         return {"telegram_dialogs": []}
 
     seen_ids: set[int] = set()

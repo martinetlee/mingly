@@ -1,20 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, List, MoreVertical, Plus, Settings2, X } from 'lucide-react'
-import type { BoardData, Chat, Tag, WSEvent } from '../api/types'
+import type { BoardData, Chat } from '../api/types'
 import {
   addBoardColumn,
   addWorkspaceBoard,
   deleteBoardColumn,
   deleteWorkspaceBoard,
   getBoard,
-  getTags,
   moveBoardChat,
+  reorderBoardColumns,
   updateBoardColumn,
   updateWorkspaceBoard,
 } from '../api/client'
 import { useWorkspaces } from '../context/WorkspaceContext'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
+import { useConfirm } from '../components/ui'
+import { errorMessage, reportError } from '../lib/toast'
+import { ageDays as serverAgeDays } from '../utils/time'
 import WorkspaceDialog from '../components/WorkspaceDialog'
 
 const AVATAR_COLORS = [
@@ -29,8 +33,8 @@ const COLUMN_ACCENTS: Record<string, string> = {
 }
 
 function relativeAge(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)
+  const days = serverAgeDays(iso)
+  if (days == null) return '—'
   if (days <= 0) return 'today'
   if (days === 1) return '1d'
   if (days < 30) return `${days}d`
@@ -39,8 +43,51 @@ function relativeAge(iso: string | null | undefined): string {
 }
 
 function ageDays(iso: string | null | undefined): number {
-  if (!iso) return 9999
-  return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)
+  return serverAgeDays(iso) ?? 9999
+}
+
+const storedBoardFor = (workspaceId: number): number | null => {
+  try {
+    const v = localStorage.getItem(`activeBoard:${workspaceId}`)
+    const n = v ? parseInt(v, 10) : NaN
+    return Number.isFinite(n) ? n : null
+  } catch {
+    return null
+  }
+}
+
+const storeBoardFor = (workspaceId: number, boardId: number | null) => {
+  try {
+    if (boardId == null) localStorage.removeItem(`activeBoard:${workspaceId}`)
+    else localStorage.setItem(`activeBoard:${workspaceId}`, String(boardId))
+  } catch { /* per-viewer convenience only */ }
+}
+
+/** Optimistically move a card: pluck it from wherever it is and place it. */
+export function applyMove(prev: BoardData, chatId: number, toTagId: number | null): BoardData {
+  let moved: Chat | undefined
+  const strip = (chats: Chat[]) => chats.filter((c) => {
+    if (c.telegram_id === chatId) { moved = c; return false }
+    return true
+  })
+  const next: BoardData = {
+    ...prev,
+    columns: prev.columns.map((col) => ({ ...col, chats: strip(col.chats) })),
+    unallocated: strip(prev.unallocated),
+    backlog: {
+      active: strip(prev.backlog.active),
+      cooling: strip(prev.backlog.cooling),
+      dormant: strip(prev.backlog.dormant),
+    },
+  }
+  if (moved) {
+    const card = moved
+    if (toTagId === null) next.backlog.active = [card, ...next.backlog.active]
+    else next.columns = next.columns.map((col) =>
+      col.tag_id === toTagId ? { ...col, chats: [card, ...col.chats] } : col,
+    )
+  }
+  return next
 }
 
 function CardAvatar({ chat }: { chat: Chat }) {
@@ -108,8 +155,9 @@ function ChatCard({
 
 export default function Board() {
   const navigate = useNavigate()
+  const confirm = useConfirm()
   const { activeWorkspace, loaded: workspacesLoaded, refreshWorkspaces } = useWorkspaces()
-  const [board, setBoard] = useState<BoardData | null>(null)
+  const [boardState, setBoardState] = useState<BoardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showBacklog, setShowBacklog] = useState(true)
@@ -119,14 +167,11 @@ export default function Board() {
   const [dragOverCol, setDragOverCol] = useState<number | 'backlog' | null>(null)
   const [addingColumn, setAddingColumn] = useState(false)
   const [newColumnName, setNewColumnName] = useState('')
-  const [stageTags, setStageTags] = useState<Tag[]>([])
   const [columnMenu, setColumnMenu] = useState<number | null>(null)
   const [renamingCol, setRenamingCol] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [confirmingDeleteCol, setConfirmingDeleteCol] = useState<number | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   // Stream boards (tabs)
-  const [activeBoardId, setActiveBoardId] = useState<number | null>(null)
   const [addingBoard, setAddingBoard] = useState(false)
   const [newBoardName, setNewBoardName] = useState('')
   const [newBoardStream, setNewBoardStream] = useState('')
@@ -135,45 +180,113 @@ export default function Board() {
   const [boardRenameValue, setBoardRenameValue] = useState('')
   const [scopingBoard, setScopingBoard] = useState<number | null>(null)
   const [scopeValue, setScopeValue] = useState('')
-  const [confirmingDeleteBoard, setConfirmingDeleteBoard] = useState<number | null>(null)
-  const lastLoadRef = useRef(0)
 
   const workspaceId = activeWorkspace?.id
 
-  // Remember the last active tab per workspace
-  useEffect(() => {
+  // The selected tab belongs to a workspace: switching workspaces reads that
+  // workspace's remembered tab in the same render, so a request can never pair
+  // workspace B with workspace A's board id
+  const [tabChoice, setTabChoice] = useState<{ wsId: number; boardId: number | null } | null>(null)
+  const activeBoardId = workspaceId == null
+    ? null
+    : tabChoice?.wsId === workspaceId ? tabChoice.boardId : storedBoardFor(workspaceId)
+  const setActiveBoardId = useCallback((boardId: number | null) => {
     if (workspaceId == null) return
-    const stored = localStorage.getItem(`activeBoard:${workspaceId}`)
-    setActiveBoardId(stored ? parseInt(stored, 10) : null)
+    setTabChoice({ wsId: workspaceId, boardId })
   }, [workspaceId])
 
   const selectBoard = (boardId: number) => {
     setActiveBoardId(boardId)
-    if (workspaceId != null) localStorage.setItem(`activeBoard:${workspaceId}`, String(boardId))
+    if (workspaceId != null) storeBoardFor(workspaceId, boardId)
   }
 
-  // Monotonic guard: rapid board-tab switches must not let an earlier board's
-  // response land last — it would both show the wrong board and snap the
-  // active tab back via the board_id reconciliation below
+  // Never render (or act on) a board that belongs to another workspace
+  const board = boardState && boardState.workspace.id === workspaceId ? boardState : null
+
+  // Sequence guard over loads AND mutations: every load or optimistic change
+  // bumps it, and a response is applied only if nothing newer happened since.
+  // While a mutation is in flight, loads are deferred (a read issued before
+  // the server applied the mutation would snap the card back) and run once
+  // the last mutation settles. In-flight tracking is per workspace epoch: a
+  // mutation still saving for the previous workspace never defers (or
+  // swallows) the new workspace's loads.
   const boardSeqRef = useRef(0)
+  const epochRef = useRef(0)
+  const inflightRef = useRef(0)
+  const reloadPendingRef = useRef(false)
+  const keyRef = useRef({ workspaceId, activeBoardId })
+  keyRef.current = { workspaceId, activeBoardId }
+
   const loadBoard = useCallback(async () => {
     if (workspaceId == null) return
+    if (inflightRef.current > 0) { reloadPendingRef.current = true; return }
     const seq = ++boardSeqRef.current
     try {
       const data = await getBoard(workspaceId, activeBoardId ?? undefined)
       if (seq !== boardSeqRef.current) return
-      setBoard(data)
+      setBoardState(data)
       // Backend falls back to the first board when the requested one is gone
-      if (data.board_id != null && data.board_id !== activeBoardId) setActiveBoardId(data.board_id)
+      if (data.board_id !== activeBoardId) setActiveBoardId(data.board_id)
       setError(null)
-      lastLoadRef.current = Date.now()
     } catch (e) {
       if (seq !== boardSeqRef.current) return
-      setError(e instanceof Error ? e.message : 'Failed to load board')
+      setError(`Couldn't load board: ${errorMessage(e)}`)
     } finally {
       if (seq === boardSeqRef.current) setLoading(false)
     }
-  }, [workspaceId, activeBoardId])
+  }, [workspaceId, activeBoardId, setActiveBoardId])
+  const loadBoardRef = useRef(loadBoard)
+  loadBoardRef.current = loadBoard
+
+  /**
+   * Run a board mutation. `optimistic` is applied immediately; a returned
+   * BoardData is the committed board and replaces local state if no newer
+   * load/mutation started meanwhile. Otherwise the board is re-read after
+   * the last in-flight mutation settles. Failures toast and resync.
+   */
+  const mutate = useCallback(async (
+    errorContext: string,
+    fn: () => Promise<BoardData | unknown>,
+    optimistic?: (prev: BoardData) => BoardData,
+  ): Promise<boolean> => {
+    const wsId = workspaceId
+    const epoch = epochRef.current
+    const seq = ++boardSeqRef.current
+    inflightRef.current++
+    if (optimistic) setBoardState((prev) => (prev && prev.workspace.id === wsId ? optimistic(prev) : prev))
+    let ok = false
+    try {
+      const result = await fn()
+      ok = true
+      const isBoard = result != null && typeof result === 'object' && 'columns' in result && 'workspace' in result
+      if (isBoard && seq === boardSeqRef.current && keyRef.current.workspaceId === wsId) {
+        const data = result as BoardData
+        if (data.workspace.id === wsId && data.board_id === keyRef.current.activeBoardId) {
+          boardSeqRef.current++ // the newest snapshot: invalidate any older read
+          setBoardState(data)
+        } else {
+          if (epoch === epochRef.current) reloadPendingRef.current = true
+        }
+      } else {
+        if (epoch === epochRef.current) reloadPendingRef.current = true
+      }
+    } catch (e) {
+      reportError(e, errorContext)
+      if (epoch === epochRef.current) reloadPendingRef.current = true // undo the optimistic change
+    } finally {
+      // A mutation from a previous workspace: its counter was reset on the
+      // switch and its result was already ignored above
+      if (epoch === epochRef.current) {
+        inflightRef.current--
+        if (inflightRef.current === 0 && reloadPendingRef.current) {
+          reloadPendingRef.current = false
+          // Through a ref: the tab may have changed while this was in flight
+          loadBoardRef.current()
+        }
+      }
+    }
+    return ok
+  }, [workspaceId])
 
   // No active kanban workspace → this page has nothing to show.
   // Wait for the workspace list to load first, or a direct landing on /board
@@ -185,58 +298,54 @@ export default function Board() {
     }
   }, [activeWorkspace, workspacesLoaded, navigate])
 
+  // Workspace switch: drop everything that belonged to the previous one
   useEffect(() => {
+    boardSeqRef.current++
+    epochRef.current++
+    inflightRef.current = 0
+    reloadPendingRef.current = false
+    setBoardState(null)
+    setColumnMenu(null)
+    setBoardMenu(null)
+    setRenamingCol(null)
+    setRenamingBoard(null)
+    setScopingBoard(null)
+    setAddingColumn(false)
+    setAddingBoard(false)
+    setError(null)
+  }, [workspaceId])
+
+  const boardStateRef = useRef(boardState)
+  boardStateRef.current = boardState
+  useEffect(() => {
+    // Adopting the server's fallback tab (board_id) changes activeBoardId;
+    // the board on screen already is that board, so don't fetch it twice
+    const cur = boardStateRef.current
+    if (cur && cur.workspace.id === workspaceId && cur.board_id === activeBoardId) return
     setLoading(true)
     loadBoard()
-  }, [loadBoard])
+  }, [loadBoard, workspaceId, activeBoardId])
 
-  const handleWsEvent = useCallback(
-    (event: WSEvent) => {
-      if (event.type !== 'new_message' && event.type !== 'chat_synced') return
-      if (Date.now() - lastLoadRef.current < 5000) return
-      loadBoard()
-    },
-    [loadBoard],
-  )
-  useWebSocket(handleWsEvent)
+  // Chat activity changes card snippets/backlog buckets: refresh at most
+  // every 5s, with a trailing refresh so the last burst is never dropped
+  const refreshSoon = useCoalescedRefetch(loadBoard, 5000)
+  useWsEvent('new_message', refreshSoon)
+  useWsEvent('chats_synced', refreshSoon)
+  useWsEvent('chat_synced', refreshSoon)
+  useWsEvent('resync', () => { loadBoard() })
 
   const openChat = (chat: Chat) => navigate(`/chats?chatId=${chat.telegram_id}`)
 
   const move = async (chatId: number, toTagId: number | null) => {
     if (workspaceId == null || !board || board.board_id == null) return
+    const wsId = workspaceId
     const boardId = board.board_id
-    // Optimistic: pluck the chat from wherever it is and place it
-    setBoard((prev) => {
-      if (!prev) return prev
-      let moved: Chat | undefined
-      const strip = (chats: Chat[]) => chats.filter((c) => {
-        if (c.telegram_id === chatId) { moved = c; return false }
-        return true
-      })
-      const next: BoardData = {
-        ...prev,
-        columns: prev.columns.map((col) => ({ ...col, chats: strip(col.chats) })),
-        unallocated: strip(prev.unallocated),
-        backlog: {
-          active: strip(prev.backlog.active),
-          cooling: strip(prev.backlog.cooling),
-          dormant: strip(prev.backlog.dormant),
-        },
-      }
-      if (moved) {
-        if (toTagId === null) next.backlog.active = [moved, ...next.backlog.active]
-        else next.columns = next.columns.map((col) =>
-          col.tag_id === toTagId ? { ...col, chats: [moved!, ...col.chats] } : col,
-        )
-      }
-      return next
-    })
-    try {
-      await moveBoardChat(workspaceId, boardId, chatId, toTagId)
-      refreshWorkspaces()
-    } catch {
-      loadBoard() // resync on failure
-    }
+    const ok = await mutate(
+      'Move failed',
+      () => moveBoardChat(wsId, boardId, chatId, toTagId),
+      (prev) => applyMove(prev, chatId, toTagId),
+    )
+    if (ok) refreshWorkspaces()
   }
 
   const onDropTo = (target: number | null) => (e: React.DragEvent) => {
@@ -246,54 +355,78 @@ export default function Board() {
     if (raw) move(parseInt(raw, 10), target)
   }
 
-  const startAddColumn = async () => {
+  const startAddColumn = () => {
     setAddingColumn(true)
     setNewColumnName('')
-    try {
-      const tags = await getTags()
-      setStageTags(tags.filter((t) => t.category === 'stage'))
-    } catch { /* autocomplete just stays empty */ }
   }
 
   const submitAddColumn = async (name: string) => {
     if (workspaceId == null || board?.board_id == null || !name.trim()) return
-    try {
-      await addBoardColumn(workspaceId, board.board_id, name.trim())
+    const wsId = workspaceId
+    const boardId = board.board_id
+    if (await mutate('Couldn\'t add column', () => addBoardColumn(wsId, boardId, name.trim()))) {
       setAddingColumn(false)
-      loadBoard()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add column')
     }
   }
 
   const shiftColumn = async (tagId: number, dir: -1 | 1) => {
     if (workspaceId == null || !board || board.board_id == null) return
     const idx = board.columns.findIndex((c) => c.tag_id === tagId)
-    const other = board.columns[idx + dir]
-    if (!other) return
-    await updateBoardColumn(workspaceId, board.board_id, tagId, { position: other.position })
-    await updateBoardColumn(workspaceId, board.board_id, other.tag_id, { position: board.columns[idx].position })
+    const target = idx + dir
+    if (idx < 0 || target < 0 || target >= board.columns.length) return
     setColumnMenu(null)
-    loadBoard()
+    const order = board.columns.map((c) => c.tag_id)
+    ;[order[idx], order[target]] = [order[target], order[idx]]
+    const wsId = workspaceId
+    const boardId = board.board_id
+    // One atomic call; the server returns the reordered board
+    await mutate(
+      'Couldn\'t move column',
+      () => reorderBoardColumns(wsId, boardId, order),
+      (prev) => ({
+        ...prev,
+        columns: order
+          .map((id) => prev.columns.find((c) => c.tag_id === id))
+          .filter((c): c is BoardData['columns'][number] => c != null),
+      }),
+    )
   }
 
   const removeColumn = async (tagId: number) => {
     if (workspaceId == null || board?.board_id == null) return
-    await deleteBoardColumn(workspaceId, board.board_id, tagId, true)
+    const col = board.columns.find((c) => c.tag_id === tagId)
+    if (!col) return
     setColumnMenu(null)
-    loadBoard()
+    const wsId = workspaceId
+    const boardId = board.board_id
+    const n = col.chats.length
+    await confirm({
+      title: `Delete column "${col.name}"?`,
+      message: n > 0
+        ? `${n} chat${n !== 1 ? 's' : ''} in this column return to the backlog. Their other tags are kept.`
+        : 'The column is empty.',
+      confirmLabel: 'Delete column',
+      destructive: true,
+      // Errors stay in the dialog; the board refreshes after success
+      onConfirm: async () => {
+        await deleteBoardColumn(wsId, boardId, tagId)
+        loadBoardRef.current()
+      },
+    })
   }
 
   const submitRename = async (tagId: number) => {
-    if (workspaceId == null || board?.board_id == null || !renameValue.trim()) { setRenamingCol(null); return }
-    try {
-      await updateBoardColumn(workspaceId, board.board_id, tagId, { name: renameValue.trim() })
-      setRenamingCol(null)
-      loadBoard()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Rename failed')
-      setRenamingCol(null)
-    }
+    const value = renameValue.trim()
+    const col = board?.columns.find((c) => c.tag_id === tagId)
+    if (workspaceId == null || board?.board_id == null || !value || value === col?.name) { setRenamingCol(null); return }
+    const wsId = workspaceId
+    const boardId = board.board_id
+    setRenamingCol(null)
+    await mutate(
+      'Rename failed',
+      () => updateBoardColumn(wsId, boardId, tagId, { name: value }),
+      (prev) => ({ ...prev, columns: prev.columns.map((c) => (c.tag_id === tagId ? { ...c, name: value } : c)) }),
+    )
   }
 
   const submitAddBoard = async () => {
@@ -305,42 +438,54 @@ export default function Board() {
       setNewBoardStream('')
       selectBoard(created.id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to add board')
+      reportError(e, 'Couldn\'t add board')
     }
   }
 
   const submitBoardRename = async (boardId: number) => {
-    if (workspaceId == null || !boardRenameValue.trim()) { setRenamingBoard(null); return }
-    try {
-      await updateWorkspaceBoard(workspaceId, boardId, { name: boardRenameValue.trim() })
-      setRenamingBoard(null)
-      loadBoard()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Board rename failed')
-      setRenamingBoard(null)
-    }
+    const value = boardRenameValue.trim()
+    const current = board?.boards.find((b) => b.id === boardId)
+    if (workspaceId == null || !value || value === current?.name) { setRenamingBoard(null); return }
+    const wsId = workspaceId
+    setRenamingBoard(null)
+    await mutate(
+      'Board rename failed',
+      () => updateWorkspaceBoard(wsId, boardId, { name: value }),
+      (prev) => ({ ...prev, boards: prev.boards.map((b) => (b.id === boardId ? { ...b, name: value } : b)) }),
+    )
   }
 
   const submitBoardScope = async (boardId: number) => {
     if (workspaceId == null) { setScopingBoard(null); return }
-    try {
-      const v = scopeValue.trim()
-      await updateWorkspaceBoard(workspaceId, boardId, v ? { scope_tag_name: v } : { clear_scope: true })
-      setScopingBoard(null)
-      loadBoard()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to set stream')
-      setScopingBoard(null)
-    }
+    const wsId = workspaceId
+    const v = scopeValue.trim()
+    setScopingBoard(null)
+    setBoardMenu(null)
+    await mutate(
+      'Couldn\'t set stream',
+      () => updateWorkspaceBoard(wsId, boardId, v ? { scope_tag_name: v } : { clear_scope: true }),
+    )
   }
 
   const removeBoard = async (boardId: number) => {
     if (workspaceId == null) return
-    await deleteWorkspaceBoard(workspaceId, boardId, true)
+    const target = board?.boards.find((b) => b.id === boardId)
     setBoardMenu(null)
-    setConfirmingDeleteBoard(null)
-    if (activeBoardId === boardId) setActiveBoardId(null)
-    else loadBoard()
+    const wsId = workspaceId
+    const ok = await confirm({
+      title: `Delete board "${target?.name ?? ''}"?`,
+      message: 'Its columns are removed and their cards return to the backlog. Workspace and stream tags are kept.',
+      confirmLabel: 'Delete board',
+      destructive: true,
+      onConfirm: () => deleteWorkspaceBoard(wsId, boardId),
+    })
+    if (!ok || keyRef.current.workspaceId !== wsId) return
+    if (activeBoardId === boardId) {
+      storeBoardFor(wsId, null)
+      setActiveBoardId(null) // reloads via loadBoard's deps
+    } else {
+      loadBoard()
+    }
   }
 
   const activeBoardIsScoped = board?.boards.find((b) => b.id === board.board_id)?.scope_tag_id != null
@@ -462,7 +607,7 @@ export default function Board() {
                         placeholder="Stream tag (empty = all)"
                         value={scopeValue}
                         onChange={(e) => setScopeValue(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') { submitBoardScope(b.id); setBoardMenu(null) } if (e.key === 'Escape') setScopingBoard(null) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') submitBoardScope(b.id); if (e.key === 'Escape') setScopingBoard(null) }}
                         className="w-full rounded border border-indigo-500 bg-slate-700 px-1.5 py-0.5 text-[11px] text-gray-200 outline-none"
                       />
                     </div>
@@ -474,20 +619,12 @@ export default function Board() {
                       {b.scope_tag_name ? `Stream: ${b.scope_tag_name}` : 'Set stream…'}
                     </button>
                   )}
-                  {confirmingDeleteBoard === b.id ? (
-                    <div className="px-3 py-1.5">
-                      <p className="mb-1 text-[10px] text-slate-400">Cards return to backlog.</p>
-                      <button onClick={() => removeBoard(b.id)} className="mr-2 font-medium text-rose-400 hover:text-rose-300">Delete</button>
-                      <button onClick={() => setConfirmingDeleteBoard(null)} className="text-slate-500 hover:text-slate-300">Cancel</button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmingDeleteBoard(b.id)}
-                      className="block w-full px-3 py-1.5 text-left text-rose-400 hover:bg-slate-700/50"
-                    >
-                      Delete board
-                    </button>
-                  )}
+                  <button
+                    onClick={() => removeBoard(b.id)}
+                    className="block w-full px-3 py-1.5 text-left text-rose-400 hover:bg-slate-700/50"
+                  >
+                    Delete board
+                  </button>
                 </div>
               )}
             </div>
@@ -703,32 +840,12 @@ export default function Board() {
                         >
                           <ChevronRight size={12} /> Move right
                         </button>
-                        {confirmingDeleteCol === col.tag_id ? (
-                          <div className="px-3 py-1.5">
-                            <p className="mb-1 text-[10px] text-slate-400">
-                              {col.chats.length} chats return to backlog.
-                            </p>
-                            <button
-                              onClick={() => { setConfirmingDeleteCol(null); removeColumn(col.tag_id) }}
-                              className="mr-2 font-medium text-rose-400 hover:text-rose-300"
-                            >
-                              Delete
-                            </button>
-                            <button
-                              onClick={() => setConfirmingDeleteCol(null)}
-                              className="text-slate-500 hover:text-slate-300"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setConfirmingDeleteCol(col.tag_id)}
-                            className="block w-full px-3 py-1.5 text-left text-rose-400 hover:bg-slate-700/50"
-                          >
-                            Delete column
-                          </button>
-                        )}
+                        <button
+                          onClick={() => removeColumn(col.tag_id)}
+                          className="block w-full px-3 py-1.5 text-left text-rose-400 hover:bg-slate-700/50"
+                        >
+                          Delete column
+                        </button>
                       </div>
                     )}
                   </div>
@@ -759,18 +876,6 @@ export default function Board() {
                       }}
                       className="w-full rounded-md border border-slate-600 bg-slate-700 px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-indigo-500"
                     />
-                    {stageTags.filter((t) =>
-                      t.name.toLowerCase().includes(newColumnName.toLowerCase()) &&
-                      !board.columns.some((c) => c.tag_id === t.id || c.name.toLowerCase() === t.name.toLowerCase()),
-                    ).slice(0, 5).map((t) => (
-                      <button
-                        key={t.id}
-                        onClick={() => submitAddColumn(t.name)}
-                        className="mt-1 block w-full rounded px-2 py-1 text-left text-[11px] text-slate-300 hover:bg-slate-700/50"
-                      >
-                        {t.name} <span className="text-slate-500">(existing stage)</span>
-                      </button>
-                    ))}
                     <div className="mt-1.5 flex justify-end gap-1.5">
                       <button onClick={() => setAddingColumn(false)} className="rounded px-2 py-1 text-[11px] text-slate-400 hover:bg-slate-700/50">Cancel</button>
                       <button onClick={() => submitAddColumn(newColumnName)} className="rounded bg-indigo-500 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-indigo-400">Add</button>

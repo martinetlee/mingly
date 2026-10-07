@@ -39,9 +39,15 @@ class UpdateTagRequest(BaseModel):
     category: Optional[str] = None
 
 
+def _locked(e: "crud.StageTagLocked") -> HTTPException:
+    return HTTPException(status_code=409, detail={"code": e.code, "message": str(e)})
+
+
 @router.get("/tags")
-async def list_tags(db: AsyncSession = Depends(get_db)):
-    rows = await crud.get_all_tags_with_counts(db)
+async def list_tags(include_stage: bool = False, db: AsyncSession = Depends(get_db)):
+    """User tags. Board-column stage tags are internal and only listed with
+    include_stage=true (e.g. column-name autocomplete)."""
+    rows = await crud.get_all_tags_with_counts(db, include_stage=include_stage)
     return [_tag_dict(t, chat_count=count) for t, count in rows]
 
 
@@ -54,14 +60,23 @@ async def create_tag(req: CreateTagRequest, db: AsyncSession = Depends(get_db)):
     category = req.category.strip() if req.category else None
     try:
         tag = await crud.create_tag(db, name=name, color=color, category=category)
-    except Exception:
-        raise HTTPException(status_code=409, detail="A tag with that name already exists")
+    except crud.NameConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return _tag_dict(tag)
 
 
 @router.put("/tags/{tag_id}")
 async def update_tag(tag_id: int, req: UpdateTagRequest, db: AsyncSession = Depends(get_db)):
-    tag = await crud.update_tag(db, tag_id, name=req.name, color=req.color, category=req.category)
+    try:
+        tag = await crud.update_tag(db, tag_id, name=req.name, color=req.color, category=req.category)
+    except crud.StageTagLocked as e:
+        raise _locked(e)
+    except crud.NameConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     return _tag_dict(tag)
@@ -69,7 +84,10 @@ async def update_tag(tag_id: int, req: UpdateTagRequest, db: AsyncSession = Depe
 
 @router.delete("/tags/{tag_id}")
 async def delete_tag(tag_id: int, db: AsyncSession = Depends(get_db)):
-    deleted = await crud.delete_tag(db, tag_id)
+    try:
+        deleted = await crud.delete_tag(db, tag_id)
+    except crud.StageTagLocked as e:
+        raise _locked(e)
     if not deleted:
         raise HTTPException(status_code=404, detail="Tag not found")
     return {"success": True}
@@ -85,13 +103,17 @@ class AddTagRequest(BaseModel):
 
 @router.get("/chats/{telegram_id}/tags")
 async def get_chat_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
-    tags = await crud.get_tags_for_chat(db, telegram_id)
+    # Board placement (stage tags) is shown on boards, not as chat tags
+    tags = await crud.get_tags_for_chat(db, telegram_id, include_stage=False)
     return [_tag_dict(t) for t in tags]
 
 
 @router.post("/chats/{telegram_id}/tags")
 async def add_tag(telegram_id: int, req: AddTagRequest, db: AsyncSession = Depends(get_db)):
-    ct = await crud.add_tag_to_chat(db, telegram_id, req.tag_id)
+    try:
+        ct = await crud.add_tag_to_chat(db, telegram_id, req.tag_id)
+    except crud.StageTagLocked as e:
+        raise _locked(e)
     if ct is None:
         raise HTTPException(status_code=404, detail="Tag not found")
     return {"success": True}
@@ -99,7 +121,10 @@ async def add_tag(telegram_id: int, req: AddTagRequest, db: AsyncSession = Depen
 
 @router.delete("/chats/{telegram_id}/tags/{tag_id}")
 async def remove_tag(telegram_id: int, tag_id: int, db: AsyncSession = Depends(get_db)):
-    removed = await crud.remove_tag_from_chat(db, telegram_id, tag_id)
+    try:
+        removed = await crud.remove_tag_from_chat(db, telegram_id, tag_id)
+    except crud.StageTagLocked as e:
+        raise _locked(e)
     if not removed:
         raise HTTPException(status_code=404, detail="Tag not assigned to this chat")
     return {"success": True}
@@ -117,9 +142,11 @@ async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    all_tags = await crud.get_all_tags(db)
-    chat_tags = await crud.get_tags_for_chat(db, telegram_id)
+    # Stage tags are board internals: never offered, never suggested
+    all_tags = [t for t in await crud.get_all_tags(db) if t.category != crud.STAGE_CATEGORY]
+    chat_tags = await crud.get_tags_for_chat(db, telegram_id, include_stage=False)
     chat_tag_names = {t.name for t in chat_tags}
+    chat_tag_keys = {t.name.strip().lower() for t in chat_tags}
     all_tag_names = [t.name for t in all_tags]
 
     # Fetch last 20 messages for context
@@ -145,18 +172,17 @@ async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
         f"Recent messages:\n{messages_text}"
     )
 
+    await db.commit()  # end the read transaction before the (slow) LLM call
+
     # Try LLM — fall back gracefully
     try:
-        from backend.llm.registry import get_registry
         from backend.llm.base import ChatMessage
+        from backend.llm.resolve import LLMUnavailable, get_provider
 
-        registry = get_registry()
-        instances = registry.list_instances()
-        if not instances:
+        try:
+            provider = get_provider()
+        except LLMUnavailable:
             return []
-
-        instance_name = instances[0]["name"]
-        provider = registry.get(instance_name)
         response = await provider.complete(
             [
                 ChatMessage(role="system", content=system_prompt),
@@ -181,7 +207,7 @@ async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
             name = str(s.get("name", "")).strip()
             color = str(s.get("color", "slate")).strip()
             reason = str(s.get("reason", "")).strip()
-            if not name or name in chat_tag_names:
+            if not name or name.lower() in chat_tag_keys:
                 continue
             if color not in valid_colors:
                 color = "slate"

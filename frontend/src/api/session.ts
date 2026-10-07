@@ -12,8 +12,21 @@
 
 const SESSION_TOKEN_KEY = 'mingly_session_token'
 
-let _onSessionExpired: (() => void) | null = null
+type Listener = () => void
+
+const _expiredListeners = new Set<Listener>()
+const _tokenListeners = new Set<Listener>()
 let _sessionExpiredFired = false
+
+function emit(listeners: Set<Listener>): void {
+  for (const cb of [...listeners]) {
+    try {
+      cb()
+    } catch (e) {
+      console.error('session listener failed', e)
+    }
+  }
+}
 
 export function setSessionToken(token: string): void {
   _sessionExpiredFired = false
@@ -22,6 +35,7 @@ export function setSessionToken(token: string): void {
   } catch {
     // sessionStorage unavailable — fall through to in-memory only
   }
+  emit(_tokenListeners)
 }
 
 export function getSessionToken(): string | null {
@@ -38,19 +52,32 @@ export function clearSessionToken(): void {
   } catch {
     // ignore
   }
+  emit(_tokenListeners)
 }
 
-export function onSessionExpired(cb: () => void): void {
-  _onSessionExpired = cb
+/**
+ * Register a callback fired once when the session expires (first 401).
+ * Several listeners may be registered (App state machine, WebSocket client…).
+ * Returns an unsubscribe function.
+ */
+export function onSessionExpired(cb: Listener): () => void {
+  _expiredListeners.add(cb)
+  return () => { _expiredListeners.delete(cb) }
+}
+
+/** Fires whenever the token is set or cleared. Returns an unsubscribe function. */
+export function onSessionTokenChanged(cb: Listener): () => void {
+  _tokenListeners.add(cb)
+  return () => { _tokenListeners.delete(cb) }
 }
 
 export function notifySessionExpired(): void {
   clearSessionToken()
   // Guard against stampede: if multiple concurrent requests all get 401,
-  // only fire the callback once until a new token is set.
+  // only fire the callbacks once until a new token is set.
   if (_sessionExpiredFired) return
   _sessionExpiredFired = true
-  _onSessionExpired?.()
+  emit(_expiredListeners)
 }
 
 /**

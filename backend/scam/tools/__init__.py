@@ -100,9 +100,14 @@ def get_tool(name: str) -> Optional[ToolDef]:
     return TOOL_REGISTRY.get(name)
 
 
-# Explicitly import script modules to trigger registration
-from backend.scam.tools import search_library  # noqa: F401, E402
+# Explicitly import script modules to trigger registration (static imports so
+# PyInstaller bundles them)
+from backend.scam.tools import search_library as _search_library  # noqa: E402
+
+_SCRIPT_MODULES = [_search_library]
 try:
-    from backend.scam.tools import ml_prefilter  # noqa: F401, E402
+    from backend.scam.tools import ml_prefilter as _ml_prefilter  # noqa: E402
+
+    _SCRIPT_MODULES.append(_ml_prefilter)
 except ImportError:
     logger.warning("ML prefilter script not available — missing dependencies (joblib/scikit-learn/lightgbm)")

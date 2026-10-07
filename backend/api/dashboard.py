@@ -4,26 +4,28 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select, desc, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.catchup import contexts_for, item_dict
+from backend.api.chats import _chat_dict
+from backend.briefing.pipeline import entry_dict
 from backend.db.database import get_db
 from backend.db.models import Chat, Message, Contact, ContactPosition, BriefingRun, BriefingEntry
-from backend.db.crud import explain_relationship_status, compute_relationship_status
+from backend.db.crud import explain_relationship_status, compute_relationship_status, get_needs_reply
+from backend.serialization import iso_utc
 
 router = APIRouter()
 
 
-def _chat_dict(c) -> dict:
+def _needs_reply_item(row, contexts: dict) -> dict:
+    chat, sender_name, text, date, item = row
     return {
-        "id": c.id,
-        "telegram_id": c.telegram_id,
-        "name": c.name,
-        "type": c.type,
-        "username": c.username,
-        "is_monitored": c.is_monitored,
-        "is_hidden": c.is_hidden,
-        "is_briefing": c.is_briefing,
-        "is_tracked": c.is_tracked,
-        "unread_count": c.unread_count or 0,
-        "last_synced_at": c.last_synced_at,
+        "chat": _chat_dict(chat),
+        "last_message": {
+            "sender_name": sender_name,
+            "text": text,
+            "date": iso_utc(date),
+        },
+        "triage": item_dict(item) if item is not None else None,
+        "context": contexts.get(chat.telegram_id),
     }
 
 
@@ -55,6 +57,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         .where(
             Message.date >= cutoff_24h,
             Message.is_outgoing == False,  # noqa: E712
+            Message.kind == "message",
             Chat.is_hidden == False,  # noqa: E712
             Chat.is_deactivated == False,  # noqa: E712
             relevant_chat_filter,
@@ -66,58 +69,12 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
     }
 
     # --- Needs Reply ---
-    # Find chats where the most recent message is incoming (not outgoing)
-    # Only from tracked chats or private chats with important contacts
-    last_msg_subq = (
-        select(
-            Message.chat_id,
-            Message.sender_name,
-            func.substr(Message.text, 1, 200).label("text"),
-            Message.date,
-            Message.is_outgoing,
-            Message.my_reaction,
-            func.row_number().over(
-                partition_by=Message.chat_id,
-                order_by=desc(Message.date),
-            ).label("rn"),
-        )
-        .subquery()
-    )
-
-    needs_reply_q = (
-        select(
-            Chat,
-            last_msg_subq.c.sender_name,
-            last_msg_subq.c.text,
-            last_msg_subq.c.date.label("msg_date"),
-        )
-        .join(last_msg_subq, and_(
-            Chat.telegram_id == last_msg_subq.c.chat_id,
-            last_msg_subq.c.rn == 1,
-        ))
-        .where(
-            last_msg_subq.c.is_outgoing == False,  # noqa: E712
-            last_msg_subq.c.my_reaction == None,  # noqa: E711 — exclude reacted messages
-            Chat.is_hidden == False,  # noqa: E712
-            Chat.is_briefing == False,  # noqa: E712
-            Chat.is_deactivated == False,  # noqa: E712
-            relevant_chat_filter,
-        )
-        .order_by(desc(last_msg_subq.c.date))
-        .limit(10)
-    )
-    needs_reply_rows = (await db.execute(needs_reply_q)).all()
-    needs_reply = [
-        {
-            "chat": _chat_dict(row[0]),
-            "last_message": {
-                "sender_name": row[1],
-                "text": row[2],
-                "date": row[3],
-            },
-        }
-        for row in needs_reply_rows
-    ]
+    # Triage (handled / snoozed) is applied server-side before the limit, so
+    # the queue can't empty out while chats are still waiting.
+    active_rows, handled_rows = await get_needs_reply(db, limit=10)
+    contexts = await contexts_for(db, [r[0].telegram_id for r in active_rows + handled_rows])
+    needs_reply = [_needs_reply_item(r, contexts) for r in active_rows]
+    recently_handled = [_needs_reply_item(r, contexts) for r in handled_rows]
 
     # --- Attention Contacts ---
     # Important contacts
@@ -175,7 +132,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             "is_important": c.is_important,
             "relationship_status": live_status,
             "relationship_status_manual": is_manual,
-            "last_interaction_at": live_last_interaction,
+            "last_interaction_at": iso_utc(live_last_interaction),
             "primary_position": primary,
         }
         contact_data.update(status_info)
@@ -183,7 +140,9 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
 
     # --- Latest Briefing ---
     latest_run = (await db.execute(
-        select(BriefingRun).order_by(desc(BriefingRun.generated_at)).limit(1)
+        select(BriefingRun)
+        .where(BriefingRun.status.in_(("done", "partial")))
+        .order_by(desc(BriefingRun.generated_at)).limit(1)
     )).scalar_one_or_none()
 
     latest_briefing = None
@@ -191,27 +150,20 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         entries = (await db.execute(
             select(BriefingEntry)
             .where(BriefingEntry.run_id == latest_run.id)
+            .order_by(BriefingEntry.id)
             .limit(5)
         )).scalars().all()
         latest_briefing = {
             "id": latest_run.id,
-            "generated_at": latest_run.generated_at,
+            "generated_at": iso_utc(latest_run.generated_at),
             "days": latest_run.days,
-            "entries": [
-                {
-                    "id": e.id,
-                    "chat_id": e.chat_id,
-                    "chat_name": e.chat_name,
-                    "category": e.category,
-                    "summary": e.summary,
-                }
-                for e in entries
-            ],
+            "entries": [entry_dict(e) for e in entries],
         }
 
     return {
         "stats": stats,
         "needs_reply": needs_reply,
+        "recently_handled": recently_handled,
         "attention_contacts": attention_contacts,
         "latest_briefing": latest_briefing,
     }

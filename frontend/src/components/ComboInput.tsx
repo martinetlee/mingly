@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getOrganizations } from '../api/client'
-import type { OrgSummary } from '../api/types'
+import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
 
 /**
  * A text input that shows a dropdown of matching organization names while typing.
@@ -19,35 +19,21 @@ export default function ComboInput({
   autoFocus?: boolean
   className?: string
 }) {
-  const [suggestions, setSuggestions] = useState<OrgSummary[]>([])
+  // The dropdown opens only for text the user typed — picking a suggestion
+  // (or a parent resetting the value) must not reopen it
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(-1)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  // Fetch suggestions when value changes
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (!value.trim()) {
-      setSuggestions([])
-      setOpen(false)
-      return
-    }
-    debounceRef.current = setTimeout(async () => {
-      try {
-        const results = await getOrganizations(value.trim())
-        setSuggestions(results)
-        setOpen(results.length > 0)
-        setActiveIndex(-1)
-      } catch {
-        setSuggestions([])
-        setOpen(false)
-      }
-    }, 150)
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-    }
-  }, [value])
+  // Latest-only: an older query's results can never replace a newer one's
+  const { data, debouncedQuery } = useDebouncedQuery(
+    value,
+    (q, signal) => getOrganizations(q, signal),
+    { delayMs: 150, keepPreviousData: false, enabled: open },
+  )
+  const suggestions = data ?? []
+
+  useEffect(() => { setActiveIndex(-1) }, [debouncedQuery])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -61,9 +47,8 @@ export default function ComboInput({
   }, [])
 
   const handleSelect = (name: string) => {
-    onChange(name)
     setOpen(false)
-    setSuggestions([])
+    onChange(name)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -87,8 +72,7 @@ export default function ComboInput({
       <input
         autoFocus={autoFocus}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => { if (suggestions.length > 0) setOpen(true) }}
+        onChange={(e) => { setOpen(true); onChange(e.target.value) }}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         className={`w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-indigo-500 ${className}`}

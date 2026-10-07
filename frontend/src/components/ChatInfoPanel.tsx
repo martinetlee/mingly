@@ -1,11 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp, History, CheckCircle2, Loader2 } from 'lucide-react'
 import type { Chat, ChatMember, Contact, SharedMediaItem, Tag, TagSuggestion, AdminPermissions, InviteLink, GroupSettings, AdminActionLog } from '../api/types'
-import { getTags, getChatTags, addTagToChat, removeTagFromChat, createTag, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError } from '../api/client'
+import { getTags, getChatTags, addTagToChat, removeTagFromChat, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError, archiveChat } from '../api/client'
 import { authenticatedMediaUrl } from '../api/session'
 import ContactInfoSection from './ContactInfoSection'
 import ModerationPanel from './ModerationPanel'
+import { useConfirm } from './ui'
+import { reportError, toast } from '../lib/toast'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { fmtDateTime, fmtShortDate } from '../utils/time'
+import { createOrFindTag, tagErrorMessage } from './chatTags'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from './PersonCard'
 
 const TAG_COLORS: Record<string, string> = {
@@ -223,7 +228,7 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
                 </p>
                 <p className="text-[10px] text-slate-500">
                   {formatFileSize(item.media_size)}
-                  {item.date && ` \u00b7 ${new Date(item.date).toLocaleDateString()}`}
+                  {item.date && ` \u00b7 ${fmtShortDate(item.date)}`}
                 </p>
               </div>
               <Download size={12} className="flex-shrink-0 text-slate-500" />
@@ -248,7 +253,7 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
                   {item.sender_name && (
                     <p className="text-[10px] text-slate-500">
                       {item.sender_name}
-                      {item.date && ` \u00b7 ${new Date(item.date).toLocaleDateString()}`}
+                      {item.date && ` \u00b7 ${fmtShortDate(item.date)}`}
                     </p>
                   )}
                 </div>
@@ -279,6 +284,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
   const [showPromote, setShowPromote] = useState(false)
   const [perms, setPerms] = useState<AdminPermissions>({ ...DEFAULT_PERMISSIONS })
   const [loading, setLoading] = useState(false)
+  const confirm = useConfirm()
 
   if (member.role === 'creator') return null
 
@@ -289,7 +295,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
       setShowPromote(false)
       setOpen(false)
       onAction()
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Promote failed') }
     setLoading(false)
   }
 
@@ -299,19 +305,23 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
       await demoteAdmin(chat.telegram_id, member.id)
       setOpen(false)
       onAction()
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Demote failed') }
     setLoading(false)
   }
 
   const handleBan = async () => {
-    if (!confirm(`Ban ${member.name}?`)) return
-    setLoading(true)
-    try {
-      await banMember(chat.telegram_id, member.id)
-      setOpen(false)
-      onAction()
-    } catch { /* ignore */ }
-    setLoading(false)
+    // Target captured now: the confirm acts on this chat/member even if the panel changes
+    const chatId = chat.telegram_id
+    const memberId = member.id
+    setOpen(false)
+    const ok = await confirm({
+      title: `Ban ${member.name}?`,
+      message: `They will be removed from ${chat.name} and can't rejoin.`,
+      destructive: true,
+      confirmLabel: 'Ban',
+      onConfirm: () => banMember(chatId, memberId),
+    })
+    if (ok) onAction()
   }
 
   const handleApprove = async () => {
@@ -320,7 +330,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
       await approveMember(chat.telegram_id, member.id)
       setOpen(false)
       onAction()
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Remove restrictions failed') }
     setLoading(false)
   }
 
@@ -409,7 +419,7 @@ function MembersSection({ chat, members, loadingMembers, membersError, onMembers
   onMembersChange: (m: ChatMember[]) => void
 }) {
   const refreshMembers = useCallback(() => {
-    getChatMembers(chat.telegram_id).then(onMembersChange).catch(() => {})
+    getChatMembers(chat.telegram_id).then(onMembersChange).catch((e) => reportError(e, 'Couldn’t refresh members'))
   }, [chat.telegram_id, onMembersChange])
 
   return (
@@ -486,7 +496,7 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
       setShowCreate(false)
       setNewTitle('')
       setNewLimit('')
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Create invite link failed') }
     setCreating(false)
   }
 
@@ -494,11 +504,11 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
     try {
       await revokeInviteLink(chat.telegram_id, link)
       setLinks((prev) => prev.filter((l) => l.link !== link))
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Revoke failed') }
   }
 
   const handleCopy = (link: string) => {
-    navigator.clipboard.writeText(link).catch(() => {})
+    navigator.clipboard.writeText(link).then(() => toast.success('Link copied'), (e) => reportError(e, 'Copy failed'))
   }
 
   return (
@@ -531,7 +541,7 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
                   </div>
                   <div className="flex gap-2 text-[10px] text-slate-500">
                     <span>{l.usage} uses{l.usage_limit ? ` / ${l.usage_limit}` : ''}</span>
-                    {l.expire_date && <span>Expires: {new Date(l.expire_date).toLocaleDateString()}</span>}
+                    {l.expire_date && <span>Expires: {fmtShortDate(l.expire_date)}</span>}
                   </div>
                 </div>
               ))}
@@ -591,7 +601,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
           setEditTitle(s.title)
           setEditAbout(s.about)
         })
-        .catch(() => {})
+        .catch((e) => reportError(e, 'Couldn’t load group settings'))
         .finally(() => setLoading(false))
     }
   }, [expanded, chat.telegram_id, settings])
@@ -605,7 +615,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
       await updateGroupSettings(chat.telegram_id, updates)
       setSettings({ title: editTitle, about: editAbout })
       setDirty(false)
-    } catch { /* ignore */ }
+    } catch (e) { reportError(e, 'Save failed') }
     setSaving(false)
   }
 
@@ -713,12 +723,68 @@ function AdminActionLogSection({ chat }: { chat: Chat }) {
                   <span className="text-slate-500 truncate">{log.details}</span>
                 )}
                 {log.created_at && (
-                  <span className="text-[10px] text-slate-600">{new Date(log.created_at).toLocaleString()}</span>
+                  <span className="text-[10px] text-slate-600">{fmtDateTime(log.created_at)}</span>
                 )}
               </div>
             ))
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Archive full history": queues a complete walk of this chat's history
+ * (DMs are also covered by the background archive). Complete once every
+ * message from the first one is stored locally.
+ */
+export function ArchiveHistorySection({ chat }: { chat: Chat }) {
+  const [queued, setQueued] = useState(false)
+  const [complete, setComplete] = useState(!!chat.history_complete)
+  const [count, setCount] = useState<number | null>(null)
+  useEffect(() => { if (chat.history_complete) setComplete(true) }, [chat.history_complete])
+
+  const archive = useAsyncAction(async () => {
+    const res = await archiveChat(chat.telegram_id)
+    setCount(res.coverage.message_count)
+    if (res.coverage.history_complete) {
+      setComplete(true)
+      toast.success('Full history is already stored')
+    } else {
+      setQueued(res.queued)
+      toast.info('Archiving full history in the background')
+    }
+  }, { errorContext: 'Couldn’t start archiving' })
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-slate-700/50 px-4 py-4" data-testid="archive-history">
+      <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-400">
+        <History size={11} /> History
+      </div>
+      {complete ? (
+        <p className="flex items-center gap-1.5 text-xs text-emerald-400">
+          <CheckCircle2 size={12} /> Full history archived{count != null ? ` · ${count.toLocaleString()} messages` : ''}
+        </p>
+      ) : queued ? (
+        <p className="flex items-center gap-1.5 text-xs text-indigo-300">
+          <Loader2 size={12} className="animate-spin" /> Archiving…{count != null ? ` ${count.toLocaleString()} messages so far` : ''}
+        </p>
+      ) : (
+        <>
+          <p className="text-[11px] text-slate-500">
+            Only part of this chat's history is stored locally. Archive it so search and agents see every message.
+          </p>
+          <button
+            type="button"
+            onClick={() => void archive.run()}
+            disabled={archive.pending}
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            {archive.pending ? <Loader2 size={12} className="animate-spin" /> : <History size={12} />}
+            Archive full history
+          </button>
+        </>
       )}
     </div>
   )
@@ -738,8 +804,8 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
   const [membersError, setMembersError] = useState<string | null>(null)
 
   useEffect(() => {
-    getTags().then(setAllTags).catch(() => {})
-    getChatTags(chat.telegram_id).then(setChatTags).catch(() => {})
+    getTags().then(setAllTags).catch((e) => reportError(e, 'Couldn’t load tags'))
+    getChatTags(chat.telegram_id).then(setChatTags).catch((e) => reportError(e, 'Couldn’t load chat tags'))
     setSuggestions([])
     if (chat.type !== 'private') {
       setLoadingMembers(true)
@@ -759,33 +825,52 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
     (t) => !assignedIds.has(t.id) && t.category !== 'stage' && t.category !== 'stream',
   )
 
-  const handleAdd = async (tag: Tag) => {
-    await addTagToChat(chat.telegram_id, tag.id)
-    setChatTags((prev) => [...prev, tag])
-    setAllTags((prev) => prev)
+  /** Resolves true when the tag is on the chat; failures are toasted */
+  const handleAdd = async (tag: Tag): Promise<boolean> => {
+    if (assignedIds.has(tag.id)) return true
+    try {
+      await addTagToChat(chat.telegram_id, tag.id)
+    } catch (e) {
+      toast.error(`Couldn’t add tag: ${tagErrorMessage(e, tag.name)}`)
+      return false
+    }
+    setChatTags((prev) => (prev.some((t) => t.id === tag.id) ? prev : [...prev, tag]))
     setShowAddDropdown(false)
     setSuggestions((prev) => prev.filter((s) => s.name !== tag.name))
+    return true
+  }
+
+  /** Create (or reuse an existing same-named) tag and put it on the chat */
+  const createAndAdd = async (name: string, color: string): Promise<boolean> => {
+    let tag: Tag
+    try {
+      const res = await createOrFindTag(name, color, allTags)
+      tag = res.tag
+      if (res.created) setAllTags((prev) => [...prev, res.tag])
+    } catch (e) {
+      toast.error(`Couldn’t create tag “${name}”: ${tagErrorMessage(e, name)}`)
+      return false
+    }
+    return handleAdd(tag)
   }
 
   const handleRemove = async (tag: Tag) => {
-    await removeTagFromChat(chat.telegram_id, tag.id)
-    setChatTags((prev) => prev.filter((t) => t.id !== tag.id))
+    try {
+      await removeTagFromChat(chat.telegram_id, tag.id)
+      setChatTags((prev) => prev.filter((t) => t.id !== tag.id))
+    } catch (e) {
+      reportError(e, 'Remove tag failed')
+    }
   }
 
   const handleCreateAndAdd = async () => {
     const name = newTagName.trim()
     if (!name) return
-    try {
-      const tag = await createTag(name, newTagColor)
-      setAllTags((prev) => [...prev, tag])
-      await addTagToChat(chat.telegram_id, tag.id)
-      setChatTags((prev) => [...prev, tag])
+    // On failure the form stays open with the name, so the user can fix and retry
+    if (await createAndAdd(name, newTagColor)) {
       setNewTagName('')
       setNewTagColor('slate')
       setShowNewTag(false)
-    } catch {
-      const existing = allTags.find((t) => t.name.toLowerCase() === name.toLowerCase())
-      if (existing && !assignedIds.has(existing.id)) await handleAdd(existing)
     }
   }
 
@@ -794,24 +879,18 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
     try {
       const results = await suggestTags(chat.telegram_id)
       setSuggestions(results)
+    } catch (e) {
+      reportError(e, 'Tag suggestions failed')
     } finally {
       setSuggesting(false)
     }
   }
 
   const handleAcceptSuggestion = async (s: TagSuggestion) => {
-    const existing = allTags.find((t) => t.name.toLowerCase() === s.name.toLowerCase())
-    if (existing) {
-      if (!assignedIds.has(existing.id)) await handleAdd(existing)
-    } else {
-      try {
-        const tag = await createTag(s.name, s.color)
-        setAllTags((prev) => [...prev, tag])
-        await addTagToChat(chat.telegram_id, tag.id)
-        setChatTags((prev) => [...prev, tag])
-      } catch { /* already exists */ }
+    // The suggestion stays (so it can be retried) unless the tag really landed on the chat
+    if (await createAndAdd(s.name, s.color)) {
+      setSuggestions((prev) => prev.filter((x) => x.name !== s.name))
     }
-    setSuggestions((prev) => prev.filter((x) => x.name !== s.name))
   }
 
   const typeColor = {
@@ -1028,6 +1107,11 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
         )}
       </div>
 
+      {/* Full-history archive: groups/channels on demand, DMs until complete */}
+      {(chat.type !== 'private' || !chat.history_complete) && (
+        <ArchiveHistorySection key={chat.telegram_id} chat={chat} />
+      )}
+
       {/* Shared media section */}
       <SharedMediaSection chat={chat} />
 
@@ -1038,7 +1122,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
 
       {/* Moderation controls (groups/channels) */}
       {chat.type !== 'private' && (
-        <ModerationPanel chat={chat} />
+        <ModerationPanel key={chat.telegram_id} chat={chat} />
       )}
 
       {/* Members section (groups/channels only) */}

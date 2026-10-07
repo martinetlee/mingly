@@ -1,7 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for Mingly.app (macOS)
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
+
+# Every backend module, including ones only imported lazily or by string
+# (migration area modules, scam tools, routers added later). Static analysis
+# from backend/main.py alone misses function-level imports.
+backend_modules = [m for m in collect_submodules('backend') if not m.startswith('backend.tests')]
 
 a = Analysis(
     ['backend/main.py'],
@@ -14,7 +21,7 @@ a = Analysis(
         ('backend/scam/default_pipeline.json', 'backend/scam'),
         ('backend/scam/default_signatures.json', 'backend/scam'),
     ],
-    hiddenimports=[
+    hiddenimports=backend_modules + [
         # pywebview / macOS WebKit
         'webview',
         'webview.platforms.cocoa',
@@ -44,6 +51,8 @@ a = Analysis(
         'websockets',
         'websockets.legacy',
         'websockets.legacy.server',
+        # Anthropic provider SDK (imported lazily; optional at runtime)
+        'anthropic',
         # httpx (used by Ollama provider)
         'httpx',
         'httpx._transports.default',

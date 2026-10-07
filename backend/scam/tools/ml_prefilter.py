@@ -5,8 +5,10 @@ the max risk score. The pipeline JSON configures which domains to run
 and the threshold values via script_params.
 """
 
+import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +49,7 @@ class _DomainModel:
         self.clf = None
         self.low_threshold = 0.3
         self.high_threshold = 0.99
+        self.has_thresholds = False
 
         try:
             import joblib
@@ -57,8 +60,10 @@ class _DomainModel:
             thresholds_file = path / "thresholds.json"
             if thresholds_file.exists():
                 t = json.loads(thresholds_file.read_text())
-                self.low_threshold = t.get("low_threshold", 0.3)
-                self.high_threshold = t.get("high_threshold", 0.99)
+                if "low_threshold" in t and "high_threshold" in t:
+                    self.low_threshold = float(t["low_threshold"])
+                    self.high_threshold = float(t["high_threshold"])
+                    self.has_thresholds = True
 
             logger.info("Loaded ML model: %s (low=%.4f, high=%.4f)",
                         domain, self.low_threshold, self.high_threshold)
@@ -129,6 +134,13 @@ class MLEnsemble:
 
     def predict(self, texts: list[str], domains: Optional[list[str]] = None,
                 low_threshold: float = 0.30, high_threshold: float = 0.95) -> dict:
+        """Score ``texts`` with each selected model against *that model's*
+        calibrated thresholds, then aggregate: the ensemble verdict is the most
+        severe per-model verdict. ``low_threshold``/``high_threshold`` are only
+        the fallback for a model that shipped without thresholds.json.
+
+        CPU-bound (TF-IDF + LightGBM): call via ``asyncio.to_thread``.
+        """
         if not self._all_models:
             return {"risk_score": 0.0, "models": [], "verdict": "no_models"}
 
@@ -144,29 +156,38 @@ class MLEnsemble:
         domain_results = []
         max_score = 0.0
         max_domain = ""
+        verdict = "safe"
+        scored = 0
 
         for model in models:
+            low = model.low_threshold if model.has_thresholds else low_threshold
+            high = model.high_threshold if model.has_thresholds else high_threshold
             try:
                 probs = model.predict_proba(texts)
-                score = float(probs.max())
-                domain_results.append({
-                    "domain": model.domain,
-                    "score": round(score, 4),
-                    "low_threshold": model.low_threshold,
-                    "high_threshold": model.high_threshold,
-                })
-                if score > max_score:
-                    max_score = score
-                    max_domain = model.domain
             except Exception as e:
                 logger.warning("ML model %s prediction failed: %s", model.domain, e)
                 domain_results.append({"domain": model.domain, "score": 0.0, "error": str(e)})
+                continue
+            score = float(probs.max())
+            model_verdict = "auto_scam" if score >= high else "borderline" if score >= low else "safe"
+            scored += 1
+            domain_results.append({
+                "domain": model.domain,
+                "score": round(score, 4),
+                "low_threshold": low,
+                "high_threshold": high,
+                "verdict": model_verdict,
+            })
+            if _VERDICT_RANK[model_verdict] > _VERDICT_RANK[verdict]:
+                verdict = model_verdict
+            if score > max_score:
+                max_score = score
+                max_domain = model.domain
 
-        verdict = "safe"
-        if max_score >= high_threshold:
-            verdict = "auto_scam"
-        elif max_score >= low_threshold:
-            verdict = "borderline"
+        if scored == 0:
+            # Every model errored: never report "safe" (that would short-circuit
+            # the pipeline to not-scam on a broken prefilter).
+            return {"risk_score": 0.0, "verdict": "unavailable", "models": domain_results}
 
         return {
             "risk_score": round(max_score, 4),
@@ -176,48 +197,70 @@ class MLEnsemble:
         }
 
 
-def _get_ensemble() -> MLEnsemble:
-    global _ensemble
-    if _ensemble is None:
-        _ensure_models_in_data_dir()
-        _ensemble = MLEnsemble(_DATA_MODELS_DIR)
-    return _ensemble
+_VERDICT_RANK = {"safe": 0, "borderline": 1, "auto_scam": 2}
+
+# Loads happen in a worker thread; the lock makes concurrent first calls share
+# one load. The global is only ever replaced by a fully built ensemble.
+_load_lock = threading.Lock()
 
 
-def reload_ensemble():
-    """Reload the ML ensemble after model sync. Called by cloud_sync."""
+def _load_ensemble_sync() -> MLEnsemble:
     global _ensemble
-    _ensemble = None  # force re-init on next call
+    with _load_lock:
+        if _ensemble is None:
+            _ensure_models_in_data_dir()
+            _ensemble = MLEnsemble(_DATA_MODELS_DIR)
+        return _ensemble
+
+
+async def get_ensemble() -> MLEnsemble:
+    ensemble = _ensemble
+    if ensemble is not None:
+        return ensemble
+    return await asyncio.to_thread(_load_ensemble_sync)
+
+
+async def reload_ensemble() -> None:
+    """Build a fresh ensemble off the event loop, then swap it in atomically.
+    Called by cloud_sync after model bundles change; in-flight predictions keep
+    using the old instance."""
+    global _ensemble
+    fresh = await asyncio.to_thread(MLEnsemble, _DATA_MODELS_DIR)
+    with _load_lock:
+        _ensemble = fresh
+
+
+def _extract_text(args: dict) -> str:
+    text = args.get("text") or args.get("$target_text") or ""
+    if text or "$message" not in args:
+        return text
+    # Legacy fallback: parse the rendered prompt (targets are the last section)
+    from backend.scam.client import TARGETS_HEADER
+
+    msg = args["$message"]
+    if TARGETS_HEADER not in msg:
+        return msg
+    texts = []
+    for line in msg.rsplit(TARGETS_HEADER, 1)[1].strip().split("\n"):
+        line = line.strip()
+        if line.startswith("[") and "]: " in line:
+            texts.append(line.split("]: ", 1)[1])
+        elif line:
+            texts.append(line)
+    return " ".join(texts)
 
 
 @register_script("ml_ensemble")
 async def ml_ensemble_script(args: dict) -> dict:
-    """Generic ML ensemble script. Pipeline JSON configures domains and thresholds."""
-    ensemble = _get_ensemble()
-
-    # Extract text
-    text = args.get("text", "")
-    if not text and "$message" in args:
-        msg = args["$message"]
-        if "Messages to analyze:" in msg:
-            lines = msg.split("Messages to analyze:")[1].strip().split("\n")
-            texts = []
-            for line in lines:
-                line = line.strip()
-                if line.startswith("[") and "]: " in line:
-                    texts.append(line.split("]: ", 1)[1])
-                elif line:
-                    texts.append(line)
-            text = " ".join(texts)
-        else:
-            text = msg
-
+    """Generic ML ensemble script. Pipeline JSON configures domains and fallback thresholds."""
+    text = _extract_text(args)
     if not text:
         return {"risk_score": 0.0, "verdict": "no_input", "models": []}
 
-    domains = args.get("domains")
-    low_threshold = args.get("ensemble_low_threshold", 0.30)
-    high_threshold = args.get("ensemble_high_threshold", 0.95)
-
-    return ensemble.predict([text], domains=domains,
-                            low_threshold=low_threshold, high_threshold=high_threshold)
+    ensemble = await get_ensemble()
+    return await asyncio.to_thread(
+        ensemble.predict, [text],
+        domains=args.get("domains"),
+        low_threshold=args.get("ensemble_low_threshold", 0.30),
+        high_threshold=args.get("ensemble_high_threshold", 0.95),
+    )

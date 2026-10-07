@@ -1,45 +1,45 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Outlet, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import ShortcutHelp from './ShortcutHelp'
 import GlobalSearch from './GlobalSearch'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
-import { useWebSocket } from '../hooks/useWebSocket'
-import type { WSEvent } from '../api/types'
-
-const NAV_ROUTES = ['/home', '/chats', '/contacts', '/organizations', '/tracked', '/shield', '/intelligence?tab=briefing', '/intelligence', '/settings']
+import type { ShortcutMap } from '../hooks/useKeyboardShortcuts'
+import { useWsEvent } from '../hooks/useWebSocket'
+import { LOCK_ACTION } from '../lib/nav'
+import { useNav } from '../context/FeaturesContext'
+import { useLockVault } from '../hooks/useLockVault'
 
 export default function Layout() {
   const [helpOpen, setHelpOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const navigate = useNavigate()
+  const { lock } = useLockVault()
+  const { shortcuts: navShortcuts } = useNav()
 
-  const shortcuts = useMemo(
-    () => ({
-      'escape': () => { setHelpOpen(false); setSearchOpen(false) },
+  const shortcuts = useMemo(() => {
+    const map: ShortcutMap = {
+      // Only consume Escape when it actually closed something
+      'escape': () => {
+        if (!searchOpen) return false
+        setSearchOpen(false)
+      },
       'shift+?': () => setHelpOpen((v) => !v),
       'mod+k': () => setSearchOpen((v) => !v),
-      'mod+1': () => navigate(NAV_ROUTES[0]),
-      'mod+2': () => navigate(NAV_ROUTES[1]),
-      'mod+3': () => navigate(NAV_ROUTES[2]),
-      'mod+4': () => navigate(NAV_ROUTES[3]),
-      'mod+5': () => navigate(NAV_ROUTES[4]),
-      'mod+6': () => navigate(NAV_ROUTES[5]),
-      'mod+7': () => navigate(NAV_ROUTES[6]),
-      'mod+8': () => navigate(NAV_ROUTES[7]),
-      'mod+9': () => navigate(NAV_ROUTES[8]),
-    }),
-    [navigate],
-  )
+    }
+    for (const { combo, item } of navShortcuts) {
+      map[combo] = () => navigate(item.to)
+    }
+    map[LOCK_ACTION.combo] = () => { void lock() }
+    return map
+  }, [navigate, searchOpen, lock, navShortcuts])
 
   useKeyboardShortcuts(shortcuts)
 
-  // Handle global WebSocket events (e.g., notification clicks)
-  useWebSocket(useCallback((event: WSEvent) => {
-    if (event.type === 'navigate_to_chat') {
-      navigate(`/chats?chatId=${event.chat_id}`)
-    }
-  }, [navigate]))
+  // Native notification clicks are relayed by the backend as navigate_to_chat
+  useWsEvent('navigate_to_chat', (event) => {
+    navigate(`/chats?chatId=${event.chat_id}`)
+  })
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-900">

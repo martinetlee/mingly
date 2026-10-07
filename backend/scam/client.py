@@ -5,16 +5,13 @@ Provides a base class and implementations:
 - ExternalScamAPIClient: real HTTP calls to external service
 """
 
-import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Union
 from urllib.parse import urlparse
 
-from backend.llm.base import ChatMessage, LLMError
-from backend.llm.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -40,21 +37,81 @@ class FollowUpRequest:
     params: dict
 
 
+@dataclass
+class ScanRequest:
+    """One scam check: the messages being judged (``targets``) plus read-only
+    ``context``. Only targets are scored, only target senders are flagged and
+    signature short-circuits look only at targets. Message dicts carry
+    message_id, sender_id, sender_name, text, date."""
+    chat_id: int
+    targets: list
+    context: list = field(default_factory=list)
+    profiles: list = field(default_factory=list)
+    chat_metadata: dict = field(default_factory=dict)
+
+    @property
+    def target_ids(self) -> list:
+        return [m["message_id"] for m in self.targets]
+
+    @property
+    def target_sender_ids(self) -> list:
+        return list(dict.fromkeys(m["sender_id"] for m in self.targets if m.get("sender_id")))
+
+    def all_messages(self) -> list:
+        """Context then targets, chronological — for APIs that take one list."""
+        return list(self.context) + list(self.targets)
+
+
+# Character budget for the message section of the prompt. Targets are always
+# included in full; context fills whatever is left, newest first.
+PROMPT_CHAR_BUDGET = 6000
+_CONTEXT_MSG_CHARS = 500
+
+TARGETS_HEADER = "Messages to analyze:"
+
+
+def build_message_context(req: ScanRequest, budget: int = PROMPT_CHAR_BUDGET) -> str:
+    """Render the request for the LLM. Targets come last, under
+    ``Messages to analyze:``, and are never truncated."""
+    head = []
+    if req.chat_metadata:
+        head.append(f"Chat: {req.chat_metadata.get('name', 'Unknown')} ({req.chat_metadata.get('type', 'unknown')})")
+    for profile in req.profiles[:5]:
+        bio = profile.get("bio") or ""
+        head.append(
+            f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}, "
+            f"Bio:{bio}, Is contact:{profile.get('is_contact', False)}"
+        )
+    target_lines = [TARGETS_HEADER] + [
+        f"  [{m.get('sender_name') or 'Unknown'}]: {m.get('text') or ''}" for m in req.targets
+    ]
+
+    remaining = budget - sum(len(x) + 1 for x in head) - sum(len(x) + 1 for x in target_lines)
+    context_lines: list[str] = []
+    for m in reversed(req.context):  # newest context first until the budget runs out
+        line = f"  [{m.get('sender_name') or 'Unknown'}]: {(m.get('text') or '')[:_CONTEXT_MSG_CHARS]}"
+        if remaining - (len(line) + 1) < 0:
+            break
+        remaining -= len(line) + 1
+        context_lines.insert(0, line)
+
+    parts = list(head)
+    if context_lines:
+        parts.append("\nEarlier messages from the same sender (context only, do not judge these):")
+        parts.extend(context_lines)
+    parts.append("")
+    parts.extend(target_lines)
+    return "\n".join(parts)
+
+
 class ScamAPIClient(ABC):
     @abstractmethod
     async def are_flagged_scams(self, telegram_ids: list[int]) -> dict[int, ScamCheckResult]:
         """Check if telegram users are known scammers. Returns {telegram_id: result}."""
 
     @abstractmethod
-    async def is_this_scam(
-        self,
-        request_id: str,
-        messages: list[dict],
-        user_telegram_id: int,
-        profiles: list[dict],
-        chat_metadata: dict,
-    ) -> ScamCheckResult:
-        """Analyze messages for scam patterns. request_id is for idempotency."""
+    async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
+        """Judge ``req.targets`` (with ``req.context`` as background). request_id is for idempotency."""
 
     @abstractmethod
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
@@ -131,37 +188,13 @@ class LocalPipelineClient(ScamAPIClient):
         self._pipeline = config
         return bool(self._pipeline.system_prompt)
 
-    async def is_this_scam(
-        self,
-        request_id: str,
-        messages: list[dict],
-        user_telegram_id: int,
-        profiles: list[dict],
-        chat_metadata: dict,
-    ) -> ScamCheckResult:
+    async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
         if not self._ensure_pipeline():
             return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="Pipeline not loaded")
 
-        # Build message context string for the engine
-        parts = []
-        if chat_metadata:
-            parts.append(f"Chat: {chat_metadata.get('name', 'Unknown')} ({chat_metadata.get('type', 'unknown')})")
-        for profile in profiles[:5]:
-            bio = profile.get('bio') or ''
-            is_contact = profile.get('is_contact', False)
-            parts.append(f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}, Bio:{bio}, Is contact:{is_contact}")
-        parts.append("\nMessages to analyze:")
-        for msg in messages[:5]:
-            sender = msg.get("sender_name", "Unknown")
-            text = (msg.get("text") or "")[:500]
-            parts.append(f"  [{sender}]: {text}")
-        message_context = "\n".join(parts)
-
-        # Execute pipeline through the DAG engine
         from backend.scam.engine import execute_pipeline
-        engine_result = await execute_pipeline(self._pipeline, message_context, messages)
+        engine_result = await execute_pipeline(self._pipeline, build_message_context(req), req.targets)
         return engine_result.scam_result
-
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
         return None  # Local client executes synchronously
@@ -178,12 +211,29 @@ MockScamAPIClient = LocalPipelineClient
 # ExternalScamAPIClient — HTTP calls to external service
 # ---------------------------------------------------------------------------
 
+def _vault_scam_api_key() -> str:
+    from backend.api.settings import get_secret_pref
+    return get_secret_pref("scam_detection_api_key")
+
+
 class ExternalScamAPIClient(ScamAPIClient):
     """Real external API client."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: Optional[str] = None,
+                 key_provider: Optional[Callable[[], str]] = None):
+        """``api_key`` is accepted for old callers and ignored: the key lives
+        in the vault and is read on every request, so a lock or vault reset
+        revokes it immediately."""
         self._base_url = base_url
-        self._api_key = api_key
+        self._key_provider = key_provider or _vault_scam_api_key
+
+    @property
+    def _api_key(self) -> str:
+        try:
+            return self._key_provider() or ""
+        except Exception:
+            logger.exception("Could not read the scam detection API key")
+            return ""
 
     async def are_flagged_scams(self, telegram_ids: list[int]) -> dict[int, ScamCheckResult]:
         import httpx
@@ -207,24 +257,18 @@ class ExternalScamAPIClient(ScamAPIClient):
                 )
             return results
 
-    async def is_this_scam(
-        self,
-        request_id: str,
-        messages: list[dict],
-        user_telegram_id: int,
-        profiles: list[dict],
-        chat_metadata: dict,
-    ) -> ScamCheckResult:
+    async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
         import httpx
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self._base_url}/isThisScam",
                 json={
                     "request_id": request_id,
-                    "messages": messages,
-                    "user_telegram_id": user_telegram_id,
-                    "profiles": profiles,
-                    "chat_metadata": chat_metadata,
+                    "messages": req.all_messages(),
+                    "target_message_ids": req.target_ids,
+                    "user_telegram_id": 0,
+                    "profiles": req.profiles,
+                    "chat_metadata": req.chat_metadata,
                 },
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=60,

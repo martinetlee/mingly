@@ -1,27 +1,20 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Star, BadgeCheck, Crown, Bot } from 'lucide-react'
 import type { PersonSummary } from '../api/types'
-import { resolvePerson } from '../api/client'
 import { sanitizeLinkedInUrl } from '../utils/sanitizeUrl'
 import { authenticatedMediaUrl } from '../api/session'
+import { fmtRelativeDays } from '../utils/time'
+import { usePersonSummary, invalidatePerson, invalidateAllPeople, primePeople } from '../hooks/usePersonSummary'
 
-// Module-level cache for resolved person data (session lifetime)
-const personCache = new Map<number, PersonSummary>()
-const pendingRequests = new Map<number, Promise<PersonSummary>>()
-
+/** @deprecated use invalidatePerson / invalidateAllPeople from hooks/usePersonSummary */
 export function invalidatePersonCache(telegramId?: number) {
-  if (telegramId != null) {
-    personCache.delete(telegramId)
-  } else {
-    personCache.clear()
-  }
+  if (telegramId != null) invalidatePerson(telegramId)
+  else invalidateAllPeople()
 }
 
+/** @deprecated use primePeople from hooks/usePersonSummary */
 export function preloadPersonCache(data: Record<number, PersonSummary>) {
-  for (const [tid, summary] of Object.entries(data)) {
-    personCache.set(Number(tid), summary)
-  }
+  primePeople(data)
 }
 
 export const RELATIONSHIP_STATUS_COLORS: Record<string, string> = {
@@ -57,17 +50,9 @@ const ONLINE_STATUS_COLORS: Record<string, string> = {
   offline: 'text-slate-500',
 }
 
-export function fmtRelative(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffMs = now.getTime() - d.getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-  if (diffDays === 0) return 'Today'
-  if (diffDays === 1) return 'Yesterday'
-  if (diffDays < 7) return `${diffDays}d ago`
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`
-  if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`
-  return `${Math.floor(diffDays / 365)}y ago`
+/** "Today" · "Yesterday" · "3d ago" · "2w ago" · "4mo ago" · "1y ago" */
+export function fmtRelative(iso: string | null | undefined): string {
+  return fmtRelativeDays(iso)
 }
 
 interface PersonCardProps {
@@ -99,62 +84,6 @@ interface PersonCardProps {
   muted?: boolean
 }
 
-function useResolvedPerson(
-  telegramId: number,
-  preloaded: boolean,
-): PersonSummary | null {
-  const [person, setPerson] = useState<PersonSummary | null>(
-    personCache.get(telegramId) ?? null,
-  )
-
-  useEffect(() => {
-    if (preloaded) return
-    const cached = personCache.get(telegramId)
-    if (cached) {
-      setPerson(cached)
-      return
-    }
-    // Guard against telegramId changing (or unmount) before the request
-    // resolves — the old response must not overwrite the new person's data
-    let stale = false
-    let req = pendingRequests.get(telegramId)
-    if (!req) {
-      req = resolvePerson(telegramId)
-      pendingRequests.set(telegramId, req)
-    }
-    req
-      .then((data) => {
-        personCache.set(telegramId, data)
-        if (!stale) setPerson(data)
-      })
-      .catch(() => {
-        if (stale) return
-        setPerson({
-          telegram_id: telegramId,
-          name: String(telegramId),
-          username: null,
-          is_important: false,
-          contact_id: null,
-          relationship_status: null,
-          last_interaction_at: null,
-          primary_position: null,
-          phone: null,
-          twitter_handle: null,
-          linkedin_url: null,
-          has_notes: false,
-        })
-      })
-      .finally(() => {
-        pendingRequests.delete(telegramId)
-      })
-    return () => {
-      stale = true
-    }
-  }, [telegramId, preloaded])
-
-  return person
-}
-
 export default function PersonCard({
   telegramId,
   name: propName,
@@ -163,7 +92,6 @@ export default function PersonCard({
   position: propPosition,
   lastInteraction: propLastInteraction,
   isImportant: propIsImportant,
-  contactId: propContactId,
   phone: propPhone,
   twitterHandle: propTwitter,
   linkedinUrl: propLinkedin,
@@ -183,8 +111,14 @@ export default function PersonCard({
   className = '',
   muted = false,
 }: PersonCardProps) {
-  const hasPreloaded = propName != null
-  const resolved = useResolvedPerson(telegramId, hasPreloaded)
+  // Resolve only when a field this mode displays wasn't supplied — callers
+  // pass what they have (name, username…) and the rest comes from the store
+  const shown: unknown[] = [propName, propIsImportant, propUsername]
+  if (showStatus) shown.push(propStatus)
+  if (mode !== 'header') shown.push(propPosition, propLastInteraction)
+  if (mode === 'full' || mode === 'profile') shown.push(propPhone, propTwitter, propLinkedin, propHasNotes)
+  const needsResolve = shown.some((v) => v === undefined)
+  const resolved = usePersonSummary(telegramId, needsResolve)
 
   const name = propName ?? resolved?.name ?? ''
   const username = propUsername !== undefined ? propUsername : resolved?.username
@@ -192,13 +126,13 @@ export default function PersonCard({
   const position = propPosition !== undefined ? propPosition : resolved?.primary_position
   const lastInteraction = propLastInteraction !== undefined ? propLastInteraction : resolved?.last_interaction_at
   const isImportant = propIsImportant ?? resolved?.is_important ?? false
-  const contactId = propContactId !== undefined ? propContactId : resolved?.contact_id
   const phone = propPhone !== undefined ? propPhone : resolved?.phone
   const twitterHandle = propTwitter !== undefined ? propTwitter : resolved?.twitter_handle
   const linkedinUrl = propLinkedin !== undefined ? propLinkedin : resolved?.linkedin_url
   const hasNotes = propHasNotes ?? resolved?.has_notes ?? false
 
-  const profileLink = contactId ? `/contacts` : `/profile/${telegramId}`
+  // Every person (contact or not) has a profile page keyed by telegram_id
+  const profileLink = `/profile/${telegramId}`
   const initial = name ? name.charAt(0).toUpperCase() : '?'
 
   if (!name && !resolved) {

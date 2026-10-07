@@ -5,6 +5,7 @@ classifiers). Phase 1 supports LLM nodes only. The engine handles validation,
 topological sorting, parallel layer execution, and full trace recording.
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -14,10 +15,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from backend.llm.base import ChatMessage, LLMError
-from backend.llm.registry import get_registry
+from backend.llm.resolve import LLMUnavailable, get_provider_for_model
 from backend.scam.client import ScamCheckResult
 
 logger = logging.getLogger(__name__)
+
+# LLM role for pipeline nodes that don't pin a model: an instance named
+# "scam" wins, else the orchestrator (see backend.llm.resolve).
+SCAM_LLM_ROLE = "scam"
 
 
 # ---------------------------------------------------------------------------
@@ -220,25 +225,38 @@ def substitute_placeholders(template: str, inputs: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def parse_llm_response(raw: str) -> dict:
-    """Parse LLM response text into a dict. Handles code fences and extra text."""
+    """Parse the final JSON object out of an LLM response.
+
+    Models often write reasoning (which may itself contain braces) before the
+    answer, so take the *last* complete JSON object in the text rather than
+    slicing from the first '{' to the last '}'.
+    """
     content = raw.strip()
     if not content:
         raise ValueError("LLM returned empty response")
 
-    # Strip markdown code fences
-    if content.startswith("```"):
-        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-    # Extract JSON object from potentially wrapped text
-    json_start = content.find("{")
-    json_end = content.rfind("}") + 1
-    if json_start >= 0 and json_end > json_start:
-        content = content[json_start:json_end]
-
     # Fix common LLM JSON mistakes: Python-style True/False/None → JSON true/false/null
     content = content.replace(": True", ": true").replace(": False", ": false").replace(": None", ": null")
 
-    return json.loads(content)
+    decoder = json.JSONDecoder()
+    last: Optional[dict] = None
+    first_error: Optional[json.JSONDecodeError] = None
+    idx = content.find("{")
+    while idx != -1:
+        try:
+            obj, end = decoder.raw_decode(content, idx)
+        except json.JSONDecodeError as e:
+            first_error = first_error or e
+            idx = content.find("{", idx + 1)
+            continue
+        if isinstance(obj, dict):
+            last = obj
+        idx = content.find("{", end)
+    if last is not None:
+        return last
+    if first_error is not None:
+        raise first_error
+    return json.loads(content)  # raises a JSONDecodeError describing the text
 
 
 # ---------------------------------------------------------------------------
@@ -293,40 +311,107 @@ def _parse_text_tool_calls(text: str) -> list:
 # Short-Circuit Evaluator
 # ---------------------------------------------------------------------------
 
+_SC_LITERALS = {"true": True, "false": False, "null": None, "True": True, "False": False, "None": None}
+_SC_COMPARE = {
+    ast.Eq: lambda a, b: a == b,
+    ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b,
+    ast.Gt: lambda a, b: a > b,
+    ast.LtE: lambda a, b: a <= b,
+    ast.GtE: lambda a, b: a >= b,
+}
+
+
+def _sc_normalize(condition: str) -> str:
+    """Translate &&/|| to and/or outside string literals."""
+    out = []
+    quote = None
+    i = 0
+    while i < len(condition):
+        ch = condition[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(condition):
+                out.append(condition[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif condition.startswith("&&", i):
+            out.append(" and ")
+            i += 1
+        elif condition.startswith("||", i):
+            out.append(" or ")
+            i += 1
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _sc_eval(node: ast.AST, output: dict) -> Any:
+    if isinstance(node, ast.Expression):
+        return _sc_eval(node.body, output)
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            return all(_sc_eval(v, output) for v in node.values)
+        return any(_sc_eval(v, output) for v in node.values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return not _sc_eval(node.operand, output)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        val = _sc_eval(node.operand, output)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return -val
+        raise ValueError("unary minus on non-number")
+    if isinstance(node, ast.Compare):
+        left = _sc_eval(node.left, output)
+        for op, comp in zip(node.ops, node.comparators):
+            fn = _SC_COMPARE.get(type(op))
+            if fn is None:
+                raise ValueError(f"operator {type(op).__name__} not allowed")
+            right = _sc_eval(comp, output)
+            try:
+                if not fn(left, right):
+                    return False
+            except TypeError:
+                return False  # e.g. null < 0.5
+            left = right
+        return True
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, type(None))):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in _SC_LITERALS:
+            return _SC_LITERALS[node.id]
+        raise ValueError(f"unknown name '{node.id}'")
+    if isinstance(node, ast.Attribute):
+        path = []
+        cur: ast.AST = node
+        while isinstance(cur, ast.Attribute):
+            path.insert(0, cur.attr)
+            cur = cur.value
+        if not (isinstance(cur, ast.Name) and cur.id == "output"):
+            raise ValueError("only output.<field> paths are allowed")
+        resolved: Any = output
+        for part in path:
+            resolved = resolved.get(part) if isinstance(resolved, dict) else None
+        return resolved
+    raise ValueError(f"{type(node).__name__} not allowed in short-circuit condition")
+
+
 def _evaluate_short_circuit(condition: str, output: dict) -> bool:
-    """Evaluate a simple short-circuit condition against a node's output.
+    """Evaluate a short-circuit condition against a node's output (AST walk, no Python eval).
 
-    Supports: output.field, ==, !=, >, <, >=, <=, &&, ||, true, false, null, numbers, quoted strings.
+    Supports: output.field(.sub), ==, !=, >, <, >=, <=, &&/and, ||/or, !/not via
+    'not', true/false/null, numbers and quoted strings. Anything else is
+    rejected (treated as not triggered).
     """
-    if not condition.strip():
+    if not condition or not condition.strip():
         return False
-
     try:
-        # Replace output.X with actual values
-        import re as _re2
-        def _resolve(match):
-            path = match.group(1)
-            val = output
-            for part in path.split("."):
-                if isinstance(val, dict):
-                    val = val.get(part)
-                else:
-                    return "null"
-            if val is None:
-                return "null"
-            if isinstance(val, bool):
-                return "true" if val else "false"
-            if isinstance(val, (int, float)):
-                return str(val)
-            return f'"{val}"'
-
-        expr = _re2.sub(r'output\.(\w[\w.]*)', _resolve, condition)
-
-        # Simple expression evaluator
-        expr = expr.replace("&&", " and ").replace("||", " or ")
-        expr = expr.replace("true", "True").replace("false", "False").replace("null", "None")
-
-        return bool(eval(expr, {"__builtins__": {}}, {}))
+        tree = ast.parse(_sc_normalize(condition.strip()), mode="eval")
+        return bool(_sc_eval(tree, output))
     except Exception as e:
         logger.warning("Short-circuit evaluation failed for '%s': %s", condition, e)
         return False
@@ -351,20 +436,11 @@ async def _execute_llm_node(
     model_requested = node_config.get("model")
     trace.model_requested = model_requested
 
-    registry = get_registry()
-    provider = None
-    if model_requested:
-        provider = registry.get_by_model(model_requested)
-        if not provider:
-            provider = registry.get_any()
-            if provider:
-                trace.model_warning = f"Model '{model_requested}' not available, using '{provider.instance_name}'"
-    else:
-        provider = registry.get_any()
-
-    if not provider:
+    try:
+        provider, trace.model_warning = get_provider_for_model(model_requested, SCAM_LLM_ROLE)
+    except LLMUnavailable as e:
         trace.status = "failed"
-        trace.error = "No LLM provider available"
+        trace.error = str(e) or "No LLM provider available"
         trace.duration_ms = int((time.monotonic() - t0) * 1000)
         trace.completed_at = datetime.now(timezone.utc).isoformat()
         return trace
@@ -417,9 +493,13 @@ async def _execute_llm_node(
             content=llm_messages[0].content + "\n\n" + _build_tool_prompt(tools),
         )
 
+    # Bound to the trace up front so tool calls are recorded even if a later
+    # LLM call fails.
+    tool_calls_made: list[dict] = []
+    trace.tool_calls = tool_calls_made
+    response = None
     try:
-        response = None
-        tool_calls_made = []
+        exhausted_with_calls = False
 
         for iteration in range(max_tool_iterations + 1):
             # Call LLM
@@ -441,62 +521,64 @@ async def _execute_llm_node(
                 pending_calls = _parse_text_tool_calls(response.content)
 
             if not pending_calls:
+                exhausted_with_calls = False
                 break  # Final answer
+            exhausted_with_calls = True
 
-            # Execute tool calls
+            # One assistant turn carrying every tool call, then one result per
+            # call (the shape chat APIs expect for parallel tool calls).
+            if use_native:
+                llm_messages.append(ChatMessage(
+                    role="assistant", content=response.content or "",
+                    tool_calls=[
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                        for tc in pending_calls
+                    ],
+                ))
+            else:
+                llm_messages.append(ChatMessage(role="assistant", content=response.content or ""))
+
+            text_results = []
             for tc in pending_calls:
                 tool = get_tool(tc.name)
+                tc_t0 = time.monotonic()
                 if not tool:
                     logger.warning("Tool '%s' not found in registry", tc.name)
-                    continue
-
-                tc_t0 = time.monotonic()
-                try:
-                    result = await tool.execute(tc.arguments)
-                except Exception as e:
-                    result = {"error": str(e)}
-                tc_ms = int((time.monotonic() - tc_t0) * 1000)
-
+                    result = {"error": f"Unknown tool '{tc.name}'"}
+                else:
+                    try:
+                        result = await tool.execute(tc.arguments)
+                    except Exception as e:
+                        result = {"error": str(e)}
                 tool_calls_made.append({
                     "iteration": iteration,
                     "tool": tc.name,
                     "args": tc.arguments,
                     "result": result,
-                    "duration_ms": tc_ms,
+                    "duration_ms": int((time.monotonic() - tc_t0) * 1000),
                 })
-
-                # Append to message history for next iteration
                 if use_native:
-                    # Native: assistant message with tool_calls + tool result
                     llm_messages.append(ChatMessage(
-                        role="assistant", content=response.content or "",
-                        tool_calls=[{"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}],
-                    ))
-                    llm_messages.append(ChatMessage(
-                        role="tool", content=json.dumps(result, default=str),
-                        tool_call_id=tc.id,
+                        role="tool", content=json.dumps(result, default=str), tool_call_id=tc.id,
                     ))
                 else:
-                    # Text-based: append as user message
-                    llm_messages.append(ChatMessage(role="assistant", content=response.content or ""))
-                    llm_messages.append(ChatMessage(
-                        role="user",
-                        content=f"Tool result for {tc.name}:\n{json.dumps(result, indent=2, default=str)}\n\nNow provide your final JSON answer.",
-                    ))
+                    text_results.append(f"Tool result for {tc.name}:\n{json.dumps(result, indent=2, default=str)}")
 
-        trace.tool_calls = tool_calls_made
+            if not use_native:
+                llm_messages.append(ChatMessage(
+                    role="user", content="\n\n".join(text_results) + "\n\nNow provide your final JSON answer.",
+                ))
 
         # Parse final response
         raw_content = (response.content if response else "") or ""
 
-        # If content is empty after tool use, make one more call without tools to force a final answer
-        if not raw_content.strip() and tool_calls_made:
+        # The model is still calling tools after the last allowed iteration, or
+        # answered with nothing after tool use: ask once more, without tools.
+        if tool_calls_made and (exhausted_with_calls or not raw_content.strip()):
             llm_messages.append(ChatMessage(role="user", content="Now provide your final JSON answer based on the tool results above."))
-            try:
-                final_response = await provider.complete(llm_messages, max_tokens=max_tokens, temperature=temperature)
-                raw_content = final_response.content or ""
-            except Exception:
-                pass
+            final_response = await provider.complete(llm_messages, max_tokens=max_tokens, temperature=temperature)
+            raw_content = final_response.content or ""
 
         trace.raw_response = raw_content
 
@@ -511,10 +593,10 @@ async def _execute_llm_node(
         trace.output = parsed
         trace.status = "completed"
 
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, ValueError) as e:
         trace.status = "failed"
         trace.error = f"LLM returned invalid JSON: {e}"
-        if response:
+        if trace.raw_response is None and response:
             trace.raw_response = response.content
     except (LLMError, Exception) as e:
         trace.status = "failed"
@@ -533,6 +615,7 @@ async def _execute_script_node(
     node_config: dict,
     inputs: dict[str, Any],
     message_context: str,
+    target_text: str = "",
 ) -> StepTrace:
     """Execute a script node by calling a registered tool/script function."""
     trace = StepTrace(node_id="", type="script", layer=0)
@@ -543,8 +626,7 @@ async def _execute_script_node(
     params = node_config.get("params", {})
     trace.script = script_name
 
-    import backend.scam.tools  # ensure tools are registered
-    from backend.scam.tools import get_tool
+    from backend.scam.tools import get_tool  # importing registers the tools
     tool = get_tool(script_name)
     if not tool:
         # If the script isn't available, return a neutral result instead of failing
@@ -556,8 +638,9 @@ async def _execute_script_node(
         trace.completed_at = datetime.now(timezone.utc).isoformat()
         return trace
 
-    # Build args: merge params with predecessor inputs + $message
-    args = {**params, **inputs, "$message": message_context}
+    # Build args: merge params with predecessor inputs + $message. Scripts
+    # that judge text (ML prefilter) use $target_text: the targets only.
+    args = {**params, **inputs, "$message": message_context, "$target_text": target_text}
     trace.input = args
 
     try:
@@ -577,70 +660,79 @@ async def _execute_script_node(
 # Pipeline Execution
 # ---------------------------------------------------------------------------
 
-async def execute_pipeline(pipeline_config, message_context: str, messages: list[dict]) -> EngineResult:
+def _finish(trace: PipelineTrace, t0: float, status: str, error: Optional[str] = None) -> None:
+    trace.status = status
+    trace.error = error
+    trace.completed_at = datetime.now(timezone.utc).isoformat()
+    trace.duration_ms = int((time.monotonic() - t0) * 1000)
+
+
+def _failed_result(trace: PipelineTrace, t0: float, error: str) -> EngineResult:
+    _finish(trace, t0, "failed", error)
+    return EngineResult(
+        scam_result=ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=error, trace_json=trace.to_json()),
+        trace=trace,
+    )
+
+
+def _signature_match(sigs, targets: list[dict]) -> Optional[dict]:
+    """First signature hit among the *target* messages (context never matches)."""
+    from backend.scam.client import _extract_domains
+
+    known_ids = set(sigs.telegram_ids)
+    for msg in targets:
+        text = msg.get("text") or ""
+        sender_id = msg.get("sender_id")
+        if sender_id and sender_id in known_ids:
+            return {"match_type": "telegram_id", "matched_value": str(sender_id), "confidence": 0.95,
+                    "category": "impersonation", "reason": "Sender matches known scammer ID"}
+        if not text:
+            continue
+        if sigs.domains:
+            for domain in _extract_domains(text):
+                if domain in sigs.domains:
+                    return {"match_type": "domain", "matched_value": domain, "confidence": 0.95,
+                            "category": "malware_link", "reason": f"Known malicious domain: {domain}"}
+        lowered = text.lower()
+        for wallet in sigs.wallets:
+            if wallet.lower() in lowered:
+                return {"match_type": "wallet", "matched_value": wallet, "confidence": 0.95,
+                        "category": "investment_scam", "reason": "Known scam wallet address"}
+        for pattern in sigs._compiled_patterns:
+            if pattern.search(text):
+                return {"match_type": "pattern", "matched_value": pattern.pattern, "confidence": 0.85,
+                        "category": "other", "reason": "Matches scam pattern"}
+    return None
+
+
+async def execute_pipeline(pipeline_config, message_context: str, targets: list[dict]) -> EngineResult:
     """Execute a pipeline DAG and return the result with full trace.
 
     Args:
         pipeline_config: PipelineConfig with nodes, edges, output, signatures, categories
-        message_context: Formatted message context string (chat info + profiles + messages)
-        messages: Raw message dicts (for signature checking)
+        message_context: Rendered prompt input (chat info + profiles + context + targets)
+        targets: The message dicts being judged. Signature checks and the ML
+            prefilter look only at these.
     """
-    from backend.scam.client import _extract_domains
-
+    t0 = time.monotonic()
     trace = PipelineTrace(
         pipeline_version=pipeline_config.version,
         started_at=datetime.now(timezone.utc).isoformat(),
         input=message_context,
     )
+    target_text = "\n".join((m.get("text") or "") for m in targets if m.get("text"))
 
-    # --- Step 1: Signature check ---
-    sigs = pipeline_config.signatures
-    if sigs.domains or sigs.wallets or sigs._compiled_patterns or sigs.telegram_ids:
-        for msg in messages:
-            text = msg.get("text") or ""
-            sender_id = msg.get("sender_id")
-
-            if sender_id and sender_id in set(sigs.telegram_ids):
-                trace.status = "short_circuited"
-                trace.short_circuit = {"match_type": "telegram_id", "matched_value": str(sender_id), "confidence": 0.95, "category": "impersonation"}
-                trace.completed_at = datetime.now(timezone.utc).isoformat()
-                trace.duration_ms = 0
-                return EngineResult(
-                    scam_result=ScamCheckResult(is_scam=True, confidence=0.95, reason=f"Sender matches known scammer ID", category="impersonation", trace_json=trace.to_json()),
-                    trace=trace,
-                )
-
-            if text:
-                if sigs.domains:
-                    for domain in _extract_domains(text):
-                        if domain in sigs.domains:
-                            trace.status = "short_circuited"
-                            trace.short_circuit = {"match_type": "domain", "matched_value": domain, "confidence": 0.95, "category": "malware_link"}
-                            trace.completed_at = datetime.now(timezone.utc).isoformat()
-                            return EngineResult(
-                                scam_result=ScamCheckResult(is_scam=True, confidence=0.95, reason=f"Known malicious domain: {domain}", category="malware_link", trace_json=trace.to_json()),
-                                trace=trace,
-                            )
-
-                for wallet in sigs.wallets:
-                    if wallet.lower() in text.lower():
-                        trace.status = "short_circuited"
-                        trace.short_circuit = {"match_type": "wallet", "matched_value": wallet, "confidence": 0.95, "category": "investment_scam"}
-                        trace.completed_at = datetime.now(timezone.utc).isoformat()
-                        return EngineResult(
-                            scam_result=ScamCheckResult(is_scam=True, confidence=0.95, reason="Known scam wallet address", category="investment_scam", trace_json=trace.to_json()),
-                            trace=trace,
-                        )
-
-                for pattern in sigs._compiled_patterns:
-                    if pattern.search(text):
-                        trace.status = "short_circuited"
-                        trace.short_circuit = {"match_type": "pattern", "matched_value": pattern.pattern, "confidence": 0.85, "category": "other"}
-                        trace.completed_at = datetime.now(timezone.utc).isoformat()
-                        return EngineResult(
-                            scam_result=ScamCheckResult(is_scam=True, confidence=0.85, reason=f"Matches scam pattern", category="other", trace_json=trace.to_json()),
-                            trace=trace,
-                        )
+    # --- Step 1: Signature check (targets only) ---
+    hit = _signature_match(pipeline_config.signatures, targets)
+    if hit:
+        reason = hit.pop("reason")
+        trace.short_circuit = hit
+        _finish(trace, t0, "short_circuited")
+        return EngineResult(
+            scam_result=ScamCheckResult(is_scam=True, confidence=hit["confidence"], reason=reason,
+                                        category=hit["category"], trace_json=trace.to_json()),
+            trace=trace,
+        )
 
     # --- Step 2: Validate & compute layers ---
     nodes = pipeline_config.nodes
@@ -648,173 +740,121 @@ async def execute_pipeline(pipeline_config, message_context: str, messages: list
     output_node_id = pipeline_config.output
 
     if not nodes:
-        trace.status = "failed"
-        trace.error = "Pipeline has no nodes"
-        trace.completed_at = datetime.now(timezone.utc).isoformat()
-        return EngineResult(
-            scam_result=ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="Pipeline has no nodes", trace_json=trace.to_json()),
-            trace=trace,
-        )
+        return _failed_result(trace, t0, "Pipeline has no nodes")
 
     try:
         predecessors, layers = validate_pipeline(nodes, edges, output_node_id)
     except ValueError as e:
-        trace.status = "failed"
-        trace.error = str(e)
-        trace.completed_at = datetime.now(timezone.utc).isoformat()
-        return EngineResult(
-            scam_result=ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=f"Pipeline validation failed: {e}", trace_json=trace.to_json()),
-            trace=trace,
-        )
+        return _failed_result(trace, t0, f"Pipeline validation failed: {e}")
 
     # --- Step 3: Execute layers ---
     node_map = {n.id: n for n in nodes}
     results: dict[str, dict] = {}
     category_ids = pipeline_config.get_category_ids()
 
+    def _skip_rest(layer_idx: int, status: str) -> None:
+        for later_idx, later in enumerate(layers[layer_idx + 1:], start=layer_idx + 1):
+            for rn in later:
+                trace.steps.append(StepTrace(node_id=rn, type=node_map[rn].type, layer=later_idx, status=status))
+
     for layer_idx, layer_node_ids in enumerate(layers):
-        # Build tasks for this layer
         tasks = []
         for nid in layer_node_ids:
             node = node_map[nid]
-
-            # Assemble inputs from predecessors
-            node_inputs: dict[str, Any] = {}
-            for pred_id in predecessors.get(nid, []):
-                if pred_id in results:
-                    node_inputs[pred_id] = results[pred_id]
-
+            node_inputs: dict[str, Any] = {
+                pred_id: results[pred_id] for pred_id in predecessors.get(nid, []) if pred_id in results
+            }
             if node.type == "llm":
-                task = _execute_llm_node(node.config, node_inputs, message_context, category_ids)
-                tasks.append((nid, task))
+                tasks.append((nid, _execute_llm_node(node.config, node_inputs, message_context, category_ids)))
             elif node.type == "script":
-                task = _execute_script_node(node.config, node_inputs, message_context)
-                tasks.append((nid, task))
+                tasks.append((nid, _execute_script_node(node.config, node_inputs, message_context, target_text)))
             else:
-                step = StepTrace(node_id=nid, type=node.type, layer=layer_idx, status="failed", error=f"Node type '{node.type}' not supported yet")
+                step = StepTrace(node_id=nid, type=node.type, layer=layer_idx, status="failed",
+                                 error=f"Node type '{node.type}' not supported yet")
 
                 async def _return_step(s=step):
                     return s
 
                 tasks.append((nid, _return_step()))
 
-        # Execute all tasks in this layer in parallel
-        if tasks:
-            coros = [t for _, t in tasks]
-            step_results = await asyncio.gather(*coros, return_exceptions=True)
+        if not tasks:
+            continue
+        step_results = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
 
-            for (nid, _), step_result in zip(tasks, step_results):
-                if isinstance(step_result, Exception):
-                    step = StepTrace(node_id=nid, type=node_map[nid].type, layer=layer_idx, status="failed", error=str(step_result))
-                    trace.steps.append(step)
-                    # Abort pipeline
-                    trace.status = "failed"
-                    trace.error = f"Node '{nid}' failed: {step_result}"
-                    # Mark remaining nodes as skipped
-                    for remaining_layer in layers[layer_idx + 1:]:
-                        for remaining_nid in remaining_layer:
-                            trace.steps.append(StepTrace(node_id=remaining_nid, type=node_map[remaining_nid].type, layer=layers.index(remaining_layer) if remaining_layer in layers else 0, status="skipped"))
-                    trace.completed_at = datetime.now(timezone.utc).isoformat()
-                    trace.duration_ms = int((time.monotonic()) * 1000)  # approximate
-                    return EngineResult(
-                        scam_result=ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=trace.error, trace_json=trace.to_json()),
-                        trace=trace,
-                    )
-
+        # Record every step of the layer before deciding to abort, so a failed
+        # node's siblings still show up in the trace.
+        layer_steps: list[StepTrace] = []
+        for (nid, _), step_result in zip(tasks, step_results):
+            if isinstance(step_result, BaseException):
+                step = StepTrace(node_id=nid, type=node_map[nid].type, layer=layer_idx,
+                                 status="failed", error=str(step_result) or type(step_result).__name__)
+            else:
                 step = step_result
                 step.node_id = nid
                 step.layer = layer_idx
-                trace.steps.append(step)
+            trace.steps.append(step)
+            layer_steps.append(step)
 
-                if step.status == "failed":
-                    # Abort pipeline
-                    trace.status = "failed"
-                    trace.error = f"Node '{nid}' failed: {step.error}"
-                    for remaining_layer in layers[layer_idx + 1:]:
-                        for remaining_nid in remaining_layer:
-                            trace.steps.append(StepTrace(node_id=remaining_nid, type=node_map[remaining_nid].type, layer=0, status="skipped"))
-                    trace.completed_at = datetime.now(timezone.utc).isoformat()
-                    return EngineResult(
-                        scam_result=ScamCheckResult(is_scam=False, confidence=0.0, reason="", error=trace.error, trace_json=trace.to_json()),
-                        trace=trace,
-                    )
+        failed = next((st for st in layer_steps if st.status == "failed"), None)
+        if failed is not None:
+            _skip_rest(layer_idx, "skipped")
+            return _failed_result(trace, t0, f"Node '{failed.node_id}' failed: {failed.error}")
 
-                # Store output for downstream nodes (filtered by output_forward/output_trace_only)
-                if step.output:
-                    node_def = node_map[nid]
-                    if node_def.output_forward is not None:
-                        # Only forward specified fields
-                        results[nid] = {k: v for k, v in step.output.items() if k in node_def.output_forward}
-                    elif node_def.output_trace_only is not None:
-                        # Forward all except trace-only fields
-                        results[nid] = {k: v for k, v in step.output.items() if k not in node_def.output_trace_only}
-                    else:
-                        # Forward everything (default)
-                        results[nid] = step.output
+        for step in layer_steps:
+            nid = step.node_id
+            node_def = node_map[nid]
+            # Store output for downstream nodes (filtered by output_forward/output_trace_only)
+            if step.output:
+                if node_def.output_forward is not None:
+                    results[nid] = {k: v for k, v in step.output.items() if k in node_def.output_forward}
+                elif node_def.output_trace_only is not None:
+                    results[nid] = {k: v for k, v in step.output.items() if k not in node_def.output_trace_only}
+                else:
+                    results[nid] = step.output
 
-                # Check short_circuit condition
-                node_sc = node_map[nid].short_circuit
-                if node_sc and step.output:
-                    sc_triggered = _evaluate_short_circuit(node_sc.get("condition", ""), step.output)
-                    if sc_triggered:
-                        # Resolve result
-                        sc_result_spec = node_sc.get("result", "output")
-                        if sc_result_spec == "output":
-                            sc_output = step.output
-                        elif isinstance(sc_result_spec, dict):
-                            sc_output = dict(sc_result_spec)
-                        else:
-                            sc_output = step.output
-
-                        trace.status = "short_circuited"
-                        trace.short_circuit = {
-                            "node_id": nid,
-                            "condition": node_sc.get("condition"),
-                            "evaluated_output": step.output,
-                            "result": sc_output,
-                        }
-                        # Mark remaining nodes as skipped
-                        for rl in layers[layer_idx + 1:]:
-                            for rn in rl:
-                                trace.steps.append(StepTrace(node_id=rn, type=node_map[rn].type, layer=0, status="skipped_short_circuit"))
-                        trace.completed_at = datetime.now(timezone.utc).isoformat()
-                        t_start = datetime.fromisoformat(trace.started_at)
-                        t_end = datetime.fromisoformat(trace.completed_at)
-                        trace.duration_ms = int((t_end - t_start).total_seconds() * 1000)
-
-                        is_scam = bool(sc_output.get("is_scam", False))
-                        confidence = max(0.0, min(1.0, float(sc_output.get("confidence", 0.0))))
-                        return EngineResult(
-                            scam_result=ScamCheckResult(
-                                is_scam=is_scam, confidence=confidence,
-                                reason=str(sc_output.get("reason", "")),
-                                category=sc_output.get("category"),
-                                trace_json=trace.to_json(),
-                            ),
-                            trace=trace,
-                        )
+            node_sc = node_def.short_circuit
+            if node_sc and step.output and _evaluate_short_circuit(node_sc.get("condition", ""), step.output):
+                sc_result_spec = node_sc.get("result", "output")
+                sc_output = dict(sc_result_spec) if isinstance(sc_result_spec, dict) else step.output
+                trace.short_circuit = {
+                    "node_id": nid,
+                    "condition": node_sc.get("condition"),
+                    "evaluated_output": step.output,
+                    "result": sc_output,
+                }
+                _skip_rest(layer_idx, "skipped_short_circuit")
+                _finish(trace, t0, "short_circuited")
+                return EngineResult(
+                    scam_result=ScamCheckResult(
+                        is_scam=bool(sc_output.get("is_scam", False)),
+                        confidence=_clamp01(sc_output.get("confidence", 0.0)),
+                        reason=str(sc_output.get("reason", "")),
+                        category=sc_output.get("category"),
+                        trace_json=trace.to_json(),
+                    ),
+                    trace=trace,
+                )
 
     # --- Step 4: Extract result from output node ---
-    trace.status = "completed"
-    trace.completed_at = datetime.now(timezone.utc).isoformat()
-    t_start = datetime.fromisoformat(trace.started_at)
-    t_end = datetime.fromisoformat(trace.completed_at)
-    trace.duration_ms = int((t_end - t_start).total_seconds() * 1000)
-
-    output = results.get(output_node_id, {})
-    is_scam = bool(output.get("is_scam", False))
-    confidence = max(0.0, min(1.0, float(output.get("confidence", 0.0))))
-    category = output.get("category")
-    reason = str(output.get("reason", ""))
-
+    output = results.get(output_node_id)
+    if not output:
+        return _failed_result(trace, t0, f"Output node '{output_node_id}' produced no output")
+    _finish(trace, t0, "completed")
     return EngineResult(
         scam_result=ScamCheckResult(
-            is_scam=is_scam,
-            confidence=confidence,
-            reason=reason,
-            category=category,
+            is_scam=bool(output.get("is_scam", False)),
+            confidence=_clamp01(output.get("confidence", 0.0)),
+            reason=str(output.get("reason", "")),
+            category=output.get("category"),
             raw_response=output,
             trace_json=trace.to_json(),
         ),
         trace=trace,
     )
+
+
+def _clamp01(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0

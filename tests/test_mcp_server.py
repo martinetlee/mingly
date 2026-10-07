@@ -54,7 +54,7 @@ def _mcp_available():
 
 
 @pytest.fixture
-def app():
+def app(db_engine):
     with patch("backend.api.auth.get_client", return_value=None), \
          patch("backend.api.auth.has_credentials", return_value=False):
         from backend.api.router import create_app
@@ -271,37 +271,47 @@ async def test_tools_list(app):
         tools = resp.json()["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
-            "list_chats", "search_chats", "get_chat", "get_messages",
-            "search_messages", "list_tags", "get_chats_by_tag",
-            "search_contacts", "get_contact", "list_organizations",
+            "get_archive_status", "list_dms", "list_chats", "search_chats", "get_chat",
+            "get_messages", "search_messages", "list_tags", "get_chats_by_tag",
+            "search_contacts", "get_contact", "get_person", "fetch_history",
+            "list_organizations",
+            # write tools (gated by the mcp_write_enabled pref)
+            "add_person_note", "update_person_note", "set_person_fields",
+            "add_position", "tag_chat", "mark_reviewed",
         }
-        assert all("inputSchema" in t and "description" in t for t in tools)
+        assert all("inputSchema" in t and "description" in t and "annotations" in t for t in tools)
+        by_name = {t["name"]: t for t in tools}
+        assert by_name["get_messages"]["annotations"]["readOnlyHint"] is True
+        assert by_name["add_person_note"]["annotations"]["readOnlyHint"] is False
+        assert by_name["fetch_history"]["annotations"]["openWorldHint"] is True
 
 
 @pytest.mark.asyncio
-async def test_list_chats_happy_path(app):
-    chat = _fake_chat()
-    rows = [(chat, "hello", "Alice", datetime(2026, 1, 1))]
-    with patch("backend.db.crud.get_chats", new=AsyncMock(return_value=rows)):
-        async with _client(app) as client:
-            sid = (await _initialize(client)).headers["mcp-session-id"]
-            resp = await client.post(
-                "/mcp",
-                headers={**AUTH, "Mcp-Session-Id": sid},
-                json=_rpc("tools/call", params={"name": "list_chats", "arguments": {"limit": 5}}),
-            )
-            result = resp.json()["result"]
-            assert result["isError"] is False
-            text = result["content"][0]["text"]
-            assert "Test Group" in text
-            assert "scam_llm" not in text
-            assert "scam_trace" not in text
+async def test_list_chats_happy_path(app, db):
+    from backend.db.models import Chat
+
+    db.add(Chat(telegram_id=111, name="Test Group", type="group", last_message_text="hello",
+                last_message_sender="Alice", last_message_date=datetime(2026, 1, 1)))
+    await db.commit()
+    async with _client(app) as client:
+        sid = (await _initialize(client)).headers["mcp-session-id"]
+        resp = await client.post(
+            "/mcp",
+            headers={**AUTH, "Mcp-Session-Id": sid},
+            json=_rpc("tools/call", params={"name": "list_chats", "arguments": {"limit": 5}}),
+        )
+        result = resp.json()["result"]
+        assert result["isError"] is False
+        text = result["content"][0]["text"]
+        assert "Test Group" in text
+        assert "scam_llm" not in text
+        assert "scam_trace" not in text
 
 
 @pytest.mark.asyncio
-async def test_get_chat_hidden_is_not_found(app):
-    hidden = _fake_chat(is_hidden=True)
-    with patch("backend.db.crud.get_chat_by_telegram_id", new=AsyncMock(return_value=hidden)):
+async def test_get_chat_deactivated_is_not_found(app):
+    dead = _fake_chat(is_deactivated=True)
+    with patch("backend.db.crud.get_chat_by_telegram_id", new=AsyncMock(return_value=dead)):
         async with _client(app) as client:
             sid = (await _initialize(client)).headers["mcp-session-id"]
             resp = await client.post(
@@ -312,3 +322,26 @@ async def test_get_chat_hidden_is_not_found(app):
             result = resp.json()["result"]
             assert result["isError"] is True
             assert "not found" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_get_chat_hidden_is_visible_and_flagged(app, db):
+    """Hidden only declutters the app's chat list; an agent covering every DM
+    must still see the chat, flagged."""
+    import json as _json
+    from backend.db.models import Chat
+
+    db.add(Chat(telegram_id=111, name="Hidden Friend", type="private", is_hidden=True))
+    await db.commit()
+    async with _client(app) as client:
+        sid = (await _initialize(client)).headers["mcp-session-id"]
+        resp = await client.post(
+            "/mcp",
+            headers={**AUTH, "Mcp-Session-Id": sid},
+            json=_rpc("tools/call", params={"name": "get_chat", "arguments": {"chat_id": 111}}),
+        )
+        result = resp.json()["result"]
+        assert result["isError"] is False
+        data = _json.loads(result["content"][0]["text"])
+        assert data["is_hidden"] is True
+        assert data["coverage"]["history_complete"] is False

@@ -1,7 +1,7 @@
 import logging
 
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import event, inspect
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
 from backend.config import DATABASE_URL
@@ -33,14 +33,25 @@ async def get_db():
 
 
 async def init_db():
-    from backend.db import models  # noqa: registers models with Base
+    import importlib
+
+    importlib.import_module("backend.db.models")  # registers models with Base
     from backend.db.migrations.runner import run_migrations
 
-    async with engine.begin() as conn:
+    async with engine.connect() as conn:
+        # A fresh DB gets the final schema from create_all, so historical
+        # migrations may legitimately reference columns that no longer exist.
+        fresh = not await conn.run_sync(lambda c: inspect(c).has_table("chats"))
         # Create any tables that don't exist yet (safe, non-destructive).
         await conn.run_sync(Base.metadata.create_all)
+        await conn.commit()
 
         # Apply versioned migrations for columns/indexes added after the
-        # initial schema.  Failures are logged and re-raised so the app
-        # never starts with a partially-migrated database.
-        await run_migrations(conn)
+        # initial schema. Each migration commits atomically with its
+        # schema_migrations row; a failure rolls it back and aborts startup.
+        await run_migrations(conn, fresh=fresh)
+
+
+async def dispose_db():
+    """Close pooled connections on shutdown (checkpoints the WAL cleanly)."""
+    await engine.dispose()

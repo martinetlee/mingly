@@ -6,12 +6,15 @@ Counters are incremented on each event. Uploaded to cloud on sync.
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import DateTime, bindparam, select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import ScamAnalytics
-from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -25,69 +28,72 @@ def get_analytics_tracker() -> "AnalyticsTracker":
     return _tracker
 
 
+_COUNTER_COLUMNS = (
+    "total_scanned", "scam_detected", "safe_detected", "short_circuited_ml",
+    "short_circuited_signatures", "pipeline_errors", "total_pipeline_ms",
+    "ml_safe", "ml_borderline", "ml_auto_scam", "ml_unavailable",
+    "flags_dismissed", "messages_unflagged", "reports_submitted", "manual_checks",
+    "rescans", "scans_private", "scans_group", "scans_channel",
+)
+_JSON_COLUMNS = ("categories_json", "tool_calls_json", "scenarios_matched_json", "safe_patterns_matched_json")
+_JSON_KEY_RE = re.compile(r"[^A-Za-z0-9_.:\- ]")
+
+
+def _today() -> datetime:
+    return datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 class AnalyticsTracker:
-    """Tracks scam detection analytics with daily rollover."""
+    """Tracks scam detection analytics with daily rollover.
 
-    async def _get_current_period(self) -> ScamAnalytics:
-        """Get or create the analytics row for today."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    Every write is a single atomic statement (``INSERT … ON CONFLICT DO
+    UPDATE SET col = col + :n``) against the unique ``period_start`` index, so
+    concurrent events never lose increments or create duplicate day rows.
+    """
 
+    async def increment(self, **counters: int) -> None:
+        """Atomically add to one or more counters on today's row."""
+        counters = {k: int(v) for k, v in counters.items() if k in _COUNTER_COLUMNS and v}
+        if not counters:
+            return
+        table = ScamAnalytics.__table__
+        values = {c: 0 for c in _COUNTER_COLUMNS}
+        values.update(counters)
+        stmt = sqlite_insert(table).values(period_start=_today(), **values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[table.c.period_start],
+            set_={k: table.c[k] + stmt.excluded[k] for k in counters},
+        )
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(ScamAnalytics).where(ScamAnalytics.period_start == today)
-            )
-            row = result.scalars().first()
-
-            if not row:
-                row = ScamAnalytics(period_start=today)
-                db.add(row)
-                await db.commit()
-                await db.refresh(row)
-
-            return row
-
-    async def _increment(self, **kwargs):
-        """Increment one or more counters on today's analytics row."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(ScamAnalytics).where(ScamAnalytics.period_start == today)
-            )
-            row = result.scalars().first()
-
-            if not row:
-                row = ScamAnalytics(period_start=today)
-                db.add(row)
-                await db.flush()
-
-            for key, value in kwargs.items():
-                if hasattr(row, key):
-                    current = getattr(row, key) or 0
-                    setattr(row, key, current + value)
-
+            await db.execute(stmt)
             await db.commit()
 
+    # Backwards-compatible name
+    _increment = increment
+
     async def _increment_json_counter(self, field: str, key: str, amount: int = 1):
-        """Increment a counter inside a JSON field (e.g., categories_json)."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-
+        """Atomically increment a counter inside a JSON field (e.g. categories_json)."""
+        if field not in _JSON_COLUMNS or not key:
+            return
+        key = _JSON_KEY_RE.sub("", str(key))[:100]
+        if not key:
+            return
+        today = _today()
+        table = ScamAnalytics.__table__
+        ensure = sqlite_insert(table).values(
+            period_start=today, **{c: 0 for c in _COUNTER_COLUMNS}
+        ).on_conflict_do_nothing(index_elements=[table.c.period_start])
+        path = f'$."{key}"'
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(ScamAnalytics).where(ScamAnalytics.period_start == today)
+            await db.execute(ensure)
+            await db.execute(
+                text(
+                    f"UPDATE scam_analytics SET {field} = json_set(COALESCE({field}, '{{}}'), :path, "
+                    f"COALESCE(json_extract(COALESCE({field}, '{{}}'), :path), 0) + :n) "
+                    f"WHERE period_start = :p"
+                ).bindparams(bindparam("p", type_=DateTime)),
+                {"path": path, "n": amount, "p": today},
             )
-            row = result.scalars().first()
-
-            if not row:
-                row = ScamAnalytics(period_start=today)
-                db.add(row)
-                await db.flush()
-
-            raw = getattr(row, field) or "{}"
-            data = json.loads(raw)
-            data[key] = data.get(key, 0) + amount
-            setattr(row, field, json.dumps(data))
-
             await db.commit()
 
     # --- Event methods ---
@@ -178,10 +184,14 @@ class AnalyticsTracker:
     async def get_pending_periods(self) -> list[dict]:
         """Get analytics periods that haven't been synced to cloud."""
         async with AsyncSessionLocal() as db:
+            # Only closed days: today's row is still being incremented, and
+            # uploading it would freeze a partial count (later increments would
+            # never reach the cloud once synced_at is set).
             result = await db.execute(
                 select(ScamAnalytics).where(
                     ScamAnalytics.synced_at.is_(None),
                     ScamAnalytics.total_scanned > 0,
+                    ScamAnalytics.period_start < _today(),
                 ).order_by(ScamAnalytics.period_start.asc()).limit(30)
             )
             rows = result.scalars().all()
@@ -224,14 +234,14 @@ class AnalyticsTracker:
             } for r in rows]
 
     async def mark_synced(self, period_starts: list[str]):
-        """Mark analytics periods as synced."""
+        """Mark analytics periods (as returned by get_pending_periods) synced."""
+        starts = [datetime.fromisoformat(ps) for ps in period_starts]
+        if not starts:
+            return
         async with AsyncSessionLocal() as db:
-            for ps in period_starts:
-                dt = datetime.fromisoformat(ps)
-                result = await db.execute(
-                    select(ScamAnalytics).where(ScamAnalytics.period_start == dt)
-                )
-                row = result.scalars().first()
-                if row:
-                    row.synced_at = datetime.utcnow()
+            await db.execute(
+                update(ScamAnalytics)
+                .where(ScamAnalytics.period_start.in_(starts))
+                .values(synced_at=datetime.utcnow())
+            )
             await db.commit()

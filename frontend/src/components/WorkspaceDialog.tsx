@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import type { Tag, Workspace } from '../api/types'
 import { addBoardColumn, createWorkspace, deleteWorkspace, getTags, updateWorkspace } from '../api/client'
+import { Modal, modalButton, useConfirm } from './ui'
+import { errorMessage, toast } from '../lib/toast'
 
 const COLOR_OPTIONS = ['indigo', 'emerald', 'rose', 'amber', 'violet', 'sky', 'slate'] as const
 const COLOR_DOTS: Record<string, string> = {
@@ -15,44 +17,43 @@ const TEMPLATES: { key: string; label: string; columns: string[] }[] = [
   { key: 'empty', label: 'Start empty', columns: [] },
 ]
 
-export default function WorkspaceDialog({
-  open,
-  onClose,
-  onSaved,
-  workspace,
-}: {
+interface WorkspaceDialogProps {
   open: boolean
   onClose: () => void
   onSaved: (id: number | null, viewMode?: 'list' | 'kanban') => void
   workspace?: Workspace | null
-}) {
-  const [name, setName] = useState('')
-  const [emoji, setEmoji] = useState('')
-  const [color, setColor] = useState<string>('indigo')
-  const [viewMode, setViewMode] = useState<'list' | 'kanban'>('list')
+}
+
+export default function WorkspaceDialog(props: WorkspaceDialogProps) {
+  if (!props.open) return null
+  // Mounted per open (and per workspace): the form is initialised once, from
+  // the workspace as it was when the dialog opened. Later refreshes of the
+  // workspace object (e.g. new-message badge counts) never reset the draft.
+  return <WorkspaceDialogBody key={props.workspace?.id ?? 'new'} {...props} />
+}
+
+function WorkspaceDialogBody({ onClose, onSaved, workspace }: WorkspaceDialogProps) {
+  const confirm = useConfirm()
+  const [name, setName] = useState(workspace?.name ?? '')
+  const [emoji, setEmoji] = useState(workspace?.emoji ?? '')
+  const [color, setColor] = useState<string>(workspace?.color ?? 'indigo')
+  const [viewMode, setViewMode] = useState<'list' | 'kanban'>(workspace?.view_mode ?? 'list')
   const [template, setTemplate] = useState('pipeline')
-  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([])
+  const [selectedTagIds, setSelectedTagIds] = useState<number[]>(workspace?.tag_ids ?? [])
   const [tagQuery, setTagQuery] = useState('')
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const editing = workspace != null
 
   useEffect(() => {
-    if (!open) return
-    setName(workspace?.name ?? '')
-    setEmoji(workspace?.emoji ?? '')
-    setColor(workspace?.color ?? 'indigo')
-    setViewMode(workspace?.view_mode ?? 'list')
-    setTemplate('pipeline')
-    setSelectedTagIds(workspace?.tag_ids ?? [])
-    setTagQuery('')
-    setError(null)
-    setConfirmingDelete(false)
-    getTags().then(setAllTags).catch(() => {})
-  }, [open, workspace])
+    const ac = new AbortController()
+    getTags()
+      .then((tags) => { if (!ac.signal.aborted) setAllTags(tags) })
+      .catch((e) => { if (!ac.signal.aborted) setError(`Couldn't load tags: ${errorMessage(e)}`) })
+    return () => ac.abort()
+  }, [])
 
   const selectableTags = useMemo(() => {
     const q = tagQuery.trim().toLowerCase()
@@ -64,9 +65,8 @@ export default function WorkspaceDialog({
 
   const selectedTags = allTags.filter((t) => selectedTagIds.includes(t.id))
 
-  if (!open) return null
-
   const save = async () => {
+    if (saving) return
     const trimmed = name.trim()
     if (!trimmed) {
       setError('Name is required')
@@ -80,24 +80,31 @@ export default function WorkspaceDialog({
     setError(null)
     try {
       if (editing && workspace) {
+        // emoji: null clears it (an omitted key would leave it unchanged)
         await updateWorkspace(workspace.id, {
-          name: trimmed, emoji: emoji || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
+          name: trimmed, emoji: emoji.trim() || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
         })
         onSaved(workspace.id, viewMode)
       } else {
         const ws = await createWorkspace({
-          name: trimmed, emoji: emoji || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
+          name: trimmed, emoji: emoji.trim() || null, color, tag_ids: selectedTagIds, view_mode: viewMode,
         })
         if (viewMode === 'kanban' && ws.main_board_id != null) {
           const cols = TEMPLATES.find((t) => t.key === template)?.columns ?? []
+          const failed: string[] = []
           for (const col of cols) {
-            await addBoardColumn(ws.id, ws.main_board_id, col).catch(() => {})
+            try {
+              await addBoardColumn(ws.id, ws.main_board_id, col)
+            } catch {
+              failed.push(col)
+            }
           }
+          if (failed.length) toast.error(`Workspace created, but some columns couldn't be added: ${failed.join(', ')}`)
         }
         onSaved(ws.id, viewMode)
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save workspace')
+      setError(errorMessage(e))
     } finally {
       setSaving(false)
     }
@@ -105,37 +112,48 @@ export default function WorkspaceDialog({
 
   const remove = async () => {
     if (!workspace) return
-    setSaving(true)
-    try {
-      await deleteWorkspace(workspace.id)
-      onSaved(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete workspace')
-    } finally {
-      setSaving(false)
-    }
+    const ok = await confirm({
+      title: `Delete workspace "${workspace.name}"?`,
+      message: 'Its boards and columns are removed. Chats and their tags are kept.',
+      confirmLabel: 'Delete workspace',
+      destructive: true,
+      onConfirm: () => deleteWorkspace(workspace.id),
+    })
+    if (ok) onSaved(null)
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div
-        className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-800 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
-          <h2 className="text-sm font-semibold text-gray-200">
-            {editing ? 'Edit workspace' : 'New workspace'}
-          </h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
-            <X size={16} />
-          </button>
+    <Modal
+      open
+      onClose={onClose}
+      size="lg"
+      title={editing ? 'Edit workspace' : 'New workspace'}
+      footer={
+        <div className="flex w-full items-center justify-between">
+          <div>
+            {editing && (
+              <button onClick={remove} disabled={saving} className="text-xs text-rose-400/80 hover:text-rose-400 disabled:opacity-50">
+                Delete workspace
+              </button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onClose} className={modalButton.secondary}>
+              Cancel
+            </button>
+            <button onClick={save} disabled={saving} className={modalButton.primary}>
+              {saving ? 'Saving…' : editing ? 'Save' : 'Create'}
+            </button>
+          </div>
         </div>
-
-        <div className="flex flex-col gap-4 px-4 py-4">
+      }
+    >
+        <div className="flex flex-col gap-4 px-5 py-4">
           <div className="flex gap-2">
             <input
               type="text"
               placeholder="🏷"
+              aria-label="Emoji"
               value={emoji}
               onChange={(e) => setEmoji(e.target.value)}
               maxLength={4}
@@ -243,42 +261,8 @@ export default function WorkspaceDialog({
             )}
           </div>
 
-          {error && <p className="text-xs text-rose-400">{error}</p>}
+          {error && <p role="alert" className="text-xs text-rose-400">{error}</p>}
         </div>
-
-        <div className="flex items-center justify-between border-t border-slate-700/50 px-4 py-3">
-          <div>
-            {editing && (
-              confirmingDelete ? (
-                <span className="flex items-center gap-2 text-xs">
-                  <span className="text-slate-400">Delete workspace? Chats and tags are kept.</span>
-                  <button onClick={remove} className="font-medium text-rose-400 hover:text-rose-300">Delete</button>
-                  <button onClick={() => setConfirmingDelete(false)} className="text-slate-500 hover:text-slate-300">Cancel</button>
-                </span>
-              ) : (
-                <button onClick={() => setConfirmingDelete(true)} className="text-xs text-rose-400/80 hover:text-rose-400">
-                  Delete workspace
-                </button>
-              )
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="rounded-lg px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-700/50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={save}
-              disabled={saving}
-              className="rounded-lg bg-indigo-500 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
-            >
-              {saving ? 'Saving…' : editing ? 'Save' : 'Create'}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

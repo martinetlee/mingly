@@ -1,9 +1,16 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, column_property, mapped_column
 
 from backend.db.database import Base
+
+# Scam/Shield verdict model (see Message.effective_is_scam)
+from sqlalchemy import Index, and_, case, func, select  # noqa: E402
+from sqlalchemy.ext.hybrid import hybrid_property  # noqa: E402
+
+SCAM_SCORE_THRESHOLD = 0.5
+SCAM_SUCCESS_STATUSES = ("completed", "short_circuited")
 
 
 class Chat(Base):
@@ -24,6 +31,10 @@ class Chat(Base):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Telegram group deactivated after migration to a supergroup — hidden from all lists
     is_deactivated: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Private chats only, set from the dialog entity by sync_dialogs
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_deleted_account: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_self: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # Saved Messages
     is_muted: Mapped[bool] = mapped_column(Boolean, default=False)
     muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_marked_unread: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -75,13 +86,94 @@ class Message(Base):
     scam_trace_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scam_synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
     scam_manual_verdict: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 'scam', 'not_scam', or NULL
+    # NULL = never scanned; pending | completed | failed | short_circuited.
+    # A failed scan never touches scam_score/scam_reason (error goes to scam_error).
+    scam_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    scam_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scam_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    scam_next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Cloud change tracking: re-upload when scam_updated_at > scam_synced_at
+    scam_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scam_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 'message' | 'service' (joins, pins, calls…: text holds a readable description)
+    kind: Mapped[str] = mapped_column(String, default="message", server_default="message", nullable=False)
+    # Structured content for polls, locations, contacts, forwards, service actions (JSON)
+    meta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    fwd_from_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Transient, not mapped: set by crud.save_message to "created" | "updated" | None
+    _change = None  # type: Optional[str]
+
+    @hybrid_property
+    def pipeline_is_scam(self) -> Optional[bool]:
+        """The automated verdict alone: None without a successful scan."""
+        if self.scam_status not in SCAM_SUCCESS_STATUSES or self.scam_score is None:
+            return None
+        return self.scam_score > SCAM_SCORE_THRESHOLD
+
+    @pipeline_is_scam.inplace.expression
+    @classmethod
+    def _pipeline_is_scam_expression(cls):
+        # False (never NULL) when there is no successful scan
+        return and_(
+            func.coalesce(cls.scam_status, "").in_(SCAM_SUCCESS_STATUSES),
+            func.coalesce(cls.scam_score, 0.0) > SCAM_SCORE_THRESHOLD,
+        )
+
+    @hybrid_property
+    def effective_is_scam(self) -> bool:
+        """The one verdict every consumer uses: a manual verdict wins, else a
+        successful scan scoring above the threshold."""
+        if self.scam_manual_verdict is not None:
+            return self.scam_manual_verdict == "scam"
+        return bool(self.pipeline_is_scam)
+
+    @effective_is_scam.inplace.expression
+    @classmethod
+    def _effective_is_scam_expression(cls):
+        # Never NULL, so NOT effective_is_scam is also correct in SQL
+        return case(
+            (cls.scam_manual_verdict.isnot(None), cls.scam_manual_verdict == "scam"),
+            else_=cls.pipeline_is_scam,
+        )
+
+
+class ChatHistoryCoverage(Base):
+    """How much of a chat's Telegram history is stored (backend.telegram.archive).
+
+    Invariant: every message with ``walk_cursor_tg_id <= id <=
+    newest_contiguous_tg_id`` is stored; with ``history_complete`` the range
+    starts at the chat's first message. Absent row = nothing known.
+    """
+    __tablename__ = "chat_history_coverage"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)  # marked id
+    history_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    oldest_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    newest_contiguous_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Lowest id the in-progress full walk has stored; resume point after a restart
+    walk_cursor_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_walk_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_topup_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+
+# Read-only: loaded with every Chat (indexed PK lookup), False without a row.
+Chat.history_complete = column_property(  # type: ignore[attr-defined]
+    select(func.coalesce(ChatHistoryCoverage.history_complete, False))
+    .where(ChatHistoryCoverage.chat_id == Chat.telegram_id)
+    .correlate_except(ChatHistoryCoverage)
+    .scalar_subquery()
+)
 
 
 class Tag(Base):
     __tablename__ = "tags"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Also unique on lower(trim(name)) (index uq_tags_name_ci, migration 91)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     color: Mapped[str] = mapped_column(String, default="slate")
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -185,10 +277,16 @@ class Contact(Base):
 
 class ContactPosition(Base):
     __tablename__ = "contact_positions"
-    __table_args__ = (UniqueConstraint("telegram_id", "organization", name="uq_telegram_org"),)
+    __table_args__ = (UniqueConstraint("telegram_id", "organization_id", name="uq_telegram_org"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # Source of truth for membership. NULL = detached (the org was deleted with
+    # mode=detach); the position keeps its history under `organization`.
+    organization_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    # Display name: mirrors organizations.name while attached, frozen once detached
     organization: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # True = current, False = former
@@ -200,6 +298,7 @@ class Organization(Base):
     __tablename__ = "organizations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Also unique on lower(trim(name)) (index uq_organizations_name_ci, migration 92)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     context: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -252,6 +351,8 @@ class CatchUpSummary(Base):
     action_needed: Mapped[bool] = mapped_column(Boolean, default=False)
     total_messages_at_generation: Mapped[int] = mapped_column(Integer, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Rule-based fallback written because the LLM failed; regenerated once it is back.
+    is_degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class BriefingRun(Base):
@@ -260,6 +361,10 @@ class BriefingRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     days: Mapped[int] = mapped_column(Integer, default=1)
+    # running | done | partial (some entries failed / run aborted after ≥1 entry) | failed
+    status: Mapped[str] = mapped_column(String, nullable=False, default="done", server_default="done")
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ScamCheckRequest(Base):
@@ -295,6 +400,11 @@ class ScamFlag(Base):
     flagged_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Per-sender verdict record: 'active' = flagged scammer, 'dismissed' = the
+    # user cleared this sender; automated flagging never re-activates it.
+    status: Mapped[str] = mapped_column(String, default="active", server_default="active")
+    dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ScamReport(Base):
@@ -342,6 +452,7 @@ class ScamFeedback(Base):
 
 class ScamAnalytics(Base):
     __tablename__ = "scam_analytics"
+    __table_args__ = (Index("uq_scam_analytics_period", "period_start", unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -397,3 +508,34 @@ class BriefingEntry(Base):
     category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact'
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON: [{chat_id, telegram_id}]
+
+
+class PersonNote(Base):
+    """Context / due-diligence note about a person (any Telegram user, keyed by
+    telegram_id like ContactPosition). Written by the user or an MCP agent."""
+    __tablename__ = "person_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # context|due_diligence|risk|relationship|todo
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")  # markdown
+    citations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [{chat_id, tg_message_id}]
+    author: Mapped[str] = mapped_column(String, nullable=False, default="user")  # user | agent
+    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AgentReview(Base):
+    """How far an MCP agent has reviewed a chat. The chat counts as reviewed
+    only while its history is complete, nothing newer than
+    reviewed_through_tg_id is stored, and no older message appeared since
+    (count of stored ids <= reviewed_through_tg_id still <= reviewed_message_count)."""
+    __tablename__ = "agent_reviews"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # telegram_id
+    reviewed_through_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reviewed_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)

@@ -1,0 +1,184 @@
+import { useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { ChevronDown, ChevronRight, Newspaper, Radio, RefreshCw, Star, X } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import type { BriefingHistoryEntry, BriefingSource, BriefingSummary } from '../api/types'
+import Markdown from './Markdown'
+
+type Category = BriefingSummary['category']
+
+interface Accent {
+  label: string
+  icon: LucideIcon
+  iconClass: string
+  heading: string
+  badge: string
+  card: string
+  name: string
+  button: string
+  flow: string
+  flowBox: string
+}
+
+const ACCENTS: Record<Category, Accent> = {
+  important_contact: {
+    label: 'Important Contacts', icon: Star, iconClass: 'fill-amber-400 text-amber-400',
+    heading: 'text-amber-400', badge: 'bg-amber-500/20 text-amber-400',
+    card: 'border-amber-500/20 bg-amber-900/10', name: 'text-amber-300',
+    button: 'border-amber-500/30 text-amber-300 hover:bg-amber-900/40',
+    flow: 'border-amber-500/20 text-amber-200 hover:bg-amber-900/30', flowBox: 'border-amber-500/20',
+  },
+  tracked: {
+    label: 'Tracked Chats', icon: Radio, iconClass: 'text-violet-400',
+    heading: 'text-violet-400', badge: 'bg-violet-500/20 text-violet-400',
+    card: 'border-violet-500/20 bg-violet-900/10', name: 'text-violet-300',
+    button: 'border-violet-500/30 text-violet-300 hover:bg-violet-900/40',
+    flow: 'border-violet-500/20 text-violet-200 hover:bg-violet-900/30', flowBox: 'border-violet-500/20',
+  },
+  briefing: {
+    label: 'Briefing Chats', icon: Newspaper, iconClass: 'text-emerald-400',
+    heading: 'text-emerald-400', badge: 'bg-emerald-500/20 text-emerald-400',
+    card: 'border-emerald-500/20 bg-emerald-900/10', name: 'text-emerald-300',
+    button: 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/40',
+    flow: 'border-emerald-500/20 text-emerald-200 hover:bg-emerald-900/30', flowBox: 'border-emerald-500/20',
+  },
+}
+
+const NO_SOURCES: BriefingSource[] = []
+
+const CATEGORY_ORDER: Category[] = ['important_contact', 'tracked', 'briefing']
+
+/** Regenerate controls for entries of a persisted run */
+export interface RegenerateControls {
+  activeEntryId: number | null
+  /** Disable Regenerate everywhere (another regeneration is running) */
+  busy: boolean
+  reasoning: Record<number, string>
+  tokens: Record<number, number>
+  flowOpen: Record<number, boolean>
+  onRegenerate: (entry: BriefingHistoryEntry) => void
+  onStop: () => void
+  onToggleFlow: (entryId: number) => void
+}
+
+const isHistoryEntry = (e: BriefingSummary | BriefingHistoryEntry): e is BriefingHistoryEntry =>
+  typeof (e as BriefingHistoryEntry).id === 'number'
+
+/** Navigate to a cited source message */
+export function useCiteNavigation() {
+  const navigate = useNavigate()
+  return useCallback((src: BriefingSource) => navigate(`/chats?chatId=${src.chat_id}&msgId=${src.telegram_id}`), [navigate])
+}
+
+interface CardProps {
+  entry: BriefingSummary | BriefingHistoryEntry
+  onCite: (src: BriefingSource) => void
+  regen?: RegenerateControls
+}
+
+export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
+  const accent = ACCENTS[entry.category] ?? ACCENTS.briefing
+  const id = isHistoryEntry(entry) ? entry.id : null
+  const active = id != null && regen?.activeEntryId === id
+  const reasoning = id != null ? regen?.reasoning[id] ?? '' : ''
+  const flowOpen = id != null && (regen?.flowOpen[id] ?? false)
+
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${accent.card}`}>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <p className={`text-[11px] font-medium ${accent.name}`}>{entry.chat_name}</p>
+        {regen && id != null && isHistoryEntry(entry) && (
+          <div className="inline-flex items-center gap-1">
+            {active ? (
+              <button
+                onClick={regen.onStop}
+                className="inline-flex items-center gap-1 rounded border border-rose-500/30 px-1.5 py-0.5 text-[10px] text-rose-300 hover:bg-rose-900/40"
+                title="Stop regenerating"
+              >
+                <X size={10} />
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={() => regen.onRegenerate(entry)}
+                disabled={regen.busy}
+                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] disabled:cursor-not-allowed disabled:opacity-40 ${accent.button}`}
+                title={regen.busy ? 'Another summary is being regenerated' : 'Regenerate this summary only'}
+              >
+                <RefreshCw size={10} />
+                Regenerate
+              </button>
+            )}
+            {(active || reasoning.length > 0) && (
+              <button
+                onClick={() => regen.onToggleFlow(id)}
+                className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${accent.flow}`}
+                title="Show or hide reasoning flow"
+              >
+                {flowOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                Flow
+                {active && typeof regen.tokens[id] === 'number' && (
+                  <span className="text-[9px] opacity-80">{regen.tokens[id]}</span>
+                )}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <Markdown
+        content={entry.summary}
+        size="xs"
+        className={`text-slate-300 ${active ? 'opacity-60' : ''}`}
+        sources={entry.sources ?? NO_SOURCES}
+        onCite={onCite}
+      />
+      {flowOpen && (
+        <div className={`mt-2 rounded border bg-slate-900/60 p-2 ${accent.flowBox}`}>
+          <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-400">
+            {reasoning || 'Waiting for reasoning stream…'}
+          </pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Entries of one run grouped by category (important contacts, tracked, briefing). */
+export function BriefingEntryList({
+  entries,
+  regen,
+}: {
+  entries: (BriefingSummary | BriefingHistoryEntry)[]
+  regen?: RegenerateControls
+}) {
+  const onCite = useCiteNavigation()
+  return (
+    <div className="space-y-4">
+      {CATEGORY_ORDER.map((category) => {
+        const items = entries.filter((e) => e.category === category)
+        if (items.length === 0) return null
+        const accent = ACCENTS[category]
+        const Icon = accent.icon
+        return (
+          <section key={category}>
+            <div className="mb-2 flex items-center gap-2">
+              <Icon size={12} className={accent.iconClass} />
+              <h3 className={`text-[11px] font-semibold uppercase tracking-wider ${accent.heading}`}>{accent.label}</h3>
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${accent.badge}`}>{items.length}</span>
+            </div>
+            <div className="space-y-2">
+              {items.map((e, i) => (
+                <BriefingEntryCard
+                  key={isHistoryEntry(e) ? e.id : `${e.chat_id}-${i}`}
+                  entry={e}
+                  onCite={onCite}
+                  regen={regen}
+                />
+              ))}
+            </div>
+          </section>
+        )
+      })}
+    </div>
+  )
+}

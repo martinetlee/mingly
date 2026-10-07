@@ -1,79 +1,53 @@
 import { useState } from 'react'
 import type { Message } from '../api/types'
-import { authenticatedMediaUrl } from '../api/session'
 import ImageLightbox from './ImageLightbox'
+import MediaView from './MediaView'
 
 interface Props {
   messages: Message[]
   isOut: boolean
 }
 
+/**
+ * Album grid. Every item renders through MediaView (photos auto-download,
+ * videos are click-to-load and play in the video lightbox, documents/audio
+ * render as their own cards), so items without a stored media_url aren't
+ * dropped and videos never render as <img>.
+ */
 export default function MediaAlbumGrid({ messages, isOut }: Props) {
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
-
-  const mediaMessages = messages.filter(
-    (m) => m.media_url && (m.media_type === 'photo' || m.media_type === 'video')
-  )
-
-  if (mediaMessages.length === 0) return null
-
-  const count = mediaMessages.length
-
-  // Determine grid layout based on count
-  let gridClass = 'grid gap-0.5'
-  if (count === 1) {
-    gridClass += ' grid-cols-1'
-  } else if (count === 2) {
-    gridClass += ' grid-cols-2'
-  } else if (count === 3) {
-    gridClass += ' grid-cols-2'
-  } else {
-    gridClass += ' grid-cols-2'
-  }
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  const visual = messages.filter((m) => m.media_type === 'photo' || m.media_type === 'video' || m.media_type === 'gif')
+  const other = messages.filter((m) => m.media_type && !visual.includes(m))
+  const count = visual.length
 
   return (
-    <div
-      className={`overflow-hidden ${isOut ? 'ml-auto' : 'mr-auto'}`}
-      style={{ maxWidth: 360 }}
-    >
-      <div className={gridClass}>
-        {mediaMessages.map((m, i) => {
-          // For 3 items: first image spans full width
-          const spanFull = count === 3 && i === 0
-
-          return (
-            <div
-              key={m.id}
-              className={`relative cursor-pointer overflow-hidden ${
-                spanFull ? 'col-span-2' : ''
-              }`}
-              onClick={() => setLightboxIndex(i)}
-            >
-              <img
-                src={authenticatedMediaUrl(m.media_url!)}
-                alt={`album item ${i + 1}`}
-                className="block h-full w-full object-cover hover:opacity-90 transition-opacity"
-                style={{
-                  maxHeight: spanFull ? 240 : 180,
-                  minHeight: 80,
-                }}
-              />
-              {m.media_type === 'video' && (
-                <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[9px] text-white">
-                  VIDEO
-                </span>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {lightboxIndex !== null && mediaMessages[lightboxIndex]?.media_url && (
-        <ImageLightbox
-          src={authenticatedMediaUrl(mediaMessages[lightboxIndex].media_url!)}
-          onClose={() => setLightboxIndex(null)}
-        />
+    <div className={isOut ? 'ml-auto' : 'mr-auto'} style={{ maxWidth: 360 }}>
+      {count > 0 && (
+        <div className={`grid gap-0.5 ${count === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+          {visual.map((m, i) => {
+            // 3 items: the first spans the full width
+            const spanFull = count === 3 && i === 0
+            return (
+              <div
+                key={m.tg_message_id}
+                className={`relative overflow-hidden ${spanFull ? 'col-span-2' : ''}`}
+                style={{ height: spanFull ? 240 : count === 1 ? undefined : 180 }}
+              >
+                <MediaView
+                  message={m}
+                  isOut={isOut}
+                  compact
+                  onOpen={setLightboxSrc}
+                />
+              </div>
+            )
+          })}
+        </div>
       )}
+      {other.map((m) => (
+        <MediaView key={m.tg_message_id} message={m} isOut={isOut} />
+      ))}
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>
   )
 }

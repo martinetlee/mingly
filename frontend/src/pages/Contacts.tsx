@@ -1,12 +1,19 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { Link } from 'react-router-dom'
-import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X, Loader2 } from 'lucide-react'
 import type { Contact, Message, RelationshipStatus } from '../api/types'
-import { getContacts, syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, getMessages, sendMessage, reactToMessage, syncChat } from '../api/client'
+import { syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, sendMessage, reactToMessage, syncChat } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import { useDebouncedValue } from '../hooks/useDebouncedQuery'
+import { usePagedContacts } from '../hooks/usePagedContacts'
+import { useChatMessages } from '../hooks/useChatMessages'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { invalidatePerson, invalidateAllPeople } from '../hooks/usePersonSummary'
+import { reportError, errorMessage, toast } from '../lib/toast'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from '../components/PersonCard'
-import MessageList from '../components/MessageList'
+import ChatMessagesView from '../components/ChatMessagesView'
+import { applyReaction } from './chats/ChatPane'
 import ComposeBar from '../components/ComposeBar'
 
 function ContactCard({
@@ -57,145 +64,132 @@ function ContactCard({
   )
 }
 
-const MSG_LIMIT = 100
+const STATUS_TABS = ['all', 'important', 'needs_reply', 'active', 'nurturing', 'stalled', 'cold'] as const
+type ContactFilter = typeof STATUS_TABS[number]
+
+/** `?filter=important|needs_reply|…` (also legacy `?status=`); anything else = all */
+export function parseContactFilter(params: URLSearchParams): ContactFilter {
+  const v = params.get('filter') ?? params.get('status') ?? 'all'
+  return (STATUS_TABS as readonly string[]).includes(v) ? (v as ContactFilter) : 'all'
+}
 
 export default function Contacts() {
-  const [contacts, setContacts] = useState<Contact[]>([])
   const [selected, setSelected] = useState<Contact | null>(null)
   const [search, setSearch] = useState('')
-  const [syncing, setSyncing] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [statusFilter, setStatusFilter] = useState<RelationshipStatus | 'all'>('all')
+  const debouncedSearch = useDebouncedValue(search.trim(), 200)
+  // The filter lives in the URL so links (Home → ?filter=important), back/forward
+  // and the tabs all go through the same state
+  const [searchParams, setSearchParams] = useSearchParams()
+  const statusFilter = parseContactFilter(searchParams)
+  const setStatusFilter = useCallback((f: ContactFilter) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('status')
+      if (f === 'all') next.delete('filter'); else next.set('filter', f)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+  const importantOnly = statusFilter === 'important'
   const [sidebarWidth, setSidebarWidth] = useState(320)
   const dragging = useRef(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const listEndRef = useRef<HTMLDivElement>(null)
 
-  // Chat message state
-  const [messages, setMessages] = useState<Message[]>([])
-  const [loadingMessages, setLoadingMessages] = useState(false)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [messageOffset, setMessageOffset] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [replyToMessage, setReplyToMessage] = useState<Message | null>(null)
-  const [syncingChat, setSyncingChat] = useState(false)
+  // Filtered + paged on the server; tab badges come from status_counts
+  const list = usePagedContacts(debouncedSearch, importantOnly ? 'all' : statusFilter, 100, importantOnly)
+  const { items: contacts, loading, hasMore: hasMoreContacts, loadMore: loadMoreContacts } = list
+
+  // Message pane, bound to the selected contact's chat
+  const selectedTid = selected?.telegram_id ?? null
+  // Same message-window engine as the Chats pane (paging, backfill, live WS updates)
+  const pane = useChatMessages({ chatId: selectedTid, topicId: null, nonce: 0 })
+  // Reply target remembers its chat so it can't leak into another one
+  const [replyTo, setReplyTo] = useState<{ chatId: number; msg: Message } | null>(null)
+  const replyToMessage = replyTo && replyTo.chatId === selectedTid ? replyTo.msg : null
+  const [syncingChat, setSyncingChat] = useState<number | null>(null)
 
   // Info panel state
   const [showInfo, setShowInfo] = useState(false)
 
-  const loadContacts = useCallback(async (query = '') => {
-    const data = await getContacts(query)
-    setContacts(data)
-    setLoading(false)
-  }, [])
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
 
-  useEffect(() => { loadContacts() }, [loadContacts])
-
+  // Infinite scroll: load the next page when the end of the list is visible
   useEffect(() => {
-    const timer = setTimeout(() => loadContacts(search), 200)
-    return () => clearTimeout(timer)
-  }, [search, loadContacts])
+    const el = listEndRef.current
+    if (!el || !hasMoreContacts || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMoreContacts()
+    })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [hasMoreContacts, loadMoreContacts, contacts.length])
 
-  const handleSync = async () => {
-    setSyncing(true)
-    try {
-      await syncContacts()
-      await loadContacts(search)
-    } finally {
-      setSyncing(false)
-    }
-  }
-
-  // Monotonic guard: rapid contact switches must not let an older response
-  // land in the newer contact's message pane
-  const loadSeqRef = useRef(0)
-
-  // Load messages for selected contact
-  const loadMessages = useCallback(async (contact: Contact) => {
-    const seq = ++loadSeqRef.current
-    setLoadingMessages(true)
-    setMessageOffset(0)
-    try {
-      const data = await getMessages(contact.telegram_id, MSG_LIMIT, 0)
-      if (seq !== loadSeqRef.current) return
-      setMessages(data)
-      setHasMore(data.length === MSG_LIMIT)
-    } finally {
-      if (seq === loadSeqRef.current) setLoadingMessages(false)
-    }
-  }, [])
-
-  const loadMoreMessages = useCallback(async () => {
-    if (!selected || loadingMore) return
-    const seq = loadSeqRef.current
-    setLoadingMore(true)
-    const nextOffset = messageOffset + MSG_LIMIT
-    try {
-      const data = await getMessages(selected.telegram_id, MSG_LIMIT, nextOffset)
-      if (seq !== loadSeqRef.current) return
-      setMessages((prev) => [...data, ...prev])
-      setMessageOffset(nextOffset)
-      setHasMore(data.length === MSG_LIMIT)
-    } finally {
-      setLoadingMore(false)
-    }
-  }, [selected, messageOffset, loadingMore])
+  const syncAll = useAsyncAction(async () => {
+    const r = await syncContacts()
+    invalidateAllPeople()
+    await list.reload()
+    toast.success(`Synced ${r.total} contact${r.total !== 1 ? 's' : ''} (${r.imported} new)`)
+  }, { errorContext: 'Contact sync failed' })
 
   const handleSelect = useCallback((c: Contact) => {
-    if (selected?.id === c.id) return
+    if (selectedRef.current?.id === c.id) return
     setSelected(c)
-    setMessages([])
-    setHasMore(false)
-    setMessageOffset(0)
-    setReplyToMessage(null)
-  }, [selected])
+    setReplyTo(null)
+  }, [])
 
-  // Load messages when contact selection changes
-  useEffect(() => {
-    if (selected) {
-      loadMessages(selected)
-    }
-  }, [selected, loadMessages])
+  /** Adopt an updated contact everywhere — if it's still the selected one. */
+  const handleContactChange = useCallback((updated: Contact) => {
+    invalidatePerson(updated.telegram_id)
+    setSelected((cur) => (cur && cur.id === updated.id ? updated : cur))
+    list.updateItem(updated)
+  }, [list])
 
-  const handleContactChange = (updated: Contact) => {
-    setSelected(updated)
-    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
-  }
+  const toggleImportant = useAsyncAction(async (c: Contact) => {
+    handleContactChange(await setContactImportantByTelegram(c.telegram_id, !c.is_important))
+  }, { errorContext: 'Couldn\'t update important' })
 
-  const handleToggleImportant = async () => {
-    if (!selected) return
-    const newVal = !selected.is_important
-    const updated = await setContactImportantByTelegram(selected.telegram_id, newVal)
-    setSelected(updated)
-    setContacts((prev) => prev.map((c) => c.id === updated.id ? updated : c))
-  }
+  const changeStatus = useAsyncAction(async (contactId: number, status: RelationshipStatus | 'auto') => {
+    const updated = status === 'auto'
+      ? await resetRelationshipStatus(contactId)
+      : await setRelationshipStatus(contactId, status)
+    handleContactChange(updated)
+  }, { errorContext: 'Couldn\'t change status' })
 
   const handleSend = async (text: string) => {
-    if (!selected) return
-    await sendMessage(selected.telegram_id, text, replyToMessage?.tg_message_id)
-    setReplyToMessage(null)
-    await loadMessages(selected)
+    const c = selectedRef.current
+    if (!c) return
+    const replyId = replyTo && replyTo.chatId === c.telegram_id ? replyTo.msg.tg_message_id : undefined
+    const res = await sendMessage(c.telegram_id, text, replyId)
+    setReplyTo((r) => (r && r.chatId === c.telegram_id ? null : r))
+    // applyMessage ignores a message whose chat is no longer the open one
+    if (res?.message) pane.applyMessage(res.message)
+    else if (selectedRef.current?.telegram_id === c.telegram_id) await pane.refresh()
   }
 
   const handleReact = async (msg: Message, emoji: string | null) => {
-    if (!selected) return
+    const c = selectedRef.current
+    if (!c) return
     try {
-      await reactToMessage(selected.telegram_id, msg.tg_message_id, emoji)
-      setMessages((prev) =>
-        prev.map((m) => m.tg_message_id === msg.tg_message_id ? { ...m, my_reaction: emoji } : m)
-      )
-    } catch {
-      // silently ignore
+      await reactToMessage(c.telegram_id, msg.tg_message_id, emoji)
+      // tg_message_id is only unique per chat: patch only if it's still open
+      if (selectedRef.current?.telegram_id === c.telegram_id) pane.patchMessage(msg.tg_message_id, (m) => applyReaction(m, emoji))
+    } catch (e) {
+      reportError(e, 'Reaction failed')
     }
   }
 
   const handleSyncChat = async () => {
-    if (!selected) return
-    setSyncingChat(true)
+    const c = selectedRef.current
+    if (!c || syncingChat === c.telegram_id) return
+    setSyncingChat(c.telegram_id)
     try {
-      await syncChat(selected.telegram_id)
-      await loadMessages(selected)
+      await syncChat(c.telegram_id)
+      if (selectedRef.current?.telegram_id === c.telegram_id) await pane.refresh()
+    } catch (e) {
+      reportError(e, 'Sync failed')
     } finally {
-      setSyncingChat(false)
+      setSyncingChat((v) => (v === c.telegram_id ? null : v))
     }
   }
 
@@ -217,10 +211,9 @@ export default function Contacts() {
     window.addEventListener('mouseup', onUp)
   }, [sidebarWidth])
 
-  const visibleContacts = useMemo(() =>
-    contacts.filter((c) => statusFilter === 'all' || c.relationship_status === statusFilter),
-    [contacts, statusFilter]
-  )
+  // Server filters by status and importance
+  const visibleContacts = contacts
+  const totalAll = useMemo(() => Object.values(list.statusCounts).reduce((a, b) => a + b, 0), [list.statusCounts])
 
   // Keyboard shortcuts
   const contactShortcuts = useMemo(() => ({
@@ -263,12 +256,12 @@ export default function Contacts() {
         <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
           <h2 className="text-sm font-semibold text-gray-100">Contacts</h2>
           <button
-            onClick={handleSync}
-            disabled={syncing}
+            onClick={() => syncAll.run()}
+            disabled={syncAll.pending}
             title="Sync contacts from Telegram"
             className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
-            <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+            <RefreshCw size={13} className={syncAll.pending ? 'animate-spin' : ''} />
             Sync
           </button>
         </div>
@@ -290,46 +283,75 @@ export default function Contacts() {
 
         {/* Status filter tabs */}
         <div className="border-b border-slate-700/50 px-3 py-2 flex flex-wrap gap-1">
-          {(['all', 'needs_reply', 'active', 'nurturing', 'stalled', 'cold'] as const).map((s) => (
+          {STATUS_TABS.map((s) => {
+            // In the Important view the response's counts describe that subset only
+            // important_count counts `search` alone; in the Important view the
+            // status counts describe that subset only, so hide them there
+            const count = s === 'important'
+              ? list.importantCount
+              : importantOnly ? null : s === 'all' ? totalAll : list.statusCounts[s] ?? 0
+            return (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
+              aria-pressed={statusFilter === s}
               className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
                 statusFilter === s
-                  ? s === 'all' ? 'bg-indigo-500/20 text-indigo-400' : RELATIONSHIP_STATUS_COLORS[s]
+                  ? s === 'all' ? 'bg-indigo-500/20 text-indigo-400'
+                    : s === 'important' ? 'bg-amber-500/20 text-amber-400' : RELATIONSHIP_STATUS_COLORS[s]
                   : 'text-slate-500 hover:text-slate-300'
               }`}
             >
-              {s === 'all' ? 'All' : RELATIONSHIP_STATUS_LABELS[s]}
+              {s === 'all' ? 'All' : s === 'important' ? 'Important' : RELATIONSHIP_STATUS_LABELS[s]}
+              {!loading && count != null && <span className="ml-1 opacity-70">{count}</span>}
             </button>
-          ))}
+            )
+          })}
         </div>
 
         {/* List */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
             <p className="px-4 py-6 text-center text-sm text-slate-500">Loading...</p>
+          ) : list.error != null && contacts.length === 0 ? (
+            <div className="px-4 py-6 text-center">
+              <p className="text-sm text-rose-400">Couldn't load contacts: {errorMessage(list.error)}</p>
+              <button onClick={() => list.reload()} className="mt-2 text-xs text-indigo-400 hover:text-indigo-300">Retry</button>
+            </div>
           ) : contacts.length === 0 ? (
             <div className="px-4 py-6 text-center">
               <p className="text-sm text-slate-500">No contacts found</p>
               <button
-                onClick={handleSync}
-                disabled={syncing}
+                onClick={() => syncAll.run()}
+                disabled={syncAll.pending}
                 className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
               >
                 Sync from Telegram
               </button>
             </div>
           ) : (
-            visibleContacts
-              .map((c) => (
+            <>
+              {visibleContacts.map((c) => (
                 <ContactCard
                   key={c.id}
                   contact={c}
                   selected={selected?.id === c.id}
                   onClick={() => handleSelect(c)}
                 />
-              ))
+              ))}
+              {hasMoreContacts && (
+                <div ref={listEndRef} className="flex justify-center py-3">
+                  <button
+                    onClick={() => loadMoreContacts()}
+                    disabled={list.loadingMore}
+                    className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                  >
+                    {list.loadingMore && <Loader2 size={12} className="animate-spin" />}
+                    Load more ({contacts.length} of {list.total})
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -364,45 +386,27 @@ export default function Contacts() {
                   </button>
                   <button
                     onClick={handleSyncChat}
-                    disabled={syncingChat}
+                    disabled={syncingChat === selected.telegram_id}
                     title="Sync messages"
                     className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
                   >
-                    <RefreshCw size={13} className={syncingChat ? 'animate-spin' : ''} />
+                    <RefreshCw size={13} className={syncingChat === selected.telegram_id ? 'animate-spin' : ''} />
                     Sync
                   </button>
                 </div>
               </div>
 
               {/* Messages */}
-              {loadingMessages ? (
-                <div className="flex flex-1 items-center justify-center text-sm text-slate-500">
-                  Loading...
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
-                  <p className="text-sm">No messages yet</p>
-                  <p className="text-xs text-slate-600 mt-1">Send a message or sync to load chat history</p>
-                </div>
-              ) : (
-                <div className="flex flex-1 flex-col overflow-hidden">
-                  {hasMore && (
-                    <div className="flex justify-center border-b border-slate-700/50 py-2">
-                      <button
-                        onClick={loadMoreMessages}
-                        disabled={loadingMore}
-                        className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                      >
-                        {loadingMore ? 'Loading...' : 'Load older messages'}
-                      </button>
-                    </div>
-                  )}
-                  <MessageList messages={messages} chatType="private" highlightTelegramId={null} onReply={setReplyToMessage} onReact={handleReact} />
-                </div>
-              )}
+              <ChatMessagesView
+                key={selected.telegram_id}
+                msgs={pane}
+                chatType="private"
+                onReply={(msg) => setReplyTo({ chatId: selected.telegram_id, msg })}
+                onReact={handleReact}
+              />
 
               {/* Compose */}
-              <ComposeBar onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyToMessage(null)} />
+              <ComposeBar key={selected.telegram_id} onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyTo(null)} />
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
@@ -427,7 +431,6 @@ export default function Contacts() {
                 name={selected.name}
                 username={selected.username}
                 isImportant={selected.is_important}
-                contactId={selected.id}
                 position={
                   selected.positions.filter((p) => p.is_active !== false).length > 0
                     ? { title: selected.positions.filter((p) => p.is_active !== false)[0].title, organization: selected.positions.filter((p) => p.is_active !== false)[0].organization }
@@ -442,7 +445,8 @@ export default function Contacts() {
               />
               <div className="flex items-center gap-2">
                 <button
-                  onClick={handleToggleImportant}
+                  onClick={() => toggleImportant.run(selected)}
+                  disabled={toggleImportant.pending}
                   title={selected.is_important ? 'Remove from important' : 'Mark as important'}
                   className={`rounded-full p-0.5 transition-colors ${
                     selected.is_important
@@ -467,10 +471,8 @@ export default function Contacts() {
                   <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Status</span>
                   {selected.relationship_status_manual && (
                     <button
-                      onClick={async () => {
-                        const updated = await resetRelationshipStatus(selected.id)
-                        handleContactChange(updated)
-                      }}
+                      onClick={() => changeStatus.run(selected.id, 'auto')}
+                      disabled={changeStatus.pending}
                       title="Reset to auto-calculated"
                       className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                     >
@@ -483,10 +485,8 @@ export default function Contacts() {
                   {(['new', 'active', 'nurturing', 'stalled', 'cold', 'needs_reply'] as const).map((s) => (
                     <button
                       key={s}
-                      onClick={async () => {
-                        const updated = await setRelationshipStatus(selected.id, s)
-                        handleContactChange(updated)
-                      }}
+                      onClick={() => changeStatus.run(selected.id, s)}
+                      disabled={changeStatus.pending}
                       className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
                         selected.relationship_status === s
                           ? RELATIONSHIP_STATUS_COLORS[s]
@@ -517,7 +517,7 @@ export default function Contacts() {
                 )}
               </div>
 
-              <ContactInfoSection contact={selected} onContactChange={handleContactChange} compact />
+              <ContactInfoSection key={selected.id} contact={selected} onContactChange={handleContactChange} compact />
             </div>
           </div>
         )}

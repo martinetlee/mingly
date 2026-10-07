@@ -6,7 +6,7 @@ group settings, and admin action log.
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,9 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
 from backend.db import crud
-from backend.telegram.client import get_client, ensure_connected
+from backend.serialization import iso_utc
+from backend.telegram.runtime import runtime
 
 router = APIRouter()
+
+
+def _db_datetime(value: Union[datetime, str, None]) -> Optional[datetime]:
+    """Raw ``text()`` queries bypass SQLAlchemy's DateTime type, so SQLite hands
+    back the stored string ("YYYY-MM-DD HH:MM:SS[.ffffff]") instead of a datetime."""
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 # ── Request models ────────────────────────────────────────────────────────
@@ -95,15 +107,6 @@ async def _require_group_chat(telegram_id: int, db: AsyncSession):
     return chat
 
 
-async def _require_client():
-    """Return the connected Telegram client or raise 503."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
-    return client
-
-
 async def _log_admin_action(
     db: AsyncSession,
     chat_telegram_id: int,
@@ -139,7 +142,7 @@ async def promote_admin(
 ):
     """Promote a user to admin with granular permissions."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import EditAdminRequest
@@ -178,7 +181,7 @@ async def demote_admin(
 ):
     """Demote an admin back to regular member."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import EditAdminRequest
@@ -209,7 +212,7 @@ async def ban_member(
 ):
     """Ban a user from the group/channel."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -246,7 +249,7 @@ async def restrict_member(
 ):
     """Restrict a member's permissions."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -287,7 +290,7 @@ async def approve_member(
 ):
     """Remove all restrictions from a user (unban/unrestrict)."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -316,7 +319,7 @@ async def get_invite_links(
 ):
     """Get all invite links for a group/channel."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import GetExportedChatInvitesRequest
@@ -332,7 +335,7 @@ async def get_invite_links(
             links.append({
                 "link": invite.link,
                 "title": getattr(invite, "title", None),
-                "expire_date": invite.expire_date.isoformat() if invite.expire_date else None,
+                "expire_date": iso_utc(invite.expire_date),
                 "usage_limit": getattr(invite, "usage_limit", None),
                 "usage": getattr(invite, "usage", 0) or 0,
                 "request_needed": getattr(invite, "request_needed", False),
@@ -351,7 +354,7 @@ async def create_invite_link(
 ):
     """Create a new invite link."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import ExportChatInviteRequest
@@ -367,7 +370,7 @@ async def create_invite_link(
         link_data = {
             "link": result.link,
             "title": getattr(result, "title", None),
-            "expire_date": result.expire_date.isoformat() if result.expire_date else None,
+            "expire_date": iso_utc(result.expire_date),
             "usage_limit": getattr(result, "usage_limit", None),
             "usage": getattr(result, "usage", 0) or 0,
             "request_needed": getattr(result, "request_needed", False),
@@ -388,7 +391,7 @@ async def revoke_invite_link(
 ):
     """Revoke an existing invite link."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import EditExportedChatInviteRequest
@@ -413,7 +416,7 @@ async def get_group_settings(
 ):
     """Get the current title and about/description for a group or channel."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     try:
         full = await client.get_entity(telegram_id)
@@ -447,7 +450,7 @@ async def update_group_settings(
 ):
     """Update group/channel title and/or description."""
     await _require_group_chat(telegram_id, db)
-    client = await _require_client()
+    client = await runtime.client()
 
     changes = []
     try:
@@ -457,7 +460,6 @@ async def update_group_settings(
             changes.append("title")
 
         if req.about is not None:
-            from telethon.tl.functions.channels import EditPhotoRequest
             from telethon.tl.functions.messages import EditChatAboutRequest
             await client(EditChatAboutRequest(peer=telegram_id, about=req.about))
             changes.append("about")
@@ -497,7 +499,7 @@ async def get_admin_action_log(
             "action": r[2],
             "target_user_id": r[3],
             "details": r[4],
-            "created_at": r[5].isoformat() if r[5] else None,
+            "created_at": iso_utc(_db_datetime(r[5])),
         }
         for r in rows
     ]

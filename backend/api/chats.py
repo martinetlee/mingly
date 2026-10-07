@@ -1,10 +1,10 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import utils
@@ -14,17 +14,19 @@ from telethon.tl.types import DialogFilter
 
 logger = logging.getLogger(__name__)
 
-from backend.config import DATA_DIR
 from backend.db.database import get_db, AsyncSessionLocal
 from backend.db.models import Message
 from backend.db import crud
-from backend.telegram.client import get_client, ensure_connected
-from backend.telegram.sync import sync_messages, bulk_sync, _chat_type, _extract_user_status, _is_deactivated
+from backend.jobs import get_running, run_single
+from backend.scam.verdict import scam_fields
+from backend.serialization import iso_utc
+from backend.telegram.runtime import runtime
+from backend.telegram.coordinator import coordinator
+from backend.telegram.entities import chat_type as _chat_type, display_name, is_deactivated as _is_deactivated
+from backend.telegram.sync import bulk_sync
+from backend.ws.manager import ws_manager
 
 router = APIRouter()
-
-# Chats with a first-time background sync currently in flight (see get_messages)
-_BG_SYNCING: set[int] = set()
 
 
 class HideRequest(BaseModel):
@@ -58,11 +60,10 @@ class MarkUnreadRequest(BaseModel):
 
 @router.get("/folders")
 async def list_folders():
-    client = get_client()
+    client = await runtime.client(require=False)
     if not client:
         return []
     try:
-        await ensure_connected()
         response = await client(GetDialogFiltersRequest())
     except Exception as e:
         logger.warning("Failed to fetch dialog folders: %s", e)
@@ -92,6 +93,15 @@ async def list_folders():
     return result
 
 
+def _parse_meta(raw: Optional[str]):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
 def _serialize_msg(row) -> dict:
     m, reply_sender, reply_text, reply_media_type = row
     reply_preview = None
@@ -108,7 +118,7 @@ def _serialize_msg(row) -> dict:
         "sender_id": m.sender_id,
         "sender_name": m.sender_name,
         "text": m.text,
-        "date": m.date.isoformat() + "Z" if m.date else None,
+        "date": iso_utc(m.date),
         "is_outgoing": m.is_outgoing,
         "media_type": m.media_type,
         "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
@@ -126,9 +136,10 @@ def _serialize_msg(row) -> dict:
         "grouped_id": m.grouped_id,
         "delivery_state": m.delivery_state or "sent",
         "is_edited": m.is_edited,
-        "scam_score": getattr(m, 'scam_score', None),
-        "scam_reason": getattr(m, 'scam_reason', None),
-        "scam_manual_verdict": getattr(m, 'scam_manual_verdict', None),
+        "kind": getattr(m, "kind", None) or "message",
+        "meta": _parse_meta(getattr(m, "meta_json", None)),
+        "fwd_from_name": getattr(m, "fwd_from_name", None),
+        **scam_fields(m),
     }
 
 
@@ -151,24 +162,24 @@ def _chat_dict(c, last_text=None, last_sender=None, last_date=None) -> dict:
         "slow_mode_seconds": c.slow_mode_seconds if hasattr(c, 'slow_mode_seconds') else 0,
         "is_pinned": c.is_pinned,
         "is_archived": c.is_archived,
+        "is_bot": bool(getattr(c, "is_bot", False)),
+        "is_deleted_account": bool(getattr(c, "is_deleted_account", False)),
+        "history_complete": bool(getattr(c, "history_complete", False)),
         "is_muted": c.is_muted,
-        "muted_until": c.muted_until.isoformat() if c.muted_until else None,
+        "muted_until": iso_utc(c.muted_until),
         "is_marked_unread": c.is_marked_unread,
         "unread_count": c.unread_count or 0,
-        "last_synced_at": c.last_synced_at,
-        "last_activity_at": getattr(c, 'last_activity_at', None),
+        "last_synced_at": iso_utc(c.last_synced_at),
+        "last_activity_at": iso_utc(getattr(c, "last_activity_at", None)),
     }
     if last_text is not None or last_sender is not None or last_date is not None:
         d["last_message"] = {
             "text": (last_text[:100] if last_text and len(last_text) > 100 else last_text) or "",
             "sender_name": last_sender,
-            "date": last_date.isoformat() + "Z" if last_date else None,
+            "date": iso_utc(last_date),
         }
     else:
         d["last_message"] = None
-    # Ensure last_activity_at is serialized as ISO string
-    if d.get("last_activity_at") and hasattr(d["last_activity_at"], "isoformat"):
-        d["last_activity_at"] = d["last_activity_at"].isoformat() + "Z"
     return d
 
 
@@ -190,10 +201,7 @@ async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
 
     if not chat:
         # Chat not in local DB — fetch from Telegram and create it
-        client = get_client()
-        if not client:
-            raise HTTPException(status_code=503, detail="Telegram client not available")
-        await ensure_connected()
+        client = await runtime.client()
         try:
             entity = await client.get_entity(telegram_id)
         except Exception as e:
@@ -202,11 +210,10 @@ async def ensure_chat(telegram_id: int, db: AsyncSession = Depends(get_db)):
         chat = await crud.upsert_chat(
             db,
             telegram_id=telegram_id,
-            name=getattr(entity, "title", None)
-                or f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
-                or str(telegram_id),
+            name=display_name(entity, telegram_id),
             chat_type=_chat_type(entity),
             username=getattr(entity, "username", None),
+            is_forum=bool(getattr(entity, "forum", False)),
             is_deactivated=_is_deactivated(entity),
         )
 
@@ -277,184 +284,68 @@ async def search_chats(q: str, db: AsyncSession = Depends(get_db)):
     return {"local": local}
 
 
+def _remote_chat_dict(telegram_id: int, name: str, ctype: str, username: Optional[str]) -> dict:
+    """Chat-shaped dict for a Telegram search hit that isn't stored locally."""
+    return {
+        "id": 0, "telegram_id": telegram_id, "name": name, "type": ctype, "username": username,
+        "is_monitored": False, "is_hidden": False, "is_briefing": False,
+        "is_tracked": False, "is_pinned": False, "is_archived": False,
+        "is_muted": False, "muted_until": None, "is_marked_unread": False,
+        "unread_count": 0, "last_synced_at": None, "last_activity_at": None, "last_message": None,
+    }
+
+
 @router.get("/search/telegram")
 async def search_chats_telegram(q: str, db: AsyncSession = Depends(get_db)):
-    """Search chats via Telegram API (finds chats not yet in local DB)."""
-    if not q.strip():
+    """Find chats by name: the user's own dialogs are searched locally (every
+    dialog is stored by dialog sync, including archived ones); Telegram is
+    queried only for the global directory (people/groups/channels not yet in
+    the dialog list). One RPC per query instead of four."""
+    q = q.strip()
+    if not q:
         return []
-    client = get_client()
-    if not client:
-        # Fallback to local DB search if client unavailable
-        from sqlalchemy import select as sa_sel
-        from backend.db.models import Chat
-        result = await db.execute(
-            sa_sel(Chat)
-            .where(Chat.name.ilike(f"%{q}%"))
-            .order_by(Chat.last_activity_at.desc().nullslast())
-            .limit(20)
-        )
-        return [_chat_dict(c) for c in result.scalars().all()]
+    from sqlalchemy import select as sa_sel, or_ as sa_or
+    from backend.db.models import Chat
 
+    pattern = f"%{q}%"
+    result = await db.execute(
+        sa_sel(Chat)
+        .where(
+            sa_or(Chat.name.ilike(pattern), Chat.username.ilike(pattern)),
+            Chat.is_deactivated == False,  # noqa: E712
+        )
+        .order_by(Chat.last_activity_at.desc().nullslast())
+        .limit(20)
+    )
+    found = [_chat_dict(c) for c in result.scalars().all()]
+    seen = {c["telegram_id"] for c in found}
+
+    if len(q) < 2:
+        return found
+    client = await runtime.client(require=False)
+    # Typeahead must never queue behind a FloodWait: skip the directory lookup.
+    if not client or not await coordinator.limiter.acquire(1, max_wait=2):
+        return found
     try:
         from telethon.tl.functions.contacts import SearchRequest
-        chats_found = []
-        seen_ids = set()
-
-        # 1. Search messages globally — finds chats including contact requests
-        #    that don't appear in regular dialog lists
-        try:
-            from telethon.tl.functions.messages import SearchGlobalRequest
-            from telethon.tl.types import InputMessagesFilterEmpty, InputPeerEmpty, PeerUser, PeerChat, PeerChannel
-            global_result = await client(SearchGlobalRequest(
-                q=q,
-                filter=InputMessagesFilterEmpty(),
-                min_date=None,
-                max_date=None,
-                offset_rate=0,
-                offset_peer=InputPeerEmpty(),
-                offset_id=0,
-                limit=20,
-            ))
-            user_map = {u.id: u for u in getattr(global_result, 'users', [])}
-            chat_map = {c.id: c for c in getattr(global_result, 'chats', [])}
-            for msg in getattr(global_result, 'messages', []):
-                peer_id = getattr(msg, 'peer_id', None)
-                if not peer_id:
-                    continue
-                if isinstance(peer_id, PeerUser):
-                    tid = peer_id.user_id
-                    if tid in seen_ids:
-                        continue
-                    seen_ids.add(tid)
-                    user = user_map.get(tid)
-                    name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip() if user else str(tid)
-                    chats_found.append({
-                        "id": 0, "telegram_id": tid, "name": name, "type": "private",
-                        "username": getattr(user, "username", None) if user else None,
-                        "is_monitored": False, "is_hidden": False, "is_briefing": False,
-                        "is_tracked": False, "is_pinned": False, "is_archived": False,
-                        "is_muted": False, "muted_until": None, "is_marked_unread": False,
-                        "last_synced_at": None, "last_activity_at": None, "last_message": None,
-                    })
-                elif isinstance(peer_id, (PeerChat, PeerChannel)):
-                    raw = peer_id.chat_id if isinstance(peer_id, PeerChat) else peer_id.channel_id
-                    tid = utils.get_peer_id(peer_id)  # marked id: -X (group) / -100X (channel)
-                    if tid in seen_ids:
-                        continue
-                    seen_ids.add(tid)
-                    chat_ent = chat_map.get(raw)
-                    ctype = "channel" if getattr(chat_ent, "broadcast", False) else "group"
-                    chats_found.append({
-                        "id": 0, "telegram_id": tid,
-                        "name": getattr(chat_ent, "title", str(tid)) if chat_ent else str(tid),
-                        "type": ctype,
-                        "username": getattr(chat_ent, "username", None) if chat_ent else None,
-                        "is_monitored": False, "is_hidden": False, "is_briefing": False,
-                        "is_tracked": False, "is_pinned": False, "is_archived": False,
-                        "is_muted": False, "muted_until": None, "is_marked_unread": False,
-                        "last_synced_at": None, "last_activity_at": None, "last_message": None,
-                    })
-        except Exception as e:
-            logger.warning("Global message search failed: %s", e)
-
-        # 2. Also search dialogs across all folders (main, archived, custom filters)
-        from backend.telegram.sync import _chat_type
-        q_lower = q.lower()
-
-        folder_ids = [None, 1]  # None = main, 1 = archived/contact requests
-
-        for folder in folder_ids:
-            try:
-                async for dialog in client.iter_dialogs(limit=200, folder=folder):
-                    if q_lower in (dialog.name or "").lower():
-                        if dialog.id in seen_ids:
-                            continue
-                        seen_ids.add(dialog.id)
-                        entity = dialog.entity
-                        chats_found.append({
-                            "id": 0, "telegram_id": dialog.id,
-                            "name": dialog.name or str(dialog.id),
-                            "type": _chat_type(entity),
-                            "username": getattr(entity, "username", None),
-                            "is_monitored": False, "is_hidden": False, "is_briefing": False,
-                            "is_tracked": False, "is_pinned": False, "is_archived": False,
-                            "is_muted": False, "muted_until": None, "is_marked_unread": False,
-                            "unread_count": dialog.unread_count,
-                            "last_synced_at": None,
-                            "last_activity_at": getattr(dialog, "date", None).isoformat() if getattr(dialog, "date", None) else None,
-                            "last_message": None,
-                        })
-                        if len(chats_found) >= 20:
-                            break
-            except Exception as e:
-                logger.warning("Dialog search folder %s failed: %s", folder, e)
-
-        # 2. Also search Telegram's global contacts/channels directory
-        result = await client(SearchRequest(q=q, limit=20))
-        # Process users
-        for user in result.users:
-            if user.id in seen_ids:
-                continue
-            seen_ids.add(user.id)
-            name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip() or str(user.id)
-            chats_found.append({
-                "id": 0,
-                "telegram_id": user.id,
-                "name": name,
-                "type": "private",
-                "username": getattr(user, "username", None),
-                "is_monitored": False,
-                "is_hidden": False,
-                "is_briefing": False,
-                "is_tracked": False,
-                "is_pinned": False,
-                "is_archived": False,
-                "is_muted": False,
-                "muted_until": None,
-                "is_marked_unread": False,
-                "last_synced_at": None,
-                "last_activity_at": None,
-                "last_message": None,
-            })
-        # Process chats/channels
-        for chat in result.chats:
-            tid = utils.get_peer_id(chat)  # marked id, matches DB convention
-            if tid in seen_ids:
-                continue
-            seen_ids.add(tid)
-            chat_type = "channel" if getattr(chat, "broadcast", False) else "group"
-            chats_found.append({
-                "id": 0,
-                "telegram_id": tid,
-                "name": getattr(chat, "title", str(chat.id)),
-                "type": chat_type,
-                "username": getattr(chat, "username", None),
-                "is_monitored": False,
-                "is_hidden": False,
-                "is_briefing": False,
-                "is_tracked": False,
-                "is_pinned": False,
-                "is_archived": False,
-                "is_muted": False,
-                "muted_until": None,
-                "is_marked_unread": False,
-                "last_synced_at": None,
-                "last_activity_at": None,
-                "last_message": None,
-            })
-        return chats_found
+        res = await client(SearchRequest(q=q, limit=20))
+    except FloodWaitError as e:
+        coordinator.limiter.flood(e.seconds)
+        logger.info("Telegram directory search rate-limited (%ss)", e.seconds)
+        return found
     except Exception as e:
-        logger.warning("Telegram search failed: %s", e, exc_info=True)
-        # Fallback to local DB search
-        from sqlalchemy import select as sa_sel
-        from backend.db.models import Chat
-        result = await db.execute(
-            sa_sel(Chat)
-            .where(Chat.name.ilike(f"%{q}%"))
-            .order_by(Chat.last_activity_at.desc().nullslast())
-            .limit(20)
-        )
-        return [_chat_dict(c) for c in result.scalars().all()]
+        logger.warning("Telegram directory search failed: %s", e)
+        return found
+    for user in res.users:
+        if user.id not in seen:
+            seen.add(user.id)
+            found.append(_remote_chat_dict(user.id, display_name(user, user.id), "private", getattr(user, "username", None)))
+    for chat in res.chats:
+        tid = utils.get_peer_id(chat)  # marked id, matches DB convention
+        if tid not in seen:
+            seen.add(tid)
+            found.append(_remote_chat_dict(tid, display_name(chat, tid), _chat_type(chat), getattr(chat, "username", None)))
+    return found
 
 
 @router.get("/search/messages")
@@ -462,8 +353,8 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
     """Search message content globally via Telegram SearchGlobalRequest."""
     if not q.strip():
         return []
-    client = get_client()
-    if not client:
+    client = await runtime.client(require=False)
+    if not client or not await coordinator.limiter.acquire(1, max_wait=2):
         return []
     try:
         from telethon.tl.functions.messages import SearchGlobalRequest
@@ -484,11 +375,11 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
         chat_messages: dict[int, list] = {}
         chats_map: dict[int, dict] = {}
 
+        # Keyed by marked peer id: raw user/chat/channel ids can collide.
         for c in getattr(result, "chats", []):
-            chats_map[c.id] = {"name": getattr(c, "title", str(c.id)), "type": "channel" if hasattr(c, "broadcast") else "group"}
+            chats_map[utils.get_peer_id(c)] = {"name": display_name(c, c.id), "type": _chat_type(c)}
         for u in getattr(result, "users", []):
-            name = f"{getattr(u, 'first_name', '') or ''} {getattr(u, 'last_name', '') or ''}".strip() or str(u.id)
-            chats_map[u.id] = {"name": name, "type": "private"}
+            chats_map[u.id] = {"name": display_name(u, u.id), "type": "private"}
 
         for msg in getattr(result, "messages", []):
             peer = msg.peer_id
@@ -500,19 +391,19 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
                 chat_messages[tg_id] = []
             if len(chat_messages[tg_id]) < 3:  # max 3 messages per chat
                 sender_name = None
-                if msg.from_id and hasattr(msg.from_id, "user_id"):
-                    u = chats_map.get(msg.from_id.user_id)
+                if msg.from_id:
+                    u = chats_map.get(utils.get_peer_id(msg.from_id))
                     sender_name = u["name"] if u else None
                 chat_messages[tg_id].append({
                     "tg_message_id": msg.id,
                     "text": (msg.message or "")[:120],
                     "sender_name": sender_name,
-                    "date": msg.date.replace(tzinfo=None).isoformat() if msg.date else None,
+                    "date": iso_utc(msg.date),
                 })
 
         results = []
         for tg_id, messages in chat_messages.items():
-            info = chats_map.get(utils.resolve_id(tg_id)[0], {})
+            info = chats_map.get(tg_id, {})
             # Try local DB for richer chat info
             local_chat = await crud.get_chat_by_telegram_id(db, tg_id)
             results.append({
@@ -522,9 +413,12 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
                 "messages": messages,
             })
         return results
+    except FloodWaitError as e:
+        coordinator.limiter.flood(e.seconds)
+        logger.info("Global message search rate-limited (%ss)", e.seconds)
+        return []
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Global message search failed: %s", e)
+        logger.warning("Global message search failed: %s", e)
         return []
 
 
@@ -588,10 +482,9 @@ async def mark_chat_read(telegram_id: int, db: AsyncSession = Depends(get_db)):
 
     # Sync to Telegram (best-effort). Without this, the periodic dialog sync
     # restores Telegram's unread count and the badge resurrects within ~2 min.
-    client = get_client()
+    client = await runtime.client(require=False)
     if client:
         try:
-            await ensure_connected()
             entity = await client.get_input_entity(telegram_id)
             await client.send_read_acknowledge(entity)
         except Exception as e:
@@ -623,12 +516,11 @@ async def toggle_pin(
         raise HTTPException(status_code=404, detail="Chat not found")
 
     # Sync to Telegram (best-effort)
-    client = get_client()
+    client = await runtime.client(require=False)
     if client:
         try:
-            await ensure_connected()
             from telethon.tl.functions.messages import ToggleDialogPinRequest
-            from telethon.tl.types import InputDialogPeer, InputPeerUser, InputPeerChat, InputPeerChannel
+            from telethon.tl.types import InputDialogPeer
             entity = await client.get_input_entity(telegram_id)
             await client(ToggleDialogPinRequest(
                 peer=InputDialogPeer(peer=entity),
@@ -651,10 +543,9 @@ async def toggle_archive(
         raise HTTPException(status_code=404, detail="Chat not found")
 
     # Sync to Telegram (best-effort)
-    client = get_client()
+    client = await runtime.client(require=False)
     if client:
         try:
-            await ensure_connected()
             from telethon.tl.functions.folders import EditPeerFoldersRequest
             from telethon.tl.types import InputFolderPeer
             entity = await client.get_input_entity(telegram_id)
@@ -666,6 +557,28 @@ async def toggle_archive(
             logger.warning("Failed to sync archive to Telegram: %s", e)
 
     return {"telegram_id": telegram_id, "is_archived": chat.is_archived}
+
+
+@router.post("/{telegram_id}/archive-history")
+async def archive_chat_history(telegram_id: int, db: AsyncSession = Depends(get_db)):
+    """Queue a full-history walk (or top-up) for one chat — DM, group or
+    channel — ahead of the background DM archive. Distinct from
+    ``/archive`` (the Telegram Archive folder toggle)."""
+    from backend.telegram import archive
+
+    if await crud.get_chat_by_telegram_id(db, telegram_id) is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    await archive.request_chat(telegram_id, priority=True)
+    cov = (await crud.get_coverage(db, [telegram_id])).get(telegram_id)
+    return {
+        "queued": True,
+        "coverage": {
+            "history_complete": bool(cov and cov.history_complete),
+            "message_count": await crud.count_chat_messages(db, telegram_id),
+            "oldest_tg_id": cov.oldest_tg_id if cov else None,
+            "newest_contiguous_tg_id": cov.newest_contiguous_tg_id if cov else None,
+        },
+    }
 
 
 @router.get("/archived")
@@ -696,10 +609,9 @@ async def toggle_mute(
         raise HTTPException(status_code=404, detail="Chat not found")
 
     # Sync to Telegram (best-effort)
-    client = get_client()
+    client = await runtime.client(require=False)
     if client:
         try:
-            await ensure_connected()
             from telethon.tl.functions.account import UpdateNotifySettingsRequest
             from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
             entity = await client.get_input_entity(telegram_id)
@@ -719,89 +631,201 @@ async def toggle_mute(
     return {
         "telegram_id": telegram_id,
         "is_muted": chat.is_muted,
-        "muted_until": chat.muted_until.isoformat() if chat.muted_until else None,
+        "muted_until": iso_utc(chat.muted_until),
     }
 
 
-@router.get("/{telegram_id}/messages")
-async def get_messages(
+async def _local_message_count(chat_id: int) -> int:
+    from sqlalchemy import func as sa_func, select as sa_select
+    async with AsyncSessionLocal() as db:
+        return (await db.execute(
+            sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == chat_id)
+        )).scalar() or 0
+
+
+async def _auto_sync(telegram_id: int, first_sync: bool) -> None:
+    """Background sync on chat open, with retry through transient failures.
+
+    Emits exactly one of: ``chat_synced`` (something changed, or first sync
+    finished with history), ``chat_sync_empty`` (a *completed* fetch found no
+    retrievable history), ``chat_sync_failed`` (gave up / chat unavailable).
+    """
+    limit = 100 if first_sync else 50
+    last = None
+    for attempt in range(1, 5):
+        res = await coordinator.sync_chat(telegram_id, limit)
+        last = res
+        changed = res.changed
+        if res.completed and first_sync and not res.exhausted:
+            if await _local_message_count(telegram_id) < 5:
+                # Chat may be full of service messages — try a deeper fetch.
+                # Only its own completion can prove the chat has no history.
+                deep = await coordinator.sync_chat(telegram_id, 500)
+                changed = changed or deep.changed
+                res = last = deep
+        if res.completed:
+            if first_sync:
+                count = await _local_message_count(telegram_id)
+                if count == 0:
+                    await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
+                    return
+            if changed or first_sync:
+                await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
+            return
+        if res.flood_wait:
+            logger.info("auto-sync chat %s: FloodWait %ss (attempt %d)", telegram_id, res.flood_wait, attempt)
+            await asyncio.sleep(min(res.flood_wait + 2, 600))
+        elif res.status == "unavailable" and await runtime.client(require=False) is not None:
+            break  # the chat itself can't be fetched (deleted, private, banned)
+        else:
+            await asyncio.sleep(3 * attempt)
+    logger.warning("auto-sync chat %s gave up: %s", telegram_id, last.error if last else None)
+    await ws_manager.broadcast({
+        "type": "chat_sync_failed",
+        "chat_id": telegram_id,
+        "status": last.status if last else "error",
+        "error": last.error if last else None,
+    })
+
+
+def _maybe_auto_sync(chat, latest: bool = True) -> bool:
+    """Start a background sync when the chat was never synced (deep fetch,
+    any view) or — for the latest view — its last sync is older than 15 min.
+    Returns True when a sync is running."""
+    if chat is None or chat.is_hidden or chat.is_deactivated:
+        return False
+    key = f"autosync:{chat.telegram_id}"
+    if get_running(key) is not None:
+        return True
+    first_sync = chat.last_synced_at is None
+    stale = not first_sync and chat.last_synced_at < datetime.utcnow() - timedelta(minutes=15)
+    if first_sync or (stale and latest):
+        run_single(key, lambda: _auto_sync(chat.telegram_id, first_sync))
+        return True
+    return coordinator.is_syncing(chat.telegram_id)
+
+
+def _parse_cursor(value: Optional[str]):
+    """Cursor = "<message.date as returned by the API>~<tg_message_id>"."""
+    if value is None:
+        return None
+    try:
+        date_part, id_part = value.rsplit("~", 1)
+        dt = datetime.fromisoformat(date_part.rstrip("Z").replace(" ", "T"))
+        return (dt.replace(tzinfo=None), int(id_part))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail=f"Invalid cursor: {value!r}")
+
+
+def _cursor(msg: dict) -> str:
+    return f"{msg['date']}~{msg['tg_message_id']}"
+
+
+@router.get("/{telegram_id}/messages/window")
+async def get_message_window(
     telegram_id: int,
-    limit: int = 100,
-    offset: int = 0,
-    anchor_telegram_id: Optional[int] = None,
+    limit: int = 50,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    anchor: Optional[int] = None,
+    date: Optional[str] = None,
+    topic_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    # When anchoring to a specific message, compute offset so it lands near the middle
-    if anchor_telegram_id is not None:
-        offset = await crud.get_offset_for_anchor(db, telegram_id, anchor_telegram_id)
+    """Keyset message window (see crud.get_message_window).
 
-    # Auto-sync on open — non-blocking (skip hidden chats).
-    # First open (never synced) does a deep fetch; a chat whose last sync is old
-    # gets a lighter refresh so history missed while the app was closed appears.
-    if offset == 0:
-        chat = await crud.get_chat_by_telegram_id(db, telegram_id)
-        first_sync = chat is not None and chat.last_synced_at is None
-        stale = (
-            chat is not None
-            and chat.last_synced_at is not None
-            and chat.last_synced_at < datetime.utcnow() - timedelta(minutes=15)
+    Exactly one positioning parameter: ``before``/``after`` (cursor strings),
+    ``anchor`` (tg_message_id to centre on), ``date`` (ISO; centre on the first
+    message at/after it) — or none for the newest messages, which also starts
+    a background sync when the chat is stale.
+    """
+    around_date = None
+    if date is not None:
+        try:
+            around_date = datetime.fromisoformat(date.rstrip("Z"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date: {date!r}")
+        if around_date.tzinfo is not None:
+            from datetime import timezone
+            around_date = around_date.astimezone(timezone.utc).replace(tzinfo=None)
+    window = await crud.get_message_window(
+        db, telegram_id,
+        limit=limit,
+        before=_parse_cursor(before),
+        after=_parse_cursor(after),
+        anchor_tg_id=anchor,
+        around_date=around_date,
+        topic_id=topic_id,
+    )
+    latest = before is None and after is None and anchor is None and date is None
+    syncing = _maybe_auto_sync(await crud.get_chat_by_telegram_id(db, telegram_id), latest=latest)
+
+    # Jump target not stored locally (or the date is older than local
+    # history): fetch it plus a window around it from Telegram, then re-read.
+    anchor_reason = None
+    if anchor is not None or around_date is not None:
+        rows = window["rows"]
+        before_local_history = (
+            around_date is not None and rows and not window["has_older"] and rows[0][0].date > around_date
         )
-        if chat and (first_sync or stale) and not chat.is_hidden and not chat.is_briefing:
-            import asyncio
+        if not window["anchor_found"] or before_local_history:
+            res = await coordinator.fetch_around(
+                telegram_id, anchor_id=anchor, date=around_date if anchor is None else None, limit=limit,
+            )
+            if res.completed:
+                window = await crud.get_message_window(
+                    db, telegram_id, limit=limit, anchor_tg_id=anchor, around_date=around_date, topic_id=topic_id,
+                )
+            if not window["anchor_found"]:
+                if res.status == "not_found" or res.completed:
+                    anchor_reason = "not_found"
+                elif res.flood_wait or res.status == "skipped":
+                    anchor_reason = "rate_limited"
+                elif res.status == "unavailable":
+                    anchor_reason = "unavailable"
+                else:
+                    anchor_reason = "error"
+    messages = [_serialize_msg(row) for row in window["rows"]]
+    return {
+        "messages": messages,
+        "has_older": window["has_older"],
+        "has_newer": window["has_newer"],
+        "older_cursor": _cursor(messages[0]) if messages else None,
+        "newer_cursor": _cursor(messages[-1]) if messages else None,
+        "anchor_found": window["anchor_found"],
+        "anchor_reason": anchor_reason,
+        "syncing": syncing,
+    }
 
-            async def _bg_sync():
-                from backend.ws.manager import ws_manager
 
-                # One in-flight sync per chat — reopening the pane must not stack syncs
-                if telegram_id in _BG_SYNCING:
-                    return
-                _BG_SYNCING.add(telegram_id)
-                try:
-                    async def _local_count() -> int:
-                        from sqlalchemy import func as sa_func, select as sa_select
-                        async with AsyncSessionLocal() as db2:
-                            return (await db2.execute(
-                                sa_select(sa_func.count()).select_from(Message).where(Message.chat_id == telegram_id)
-                            )).scalar() or 0
-
-                    # Retry through transient failures (rate limits during click sprees, etc.).
-                    # The UI shows a persistent "syncing…" state, so waiting here is fine;
-                    # a failed sync must never masquerade as "no history".
-                    for attempt in range(1, 5):
-                        try:
-                            changed = await sync_messages(telegram_id, limit=100 if first_sync else 50)
-                            if first_sync:
-                                count = await _local_count()
-                                if count < 5:
-                                    # Chat may be full of service messages — try a deeper fetch
-                                    changed += await sync_messages(telegram_id, limit=500)
-                                    count = await _local_count()
-                                if count == 0:
-                                    # Sync completed and there is genuinely nothing retrievable
-                                    await ws_manager.broadcast({"type": "chat_sync_empty", "chat_id": telegram_id})
-                                else:
-                                    await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
-                            elif changed:
-                                # Refresh sync: only notify when something actually changed,
-                                # so opening an idle chat doesn't flash a pointless reload
-                                await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
-                            return
-                        except FloodWaitError as e:
-                            logger.info("auto-sync chat %s: FloodWait %ss (attempt %d)", telegram_id, e.seconds, attempt)
-                            await asyncio.sleep(min(e.seconds + 2, 600))
-                        except Exception:
-                            logger.warning("auto-sync chat %s failed (attempt %d)", telegram_id, attempt, exc_info=True)
-                            await asyncio.sleep(3 * attempt)
-                    # Exhausted: stay silent — the pane keeps its syncing state and the
-                    # next open of this chat retries (last_synced_at is still NULL)
-                    logger.warning("auto-sync chat %s gave up after retries", telegram_id)
-                finally:
-                    _BG_SYNCING.discard(telegram_id)
-
-            asyncio.create_task(_bg_sync())
-
-    rows = await crud.get_messages(db, telegram_id, limit=limit, offset=offset)
-    return [_serialize_msg(row) for row in reversed(rows)]
+@router.post("/{telegram_id}/backfill")
+async def backfill_history(
+    telegram_id: int,
+    limit: int = 100,
+    topic_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch history older than the oldest locally stored message from
+    Telegram. ``exhausted`` = Telegram has nothing older."""
+    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    oldest = await crud.get_oldest_message_id(db, telegram_id, topic_id)
+    res = await coordinator.sync_chat(
+        telegram_id, max(1, min(limit, 200)), offset_id=oldest or 0, topic_id=topic_id,
+    )
+    if res.flood_wait:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Telegram rate limit — retry in {res.flood_wait}s",
+            headers={"Retry-After": str(res.flood_wait)},
+        )
+    if res.status == "unavailable":
+        await runtime.client()  # 503 when Telegram itself is unreachable
+        raise HTTPException(status_code=422, detail=res.error or "Chat unavailable")
+    if res.status == "error":
+        raise HTTPException(status_code=502, detail=f"Backfill failed: {res.error}")
+    return {"added": res.added, "exhausted": res.exhausted, "status": res.status}
 
 
 @router.get("/{telegram_id}/messages/search")
@@ -817,17 +841,6 @@ async def search_messages(
     return [_serialize_msg(row) for row in reversed(rows)]
 
 
-@router.get("/{telegram_id}/messages/date-offset")
-async def get_date_offset(
-    telegram_id: int,
-    date: str,
-    db: AsyncSession = Depends(get_db),
-):
-    target = datetime.fromisoformat(date)
-    offset = await crud.get_date_offset(db, telegram_id, target)
-    return {"offset": offset}
-
-
 class ReactRequest(BaseModel):
     emoji: Optional[str] = None
 
@@ -840,9 +853,7 @@ async def react_to_message(
     db: AsyncSession = Depends(get_db),
 ):
     """Send or remove the current user's emoji reaction on a message via Telethon."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram not connected")
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import SendReactionRequest
@@ -867,28 +878,32 @@ async def react_to_message(
 
 @router.post("/{telegram_id}/sync")
 async def sync_chat(telegram_id: int, limit: int = 100, db: AsyncSession = Depends(get_db)):
+    """Refresh the newest messages of a chat from Telegram.
+
+    Returns the typed sync result: {status, fetched, added, updated, deleted,
+    exhausted, flood_wait, error, chat_id}. ``chat_synced`` is broadcast only
+    when something changed."""
     chat = await crud.get_chat_by_telegram_id(db, telegram_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    try:
-        await sync_messages(telegram_id, limit=min(limit, 200))
-    except FloodWaitError as e:
+    res = await coordinator.sync_chat(telegram_id, max(1, min(limit, 200)))
+    if res.flood_wait:
         raise HTTPException(
             status_code=429,
-            detail=f"Telegram rate limit — retry in {e.seconds}s",
-            headers={"Retry-After": str(e.seconds)},
+            detail=f"Telegram rate limit — retry in {res.flood_wait}s",
+            headers={"Retry-After": str(res.flood_wait)},
         )
-    except ValueError as e:
+    if res.status == "unavailable":
+        await runtime.client()  # 503 when Telegram itself is unreachable
         raise HTTPException(
             status_code=422,
-            detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({e})",
+            detail=f"Could not resolve chat entity. The user or chat may have been deleted. ({res.error})",
         )
-    except Exception as e:
-        logger.warning("sync_chat %s failed: %s", telegram_id, e)
-        raise HTTPException(status_code=502, detail=f"Sync failed: {e}")
-    from backend.ws.manager import ws_manager
-    await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
-    return {"status": "ok"}
+    if res.status == "error":
+        raise HTTPException(status_code=502, detail=f"Sync failed: {res.error}")
+    if res.changed:
+        await ws_manager.broadcast({"type": "chat_synced", "chat_id": telegram_id})
+    return res.to_dict()
 
 
 @router.get("/{telegram_id}/shared-media")
@@ -941,7 +956,7 @@ async def get_shared_media(
         items.append({
             "id": m.id,
             "tg_message_id": m.tg_message_id,
-            "date": m.date.isoformat() if m.date else None,
+            "date": iso_utc(m.date),
             "sender_name": m.sender_name,
             "media_type": m.media_type,
             "media_url": f"/api/media/{m.media_path}" if m.media_path else None,
@@ -961,10 +976,7 @@ async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession 
     if chat.type == "private":
         return []
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     from telethon.tl.types import User
 
@@ -1004,10 +1016,7 @@ async def get_chat_members(telegram_id: int, limit: int = 100, db: AsyncSession 
 @router.get("/{telegram_id}/presence")
 async def get_user_presence(telegram_id: int):
     """Get online/last-seen status for a private chat user via Telethon."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.users import GetFullUserRequest
@@ -1028,7 +1037,7 @@ async def get_user_presence(telegram_id: int):
         if isinstance(user_status, UserStatusOnline):
             return {"status": "online"}
         if isinstance(user_status, UserStatusOffline):
-            last_seen = user_status.was_online.isoformat() if user_status.was_online else None
+            last_seen = iso_utc(user_status.was_online)
             return {"status": "offline", "last_seen": last_seen}
         if isinstance(user_status, UserStatusRecently):
             return {"status": "recently"}
@@ -1044,10 +1053,7 @@ async def get_user_presence(telegram_id: int):
 @router.post("/{telegram_id}/typing")
 async def send_typing_action(telegram_id: int):
     """Send a typing indicator to the given chat via Telethon."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import SetTypingRequest
@@ -1074,62 +1080,55 @@ async def list_topics(telegram_id: int, db: AsyncSession = Depends(get_db)):
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
+    from telethon.tl.functions.messages import GetForumTopicsRequest
+    from telethon.tl.types import ForumTopic
     try:
-        from telethon.tl.functions.channels import GetForumTopicsRequest
         result = await client(GetForumTopicsRequest(
-            channel=telegram_id,
-            offset_date=0,
+            peer=telegram_id,
+            offset_date=None,
             offset_id=0,
             offset_topic=0,
             limit=100,
-            q=None,
         ))
-        topics = []
-        for topic in result.topics:
-            topics.append({
-                "id": topic.id,
-                "title": topic.title,
-                "icon_color": getattr(topic, "icon_color", None),
-                "icon_emoji_id": getattr(topic, "icon_emoji_id", None),
-                "date": topic.date.replace(tzinfo=None).isoformat() if topic.date else None,
-                "is_closed": getattr(topic, "closed", False) or False,
-                "is_pinned": getattr(topic, "pinned", False) or False,
-            })
-        return topics
-    except (ImportError, Exception) as exc:
-        # GetForumTopicsRequest not available or call failed;
-        # fall back to deriving topics from synced messages
-        if not isinstance(exc, ImportError):
-            logger.warning("GetForumTopicsRequest failed, using fallback: %s", exc)
-        from sqlalchemy import select as sa_sel, distinct
+    except Exception as exc:
+        # Telegram unreachable or the chat is not a forum — derive topics from synced messages
+        logger.warning("GetForumTopicsRequest failed, using fallback: %s", exc)
+        from sqlalchemy import select as sa_sel, func as sa_func
         from backend.db.models import Message
         rows = (await db.execute(
-            sa_sel(distinct(Message.topic_id))
+            sa_sel(Message.topic_id, sa_func.min(Message.date))
             .where(Message.chat_id == telegram_id, Message.topic_id.isnot(None))
-        )).fetchall()
-        topics = []
-        for (tid,) in rows:
-            first_msg = (await db.execute(
-                sa_sel(Message)
-                .where(Message.chat_id == telegram_id, Message.topic_id == tid)
-                .order_by(Message.date)
-                .limit(1)
-            )).scalars().first()
-            topics.append({
+            .group_by(Message.topic_id)
+        )).all()
+        return [
+            {
                 "id": tid,
                 "title": f"Topic {tid}",
                 "icon_color": None,
                 "icon_emoji_id": None,
-                "date": first_msg.date.isoformat() if first_msg and first_msg.date else None,
+                "date": iso_utc(first_date),
                 "is_closed": False,
                 "is_pinned": False,
-            })
-        return topics
+            }
+            for tid, first_date in rows
+        ]
+
+    topics = []
+    for topic in result.topics:
+        if not isinstance(topic, ForumTopic):
+            continue  # ForumTopicDeleted
+        topics.append({
+            "id": topic.id,
+            "title": topic.title,
+            "icon_color": getattr(topic, "icon_color", None),
+            "icon_emoji_id": getattr(topic, "icon_emoji_id", None),
+            "date": iso_utc(topic.date),
+            "is_closed": bool(getattr(topic, "closed", False)),
+            "is_pinned": bool(getattr(topic, "pinned", False)),
+        })
+    return topics
 
 
 class CreateTopicRequest(BaseModel):
@@ -1143,17 +1142,13 @@ async def create_topic(telegram_id: int, req: CreateTopicRequest, db: AsyncSessi
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
-        from telethon.tl.functions.channels import CreateForumTopicRequest
+        from telethon.tl.functions.messages import CreateForumTopicRequest
         result = await client(CreateForumTopicRequest(
-            channel=telegram_id,
+            peer=telegram_id,
             title=req.title,
-            random_id=int(datetime.utcnow().timestamp() * 1000),
         ))
         # The result contains the created topic updates
         updates = getattr(result, "updates", [])
@@ -1179,38 +1174,18 @@ async def set_topic_state(telegram_id: int, topic_id: int, req: TopicStateReques
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
-        from telethon.tl.functions.channels import EditForumTopicRequest
+        from telethon.tl.functions.messages import EditForumTopicRequest
         await client(EditForumTopicRequest(
-            channel=telegram_id,
+            peer=telegram_id,
             topic_id=topic_id,
             closed=req.closed,
         ))
         return {"success": True, "topic_id": topic_id, "closed": req.closed}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot update topic state: {e}")
-
-
-@router.get("/{telegram_id}/topics/{topic_id}/messages")
-async def get_topic_messages(
-    telegram_id: int,
-    topic_id: int,
-    limit: int = 100,
-    offset: int = 0,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get messages for a specific forum topic."""
-    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-
-    rows = await crud.get_topic_messages(db, telegram_id, topic_id, limit=limit, offset=offset)
-    return [_serialize_msg(row) for row in reversed(rows)]
 
 
 # ---------------------------------------------------------------------------
@@ -1228,10 +1203,7 @@ async def set_slow_mode(telegram_id: int, req: SlowModeRequest, db: AsyncSession
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import ToggleSlowModeRequest
@@ -1264,10 +1236,7 @@ async def pin_message(
     db: AsyncSession = Depends(get_db),
 ):
     """Pin or unpin a message in a chat."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         if req.pinned:
@@ -1278,7 +1247,7 @@ async def pin_message(
         raise HTTPException(status_code=400, detail=f"Cannot {'pin' if req.pinned else 'unpin'} message: {e}")
 
     # Update local DB
-    msg = await crud.set_message_pinned(db, telegram_id, msg_tg_id, req.pinned)
+    await crud.set_message_pinned(db, telegram_id, msg_tg_id, req.pinned)
     return {"success": True, "is_pinned": req.pinned}
 
 
@@ -1306,24 +1275,32 @@ async def get_post_stats(telegram_id: int, limit: int = 20, db: AsyncSession = D
     if chat.type != "channel":
         raise HTTPException(status_code=400, detail="Post stats are only available for channels")
 
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
+    limit = max(1, min(limit, 100))
+    if not await coordinator.limiter.acquire(1, max_wait=30):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Telegram rate limit — retry in {coordinator.limiter.flood_remaining}s",
+            headers={"Retry-After": str(coordinator.limiter.flood_remaining)},
+        )
 
     posts = []
     try:
         async for msg in client.iter_messages(telegram_id, limit=limit):
-            if not msg.text and not msg.media:
+            if not msg.message and not msg.media:
                 continue
             posts.append({
                 "telegram_id": msg.id,
-                "text": (msg.text or "")[:200],
-                "date": msg.date.replace(tzinfo=None).isoformat() if msg.date else None,
+                "text": (msg.message or "")[:200],
+                "date": iso_utc(msg.date),
                 "views": getattr(msg, "views", None) or 0,
                 "forwards": getattr(msg, "forwards", None) or 0,
                 "replies_count": getattr(msg.replies, "replies", 0) if getattr(msg, "replies", None) else 0,
             })
+    except FloodWaitError as e:
+        coordinator.limiter.flood(e.seconds)
+        raise HTTPException(status_code=429, detail=f"Telegram rate limit — retry in {e.seconds}s",
+                            headers={"Retry-After": str(e.seconds)})
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot fetch post stats: {e}")
 
@@ -1360,10 +1337,7 @@ async def start_private_chat(
     db: AsyncSession = Depends(get_db),
 ):
     """Start or open a private chat with a user by their Telegram ID."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         entity = await client.get_entity(req.telegram_id)
@@ -1371,11 +1345,7 @@ async def start_private_chat(
         raise HTTPException(status_code=404, detail=f"Could not find user: {e}")
 
     telegram_id = utils.get_peer_id(entity)
-    name = (
-        getattr(entity, "title", None)
-        or f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip()
-        or str(telegram_id)
-    )
+    name = display_name(entity, telegram_id)
     chat = await crud.upsert_chat(
         db,
         telegram_id=telegram_id,
@@ -1392,10 +1362,7 @@ async def create_group(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new Telegram group with the given members."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     if not req.member_ids:
         raise HTTPException(status_code=400, detail="At least one member is required")
@@ -1440,10 +1407,7 @@ async def create_channel(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new Telegram channel."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     try:
         from telethon.tl.functions.channels import CreateChannelRequest as TLCreateChannel
@@ -1474,17 +1438,14 @@ async def join_via_invite_link(
     db: AsyncSession = Depends(get_db),
 ):
     """Join a chat/group/channel via an invite link (t.me/joinchat/... or t.me/+...)."""
-    client = get_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
-    await ensure_connected()
+    client = await runtime.client()
 
     link = req.link.strip()
     if not link:
         raise HTTPException(status_code=400, detail="Link is required")
 
     try:
-        from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
+        from telethon.tl.functions.messages import ImportChatInviteRequest
 
         # Extract the hash from the invite link
         invite_hash = None
@@ -1508,7 +1469,7 @@ async def join_via_invite_link(
             joined_chat = result.chats[0] if result.chats else entity
 
         telegram_id = utils.get_peer_id(joined_chat)
-        name = getattr(joined_chat, "title", None) or str(telegram_id)
+        name = display_name(joined_chat, telegram_id)
         chat = await crud.upsert_chat(
             db,
             telegram_id=telegram_id,

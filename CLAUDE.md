@@ -12,7 +12,7 @@ Violating this rule wastes the user's time with rework and inconsistent UX. If y
 
 ## VERIFY EVERY CHANGE
 After making code changes, always run all three checks before reporting done:
-1. `cd frontend && npx tsc --noEmit`
+1. `cd frontend && npm run typecheck` (app + test files; plain `npx tsc --noEmit` checks nothing — the root tsconfig has `files: []`)
 2. `cd frontend && npm run build`
 3. `bash build_app.sh` (from project root)
 
@@ -61,7 +61,7 @@ python3 run_dev.py
 cd frontend && npm run dev
 
 # TypeScript check
-cd frontend && npx tsc --noEmit
+cd frontend && npm run typecheck
 
 # Build macOS app
 bash build_app.sh

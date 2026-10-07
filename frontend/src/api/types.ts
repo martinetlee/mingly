@@ -41,6 +41,10 @@ export interface Chat {
     sender_name: string | null
     date: string | null
   } | null
+  is_bot?: boolean
+  is_deleted_account?: boolean
+  /** Every message from the chat's first up to the newest is stored locally */
+  history_complete?: boolean
 }
 
 export interface Tag {
@@ -137,16 +141,62 @@ export interface Message {
   is_edited?: boolean
   scam_score?: number | null
   scam_reason?: string | null
-  scam_manual_verdict?: 'scam' | 'not_scam' | null
+  scam_manual_verdict?: ScamManualVerdict
+  scam_category?: string | null
+  scam_status?: ScamStatus
+  scam_error?: string | null
+  /** THE verdict (manual wins, else a successful scan > 0.5). Never re-derive it from scam_score. */
+  effective_is_scam?: boolean
+  /** 'service' = a system line (joined, pinned, call…); `text` holds the readable description */
+  kind?: 'message' | 'service'
+  /** Structured content of polls, locations, contacts, forwards and service actions */
+  meta?: Record<string, unknown> | null
+  fwd_from_name?: string | null
 }
+
+export type ScamManualVerdict = 'scam' | 'not_scam' | null
+/** null = never scanned; pending = queued with no earlier result */
+export type ScamStatus = null | 'pending' | 'completed' | 'short_circuited' | 'failed'
+
+/** The scam fields every scam API response / WS `messages[]` entry carries (backend scam_fields()). */
+export interface ScamFields {
+  /** Stored pipeline score (0.5 ± conf/2); null = no successful scan */
+  scam_score: number | null
+  scam_reason: string | null
+  scam_category: string | null
+  scam_manual_verdict: ScamManualVerdict
+  scam_status: ScamStatus
+  /** Last check error; can be set while status is completed (a re-check failed, earlier result kept) */
+  scam_error: string | null
+  effective_is_scam: boolean
+}
+
+/** Stored row state after a check/verdict change, keyed by (chat_id, tg_message_id). */
+export type ScamMsgState = ScamFields & { chat_id: number; tg_message_id: number; sender_id: number | null }
+
+export type ScamFlagStatus = 'active' | 'dismissed'
+export interface ScamFlagChange { telegram_id: number; status: ScamFlagStatus | null }
+
+export interface ScamVerdictResponse {
+  status: string
+  scope: 'message' | 'sender'
+  verdict: ScamManualVerdict
+  count: number
+  messages: ScamMsgState[]
+  flags: ScamFlagChange[]
+}
+
+export type ScamCheckSource = 'manual' | 'rescan' | 'realtime' | 'edit' | 'resume' | 'scan'
 
 export interface ScamFlag {
   telegram_id: number
   sender_name?: string | null
+  status: ScamFlagStatus
   source: 'local' | 'cloud' | 'manual'
   confidence: number | null
   reason: string | null
   flagged_at: string
+  dismissed_at?: string | null
   last_chat_id?: number | null
   last_chat_name?: string | null
   last_message_id?: number | null
@@ -159,7 +209,7 @@ export interface ScamFlag {
   synced_to_cloud?: boolean
 }
 
-export interface ScannedMessage {
+export interface ScannedMessage extends ScamFields {
   tg_message_id: number
   chat_id: number
   chat_name: string
@@ -167,15 +217,38 @@ export interface ScannedMessage {
   sender_name: string | null
   text: string
   date: string | null
-  scam_score: number
-  scam_reason: string | null
-  scam_category: string | null
+  scam_attempts: number
+  scam_next_retry_at: string | null
+  scam_updated_at: string | null
   llm_prompt: string | null
   llm_response: string | null
   trace_json: string | null
-  synced_to_cloud?: boolean
-  scam_manual_verdict?: 'scam' | 'not_scam' | null
+  /** true only if the latest change was uploaded */
+  synced_to_cloud: boolean
 }
+
+export interface ScamQueueStats { queued: number; running: number; workers: number }
+
+/** POST /api/scam/pipeline/sync result (status: success | partial | failed | not_configured | reloaded | no_pipeline) */
+export interface CloudSyncResult {
+  status: string
+  error?: string | null
+  errors?: string[]
+  files_updated?: string[]
+  reports_submitted?: number
+  flags_submitted?: number
+  scan_results_submitted?: number
+  dismissals_submitted?: number
+  analytics_submitted?: number
+  version?: string
+  /** legacy fields some callers still read */
+  pipeline_updated?: boolean
+  scenarios_updated?: boolean
+  signatures_updated?: boolean
+}
+
+/** verdict_filter values accepted by GET /api/scam/scanned-messages (+ export) */
+export type ScamVerdictFilter = 'scam' | 'not_scam' | 'failed' | 'pending' | 'manual' | 'unmarked' | 'all'
 
 export interface ScamCategory {
   id: string
@@ -222,8 +295,10 @@ export interface SyncHistoryStats {
   } | null
   flags: { total: number; synced: number; pending: number }
   reports: { total: number; synced: number; pending: number }
-  scans: { total: number; synced: number; pending: number; total_scanned: number; scam_detected: number; failed: number }
+  scans: { total: number; synced: number; pending: number; total_scanned: number; scam_detected: number; failed: number; queued?: number }
   dismissals: { total: number; synced: number; pending: number }
+  /** A cloud sync is in flight (single-flight on the server) */
+  running?: boolean
   analytics: {
     total: number
     synced: number
@@ -263,6 +338,8 @@ export interface PinnedMessage {
 export interface ContactPosition {
   id: number
   telegram_id?: number
+  /** null = detached (org deleted with mode=detach; the name is kept as history) */
+  organization_id: number | null
   organization: string
   title: string | null
   is_active: boolean
@@ -299,6 +376,26 @@ export interface Contact {
   days_since_incoming?: number | null
 }
 
+/** GET /api/contacts — server-side filtered page */
+export interface ContactsPage {
+  items: Contact[]
+  total: number
+  limit: number
+  offset: number
+  /** Matches of `search` alone per status ("none" = no status) */
+  status_counts: Record<string, number>
+  /** Important contacts matching `search` (Important tab badge) */
+  important_count?: number
+}
+
+/** GET /api/people/{telegram_id} — local data only, works offline */
+export interface PersonDetail {
+  telegram_id: number
+  name: string
+  contact: Contact | null
+  positions: ContactPosition[]
+}
+
 export interface PersonSummary {
   telegram_id: number
   name: string
@@ -307,7 +404,7 @@ export interface PersonSummary {
   contact_id: number | null
   relationship_status: string | null
   last_interaction_at: string | null
-  primary_position: { title: string | null; organization: string } | null
+  primary_position: { title: string | null; organization: string; organization_id?: number | null } | null
   phone: string | null
   twitter_handle: string | null
   linkedin_url: string | null
@@ -325,6 +422,10 @@ export interface DashboardNeedsReply {
     text: string | null
     date: string
   }
+  /** Triage record (null = never triaged). Handled/snoozed filtering is done server-side. */
+  triage: CatchUpItem | null
+  /** Inline catch-up context (summary null = not generated yet) */
+  context: CatchUpContext | null
 }
 
 export interface DashboardAttentionContact {
@@ -348,8 +449,10 @@ export interface DashboardBriefingEntry {
   id: number
   chat_id: number
   chat_name: string
-  category: string
+  category: 'tracked' | 'briefing' | 'important_contact'
   summary: string
+  /** Citation targets for `[n]` markers (sources[n-1]) */
+  sources?: BriefingSource[]
 }
 
 export interface DashboardBriefing {
@@ -362,12 +465,14 @@ export interface DashboardBriefing {
 export interface DashboardData {
   stats: DashboardStats
   needs_reply: DashboardNeedsReply[]
+  /** Handled items still unanswered (≤10), newest handled first */
+  recently_handled?: DashboardNeedsReply[]
   attention_contacts: DashboardAttentionContact[]
   latest_briefing: DashboardBriefing | null
 }
 
 export interface SearchMessageResult {
-  telegram_id: number
+  tg_message_id: number
   chat_id: number
   chat_name: string
   sender_name: string | null
@@ -395,21 +500,34 @@ export interface TelegramSearchResult {
   username: string | null
 }
 
+/**
+ * GET /api/settings/prefs — the backend returns only these whitelisted keys,
+ * each present only if set. API keys live in the vault and are never returned.
+ */
 export interface Prefs {
   notif_pref?: string
-  briefing_schedule?: string
-  briefing_time?: string
-  briefing_day?: string
+  briefing_schedule?: 'daily' | 'weekly'
+  briefing_time?: string            // "HH:MM" (24h)
+  briefing_day?: string             // 'monday' … 'sunday'
   briefing_max_tokens?: number
   briefing_last_run?: string
   catchup_summary_interval_minutes?: number
   translation_language?: string
-  [key: string]: unknown
+  session_idle_timeout_minutes?: number
 }
 
+/** GET /api/llm/keys — whether a provider API key is stored in the vault */
+export interface LlmKeyStatus {
+  anthropic: boolean
+  openai: boolean
+}
+
+export type LlmKeyProvider = keyof LlmKeyStatus
+
 export interface OrgMember {
-  contact_id: number
+  contact_id: number | null
   telegram_id: number
+  position_id: number
   name: string
   username: string | null
   title: string | null
@@ -482,6 +600,10 @@ export interface TelegramProfile {
   members_count?: number | null
   photo_url?: string | null
   common_chats?: { id: number; title: string }[]
+  /** Served from the backend cache because Telegram is unreachable */
+  stale?: boolean
+  /** Epoch seconds of the underlying Telegram fetch */
+  fetched_at?: number
 }
 
 export interface ConversationSummary {
@@ -560,11 +682,44 @@ export interface BriefingHistoryEntry {
   sources?: BriefingSource[]
 }
 
+export type BriefingRunStatus = 'running' | 'done' | 'partial' | 'failed'
+
 export interface BriefingRun {
   id: number
   generated_at: string
+  finished_at?: string | null
   days: number
+  status?: BriefingRunStatus
+  error?: string | null
   entries: BriefingHistoryEntry[]
+}
+
+/** GET /api/intelligence/briefing/status */
+export type BriefingJobStatus =
+  | { running: false }
+  | {
+      running: true
+      job_id: string
+      kind: 'briefing'
+      started_at: number
+      days: number
+      trigger: 'manual' | 'scheduled'
+      progress: { total?: number; current?: number; chat_name?: string; run_id?: number | null; days?: number }
+    }
+
+/** POST/GET /api/catchup/generate-summaries[/status] */
+export interface CatchUpSummaryJob {
+  job_id?: string
+  status: 'idle' | 'running' | 'done' | 'error'
+  started?: boolean
+  chat_ids?: number[] | null
+  total?: number
+  done?: number
+  summaries_generated?: number
+  started_at?: string | number | null
+  finished_at?: string | number | null
+  error?: string | null
+  llm_error?: string | null
 }
 
 export interface CatchUpItem {
@@ -588,12 +743,15 @@ export interface CatchUpContextMessage {
 }
 
 export interface CatchUpContext {
-  summary: string
+  /** null when no summary has been generated yet */
+  summary: string | null
   summary_messages: CatchUpContextMessage[]
   recent_messages: CatchUpContextMessage[]
   last_activity_at: string | null
   generated_at: string | null
   new_messages_since_summary: number
+  /** True when the summary is the non-LLM fallback (AI was unavailable) */
+  degraded?: boolean
 }
 
 export interface ForumTopic {
@@ -658,6 +816,61 @@ export interface UserPresence {
   error?: string
 }
 
+export type TelegramRuntimeState = 'starting' | 'syncing' | 'ready' | 'reconnecting' | 'unauthorized' | 'error' | 'stopped'
+
+/** GET /api/chats/{id}/messages/window — keyset window (oldest → newest) */
+export interface MessageWindow {
+  messages: Message[]
+  has_older: boolean
+  has_newer: boolean
+  older_cursor: string | null
+  newer_cursor: string | null
+  anchor_found: boolean
+  /** Why anchor_found is false (the server already asked Telegram) */
+  anchor_reason?: AnchorReason | null
+  syncing: boolean
+}
+
+export type AnchorReason = 'not_found' | 'unavailable' | 'rate_limited' | 'error'
+
+/** POST /api/compose/send-files — per-file outcome, same order as uploaded */
+export interface SendFileResult {
+  filename: string
+  status: 'sent' | 'failed'
+  message_id?: number
+  error?: string
+}
+
+export interface SendFilesResponse {
+  /** Every file sent */
+  success: boolean
+  /** Some sent, some failed (HTTP 207) */
+  partial?: boolean
+  message_ids: number[]
+  messages?: Message[]
+  files?: SendFileResult[]
+}
+
+/** POST /api/chats/{id}/backfill */
+export interface BackfillResult {
+  added: number
+  exhausted: boolean
+  status: 'changed' | 'unchanged'
+}
+
+/** POST /api/chats/{id}/sync — typed sync result */
+export interface ChatSyncResult {
+  status: 'changed' | 'unchanged'
+  chat_id: number
+  fetched: number
+  added: number
+  updated: number
+  deleted: number
+  exhausted: boolean
+  flood_wait: number | null
+  error: string | null
+}
+
 export type WSEvent =
   | { type: 'new_message'; chat_id: number; message_id: number; chat_name?: string; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean; message?: Message }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
@@ -668,15 +881,30 @@ export type WSEvent =
   | { type: 'research_complete'; entity: 'contact' | 'organization'; id: number }
   | { type: 'user_typing'; user_id: number; chat_id: number; user_name: string }
   | { type: 'user_status'; user_id: number; status: string; last_seen?: string | null }
-  | { type: 'scam_detected'; chat_id: number; message_ids: number[]; sender_ids: number[]; confidence: number; reason: string }
+  /** Exactly one of scam_detected / scam_check_safe / scam_check_error per checked message (terminal). */
+  | { type: 'scam_detected'; request_id: string; source: ScamCheckSource; chat_id: number; message_ids: number[]; sender_ids: number[]; messages: ScamMsgState[]; pipeline_is_scam: boolean; /** raw pipeline confidence, display only */ confidence: number; reason: string; category: string | null }
+  | { type: 'scam_check_safe'; request_id: string; source: ScamCheckSource; chat_id: number; message_ids: number[]; sender_ids: number[]; messages: ScamMsgState[]; pipeline_is_scam: boolean; confidence: number; reason: string; category: string | null }
+  | { type: 'scam_check_error'; request_id: string | null; source: ScamCheckSource; chat_id: number; message_ids: number[]; sender_ids: number[]; messages: ScamMsgState[]; error: string }
   | { type: 'scam_users_flagged'; telegram_ids: number[] }
-  | { type: 'scam_check_error'; chat_id: number; message_ids: number[]; error: string }
-  | { type: 'scam_check_safe'; chat_id: number; message_ids: number[] }
+  | { type: 'scam_verdict_changed'; scope: 'message' | 'sender'; verdict: ScamManualVerdict; count: number; messages: ScamMsgState[]; flags: ScamFlagChange[] }
   | { type: 'messages_deleted'; chat_id: number | null; message_ids: number[] }
   | { type: 'navigate_to_chat'; chat_id: number }
   | { type: 'chat_synced'; chat_id: number }
   | { type: 'chat_sync_empty'; chat_id: number }
   | { type: 'bulk_sync_complete'; synced: number }
+  | { type: 'chats_synced'; chat_ids: number[] }
+  | { type: 'message_edited'; chat_id: number; tg_message_id: number; message: Message }
+  | { type: 'messages_pinned'; chat_id: number; message_ids: number[]; pinned: boolean }
+  | { type: 'media_ready'; chat_id: number; tg_message_id: number; media_type: string; media_url: string }
+  | { type: 'chat_sync_failed'; chat_id: number; status: 'unavailable' | 'error' | 'skipped'; error: string | null }
+  | { type: 'telegram_status'; state: TelegramRuntimeState; error: string | null }
+  | { type: 'catchup_summaries_updated'; job_id: string }
+  | ({ type: 'archive_progress' } & ArchiveStatus)
+  | { type: 'person_notes_changed'; telegram_id: number }
+  /** An MCP agent changed a person's contact fields or positions */
+  | { type: 'person_changed'; telegram_id: number }
+  /** Client-side only: emitted by WebSocketProvider after a reconnect — events may have been missed, refetch */
+  | { type: 'resync' }
 
 export interface OllamaStatus {
   running: boolean
@@ -689,4 +917,71 @@ export interface McpSettings {
   key_set: boolean
   url: string
   vault_unlocked: boolean
+  /** Opt-in: MCP clients may write person notes, fields, positions, tags and review marks */
+  write_enabled?: boolean
+}
+
+// ── DM archive ──
+
+export type ArchiveState = 'idle' | 'running' | 'paused' | 'waiting_flood' | 'stopped'
+
+/** GET /api/archive/status (also the `archive_progress` WS payload) */
+export interface ArchiveStatus {
+  state: ArchiveState
+  /** While waiting on a Telegram FloodWait: when the archive resumes */
+  flood_wait_until: string | null
+  dms: { total: number; complete: number; pending: number; failed: number; bots_skipped: number }
+  current_chat: { telegram_id: number; name: string } | null
+  started_at: string | null
+  last_topup_at: string | null
+  groups_queued: number
+}
+
+export interface HistoryCoverage {
+  history_complete: boolean
+  message_count: number
+  oldest_tg_id: number | null
+  newest_contiguous_tg_id: number | null
+}
+
+/** POST /api/chats/{telegram_id}/archive */
+export interface ChatArchiveResponse {
+  queued: boolean
+  coverage: HistoryCoverage
+}
+
+// ── Person notes ──
+
+export type PersonNoteKind = 'context' | 'due_diligence' | 'risk' | 'relationship' | 'todo'
+
+export interface PersonNoteCitation {
+  chat_id: number
+  tg_message_id: number
+}
+
+export interface PersonNote {
+  id: number
+  telegram_id: number
+  kind: PersonNoteKind
+  title: string
+  /** Markdown */
+  body: string
+  citations: PersonNoteCitation[]
+  author: 'agent' | 'user'
+  agent_label: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PersonNoteInput {
+  kind: PersonNoteKind
+  title: string
+  body: string
+  citations?: PersonNoteCitation[]
+}
+
+/** GET /api/features — backend feature switches the UI follows */
+export interface Features {
+  /** Shield (scam detection). Off while its backend is retired. */
+  shield: boolean
 }

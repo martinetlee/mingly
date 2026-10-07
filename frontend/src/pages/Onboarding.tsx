@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import logo from '../assets/logo.png'
 import {
   hasCredentials, setupCredentials, resolve1Password,
   sendCode, verifyCode, verify2FA,
   initVault,
 } from '../api/client'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { errorMessage } from '../lib/toast'
 
 type Step = 'set-password' | 'credentials' | 'phone' | 'code' | 'twofa' | 'done'
 
@@ -28,25 +30,18 @@ interface SecretFieldProps {
 }
 
 function SecretField({ label, hint, value, onChange, type = 'text', placeholder }: SecretFieldProps) {
-  const [resolving, setResolving] = useState(false)
-  const [resolveError, setResolveError] = useState('')
   const [resolved, setResolved] = useState(false)
   const isOpRef = is1PasswordRef(value)
 
-  const handleResolve = async () => {
-    setResolving(true)
-    setResolveError('')
+  const resolve = useAsyncAction(async () => {
     setResolved(false)
-    try {
-      const res = await resolve1Password(value.trim())
-      onChange(res.value)
-      setResolved(true)
-    } catch (e: unknown) {
-      setResolveError(e instanceof Error ? e.message : 'Failed to resolve')
-    } finally {
-      setResolving(false)
-    }
-  }
+    const res = await resolve1Password(value.trim())
+    onChange(res.value)
+    setResolved(true)
+  })
+  const resolving = resolve.pending
+  const resolveError = resolve.error ? errorMessage(resolve.error) : ''
+  const handleResolve = () => { void resolve.run() }
 
   return (
     <div className="mb-4">
@@ -55,7 +50,7 @@ function SecretField({ label, hint, value, onChange, type = 'text', placeholder 
         <input
           type={type}
           value={value}
-          onChange={(e) => { onChange(e.target.value); setResolved(false); setResolveError('') }}
+          onChange={(e) => { onChange(e.target.value); setResolved(false); resolve.reset() }}
           placeholder={placeholder}
           className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 font-mono"
           spellCheck={false}
@@ -84,113 +79,113 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
   // Master password setup
   const [masterPwd, setMasterPwd] = useState('')
   const [masterPwdConfirm, setMasterPwdConfirm] = useState('')
-  const [pwdError, setPwdError] = useState('')
-  const [pwdLoading, setPwdLoading] = useState(false)
+  const [pwdValidation, setPwdValidation] = useState('')
 
   // API credentials
   const [apiId, setApiId] = useState('')
   const [apiHash, setApiHash] = useState('')
-  const [credError, setCredError] = useState('')
-  const [credLoading, setCredLoading] = useState(false)
 
   // Telegram login
   const [phone, setPhone] = useState('')
   const [phoneCodeHash, setPhoneCodeHash] = useState('')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+
+  // Initial "which step?" probe; a failure is shown with Retry instead of guessing a step
+  const [probeError, setProbeError] = useState('')
+  const probe = useCallback(() => {
+    setProbeError('')
+    hasCredentials()
+      .then(({ has_credentials }) => setStep(has_credentials ? 'phone' : 'credentials'))
+      .catch((e: unknown) => setProbeError(errorMessage(e)))
+  }, [])
 
   useEffect(() => {
     if (needsVaultSetup) {
       setStep('set-password')
       return
     }
-    hasCredentials()
-      .then(({ has_credentials }) => setStep(has_credentials ? 'phone' : 'credentials'))
-      .catch(() => setStep('credentials'))
-  }, [needsVaultSetup])
+    probe()
+  }, [needsVaultSetup, probe])
 
-  // ── Step handlers ──────────────────────────────────────────────────────────
+  // ── Step actions (single-flight: Enter and the button share one request) ──
 
-  const handleSetPassword = async () => {
+  const setPasswordAction = useAsyncAction(async () => {
+    await initVault(masterPwd)
+    setStep('credentials')
+  })
+  const credentialsAction = useAsyncAction(async () => {
+    await setupCredentials(apiId.trim(), apiHash.trim())
+    setStep('phone')
+  })
+  const sendCodeAction = useAsyncAction(async () => {
+    const res = await sendCode(phone.trim())
+    setPhoneCodeHash(res.phone_code_hash)
+    setStep('code')
+  })
+  const verifyCodeAction = useAsyncAction(async () => {
+    const res = await verifyCode(phone.trim(), code.trim(), phoneCodeHash)
+    if (res.requires_2fa) {
+      setStep('twofa')
+    } else {
+      setStep('done')
+      setTimeout(onComplete, 800)
+    }
+  })
+  const verify2FAAction = useAsyncAction(async () => {
+    await verify2FA(password)
+    setStep('done')
+    setTimeout(onComplete, 800)
+  })
+
+  const pwdLoading = setPasswordAction.pending
+  const pwdError = pwdValidation || (setPasswordAction.error ? errorMessage(setPasswordAction.error) : '')
+  const credLoading = credentialsAction.pending
+  const credError = credentialsAction.error ? errorMessage(credentialsAction.error) : ''
+  const loginActions = [sendCodeAction, verifyCodeAction, verify2FAAction]
+  const loading = loginActions.some((a) => a.pending)
+  const loginError = loginActions.find((a) => a.error)?.error
+  const error = loginError ? errorMessage(loginError) : ''
+  const clearLoginErrors = () => loginActions.forEach((a) => a.reset())
+
+  const credsBlocked = !apiId.trim() || !apiHash.trim() || is1PasswordRef(apiId) || is1PasswordRef(apiHash)
+
+  // Every submit path (button or Enter) goes through these guards
+  const handleSetPassword = () => {
+    if (!masterPwd || !masterPwdConfirm || pwdLoading) return
     if (masterPwd !== masterPwdConfirm) {
-      setPwdError("Passwords don't match")
+      setPwdValidation("Passwords don't match")
       return
     }
     if (masterPwd.length < 6) {
-      setPwdError('Password must be at least 6 characters')
+      setPwdValidation('Password must be at least 6 characters')
       return
     }
-    setPwdError('')
-    setPwdLoading(true)
-    try {
-      await initVault(masterPwd)
-      setStep('credentials')
-    } catch (e: unknown) {
-      setPwdError(e instanceof Error ? e.message : 'Failed to set password')
-    } finally {
-      setPwdLoading(false)
-    }
+    setPwdValidation('')
+    void setPasswordAction.run()
   }
 
-  const handleSaveCredentials = async () => {
-    setCredError('')
-    setCredLoading(true)
-    try {
-      await setupCredentials(apiId.trim(), apiHash.trim())
-      setStep('phone')
-    } catch (e: unknown) {
-      setCredError(e instanceof Error ? e.message : 'Failed to save credentials')
-    } finally {
-      setCredLoading(false)
-    }
+  const handleSaveCredentials = () => {
+    if (credsBlocked || credLoading) return
+    void credentialsAction.run()
   }
 
-  const handleSendCode = async () => {
-    setError('')
-    setLoading(true)
-    try {
-      const res = await sendCode(phone.trim())
-      setPhoneCodeHash(res.phone_code_hash)
-      setStep('code')
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to send code')
-    } finally {
-      setLoading(false)
-    }
+  const handleSendCode = () => {
+    if (!phone.trim() || loading) return
+    clearLoginErrors()
+    void sendCodeAction.run()
   }
 
-  const handleVerifyCode = async () => {
-    setError('')
-    setLoading(true)
-    try {
-      const res = await verifyCode(phone.trim(), code.trim(), phoneCodeHash)
-      if (res.requires_2fa) {
-        setStep('twofa')
-      } else {
-        setStep('done')
-        setTimeout(onComplete, 800)
-      }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Invalid code')
-    } finally {
-      setLoading(false)
-    }
+  const handleVerifyCode = () => {
+    if (!code.trim() || loading) return
+    clearLoginErrors()
+    void verifyCodeAction.run()
   }
 
-  const handleVerify2FA = async () => {
-    setError('')
-    setLoading(true)
-    try {
-      await verify2FA(password)
-      setStep('done')
-      setTimeout(onComplete, 800)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Incorrect password')
-    } finally {
-      setLoading(false)
-    }
+  const handleVerify2FA = () => {
+    if (!password || loading) return
+    clearLoginErrors()
+    void verify2FAAction.run()
   }
 
   // ── Step indicator ────────────────────────────────────────────────────────
@@ -204,7 +199,19 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
   if (step === null) {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-950">
-        <div className="text-slate-500 text-sm">Loading…</div>
+        {probeError ? (
+          <div className="max-w-sm px-4 text-center">
+            <p role="alert" className="text-sm text-red-400">Couldn't check your Telegram setup: {probeError}</p>
+            <button
+              onClick={probe}
+              className="mt-3 rounded-lg border border-slate-700 px-4 py-2 text-xs text-slate-300 transition hover:bg-slate-800"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div className="text-slate-500 text-sm">Loading…</div>
+        )}
       </div>
     )
   }
@@ -248,7 +255,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
             <>
               <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Protect your data</h2>
               <p className="mb-5 text-xs text-slate-500">
-                Set a master password to encrypt your credentials locally. You'll enter this each time you open Common Defense.
+                Set a master password to encrypt your Telegram credentials and session locally. You'll enter this each time you open Common Defense.
               </p>
 
               <div className="mb-4">
@@ -256,7 +263,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 <input
                   type="password"
                   value={masterPwd}
-                  onChange={(e) => { setMasterPwd(e.target.value); setPwdError('') }}
+                  onChange={(e) => { setMasterPwd(e.target.value); setPwdValidation(''); setPasswordAction.reset() }}
                   placeholder="At least 6 characters"
                   autoFocus
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
@@ -267,8 +274,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 <input
                   type="password"
                   value={masterPwdConfirm}
-                  onChange={(e) => { setMasterPwdConfirm(e.target.value); setPwdError('') }}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSetPassword()}
+                  onChange={(e) => { setMasterPwdConfirm(e.target.value); setPwdValidation(''); setPasswordAction.reset() }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSetPassword() } }}
                   placeholder="Repeat password"
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
                 />
@@ -324,7 +331,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
               )}
               <button
                 onClick={handleSaveCredentials}
-                disabled={!apiId.trim() || !apiHash.trim() || credLoading || is1PasswordRef(apiId) || is1PasswordRef(apiHash)}
+                disabled={credsBlocked || credLoading}
                 className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
               >
                 {credLoading ? 'Saving…' : 'Continue'}
@@ -345,8 +352,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
               <input
                 type="tel"
                 value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSendCode()}
+                onChange={(e) => { setPhone(e.target.value); clearLoginErrors() }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSendCode() } }}
                 placeholder="+1 234 567 8900"
                 autoFocus
                 className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
@@ -384,8 +391,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 type="text"
                 inputMode="numeric"
                 value={code}
-                onChange={(e) => setCode(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleVerifyCode()}
+                onChange={(e) => { setCode(e.target.value); clearLoginErrors() }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleVerifyCode() } }}
                 placeholder="12345"
                 autoFocus
                 maxLength={6}
@@ -405,7 +412,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
                 {loading ? 'Verifying…' : 'Verify Code'}
               </button>
               <button
-                onClick={() => { setStep('phone'); setCode(''); setError('') }}
+                onClick={() => { setStep('phone'); setCode(''); clearLoginErrors() }}
                 className="mt-3 w-full text-xs text-slate-600 transition hover:text-slate-400"
               >
                 ← Change number
@@ -421,8 +428,8 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
               <input
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleVerify2FA()}
+                onChange={(e) => { setPassword(e.target.value); clearLoginErrors() }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleVerify2FA() } }}
                 placeholder="Password"
                 autoFocus
                 className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
@@ -456,7 +463,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
         </div>
 
         <p className="mt-4 text-center text-xs text-slate-600">
-          Your session and credentials are encrypted with your master password
+          Your Telegram session and credentials are encrypted with your master password. Messages are stored unencrypted in a local database.
         </p>
       </div>
     </div>
