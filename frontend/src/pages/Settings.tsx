@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { getPrefs } from '../api/client'
 import type { Prefs } from '../api/types'
 import { useTheme } from '../hooks/useTheme'
@@ -11,11 +12,14 @@ import {
   BriefingSection, CatchUpSection, NotificationsSection, SecuritySection, TranslationSection,
 } from './settings/PreferenceSections'
 import ShieldTab from './settings/ShieldTab'
+import Connections from './settings/Connections'
 import { useFeatures } from '../context/FeaturesContext'
 import TagsManager from './settings/TagsManager'
 import { Card, Section, Switch } from './settings/shared'
 
-type SettingsTab = 'general' | 'tags' | 'shield'
+type SettingsTab = 'general' | 'connections' | 'tags' | 'shield'
+
+const TABS: SettingsTab[] = ['general', 'connections', 'tags', 'shield']
 
 function readLocal(key: string): string | null {
   try { return localStorage.getItem(key) } catch { return null }
@@ -27,9 +31,13 @@ function writeLocal(key: string, value: string) {
 
 export default function Settings() {
   const { theme, setTheme } = useTheme()
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
+  // The tab lives in the URL (?tab=connections) so other screens can link to it
+  const [searchParams, setSearchParams] = useSearchParams()
   const { shield } = useFeatures()
-  const visibleTabs: SettingsTab[] = shield ? ['general', 'tags', 'shield'] : ['general', 'tags']
+  const visibleTabs = TABS.filter((t) => t !== 'shield' || shield)
+  const requested = searchParams.get('tab') as SettingsTab | null
+  const settingsTab: SettingsTab = requested && visibleTabs.includes(requested) ? requested : 'general'
+  const setSettingsTab = (tab: SettingsTab) => setSearchParams(tab === 'general' ? {} : { tab }, { replace: true })
 
   // One shared prefs read; each field adopts its server value from it
   const [prefs, setPrefs] = useState<Prefs | undefined>(undefined)
@@ -149,6 +157,8 @@ export default function Settings() {
             <McpSection />
           </>
         )}
+
+        {settingsTab === 'connections' && <Connections />}
 
         {settingsTab === 'tags' && (
           <>

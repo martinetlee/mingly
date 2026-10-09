@@ -4,14 +4,9 @@ import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from telethon.errors import PhoneCodeInvalidError
 
 from backend.connectors.manager import manager
-from backend.telegram.client import get_client, get_me, has_credentials
-from backend.telegram.connector import InvalidCredentials, connector as telegram
-from backend.telegram.runtime import runtime
 from backend.secrets import (
-    get_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault, lock as lock_vault_fn,
 )
 from backend.api.dependencies import generate_session_token, require_session_token, revoke_session
@@ -22,33 +17,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Every auth route except the vault bootstrap ones (status/init/unlock/reset)
-# requires the session token: without it any web page could log the account
-# out or overwrite the API credentials.
+# requires the session token: without it any web page could lock the vault or
+# make the op CLI read secrets. Channel sign-in lives in ``/api/accounts``.
 protected = [Depends(require_session_token)]
 
 # How long unlock waits for the connectors to connect before answering
 # anyway; the start keeps going in the background and reports via
 # `connector_status` / `telegram_status`.
 UNLOCK_START_TIMEOUT = 12
-
-
-class PhoneRequest(BaseModel):
-    phone: str
-
-
-class CodeRequest(BaseModel):
-    phone: str
-    code: str
-    phone_code_hash: str
-
-
-class PasswordRequest(BaseModel):
-    password: str
-
-
-class CredentialsRequest(BaseModel):
-    api_id: str
-    api_hash: str
 
 
 class ResolveRequest(BaseModel):
@@ -140,12 +116,7 @@ async def do_lock_vault():
     return {"success": True}
 
 
-# ── Credentials / auth ────────────────────────────────────────────────────────
-
-@router.get("/has-credentials", dependencies=protected)
-async def auth_has_credentials():
-    return {"has_credentials": has_credentials()}
-
+# ── Secret references ─────────────────────────────────────────────────────────
 
 @router.post("/resolve-1password", dependencies=protected)
 async def auth_resolve_1password(req: ResolveRequest):
@@ -170,86 +141,3 @@ async def auth_resolve_1password(req: ResolveRequest):
         raise HTTPException(status_code=400, detail="1Password CLI (op) not found. Install it from 1password.com/downloads/command-line/")
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=408, detail="1Password CLI timed out. Make sure 1Password is unlocked.")
-
-
-@router.post("/setup", dependencies=protected)
-async def auth_setup(req: CredentialsRequest):
-    """Save Telegram API credentials to the vault and connect a client."""
-    try:
-        await telegram.save_credentials(req.api_id, req.api_hash)
-    except InvalidCredentials as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Credentials saved but client init failed: {e}")
-    return {"success": True}
-
-
-@router.get("/status", dependencies=protected)
-async def auth_status():
-    client = get_client()
-    runtime_status = runtime.status()
-    if not client:
-        return {"authenticated": False, "connected": False, "runtime": runtime_status}
-    try:
-        if not await client.is_user_authorized():
-            return {"authenticated": False, "connected": client.is_connected(), "runtime": runtime_status}
-        me = await get_me()
-        return {
-            "authenticated": True,
-            "connected": True,
-            "username": me.username,
-            "first_name": me.first_name,
-            "phone": me.phone,
-            "runtime": runtime_status,
-        }
-    except Exception:
-        # Offline: a stored session still means the account is logged in —
-        # don't bounce the user to onboarding because Wi-Fi is down.
-        return {
-            "authenticated": bool(get_secret("telegram_session")),
-            "connected": False,
-            "runtime": runtime_status,
-        }
-
-
-@router.post("/send-code", dependencies=protected)
-async def auth_send_code(req: PhoneRequest):
-    try:
-        phone_code_hash = await telegram.send_code(req.phone)
-        return {"phone_code_hash": phone_code_hash}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.post("/verify-code", dependencies=protected)
-async def auth_verify_code(req: CodeRequest):
-    try:
-        info = await telegram.sign_in(req.phone, req.code, req.phone_code_hash)
-    except PhoneCodeInvalidError:
-        raise HTTPException(status_code=400, detail="Invalid code. Please try again.")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if info is None:
-        return {"success": True, "requires_2fa": True}
-    return {"success": True, "requires_2fa": False, **info}
-
-
-@router.post("/verify-2fa", dependencies=protected)
-async def auth_verify_2fa(req: PasswordRequest):
-    try:
-        info = await telegram.sign_in_2fa(req.password)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"success": True, **info}
-
-
-@router.post("/logout", dependencies=protected)
-async def auth_logout():
-    """Log out of Telegram: terminate the server-side session, stop all sync
-    work and forget the local session string."""
-    await telegram.logout()
-    # The vault stays unlocked (the user continues to onboarding with the same
-    # session token), so only drop the sockets carrying the old account's events.
-    from backend.ws.manager import ws_manager
-    await ws_manager.close_all(reason="Telegram logged out")
-    return {"success": True}

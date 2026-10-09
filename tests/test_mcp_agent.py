@@ -109,10 +109,8 @@ def fake_archive(monkeypatch):
 
 @pytest.fixture
 def app(db_engine):
-    with patch("backend.api.auth.get_client", return_value=None), \
-         patch("backend.api.auth.has_credentials", return_value=False):
-        from backend.api.router import create_app
-        return create_app()
+    from backend.api.router import create_app
+    return create_app()
 
 
 class Agent:

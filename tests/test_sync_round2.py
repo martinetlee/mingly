@@ -255,11 +255,12 @@ async def test_lock_endpoint_stops_runtime_and_locks_vault(db_engine):
     from backend.api.router import create_app
     from backend.api import auth
     from backend.api.dependencies import generate_session_token
+    from backend.telegram.runtime import runtime
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as c:
         assert (await c.post("/api/auth/lock")).status_code == 401
         token = generate_session_token()
-        with patch.object(auth.runtime, "stop", AsyncMock()) as stop, \
+        with patch.object(runtime, "stop", AsyncMock()) as stop, \
              patch.object(auth, "lock_vault_fn") as lock, \
              patch.object(auth, "revoke_session", AsyncMock()) as revoke:
             r = await c.post("/api/auth/lock", headers={"X-Session-Token": token})

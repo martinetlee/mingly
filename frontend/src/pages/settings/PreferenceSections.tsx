@@ -9,7 +9,10 @@ import {
   setSessionTimeout as apiSetSessionTimeout,
   setTranslationLanguage as apiSetTranslationLanguage,
 } from '../../api/client'
+import { setChannelNotifPref } from '../../api/email'
 import type { Prefs } from '../../api/types'
+import { channelLabel } from '../../components/ChannelIcon'
+import { useAccounts } from '../../hooks/useAccounts'
 import { useSettingField } from '../../hooks/useSettingField'
 import { Card, FieldStatus, Section, inputClass, labelClass, selectClass } from './shared'
 
@@ -83,6 +86,9 @@ export function NotificationsSection({ prefs }: { prefs: Prefs | undefined }) {
     echo: echoKey<NotifPref>('pref'),
     label: 'notification preference',
   })
+  // Connected channels with their own setting get a selector below the global one
+  const { accounts } = useAccounts()
+  const channelOverrides = NOTIF_DEFAULT_OFF_CHANNELS.filter((ch) => accounts.some((a) => a.channel === ch && a.configured))
 
   return (
     <Section title="Notifications" description="Get notified when new messages arrive." className="">
@@ -101,8 +107,44 @@ export function NotificationsSection({ prefs }: { prefs: Prefs | undefined }) {
         {notif.value !== 'off' && (
           <p className="mt-2 text-xs text-emerald-400">✓ Native notifications enabled</p>
         )}
+        {channelOverrides.map((ch) => (
+          <ChannelNotifField key={ch} channel={ch} prefs={prefs} />
+        ))}
       </Card>
     </Section>
+  )
+}
+
+// Channels that notify on their own setting; until set, the backend
+// (api/settings.py get_notif_pref) keeps them off.
+const NOTIF_DEFAULT_OFF_CHANNELS = ['gmail']
+
+/** One connected channel's own notification setting (e.g. email, off by default). */
+function ChannelNotifField({ channel, prefs }: { channel: string; prefs: Prefs | undefined }) {
+  const perChannel = prefs?.notif_pref_channels
+  const id = `notif-pref-${channel}`
+  const field = useSettingField<NotifPref>({
+    initial: 'off',
+    serverValue: prefs ? (perChannel?.[channel] ?? 'off') : undefined,
+    set: (v) => setChannelNotifPref(channel, v),
+    echo: echoKey<NotifPref>('pref'),
+    label: `${channelLabel(channel)} notification preference`,
+  })
+  return (
+    <div className="mt-4">
+      <label className={labelClass} htmlFor={id}>{channelLabel(channel)}</label>
+      <select
+        id={id}
+        value={field.value}
+        onChange={(e) => field.setValue(e.target.value as NotifPref, { immediate: true })}
+        className={selectClass}
+      >
+        <option value="all">All new messages</option>
+        <option value="tracked">Tracked conversations only</option>
+        <option value="off">Off</option>
+      </select>
+      <p className="mt-1.5 text-xs text-slate-500">Set separately; off until you turn it on.</p>
+    </div>
   )
 }
 

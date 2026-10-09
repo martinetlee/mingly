@@ -27,6 +27,9 @@ _save_prefs = save_prefs
 # bookkeeping, prompt overrides with their own endpoints) stays server-side.
 PUBLIC_PREF_KEYS = (
     "notif_pref",
+    "notif_pref_channels",
+    "email_remote_images_senders",
+    "gmail_backfill_days",
     "briefing_schedule",
     "briefing_time",
     "briefing_day",
@@ -110,13 +113,33 @@ def on_vault_unlocked() -> None:
         logger.exception("Failed to reconfigure Shield cloud sync after unlock")
 
 
-def get_notif_pref() -> str:
-    """Returns 'all', 'tracked', or 'off'."""
-    return _load_prefs().get("notif_pref", "tracked")
+NOTIF_PREFS = ("all", "tracked", "off")
+# Channels whose notifications are off until the user turns them on (mail
+# volume would drown chat notifications).
+NOTIF_DEFAULT_OFF_CHANNELS = ("gmail",)
+
+
+def get_notif_pref(channel: Optional[str] = None) -> str:
+    """Returns 'all', 'tracked', or 'off' — for one channel when given: its
+    own setting, else off for email channels, else the global setting."""
+    prefs = _load_prefs()
+    if channel is not None:
+        per_channel = prefs.get("notif_pref_channels") or {}
+        if isinstance(per_channel, dict) and per_channel.get(channel) in NOTIF_PREFS:
+            return per_channel[channel]
+        if channel in NOTIF_DEFAULT_OFF_CHANNELS:
+            return "off"
+    return prefs.get("notif_pref", "tracked")
 
 
 class NotifPrefRequest(BaseModel):
     pref: str  # 'all' | 'tracked' | 'off'
+    channel: Optional[str] = None  # None = the global setting
+
+
+class RemoteImagesRequest(BaseModel):
+    sender: str  # email address
+    allowed: bool
 
 
 class BriefingScheduleRequest(BaseModel):
@@ -153,12 +176,33 @@ async def get_prefs():
 
 @router.post("/prefs/notifications")
 async def set_notif_pref(req: NotifPrefRequest):
-    if req.pref not in ("all", "tracked", "off"):
+    if req.pref not in NOTIF_PREFS:
         raise HTTPException(status_code=400, detail="Invalid preference")
     prefs = _load_prefs()
-    prefs["notif_pref"] = req.pref
+    if req.channel:
+        per_channel = prefs.get("notif_pref_channels")
+        per_channel = dict(per_channel) if isinstance(per_channel, dict) else {}
+        per_channel[req.channel] = req.pref
+        prefs["notif_pref_channels"] = per_channel
+    else:
+        prefs["notif_pref"] = req.pref
     _save_prefs(prefs)
-    return {"success": True, "pref": req.pref}
+    return {"success": True, "pref": req.pref, "channel": req.channel}
+
+
+@router.post("/prefs/email-remote-images")
+async def set_email_remote_images(req: RemoteImagesRequest):
+    """Remember (or forget) that remote images load for one email sender."""
+    sender = req.sender.strip().lower()
+    if "@" not in sender:
+        raise HTTPException(status_code=400, detail="Invalid sender address")
+    prefs = _load_prefs()
+    current = prefs.get("email_remote_images_senders")
+    senders = [s for s in current if isinstance(s, str)] if isinstance(current, list) else []
+    senders = [s for s in senders if s != sender] + ([sender] if req.allowed else [])
+    prefs["email_remote_images_senders"] = sorted(senders)
+    _save_prefs(prefs)
+    return {"success": True, "senders": prefs["email_remote_images_senders"]}
 
 
 @router.post("/prefs/briefing-schedule")

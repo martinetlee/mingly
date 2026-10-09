@@ -1,154 +1,39 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import logo from '../assets/logo.png'
-import {
-  hasCredentials, setupCredentials, resolve1Password,
-  sendCode, verifyCode, verify2FA,
-  initVault,
-} from '../api/client'
+import { initVault } from '../api/client'
+import { getAccounts } from '../api/accounts'
+import type { ConnectableChannel } from '../api/accounts'
+import AuthFlow from '../components/AuthFlow'
+import ChannelIcon from '../components/ChannelIcon'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { errorMessage } from '../lib/toast'
 
-type Step = 'set-password' | 'credentials' | 'phone' | 'code' | 'twofa' | 'done'
+type Step = 'set-password' | 'connect'
 
 interface Props {
+  /** Vault created (and optionally a first account connected or skipped) */
   onComplete: () => void
-  /** If true, vault doesn't exist yet — show password setup as first step */
-  needsVaultSetup?: boolean
 }
 
-function is1PasswordRef(value: string) {
-  return value.trim().startsWith('op://')
-}
+/**
+ * First run: set the master password that creates the vault, then optionally
+ * connect a first account through the same generic sign-in as Settings →
+ * Connections. Accounts can always be added later there.
+ */
+export default function Onboarding({ onComplete }: Props) {
+  const [step, setStep] = useState<Step>('set-password')
 
-interface SecretFieldProps {
-  label: string
-  hint: string
-  value: string
-  onChange: (v: string) => void
-  type?: 'text' | 'password'
-  placeholder?: string
-}
-
-function SecretField({ label, hint, value, onChange, type = 'text', placeholder }: SecretFieldProps) {
-  const [resolved, setResolved] = useState(false)
-  const isOpRef = is1PasswordRef(value)
-
-  const resolve = useAsyncAction(async () => {
-    setResolved(false)
-    const res = await resolve1Password(value.trim())
-    onChange(res.value)
-    setResolved(true)
-  })
-  const resolving = resolve.pending
-  const resolveError = resolve.error ? errorMessage(resolve.error) : ''
-  const handleResolve = () => { void resolve.run() }
-
-  return (
-    <div className="mb-4">
-      <label className="mb-1 block text-xs font-medium text-slate-400">{label}</label>
-      <div className="flex gap-2">
-        <input
-          type={type}
-          value={value}
-          onChange={(e) => { onChange(e.target.value); setResolved(false); resolve.reset() }}
-          placeholder={placeholder}
-          className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 font-mono"
-          spellCheck={false}
-          autoComplete="off"
-        />
-        {isOpRef && (
-          <button
-            onClick={handleResolve}
-            disabled={resolving}
-            className="shrink-0 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-xs font-medium text-indigo-400 hover:bg-indigo-500/20 disabled:opacity-50 transition"
-          >
-            {resolving ? '…' : resolved ? '✓' : 'Resolve'}
-          </button>
-        )}
-      </div>
-      {resolveError && <p className="mt-1 text-xs text-red-400">{resolveError}</p>}
-      {resolved && <p className="mt-1 text-xs text-emerald-400">Resolved from 1Password</p>}
-      <p className="mt-1 text-xs text-slate-600">{hint}</p>
-    </div>
-  )
-}
-
-export default function Onboarding({ onComplete, needsVaultSetup = false }: Props) {
-  const [step, setStep] = useState<Step | null>(null)
-
-  // Master password setup
   const [masterPwd, setMasterPwd] = useState('')
   const [masterPwdConfirm, setMasterPwdConfirm] = useState('')
   const [pwdValidation, setPwdValidation] = useState('')
 
-  // API credentials
-  const [apiId, setApiId] = useState('')
-  const [apiHash, setApiHash] = useState('')
-
-  // Telegram login
-  const [phone, setPhone] = useState('')
-  const [phoneCodeHash, setPhoneCodeHash] = useState('')
-  const [code, setCode] = useState('')
-  const [password, setPassword] = useState('')
-
-  // Initial "which step?" probe; a failure is shown with Retry instead of guessing a step
-  const [probeError, setProbeError] = useState('')
-  const probe = useCallback(() => {
-    setProbeError('')
-    hasCredentials()
-      .then(({ has_credentials }) => setStep(has_credentials ? 'phone' : 'credentials'))
-      .catch((e: unknown) => setProbeError(errorMessage(e)))
-  }, [])
-
-  useEffect(() => {
-    if (needsVaultSetup) {
-      setStep('set-password')
-      return
-    }
-    probe()
-  }, [needsVaultSetup, probe])
-
-  // ── Step actions (single-flight: Enter and the button share one request) ──
-
   const setPasswordAction = useAsyncAction(async () => {
     await initVault(masterPwd)
-    setStep('credentials')
-  })
-  const credentialsAction = useAsyncAction(async () => {
-    await setupCredentials(apiId.trim(), apiHash.trim())
-    setStep('phone')
-  })
-  const sendCodeAction = useAsyncAction(async () => {
-    const res = await sendCode(phone.trim())
-    setPhoneCodeHash(res.phone_code_hash)
-    setStep('code')
-  })
-  const verifyCodeAction = useAsyncAction(async () => {
-    const res = await verifyCode(phone.trim(), code.trim(), phoneCodeHash)
-    if (res.requires_2fa) {
-      setStep('twofa')
-    } else {
-      setStep('done')
-      setTimeout(onComplete, 800)
-    }
-  })
-  const verify2FAAction = useAsyncAction(async () => {
-    await verify2FA(password)
-    setStep('done')
-    setTimeout(onComplete, 800)
+    setStep('connect')
   })
 
   const pwdLoading = setPasswordAction.pending
   const pwdError = pwdValidation || (setPasswordAction.error ? errorMessage(setPasswordAction.error) : '')
-  const credLoading = credentialsAction.pending
-  const credError = credentialsAction.error ? errorMessage(credentialsAction.error) : ''
-  const loginActions = [sendCodeAction, verifyCodeAction, verify2FAAction]
-  const loading = loginActions.some((a) => a.pending)
-  const loginError = loginActions.find((a) => a.error)?.error
-  const error = loginError ? errorMessage(loginError) : ''
-  const clearLoginErrors = () => loginActions.forEach((a) => a.reset())
-
-  const credsBlocked = !apiId.trim() || !apiHash.trim() || is1PasswordRef(apiId) || is1PasswordRef(apiHash)
 
   // Every submit path (button or Enter) goes through these guards
   const handleSetPassword = () => {
@@ -165,56 +50,7 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
     void setPasswordAction.run()
   }
 
-  const handleSaveCredentials = () => {
-    if (credsBlocked || credLoading) return
-    void credentialsAction.run()
-  }
-
-  const handleSendCode = () => {
-    if (!phone.trim() || loading) return
-    clearLoginErrors()
-    void sendCodeAction.run()
-  }
-
-  const handleVerifyCode = () => {
-    if (!code.trim() || loading) return
-    clearLoginErrors()
-    void verifyCodeAction.run()
-  }
-
-  const handleVerify2FA = () => {
-    if (!password || loading) return
-    clearLoginErrors()
-    void verify2FAAction.run()
-  }
-
-  // ── Step indicator ────────────────────────────────────────────────────────
-
-  const indicatorSteps: Step[] = needsVaultSetup
-    ? ['set-password', 'credentials', 'phone', 'code']
-    : ['credentials', 'phone', 'code']
-
-  const stepOrder: Step[] = ['set-password', 'credentials', 'phone', 'code', 'twofa', 'done']
-
-  if (step === null) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-slate-950">
-        {probeError ? (
-          <div className="max-w-sm px-4 text-center">
-            <p role="alert" className="text-sm text-red-400">Couldn't check your Telegram setup: {probeError}</p>
-            <button
-              onClick={probe}
-              className="mt-3 rounded-lg border border-slate-700 px-4 py-2 text-xs text-slate-300 transition hover:bg-slate-800"
-            >
-              Retry
-            </button>
-          </div>
-        ) : (
-          <div className="text-slate-500 text-sm">Loading…</div>
-        )}
-      </div>
-    )
-  }
+  const indicatorSteps: Step[] = ['set-password', 'connect']
 
   return (
     <div className="flex h-screen items-center justify-center bg-slate-950 overflow-hidden relative">
@@ -231,31 +67,25 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
             <img src={logo} alt="Common Defense" className="h-10 w-10 object-contain" />
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Common Defense</h1>
-          <p className="mt-1.5 text-sm text-slate-400">Your Telegram, intelligently organised</p>
+          <p className="mt-1.5 text-sm text-slate-400">Your conversations, intelligently organised</p>
         </div>
 
         {/* Step indicators */}
         <div className="mb-6 flex items-center justify-center gap-2">
-          {indicatorSteps.map((s) => (
-            <div key={s} className="flex items-center gap-2">
-              <div className={`h-2 w-2 rounded-full transition-colors ${
-                step === s ? 'bg-indigo-500' :
-                stepOrder.indexOf(step) > stepOrder.indexOf(s)
-                  ? 'bg-indigo-500/40' : 'bg-slate-700'
-              }`} />
-            </div>
+          {indicatorSteps.map((s, i) => (
+            <div key={s} className={`h-2 w-2 rounded-full transition-colors ${
+              step === s ? 'bg-indigo-500' : indicatorSteps.indexOf(step) > i ? 'bg-indigo-500/40' : 'bg-slate-700'
+            }`} />
           ))}
         </div>
 
         {/* Card */}
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-7 shadow-2xl backdrop-blur-sm">
-
-          {/* Step 0: Set master password */}
           {step === 'set-password' && (
             <>
               <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Protect your data</h2>
               <p className="mb-5 text-xs text-slate-500">
-                Set a master password to encrypt your Telegram credentials and session locally. You'll enter this each time you open Common Defense.
+                Set a master password to encrypt your account credentials and sessions locally. You'll enter this each time you open Common Defense.
               </p>
 
               <div className="mb-4">
@@ -297,175 +127,82 @@ export default function Onboarding({ onComplete, needsVaultSetup = false }: Prop
             </>
           )}
 
-          {/* Step 1: Telegram API credentials */}
-          {step === 'credentials' && (
-            <>
-              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Connect to Telegram</h2>
-              <p className="mb-5 text-xs text-slate-500">
-                Get your free API credentials at{' '}
-                <span className="font-mono text-indigo-400">my.telegram.org</span>{' '}
-                → API development tools.
-              </p>
-
-              <SecretField
-                label="API ID"
-                hint='Numeric ID, e.g. 12345678. Supports 1Password references (op://…)'
-                value={apiId}
-                onChange={setApiId}
-                placeholder="12345678 or op://vault/item/field"
-              />
-              <SecretField
-                label="API Hash"
-                hint='32-character hex string. Supports 1Password references (op://…)'
-                value={apiHash}
-                onChange={setApiHash}
-                type="password"
-                placeholder="a1b2c3… or op://vault/item/field"
-              />
-
-              {credError && (
-                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
-                  {credError}
-                </p>
-              )}
-              <button
-                onClick={handleSaveCredentials}
-                disabled={credsBlocked || credLoading}
-                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
-              >
-                {credLoading ? 'Saving…' : 'Continue'}
-              </button>
-              {(is1PasswordRef(apiId) || is1PasswordRef(apiHash)) && (
-                <p className="mt-2 text-center text-xs text-amber-400">
-                  Resolve all 1Password references before continuing
-                </p>
-              )}
-            </>
-          )}
-
-          {/* Step 2: Phone number */}
-          {step === 'phone' && (
-            <>
-              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Sign in with Telegram</h2>
-              <p className="mb-5 text-xs text-slate-500">Enter your phone number with country code</p>
-              <input
-                type="tel"
-                value={phone}
-                onChange={(e) => { setPhone(e.target.value); clearLoginErrors() }}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSendCode() } }}
-                placeholder="+1 234 567 8900"
-                autoFocus
-                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
-              />
-              {error && (
-                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
-                  {error}
-                </p>
-              )}
-              <button
-                onClick={handleSendCode}
-                disabled={!phone.trim() || loading}
-                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
-              >
-                {loading ? 'Sending…' : 'Send Code'}
-              </button>
-              <button
-                onClick={() => setStep('credentials')}
-                className="mt-3 w-full text-xs text-slate-600 transition hover:text-slate-400"
-              >
-                ← Change API credentials
-              </button>
-            </>
-          )}
-
-          {/* Step 3: OTP */}
-          {step === 'code' && (
-            <>
-              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Enter the code</h2>
-              <p className="mb-5 text-xs text-slate-500">
-                We sent a code to <span className="text-slate-300 font-medium">{phone}</span> via Telegram
-              </p>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={code}
-                onChange={(e) => { setCode(e.target.value); clearLoginErrors() }}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleVerifyCode() } }}
-                placeholder="12345"
-                autoFocus
-                maxLength={6}
-                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 tracking-widest outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
-              />
-              {error && (
-                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
-                  {error}
-                </p>
-              )}
-              <button
-                onClick={handleVerifyCode}
-                disabled={!code.trim() || loading}
-                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
-              >
-                {loading ? 'Verifying…' : 'Verify Code'}
-              </button>
-              <button
-                onClick={() => { setStep('phone'); setCode(''); clearLoginErrors() }}
-                className="mt-3 w-full text-xs text-slate-600 transition hover:text-slate-400"
-              >
-                ← Change number
-              </button>
-            </>
-          )}
-
-          {/* Step 4: 2FA (conditional) */}
-          {step === 'twofa' && (
-            <>
-              <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Two-step verification</h2>
-              <p className="mb-5 text-xs text-slate-500">Enter your Telegram 2FA password</p>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => { setPassword(e.target.value); clearLoginErrors() }}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleVerify2FA() } }}
-                placeholder="Password"
-                autoFocus
-                className="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
-              />
-              {error && (
-                <p className="mb-3 flex items-center gap-1.5 text-xs text-red-400">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-400" />
-                  {error}
-                </p>
-              )}
-              <button
-                onClick={handleVerify2FA}
-                disabled={!password || loading}
-                className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400 disabled:opacity-40 disabled:shadow-none"
-              >
-                {loading ? 'Signing in…' : 'Sign In'}
-              </button>
-            </>
-          )}
-
-          {/* Done */}
-          {step === 'done' && (
-            <div className="py-4 text-center">
-              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 text-lg ring-1 ring-emerald-500/30">
-                ✓
-              </div>
-              <p className="text-sm font-medium text-slate-200">Signed in successfully</p>
-              <p className="mt-1 text-xs text-slate-500">Loading your chats…</p>
-            </div>
-          )}
+          {step === 'connect' && <ConnectFirstAccount onComplete={onComplete} />}
         </div>
 
         <p className="mt-4 text-center text-xs text-slate-600">
-          Your Telegram session and credentials are encrypted with your master password. Messages are stored unencrypted in a local database.
+          Account credentials and sessions are encrypted with your master password. Messages are stored unencrypted in a local database.
         </p>
       </div>
     </div>
+  )
+}
+
+/** Pick a channel and sign in, or skip; more accounts live in Settings → Connections. */
+function ConnectFirstAccount({ onComplete }: { onComplete: () => void }) {
+  const [channels, setChannels] = useState<ConnectableChannel[] | null>(null)
+  const [loadError, setLoadError] = useState('')
+  const [chosen, setChosen] = useState<ConnectableChannel | null>(null)
+  const [connected, setConnected] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoadError('')
+    getAccounts()
+      .then((r) => { if (!cancelled) setChannels(r.channels) })
+      .catch((e) => { if (!cancelled) setLoadError(errorMessage(e)) })
+    return () => { cancelled = true }
+  }, [attempt])
+
+  if (chosen) {
+    return (
+      <AuthFlow
+        key={chosen.channel}
+        accountKey={chosen.channel}
+        onDone={() => setConnected(true)}
+        // Cancel goes back to the channel list; the done screen's button continues
+        onClose={() => (connected ? onComplete() : setChosen(null))}
+        doneLabel="Continue"
+      />
+    )
+  }
+
+  return (
+    <>
+      <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Connect an account</h2>
+      <p className="mb-5 text-xs text-slate-500">
+        Choose a messaging account to sync. You can add more, or do this later, in Settings → Connections.
+      </p>
+      {loadError ? (
+        <div className="mb-4">
+          <p role="alert" className="text-xs text-red-400">Couldn't load the available channels: {loadError}</p>
+          <button
+            onClick={() => setAttempt((n) => n + 1)}
+            className="mt-2 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800"
+          >
+            Retry
+          </button>
+        </div>
+      ) : channels === null ? (
+        <p className="mb-4 text-xs text-slate-500">Loading…</p>
+      ) : (
+        <div className="mb-4 flex flex-col gap-2">
+          {channels.map((c) => (
+            <button
+              key={c.channel}
+              onClick={() => setChosen(c)}
+              className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-200 transition hover:border-indigo-500/60 hover:bg-slate-800/60"
+            >
+              <span aria-hidden><ChannelIcon channel={c.channel} size={16} className="text-slate-300" /></span>
+              {c.display_name}
+            </button>
+          ))}
+        </div>
+      )}
+      <button onClick={onComplete} className="w-full text-xs text-slate-500 transition hover:text-slate-300">
+        Skip for now
+      </button>
+    </>
   )
 }

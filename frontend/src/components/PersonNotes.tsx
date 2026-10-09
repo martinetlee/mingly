@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { chatUrl } from '../lib/routes'
+import { openConversationUrl } from '../lib/routes'
 import { Bot, Loader2, MessageSquareQuote, NotebookPen, Pencil, Plus, Trash2, User } from 'lucide-react'
 import type { PersonNote, PersonNoteInput, PersonNoteKind } from '../api/types'
 import { createPersonNote, deletePersonNote, getPersonNotes, updatePersonNote } from '../api/client'
@@ -93,7 +93,7 @@ export default function PersonNotes({ personId }: { personId: number }) {
     })
   }
 
-  const openCitation = (conversationId: number, messageId: number) => navigate(chatUrl(conversationId, messageId))
+  const openCitation = (conversationId: number, messageId: number) => navigate(openConversationUrl(conversationId, messageId))
 
   return (
     <div className="mb-6 rounded-xl border border-slate-700/50 bg-slate-800 p-4" data-testid="person-notes">

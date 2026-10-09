@@ -341,16 +341,18 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     if (sender.person_id != null) navigate(personUrl(sender.person_id))
   }, [navigate])
   // Their existing direct conversation on any channel, else a new Telegram one
-  // (a sender in a Telegram conversation has a Telegram identity)
+  // (a sender in a Telegram conversation has a Telegram identity). From a
+  // messenger chat it stays in messengers: never their email thread.
   const canStartFromHere = chat.channel === 'telegram'
+  const messengersOnly = chat.kind !== 'email_thread'
   const onSendMessage = useCallback(async (sender: MessageSender) => {
     if (sender.person_id == null) return
     try {
-      onOpenChat(await openDirectConversation(sender.person_id, { canStart: canStartFromHere }))
+      onOpenChat(await openDirectConversation(sender.person_id, { canStart: canStartFromHere, messengersOnly }))
     } catch (e) {
       reportError(e, 'Couldn’t open a chat with this user')
     }
-  }, [onOpenChat, canStartFromHere])
+  }, [onOpenChat, canStartFromHere, messengersOnly])
   const onMention = useCallback((sender: MessageSender) => {
     if (sender.name) setMentionInsert(`@${sender.name.replace(/\s+/g, '_')} `)
   }, [])
@@ -550,6 +552,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
           messages={msgs.messages}
           multiParty={isMultiParty(chat)}
           channel={chat.channel}
+          conversationKind={chat.kind}
           highlightMessageId={msgs.highlightMessageId}
           scrollIntent={msgs.scrollIntent}
           firstUnreadMessageId={msgs.firstUnreadMessageId}

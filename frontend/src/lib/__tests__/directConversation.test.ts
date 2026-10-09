@@ -24,6 +24,17 @@ describe('openDirectConversation ("message this person")', () => {
     expect(startPrivateChat).not.toHaveBeenCalled()
   })
 
+  it('messengersOnly (chat-only entry points) skips email threads', async () => {
+    const email = makeConversation(9, 'Ann', { kind: 'email_thread', channel: 'gmail' })
+    const dm = makeConversation(3, 'Ann', { kind: 'direct' })
+    getPersonConversations.mockResolvedValue([email, dm])
+    await expect(openDirectConversation(7, { canStart: true, messengersOnly: true })).resolves.toBe(dm)
+    getPersonConversations.mockResolvedValue([email])
+    startPrivateChat.mockResolvedValue(dm)
+    await expect(openDirectConversation(7, { canStart: true, messengersOnly: true })).resolves.toBe(dm)
+    expect(startPrivateChat).toHaveBeenCalledWith(7)
+  })
+
   it('starts a Telegram chat by person id only when there is none and the person is on Telegram', async () => {
     getPersonConversations.mockResolvedValue([])
     startPrivateChat.mockResolvedValue(makeConversation(4, 'Ann', { kind: 'direct' }))

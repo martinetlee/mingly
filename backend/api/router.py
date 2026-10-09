@@ -146,6 +146,11 @@ def create_app() -> FastAPI:
     app.include_router(translate.router, prefix="/api/translate", tags=["translate"], dependencies=protected)
     app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspaces"], dependencies=protected)
 
+    # OAuth redirect targets: the browser arrives without the session token;
+    # each request is authenticated by its sign-in flow's state parameter.
+    from backend.connectors.gmail.routes import router as gmail_routes
+    app.include_router(gmail_routes, prefix="/api/connectors/gmail", tags=["gmail"])
+
     # MCP endpoint has its own auth (vault-stored bearer key), NOT the session
     # token — external MCP clients can't obtain the ephemeral session token.
     app.include_router(mcp.router, tags=["mcp"])

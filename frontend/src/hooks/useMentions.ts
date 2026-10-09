@@ -4,7 +4,7 @@ import { getMentions, reactToMessage } from '../api/client'
 import type { MentionGroup } from '../api/types'
 import { reportError } from '../lib/toast'
 import { can } from '../lib/capabilities'
-import { chatUrl } from '../lib/routes'
+import { openConversationUrl } from '../lib/routes'
 import { useLatestQuery } from './useLatestQuery'
 import { useCoalescedRefetch } from './useCoalescedRefetch'
 import { useWebSocket } from './useWebSocket'
@@ -107,7 +107,7 @@ export function useMentionNavigator(
   }, [selectedIdx])
 
   const openInChat = useCallback((conversationId: number, messageId: number) => {
-    navigate(chatUrl(conversationId, messageId))
+    navigate(openConversationUrl(conversationId, messageId))
   }, [navigate])
 
   const shortcuts = useMemo(() => ({

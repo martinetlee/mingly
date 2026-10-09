@@ -20,7 +20,7 @@ from backend.db.database import AsyncSessionLocal, get_db
 from backend.db.models import Conversation, Message, MessageAttachment
 from backend.jobs import get_running, run_single
 from backend.serialization import iso_utc
-from backend.serializers import attachment_out, conversation_out, message_out
+from backend.serializers import attachment_out, conversation_out, messages_out
 from backend.telegram import ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name
@@ -79,13 +79,22 @@ async def list_conversations(
     tag_id: Optional[int] = None,
     workspace_id: Optional[int] = None,
     channel: Optional[str] = None,
+    label: Optional[str] = None,
+    kind: Optional[str] = None,
+    exclude_kind: Optional[str] = None,
+    account_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    """The inbox (not archived), optionally narrowed by tag, workspace,
+    channel, ``account_id`` or ``kind`` / ``exclude_kind``. ``label`` (Gmail)
+    lists a label's conversations, archived ones included."""
     member_ids = None
     if workspace_id is not None:
         member_ids = crud.workspace_member_ids(workspace_id)
     convs = await crud.list_conversations(
         db, limit=limit, offset=offset, sort_by=sort_by, tag_id=tag_id, member_ids=member_ids, channel=channel,
+        label=label, kind=kind, exclude_kind=exclude_kind, account_id=account_id,
+        archived=None if label is not None else False,
     )
     return [conversation_out(c) for c in convs]
 
@@ -275,6 +284,13 @@ async def mark_read(conversation_id: int, db: AsyncSession = Depends(get_db)):
         await client.send_read_acknowledge(await client.get_input_entity(peer))
 
     await _telegram_best_effort(conv, "read state", _ack)
+    if not ids.is_telegram(conv):
+        connector = _connector_of(conv)
+        if connector is not None:
+            try:
+                await connector.mark_read(conv)
+            except Exception as e:  # best-effort, like Telegram's
+                logger.warning("Failed to send read state to %s: %s", conv.account_id, e)
     return {"success": True}
 
 
@@ -505,7 +521,7 @@ async def get_message_window(
                 else:
                     anchor_reason = "error"
     return {
-        "messages": [message_out(row) for row in window["rows"]],
+        "messages": await messages_out(db, window["rows"]),
         "has_older": window["has_older"],
         "has_newer": window["has_newer"],
         "anchor_found": window["anchor_found"],
@@ -553,7 +569,7 @@ async def search_messages(conversation_id: int, q: str = "", limit: int = 50, db
         return []
     await conversation_or_404(db, conversation_id)
     rows = await crud.search_messages_in_conversation(db, conversation_id, q.strip(), limit=limit)
-    return [message_out(row) for row in reversed(rows)]
+    return await messages_out(db, list(reversed(rows)))
 
 
 @router.post("/{conversation_id}/sync")
@@ -810,7 +826,7 @@ async def set_slow_mode(conversation_id: int, req: SlowModeRequest, db: AsyncSes
 @router.get("/{conversation_id}/pinned")
 async def get_pinned_messages(conversation_id: int, db: AsyncSession = Depends(get_db)):
     await conversation_or_404(db, conversation_id)
-    return [message_out(row) for row in await crud.get_pinned_messages(db, conversation_id)]
+    return await messages_out(db, list(await crud.get_pinned_messages(db, conversation_id)))
 
 
 @router.get("/{conversation_id}/post-stats")
@@ -859,11 +875,36 @@ class ReactRequest(BaseModel):
     emoji: Optional[str] = None
 
 
+def _connector_of(conv: Conversation):
+    from backend.connectors.manager import manager
+    from backend.serializers import channel_of
+    return manager.for_account(channel_of(conv), conv.account_id)
+
+
+async def _react_via_connector(conv: Conversation, msg: Message, emoji: Optional[str]) -> None:
+    from backend.api.lookups import unsupported_channel
+    from backend.connectors.base import Capability, UnsupportedOperation
+
+    connector = _connector_of(conv)
+    if connector is None or Capability.REACT not in connector.conversation_capabilities(conv):
+        raise unsupported_channel(conv, "Reactions")
+    try:
+        await connector.react(conv, msg, emoji)
+    except UnsupportedOperation as e:
+        raise unsupported_channel(conv, str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send reaction: {e}")
+
+
 @messages_router.post("/{message_id}/react")
 async def react_to_message(message_id: int, req: ReactRequest, db: AsyncSession = Depends(get_db)):
     """Send or remove the current user's emoji reaction on a message."""
     msg = await message_or_404(db, message_id)
     conv = await conversation_or_404(db, msg.conversation_id)
+    if not ids.is_telegram(conv):
+        await _react_via_connector(conv, msg, req.emoji)
+        msg = await crud.set_my_reaction(db, message_id, req.emoji)
+        return {"success": True, "my_reaction": msg.my_reaction if msg else req.emoji}
     peer = telegram_peer(conv, "Reactions")
     client = await runtime.client()
     try:

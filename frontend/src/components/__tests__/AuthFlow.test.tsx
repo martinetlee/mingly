@@ -1,0 +1,139 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+
+vi.mock('../../api/accounts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/accounts')>()),
+  beginAccountAuth: vi.fn(),
+  continueAccountAuth: vi.fn(),
+}))
+vi.mock('../../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/client')>()),
+  openExternalUrl: vi.fn(),
+  resolve1Password: vi.fn(),
+}))
+
+import { beginAccountAuth, continueAccountAuth } from '../../api/accounts'
+import type { AuthStep } from '../../api/accounts'
+import { openExternalUrl, resolve1Password } from '../../api/client'
+import AuthFlow, { POLL_MS } from '../AuthFlow'
+
+const step = (over: Partial<AuthStep>): AuthStep => ({
+  flow_id: 'f1', kind: 'fields', title: null, message: null, fields: [],
+  qr_payload: null, auth_url: null, poll: false, ...over,
+})
+
+const phoneStep = step({
+  title: 'Your phone number',
+  fields: [{ name: 'phone', label: 'Phone number', kind: 'phone', required: true, placeholder: '+1 555 123 4567' }],
+})
+const codeStep = step({
+  title: 'Enter the code sent via Telegram',
+  fields: [{ name: 'code', label: 'Login code', kind: 'code', required: true, placeholder: null }],
+})
+
+beforeEach(() => vi.clearAllMocks())
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
+
+describe('AuthFlow', () => {
+  it('fields: submits the form and renders the next step; a re-asked step shows its message as an error', async () => {
+    vi.mocked(beginAccountAuth).mockResolvedValue(phoneStep)
+    vi.mocked(continueAccountAuth)
+      .mockResolvedValueOnce(codeStep)
+      .mockResolvedValueOnce({ ...codeStep, message: 'Invalid code. Please try again.' })
+    render(<AuthFlow accountKey="telegram" />)
+
+    const phone = await screen.findByLabelText('Phone number')
+    expect((phone as HTMLInputElement).type).toBe('tel')
+    expect(screen.getByRole('button', { name: 'Continue' })).toHaveProperty('disabled', true)
+    fireEvent.change(phone, { target: { value: ' +15551234567 ' } })
+    fireEvent.submit(phone.closest('form')!)
+    expect(await screen.findByText('Enter the code sent via Telegram')).toBeTruthy()
+    expect(continueAccountAuth).toHaveBeenCalledWith('telegram', 'f1', { phone: '+15551234567' })
+
+    const code = screen.getByLabelText('Login code') as HTMLInputElement
+    expect(code.inputMode).toBe('numeric')
+    fireEvent.change(code, { target: { value: '000' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Invalid code')
+  })
+
+  it('done: shows the message and fires onDone once; error step offers Try again', async () => {
+    const onDone = vi.fn()
+    const onClose = vi.fn()
+    vi.mocked(beginAccountAuth)
+      .mockResolvedValueOnce(step({ kind: 'error', message: 'signal-cli not found' }))
+      .mockResolvedValueOnce(phoneStep)
+    vi.mocked(continueAccountAuth).mockResolvedValue(step({ kind: 'done', message: 'Signed in as ann' }))
+    render(<AuthFlow accountKey="signal" onDone={onDone} onClose={onClose} doneLabel="Done" />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('signal-cli not found')
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '+1555' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText('Signed in as ann')).toBeTruthy()
+    expect(onDone).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(beginAccountAuth).toHaveBeenCalledTimes(2)
+  })
+
+  it('qr: renders the payload as a QR code image', async () => {
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      kind: 'qr', title: 'Link Signal', qr_payload: 'sgnl://linkdevice?uuid=abc&pub_key=xyz',
+    }))
+    render(<AuthFlow accountKey="signal" />)
+    const img = await screen.findByAltText('QR code to scan') as HTMLImageElement
+    expect(img.src.startsWith('data:image/svg+xml')).toBe(true)
+    expect(decodeURIComponent(img.src)).toContain('<svg')
+  })
+
+  it('oauth_browser: opens the consent page once, polls with {} while poll is set, then done', async () => {
+    vi.useFakeTimers()
+    const onDone = vi.fn()
+    const waiting = step({ kind: 'oauth_browser', title: 'Sign in with Google', auth_url: 'https://accounts.google.com/o/oauth2/auth?x', poll: true })
+    vi.mocked(beginAccountAuth).mockResolvedValue(waiting)
+    vi.mocked(continueAccountAuth)
+      .mockResolvedValueOnce({ ...waiting })
+      .mockResolvedValueOnce(step({ kind: 'done', message: 'Connected ann@gmail.com' }))
+    render(<AuthFlow accountKey="gmail" onDone={onDone} />)
+
+    await act(async () => { await Promise.resolve() })
+    expect(screen.getByText('Sign in with Google')).toBeTruthy()
+    expect(openExternalUrl).toHaveBeenCalledTimes(1)
+    expect(openExternalUrl).toHaveBeenCalledWith('https://accounts.google.com/o/oauth2/auth?x')
+    expect(continueAccountAuth).not.toHaveBeenCalled()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
+    expect(continueAccountAuth).toHaveBeenCalledTimes(1)
+    expect(continueAccountAuth).toHaveBeenLastCalledWith('gmail', 'f1', {})
+    expect(onDone).not.toHaveBeenCalled()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
+    expect(continueAccountAuth).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('Connected ann@gmail.com')).toBeTruthy()
+    expect(onDone).toHaveBeenCalledTimes(1)
+    // Same URL across polls: the browser was opened only once; done stops polling
+    expect(openExternalUrl).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS * 3) })
+    expect(continueAccountAuth).toHaveBeenCalledTimes(2)
+  })
+
+  it('resolves a 1Password reference before the form can be submitted', async () => {
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      title: 'Connect to Telegram',
+      fields: [{ name: 'api_hash', label: 'API Hash', kind: 'password', required: true, placeholder: null }],
+    }))
+    vi.mocked(resolve1Password).mockResolvedValue({ value: 'abc123' })
+    render(<AuthFlow accountKey="telegram" />)
+    const input = await screen.findByLabelText('API Hash') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'op://vault/tg/hash' } })
+    expect(screen.getByRole('button', { name: 'Continue' })).toHaveProperty('disabled', true)
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }))
+    expect(await screen.findByText('Resolved from 1Password')).toBeTruthy()
+    expect(input.value).toBe('abc123')
+    expect(screen.getByRole('button', { name: 'Continue' })).toHaveProperty('disabled', false)
+  })
+})

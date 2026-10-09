@@ -7,13 +7,6 @@
  * keys. Conversation / Message / Person / Identity match backend/serializers.py.
  */
 
-export interface AuthStatus {
-  authenticated: boolean
-  username?: string
-  first_name?: string
-  phone?: string
-}
-
 /** Messaging channels a connector can provide (string-typed: never assume Telegram) */
 export type ChannelName = 'telegram' | 'gmail' | 'signal' | 'sms' | (string & {})
 
@@ -89,6 +82,8 @@ export interface Conversation {
   last_activity_at: string | null
   last_message?: LastMessagePreview
   capabilities: Capability[]
+  /** Channel labels / folders (Gmail: Inbox, Sent, user labels…); empty elsewhere */
+  labels?: string[]
 }
 
 export interface Tag {
@@ -178,6 +173,16 @@ export interface MessageSender {
   avatar_url: string | null
 }
 
+/** One sender / recipient of a message (email from/to/cc/bcc) */
+export interface MessageParticipant {
+  identity_id: number
+  person_id: number
+  role: 'from' | 'to' | 'cc' | 'bcc'
+  display_name: string | null
+  /** The channel handle (lowercased email address) */
+  external_id: string
+}
+
 export interface Message {
   id: number
   conversation_id: number
@@ -220,6 +225,8 @@ export interface Message {
   scam_error?: string | null
   /** THE verdict (manual wins, else a successful scan > 0.5). Never re-derive it from scam_score. */
   effective_is_scam?: boolean
+  /** From/to/cc/bcc identities (email); empty for Telegram */
+  participants?: MessageParticipant[]
 }
 
 export type ScamManualVerdict = 'scam' | 'not_scam' | null
@@ -565,6 +572,10 @@ export type TelegramDirectoryResult = Conversation | TelegramDirectoryHit
  */
 export interface Prefs {
   notif_pref?: string
+  /** Per-channel notification setting (email channels are 'off' until set) */
+  notif_pref_channels?: Record<string, 'all' | 'tracked' | 'off'>
+  /** Email senders whose remote images load automatically */
+  email_remote_images_senders?: string[]
   briefing_schedule?: 'daily' | 'weekly'
   briefing_time?: string            // "HH:MM" (24h)
   briefing_day?: string             // 'monday' … 'sunday'

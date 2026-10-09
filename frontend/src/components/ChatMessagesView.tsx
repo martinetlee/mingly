@@ -51,6 +51,7 @@ export default function ChatMessagesView({
         messages={msgs.messages}
         multiParty={isMultiParty(conversation)}
         channel={conversation.channel}
+        conversationKind={conversation.kind}
         highlightMessageId={msgs.highlightMessageId}
         scrollIntent={msgs.scrollIntent}
         firstUnreadMessageId={msgs.firstUnreadMessageId}

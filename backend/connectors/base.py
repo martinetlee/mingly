@@ -77,16 +77,46 @@ class AuthFlowError(Exception):
     """An auth flow id that is unknown or already finished."""
 
 
+class UnsupportedOperation(Exception):
+    """The connector can't do this (the API answers 409 unsupported_channel)."""
+
+
+@dataclass
+class OutgoingFile:
+    path: str  # local temp file, owned by the caller
+    filename: str
+    mime_type: Optional[str] = None
+
+
+@dataclass
+class OutgoingMessage:
+    text: str = ""
+    reply_to_message_id: Optional[int] = None  # internal id, same conversation
+    subject: Optional[str] = None  # email
+    # Email recipients (handles). A non-empty ``to`` is the complete To list;
+    # empty = the channel's default (a reply goes to the sender / Reply-To).
+    to: list[str] = field(default_factory=list)
+    cc: list[str] = field(default_factory=list)
+    files: list[OutgoingFile] = field(default_factory=list)
+
+
 class Connector(ABC):
     channel: ClassVar[str]
     display_name: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]]
+    # Several accounts of this channel can be connected (Gmail); the manager
+    # then creates one connector per ``accounts`` row.
+    multi_account: ClassVar[bool] = False
+
+    def __init__(self, account_id: Optional[int] = None) -> None:
+        # The ``accounts`` row this connector serves; None until sign-in
+        # created it.
+        self.account_id = account_id
 
     @property
     def account_key(self) -> str:
-        """Stable id of the account this connector serves. One account per
-        channel until accounts are stored; then the account row id."""
-        return f"{self.channel}:default"
+        """Stable id of the account this connector serves."""
+        return f"{self.channel}:{self.account_id}" if self.account_id is not None else f"{self.channel}:new"
 
     @abstractmethod
     def is_configured(self) -> bool:
@@ -116,6 +146,34 @@ class Connector(ABC):
     async def logout(self) -> None:
         """Sign the account out and forget its stored session."""
 
+    async def remove(self) -> None:
+        """Disconnect for good: log out and forget credentials. The manager
+        then deletes the account row (and with it its conversations)."""
+        await self.logout()
+
+    async def send(self, conversation: Any, draft: OutgoingMessage) -> list[int]:
+        """Send a message into ``conversation``; persist it like a received
+        one and return the stored message ids."""
+        raise UnsupportedOperation(f"{self.display_name} can't send messages")
+
+    async def fetch_attachment(self, attachment: Any, message: Any, conversation: Any) -> str:
+        """Download an attachment; returns its path relative to DATA_DIR
+        (the connector also records it via crud.set_attachment_local_path)."""
+        raise UnsupportedOperation(f"{self.display_name} can't download attachments")
+
+    async def react(self, conversation: Any, message: Any, emoji: Optional[str]) -> None:
+        """Set (or with None remove) the user's reaction on a message."""
+        raise UnsupportedOperation(f"{self.display_name} can't react to messages")
+
+    async def mark_read(self, conversation: Any) -> None:
+        """Tell the channel the conversation was read (read receipts).
+        Best-effort; the default does nothing."""
+        return None
+
+    async def sync_now(self) -> None:
+        """Pull anything new right away (e.g. after the user opens the app)."""
+        return None
+
     def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:
         """What can be done in one conversation (e.g. no sending in a
         broadcast channel you don't admin). Defaults to the channel's."""
@@ -124,6 +182,7 @@ class Connector(ABC):
     def describe(self) -> dict[str, Any]:
         return {
             "account_key": self.account_key,
+            "account_id": self.account_id,
             "channel": self.channel,
             "display_name": self.display_name,
             "capabilities": sorted(c.value for c in self.capabilities),

@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _download(att: MessageAttachment) -> str:
+    """Telegram downloads through its runtime; other channels through their
+    connector."""
+    from backend.connectors.base import UnsupportedOperation
+    from backend.connectors.manager import manager
+    from backend.db import crud
+    from backend.serializers import channel_of
+
+    async with AsyncSessionLocal() as db:
+        msg = await crud.get_message(db, att.message_id)
+        conv = await crud.get_conversation(db, msg.conversation_id)
+    channel = channel_of(conv)
+    if channel == "telegram":
+        return await download_attachment(att.id)
+    connector = manager.for_account(channel, conv.account_id)
+    if connector is None:
+        raise MediaUnavailable(f"{channel} is not connected")
+    try:
+        return await connector.fetch_attachment(att, msg, conv)
+    except UnsupportedOperation as e:
+        raise MediaNotFound(str(e))
+
+
 class MediaDownloadResponse(BaseModel):
     url: str
     kind: str
@@ -46,7 +69,7 @@ async def download_media(attachment_id: int) -> MediaDownloadResponse:
         return MediaDownloadResponse(url=media_url(att.local_path), kind=att.kind)
 
     try:
-        rel = await download_attachment(attachment_id)
+        rel = await _download(att)
     except MediaUnavailable:
         raise HTTPException(status_code=503, detail="Channel not connected")
     except MediaNotFound as e:

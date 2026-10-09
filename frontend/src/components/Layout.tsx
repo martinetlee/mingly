@@ -1,13 +1,14 @@
 import { useMemo, useState } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
+import ErrorBoundary from './ui/ErrorBoundary'
 import ShortcutHelp from './ShortcutHelp'
 import GlobalSearch from './GlobalSearch'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import type { ShortcutMap } from '../hooks/useKeyboardShortcuts'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { LOCK_ACTION } from '../lib/nav'
-import { chatUrl } from '../lib/routes'
+import { openConversationUrl } from '../lib/routes'
 import { useNav } from '../context/FeaturesContext'
 import { useLockVault } from '../hooks/useLockVault'
 
@@ -15,6 +16,7 @@ export default function Layout() {
   const [helpOpen, setHelpOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const navigate = useNavigate()
+  const location = useLocation()
   const { lock } = useLockVault()
   const { shortcuts: navShortcuts } = useNav()
 
@@ -39,14 +41,16 @@ export default function Layout() {
 
   // Native notification clicks are relayed by the backend as navigate_to_conversation
   useWsEvent('navigate_to_conversation', (event) => {
-    navigate(chatUrl(event.conversation_id))
+    navigate(openConversationUrl(event.conversation_id))
   })
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-900">
       <Sidebar onSearchClick={() => setSearchOpen(true)} />
       <main className="flex flex-1 overflow-hidden">
-        <Outlet />
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
       <GlobalSearch open={searchOpen} onClose={() => setSearchOpen(false)} />

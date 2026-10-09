@@ -162,7 +162,9 @@ useKeyboardShortcuts({
 
 ## App bootstrap (App.tsx)
 1. It always calls `GET /api/session/validate` first, which reports both token validity and vault status.
-   - `valid` → checks Telegram auth, then shows the app or onboarding. A 401 from `/api/auth/status` shows Unlock.
-   - Not valid → clears any stale token, then shows Create vault (`unset`) or Unlock (`locked`/`unlocked`). Unlock always issues a fresh token for this window, and other windows keep theirs.
+   - `valid` → shows the app. No channel gates it: with no account connected, Home and Chats show `NoAccountsNotice`, which links to Settings → Connections (`/settings?tab=connections`).
+   - Not valid → clears any stale token, then shows Create vault (`unset`) or Unlock (`locked`/`unlocked`). Unlock always issues a fresh token for this window, and other windows keep theirs, then shows the app.
+   - Create vault (`Onboarding`) sets the master password, optionally connects a first account, then shows LLM setup, then the app.
+   - Every channel signs in through `components/AuthFlow.tsx` (the backend's step machine via `api/accounts.ts`): `fields`, `qr`, `oauth_browser` (opened with `openExternalUrl`, then polled every 2s while `poll`), `done`, `error`.
 2. If the endpoint is missing (older backend), it falls back to vault status. An unlocked vault without a token for this tab still shows Unlock.
 3. If any request fails (network or 5xx), it shows "Can't reach the Mingly backend" and retries with backoff (1s up to a 10s cap), with a "Retry now" button. It never falls through to "create vault".

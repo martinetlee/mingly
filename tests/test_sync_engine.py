@@ -585,13 +585,22 @@ async def test_auth_mutators_require_token_and_reset_requires_confirmation(db_en
     from backend.api import auth
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as c:
-        for path in ("/api/auth/logout", "/api/auth/setup", "/api/auth/send-code"):
+        for path in ("/api/auth/lock", "/api/auth/resolve-1password",
+                     "/api/accounts/telegram/auth", "/api/accounts/telegram/auth/x",
+                     "/api/accounts/telegram/logout"):
             assert (await c.post(path, json={})).status_code == 401, path
-        assert (await c.get("/api/auth/status")).status_code == 401
+        assert (await c.get("/api/accounts")).status_code == 401
+        assert (await c.delete("/api/accounts/gmail:1")).status_code == 401
+        # The Telegram-only onboarding routes are gone (sign-in is /api/accounts)
+        for path in ("/api/auth/logout", "/api/auth/setup", "/api/auth/send-code",
+                     "/api/auth/verify-code", "/api/auth/verify-2fa"):
+            assert (await c.post(path, json={})).status_code in (404, 405), path
+        for path in ("/api/auth/status", "/api/auth/has-credentials"):
+            assert (await c.get(path)).status_code in (404, 405), path
         assert (await c.get("/api/auth/vault-status")).status_code == 200
         assert (await c.post("/api/auth/vault/reset", json={})).status_code == 400
         with patch.object(auth, "reset_vault") as reset, \
-             patch.object(auth.runtime, "stop", AsyncMock()) as stop:
+             patch.object(auth.manager, "stop_all", AsyncMock()) as stop:
             r = await c.post("/api/auth/vault/reset", json={"confirm": "RESET"})
         assert r.status_code == 200 and reset.called and stop.called
 

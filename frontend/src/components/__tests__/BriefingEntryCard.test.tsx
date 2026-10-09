@@ -24,6 +24,6 @@ describe('BriefingEntryList (Home → Latest Briefing)', () => {
     )
     expect(screen.getByText('Launch').tagName).toBe('STRONG')
     fireEvent.click(screen.getByTitle('Jump to source message'))
-    expect(screen.getByTestId('where').textContent).toBe('/chats?conversationId=123&messageId=4242')
+    expect(screen.getByTestId('where').textContent).toBe('/open/123?messageId=4242') // resolved to Chats or Mail by kind
   })
 })

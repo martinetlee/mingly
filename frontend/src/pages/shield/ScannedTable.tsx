@@ -7,7 +7,7 @@ import { useSelection } from '../../hooks/useSelection'
 import { useFlaggedSenders } from '../../hooks/useFlaggedSenders'
 import { fmtRelative } from '../../utils/time'
 import { errorMessage } from '../../lib/toast'
-import { chatUrl, personUrl } from '../../lib/routes'
+import { openConversationUrl, personUrl } from '../../lib/routes'
 import type { ScannedList } from './useScannedList'
 import { useVerdictActions } from './useVerdictActions'
 import type { useRescan } from './useRescan'
@@ -205,7 +205,7 @@ export default function ScannedTable({ list, devMode, rescan, emptyTitle, emptyH
   }, [verdicts, selection])
 
   const onOpen = useCallback((conversationId: number, messageId: number) => {
-    navigate(chatUrl(conversationId, messageId))
+    navigate(openConversationUrl(conversationId, messageId))
   }, [navigate])
 
   const { click, toggle } = selection

@@ -68,10 +68,12 @@ def sender_out(m: Message) -> Optional[dict]:
     }
 
 
-def message_out(row) -> dict:
+def message_out(row, participants: Optional[list] = None) -> dict:
     """A Message, or a reply-preview row ``(Message, reply_id,
     reply_sender_name, reply_text, reply_media_type)`` from
-    ``crud.with_reply_preview``."""
+    ``crud.with_reply_preview``. ``participants`` are the message's
+    from/to/cc/bcc identities (``ingest.service.message_participants``;
+    channels without them get an empty list)."""
     from backend.scam.verdict import scam_fields
 
     if isinstance(row, Message):
@@ -108,8 +110,18 @@ def message_out(row) -> dict:
         "delivery_state": m.delivery_state or "sent",
         "is_edited": m.is_edited,
         "fwd_from_name": m.fwd_from_name,
+        "participants": participants or [],
         **scam_fields(m),
     }
+
+
+async def messages_out(db, rows: list) -> list[dict]:
+    """``message_out`` for a batch, with participants loaded in one query."""
+    from backend.ingest.service import message_participants
+
+    ids = [r.id if isinstance(r, Message) else r[0].id for r in rows]
+    parts = await message_participants(db, ids)
+    return [message_out(r, parts.get(i)) for r, i in zip(rows, ids)]
 
 
 def channel_of(conv: Conversation) -> Optional[str]:
@@ -119,7 +131,7 @@ def channel_of(conv: Conversation) -> Optional[str]:
 def capabilities_of(conv: Conversation) -> list[str]:
     from backend.connectors.manager import manager
 
-    connector = manager.get(channel_of(conv) or "")
+    connector = manager.for_account(channel_of(conv), conv.account_id)
     if connector is None:
         return []
     return sorted(c.value for c in connector.conversation_capabilities(conv))
@@ -160,6 +172,7 @@ def conversation_out(conv: Conversation, *, with_last_message: bool = True) -> d
         "last_synced_at": iso_utc(conv.last_synced_at),
         "last_activity_at": iso_utc(conv.last_activity_at),
         "capabilities": capabilities_of(conv),
+        "labels": parse_json(conv.labels_json) or [],
     }
     if with_last_message and (conv.last_message_text is not None or conv.last_message_at is not None):
         text = conv.last_message_text or ""

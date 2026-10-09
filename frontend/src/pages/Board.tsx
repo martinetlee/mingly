@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { chatUrl } from '../lib/routes'
+import { conversationUrl } from '../lib/routes'
 import { conversationTitle } from '../lib/conversation'
 import ChannelIcon from '../components/ChannelIcon'
 import ConversationAvatar from '../components/ConversationAvatar'
@@ -328,7 +328,7 @@ export default function Board() {
   useWsEvent('conversation_synced', refreshSoon)
   useWsEvent('resync', () => { loadBoard() })
 
-  const openChat = (chat: Conversation) => navigate(chatUrl(chat.id))
+  const openChat = (chat: Conversation) => navigate(conversationUrl(chat))
 
   const move = async (conversationId: number, toTagId: number | null) => {
     if (workspaceId == null || !board || board.board_id == null) return

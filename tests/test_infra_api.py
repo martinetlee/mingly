@@ -60,9 +60,9 @@ async def test_host_validation(app, base_url, ok):
 @pytest.mark.asyncio
 async def test_foreign_origin_blocked_on_mutation(app):
     async with _client(app) as c:
-        r = await c.post("/api/auth/logout", headers={"Origin": "http://evil.example.com"})
+        r = await c.post("/api/auth/lock", headers={"Origin": "http://evil.example.com"})
         assert r.status_code == 403
-        r = await c.post("/api/auth/logout", headers={"Origin": "null"})
+        r = await c.post("/api/auth/lock", headers={"Origin": "null"})
         assert r.status_code == 403
         # Safe methods are not origin-checked (CORS already prevents reading).
         r = await c.get("/api/auth/vault-status", headers={"Origin": "http://evil.example.com"})

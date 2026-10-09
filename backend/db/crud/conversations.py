@@ -5,7 +5,7 @@ used through ``get_conversation_by_external`` / ``upsert_conversation``."""
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import asc, case, desc, or_, select, update
+from sqlalchemy import asc, case, desc, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ __all__ = [
     "one_to_one_filter",
     "visible_filter",
     "list_conversations",
+    "conversation_labels",
     "get_tracked_conversations",
     "get_briefing_conversations",
     "get_hidden_conversations",
@@ -74,11 +75,34 @@ async def list_conversations(
     tag_id: Optional[int] = None,
     member_ids=None,
     channel: Optional[str] = None,
+    label: Optional[str] = None,
+    kind: Optional[str] = None,
+    exclude_kind: Optional[str] = None,
+    account_id: Optional[int] = None,
+    archived: Optional[bool] = False,
 ) -> list[Conversation]:
     """The inbox. ``member_ids`` is an optional subquery/collection of
     conversation ids to restrict to (e.g. a workspace's members);
-    ``channel`` restricts to one channel's accounts."""
-    query = select(Conversation).where(visible_filter())
+    ``channel`` restricts to one channel's accounts, ``account_id`` to one
+    account, ``kind`` / ``exclude_kind`` to (or away from) one conversation
+    kind, ``label`` to conversations carrying a channel label (Gmail).
+    ``archived``: False = the inbox (default), True = archived only, None =
+    both (a mail folder view)."""
+    query = select(Conversation).where(
+        Conversation.is_hidden == False,  # noqa: E712
+        Conversation.is_briefing == False,  # noqa: E712
+        Conversation.is_deactivated == False,  # noqa: E712
+    )
+    if archived is not None:
+        query = query.where(Conversation.is_archived == archived)
+    if label is not None:
+        query = query.where(_has_label(label))
+    if kind is not None:
+        query = query.where(Conversation.kind == kind)
+    if exclude_kind is not None:
+        query = query.where(Conversation.kind != exclude_kind)
+    if account_id is not None:
+        query = query.where(Conversation.account_id == account_id)
     if channel is not None:
         query = query.where(Conversation.account_id.in_(select(Account.id).where(Account.channel == channel)))
     if tag_id is not None:
@@ -98,6 +122,32 @@ async def list_conversations(
     else:  # recent
         query = query.order_by(desc(Conversation.is_pinned), desc(Conversation.last_activity_at), Conversation.title)
     return list((await db.execute(query.limit(limit).offset(offset))).scalars().all())
+
+
+def _has_label(label: str):
+    return text(
+        "EXISTS (SELECT 1 FROM json_each(conversations.labels_json) WHERE json_each.value = :label)"
+    ).bindparams(label=label)
+
+
+async def conversation_labels(db: AsyncSession, account_id: Optional[int] = None) -> list[tuple[str, int]]:
+    """Every channel label in use (optionally on one account), with how many
+    visible conversations carry it."""
+    labels = func.json_each(Conversation.labels_json).table_valued("value").alias("labels")
+    rows = (await db.execute(
+        select(labels.c.value, func.count())
+        .select_from(Conversation)
+        .join(labels, text("1 = 1"))
+        .where(
+            Conversation.labels_json.isnot(None),
+            Conversation.is_hidden == False,  # noqa: E712
+            Conversation.is_deactivated == False,  # noqa: E712
+            *((Conversation.account_id == account_id,) if account_id is not None else ()),
+        )
+        .group_by(labels.c.value)
+        .order_by(labels.c.value)
+    )).all()
+    return [(str(v), int(n)) for v, n in rows]
 
 
 async def _where(db: AsyncSession, *conds, order=None) -> list[Conversation]:

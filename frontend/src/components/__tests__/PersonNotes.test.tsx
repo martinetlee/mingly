@@ -44,6 +44,7 @@ function setup(personId = 42) {
           <Routes>
             <Route path="/people/:id" element={<PersonNotes personId={pid} />} />
             <Route path="/chats" element={<LocationProbe />} />
+            <Route path="/open/:conversationId" element={<LocationProbe />} />
           </Routes>
         </MemoryRouter>
       </ConfirmProvider>
@@ -126,11 +127,11 @@ describe('PersonNotes', () => {
     await waitFor(() => expect(screen.queryByText('Note 1')).toBeNull())
   })
 
-  it('citation chips open the cited message in Chats', async () => {
+  it('citation chips open the cited message in its conversation', async () => {
     vi.mocked(getPersonNotes).mockResolvedValue([note(1, { citations: [{ conversation_id: 42, message_id: 900 }] })])
     setup()
     fireEvent.click(await screen.findByRole('button', { name: /source 1/i }))
-    expect(screen.getByTestId('location').textContent).toBe('/chats?conversationId=42&messageId=900')
+    expect(screen.getByTestId('location').textContent).toBe('/open/42?messageId=900') // resolved to Chats or Mail by kind
   })
 
   it('refetches on person_notes_changed for this person only', async () => {

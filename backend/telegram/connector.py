@@ -2,8 +2,8 @@
 
 The runtime stays the single owner of the Telethon client; this class maps
 its lifecycle and onboarding (API credentials → phone → code → optional 2FA
-password) onto the channel-neutral connector contract. The legacy
-``/api/auth/*`` onboarding routes call the same methods.
+password) onto the channel-neutral connector contract; sign-in runs through
+``/api/accounts/telegram/auth``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,13 @@ class TelegramConnector(Connector):
     })
 
     def __init__(self) -> None:
+        super().__init__(account_id=None)
         self._flows: OrderedDict[str, _Flow] = OrderedDict()
+
+    @property
+    def account_key(self) -> str:
+        # One Telegram account, owned by the process-wide runtime.
+        return "telegram:default"
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -83,7 +89,7 @@ class TelegramConnector(Connector):
             caps.discard(Capability.ADMIN_MODERATION)
         return frozenset(caps)
 
-    # -- sign-in steps (shared with the legacy /api/auth routes) -------------
+    # -- sign-in steps --------------------------------------------------------
 
     async def save_credentials(self, api_id: str, api_hash: str) -> bool:
         """Store API credentials and connect a fresh client. Returns whether
@@ -159,7 +165,10 @@ class TelegramConnector(Connector):
         return AuthStep(flow_id, "done", message=f"Signed in as {name}" if name else "Signed in")
 
     async def begin_auth(self, params: dict[str, Any]) -> AuthStep:
-        flow = _Flow("phone" if self.is_configured() else "credentials")
+        """Starts at the phone step when API credentials exist, unless
+        ``params["reset_credentials"]`` asks to enter new ones."""
+        start_at_phone = self.is_configured() and not params.get("reset_credentials")
+        flow = _Flow("phone" if start_at_phone else "credentials")
         return self._step(self._open(flow), flow)
 
     async def continue_auth(self, flow_id: str, data: dict[str, Any]) -> AuthStep:

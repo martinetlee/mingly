@@ -2,7 +2,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Cloud, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import type { ScamFlag } from '../../api/types'
 import { errorMessage } from '../../lib/toast'
-import { chatUrl, personUrl } from '../../lib/routes'
+import { openConversationUrl, personUrl } from '../../lib/routes'
 import { useVerdictActions } from './useVerdictActions'
 import { ConfidencePill, EmptyState, ErrorState, LoadingRow, SyncBadge } from './shared'
 
@@ -69,7 +69,7 @@ export default function FlaggedTab({ flags, loading, error, onRetry }: {
                 {flag.flagged_message_text ? (
                   <button
                     disabled={!conversationId || !msgId}
-                    onClick={() => conversationId && msgId && navigate(chatUrl(conversationId, msgId))}
+                    onClick={() => conversationId && msgId && navigate(openConversationUrl(conversationId, msgId))}
                     className="text-xs text-slate-400 hover:text-slate-200 truncate max-w-[220px] block text-left transition-colors"
                     title={flag.flagged_message_text}
                   >

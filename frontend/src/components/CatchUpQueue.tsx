@@ -29,7 +29,7 @@ import { reportError, toast } from '../lib/toast'
 import { fmtRelative, parseServerDate } from '../utils/time'
 import Markdown from './Markdown'
 import ChannelIcon from './ChannelIcon'
-import { chatUrl } from '../lib/routes'
+import { openConversationUrl } from '../lib/routes'
 import { conversationTitle } from '../lib/conversation'
 
 const RELATIONSHIP_STATUSES: { value: RelationshipStatus; label: string; color: string }[] = [
@@ -492,7 +492,7 @@ export default function CatchUpQueue({
     }
   }
 
-  const handleReply = (conversationId: number) => navigate(`/chats?conversationId=${conversationId}`)
+  const handleReply = (conversationId: number) => navigate(openConversationUrl(conversationId))
 
   const shortcuts = useMemo(() => ({
     j: () => setSelectedIdx((i) => Math.min(i + 1, needsReply.length - 1)),

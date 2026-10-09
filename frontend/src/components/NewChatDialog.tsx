@@ -162,7 +162,7 @@ function PrivateChatTab({ busy, create }: { busy: boolean; create: CreateFn }) {
             {contacts.map(({ person, identity }) => (
               <PersonRow
                 key={person.id} seed={person.id} avatarUrl={person.avatar_url} name={person.name} username={identity.username}
-                busy={busy} onClick={() => create(() => openDirectConversation(person.id, { canStart: true }))}
+                busy={busy} onClick={() => create(() => openDirectConversation(person.id, { canStart: true, messengersOnly: true }))}
               />
             ))}
           </div>

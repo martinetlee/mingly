@@ -2,7 +2,7 @@
  * Sidebar navigation — the single source for the Sidebar links, the ⌘1-9
  * shortcuts (Layout) and the shortcut help sheet.
  */
-import { Home, MessageSquare, Users, Building2, Radio, Shield, Brain, Settings, Lock } from 'lucide-react'
+import { Home, MessageSquare, Mail, Users, Building2, Radio, Shield, Brain, Settings, Lock } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import type { Features } from '../api/types'
@@ -19,6 +19,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { to: '/home', icon: Home, label: 'Home' },
   { to: '/chats', icon: MessageSquare, label: 'Chats' },
+  { to: '/mail', icon: Mail, label: 'Mail' },
   { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },

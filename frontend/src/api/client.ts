@@ -1,6 +1,6 @@
 import type { PeoplePage, Features, Person } from './types'
 import type { BackfillResult, ConversationSyncResult, MessageWindow, SendFilesResponse } from './types'
-import type { AdminActionLog, AdminPermissions, AiConversationDetail, AiConversationSummary, AuthStatus, BoardColumn, BoardData, BriefingJobStatus, BriefingRun, CatchUpItem, CatchUpSummaryJob, ChannelPostStats, ChatMember, ContactPosition, Conversation, ConversationKind, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamManualVerdict, ScamVerdictResponse, ScamVerdictFilter, ScamQueueStats, CloudSyncResult, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramDirectoryResult, TelegramProfile, UserPresence, Workspace } from './types'
+import type { AdminActionLog, AdminPermissions, AiConversationDetail, AiConversationSummary, BoardColumn, BoardData, BriefingJobStatus, BriefingRun, CatchUpItem, CatchUpSummaryJob, ChannelPostStats, ChatMember, ContactPosition, Conversation, ConversationKind, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamManualVerdict, ScamVerdictResponse, ScamVerdictFilter, ScamQueueStats, CloudSyncResult, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramDirectoryResult, TelegramProfile, UserPresence, Workspace } from './types'
 import { setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 import { setCachedNotifPref } from '../lib/notifications'
 
@@ -120,44 +120,11 @@ export const resetVault = async (confirm?: string) => {
 
 // --- Auth ---
 
-export const getAuthStatus = () =>
-  request<AuthStatus>('/api/auth/status')
-
-export const hasCredentials = () =>
-  request<{ has_credentials: boolean }>('/api/auth/has-credentials')
-
-export const setupCredentials = (api_id: string, api_hash: string) =>
-  request<{ success: boolean }>('/api/auth/setup', {
-    method: 'POST',
-    body: JSON.stringify({ api_id, api_hash }),
-  })
-
 export const resolve1Password = (reference: string) =>
   request<{ value: string }>('/api/auth/resolve-1password', {
     method: 'POST',
     body: JSON.stringify({ reference }),
   })
-
-export const sendCode = (phone: string) =>
-  request<{ phone_code_hash: string }>('/api/auth/send-code', {
-    method: 'POST',
-    body: JSON.stringify({ phone }),
-  })
-
-export const verifyCode = (phone: string, code: string, phone_code_hash: string) =>
-  request<{ success: boolean; requires_2fa: boolean; first_name?: string }>('/api/auth/verify-code', {
-    method: 'POST',
-    body: JSON.stringify({ phone, code, phone_code_hash }),
-  })
-
-export const verify2FA = (password: string) =>
-  request<{ success: boolean; first_name?: string }>('/api/auth/verify-2fa', {
-    method: 'POST',
-    body: JSON.stringify({ password }),
-  })
-
-export const logout = () =>
-  request<{ success: boolean }>('/api/auth/logout', { method: 'POST' })
 
 /**
  * Lock the vault: the backend revokes every session, stops Telegram and
@@ -178,8 +145,28 @@ export const lockVault = async (): Promise<void> => {
 
 // --- Conversations ---
 
-export const getConversations = (limit = 50, offset = 0, sortBy = 'recent', tagId?: number, workspaceId?: number, signal?: AbortSignal) =>
-  request<Conversation[]>(`/api/conversations?limit=${limit}&offset=${offset}&sort_by=${sortBy}${tagId != null ? `&tag_id=${tagId}` : ''}${workspaceId != null ? `&workspace_id=${workspaceId}` : ''}`, { signal })
+/** Narrowing of GET /api/conversations beyond tag / workspace */
+export interface ConversationListFilter {
+  /** One channel (`telegram`, `signal`…) */
+  channel?: string | null
+  /** Leave out one conversation kind (the Chats space drops `email_thread`) */
+  excludeKind?: ConversationKind | null
+}
+
+/** Chats is the messengers space: every chat-only list leaves email threads to Mail */
+export const MESSENGERS_ONLY: ConversationListFilter = { excludeKind: 'email_thread' }
+
+export const getConversations = (
+  limit = 50, offset = 0, sortBy = 'recent', tagId?: number, workspaceId?: number, signal?: AbortSignal,
+  filter: ConversationListFilter = {},
+) => {
+  const q = new URLSearchParams({ limit: String(limit), offset: String(offset), sort_by: sortBy })
+  if (tagId != null) q.set('tag_id', String(tagId))
+  if (workspaceId != null) q.set('workspace_id', String(workspaceId))
+  if (filter.channel) q.set('channel', filter.channel)
+  if (filter.excludeKind) q.set('exclude_kind', filter.excludeKind)
+  return request<Conversation[]>(`/api/conversations?${q}`, { signal })
+}
 
 // --- Workspaces ---
 

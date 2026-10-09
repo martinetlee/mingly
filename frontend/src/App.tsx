@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { getVaultStatus, getAuthStatus, openExternalUrl, validateSession } from './api/client'
+import { getVaultStatus, openExternalUrl, validateSession } from './api/client'
 import { clearSessionToken, getSessionToken, onSessionExpired } from './api/session'
 import { isAbortError, isSessionExpiredError } from './lib/http'
 import Layout from './components/Layout'
@@ -10,6 +10,8 @@ import Onboarding from './pages/Onboarding'
 import Unlock from './pages/Unlock'
 import Home from './pages/Home'
 import Chats from './pages/Chats'
+import Mail from './pages/Mail'
+import OpenConversation from './pages/OpenConversation'
 import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
 import Settings from './pages/Settings'
@@ -27,7 +29,7 @@ import { ThemeProvider } from './context/ThemeContext'
 import { ToastProvider } from './components/ui/Toast'
 import { ConfirmProvider } from './components/ui/ConfirmDialog'
 
-type AppState = 'loading' | 'backend-unavailable' | 'vault-unset' | 'vault-locked' | 'onboarding' | 'llm-setup' | 'app'
+type AppState = 'loading' | 'backend-unavailable' | 'vault-unset' | 'vault-locked' | 'llm-setup' | 'app'
 
 const RETRY_BASE_MS = 1000
 const RETRY_MAX_MS = 10000
@@ -38,14 +40,14 @@ const RETRY_MAX_MS = 10000
  * another window doesn't mean *this* tab has a session). Falls back to
  * vault status on backends without the endpoint. Throws when the backend
  * can't be reached — the caller shows "backend unavailable", never "create vault".
+ *
+ * A session goes straight to the app whatever accounts are connected: with
+ * none, Home and Chats point to Settings → Connections.
  */
 async function resolveInitialState(signal: AbortSignal): Promise<AppState> {
   const v = await validateSession(signal)
   if (v) {
-    if (v.valid) {
-      const s = await getAuthStatus()
-      return s.authenticated ? 'app' : 'onboarding'
-    }
+    if (v.valid) return 'app'
     // Stale token from an earlier session: drop it so nothing sends it again
     if (getSessionToken()) clearSessionToken()
     return v.vault_status === 'unset' ? 'vault-unset' : 'vault-locked'
@@ -54,9 +56,7 @@ async function resolveInitialState(signal: AbortSignal): Promise<AppState> {
   if (status === 'unset') return 'vault-unset'
   if (status === 'locked') return 'vault-locked'
   // Unlocked, but this tab holds no token → unlock to obtain one
-  if (!getSessionToken()) return 'vault-locked'
-  const s = await getAuthStatus()
-  return s.authenticated ? 'app' : 'onboarding'
+  return getSessionToken() ? 'app' : 'vault-locked'
 }
 
 /** /shield exists only while the Shield feature is on */
@@ -103,7 +103,7 @@ function AppRoot() {
       })
       .catch((e) => {
         if (ctrl.signal.aborted || isAbortError(e)) return
-        // 401 from a protected route (e.g. /api/auth/status): this tab needs to unlock
+        // 401: this tab needs to unlock
         if (isSessionExpiredError(e)) { setState('vault-locked'); return }
         // Backend down or restarting — never mistake this for "no vault"
         const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attemptRef.current)
@@ -140,16 +140,6 @@ function AppRoot() {
     return () => document.removeEventListener('click', handler, true)
   }, [])
 
-  const handleVaultUnlocked = () => {
-    getAuthStatus()
-      .then((s) => setState(s.authenticated ? 'app' : 'onboarding'))
-      .catch((e) => {
-        if (isSessionExpiredError(e)) setState('vault-locked')
-        // Backend hiccup right after unlock: re-run the bootstrap (it retries)
-        else retryNow()
-      })
-  }
-
   if (state === 'loading') {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-900">
@@ -177,15 +167,11 @@ function AppRoot() {
   }
 
   if (state === 'vault-unset') {
-    return <Onboarding needsVaultSetup onComplete={() => setState('llm-setup')} />
+    return <Onboarding onComplete={() => setState('llm-setup')} />
   }
 
   if (state === 'vault-locked') {
-    return <Unlock onUnlock={handleVaultUnlocked} />
-  }
-
-  if (state === 'onboarding') {
-    return <Onboarding onComplete={() => setState('llm-setup')} />
+    return <Unlock onUnlock={() => setState('app')} />
   }
 
   if (state === 'llm-setup') {
@@ -202,6 +188,8 @@ function AppRoot() {
             <Route index element={<Navigate to="/home" replace />} />
             <Route path="home" element={<Home />} />
             <Route path="chats" element={<Chats />} />
+            <Route path="mail" element={<Mail />} />
+            <Route path="open/:conversationId" element={<OpenConversation />} />
             <Route path="board" element={<Board />} />
             <Route path="contacts" element={<Contacts />} />
             <Route path="organizations" element={<Organizations />} />

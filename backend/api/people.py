@@ -2,9 +2,11 @@
 
 Mounted at /api/people. Everything here is local data keyed by internal
 ``person_id`` (works offline); only ``POST /sync`` talks to a channel.
-Every write broadcasts ``person_changed`` so open views refresh.
+Every write broadcasts ``person_changed`` so open views refresh. Merging,
+undoing a merge and detaching identities go through ``backend.people.linking``.
 """
 
+import json
 from datetime import datetime
 from typing import Iterable, List, Optional
 
@@ -14,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Person, PersonPosition
+from backend.db.models import Person, PersonMerge, PersonMergeSuggestion, PersonPosition
+from backend.people import linking
 from backend.serialization import iso_utc
-from backend.serializers import conversation_out, person_out
+from backend.serializers import channel_of, conversation_out, messages_out, person_out
 from backend.ws.manager import ws_manager
 
 router = APIRouter()
@@ -52,6 +55,10 @@ class PositionUpdate(BaseModel):
 
 class StatusRequest(BaseModel):
     status: str
+
+
+class MergeRequest(BaseModel):
+    other_person_id: int  # merged into the person in the path, then removed
 
 
 # --- Payloads ---
@@ -158,7 +165,7 @@ def _parse_date(raw: str) -> datetime:
     try:
         return datetime.fromisoformat(raw.strip().replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid ended_at date format")
+        raise HTTPException(status_code=400, detail=f"Invalid date: {raw!r}")
 
 
 def _check_status(status: str) -> None:
@@ -237,6 +244,86 @@ async def refresh_all_statuses(db: AsyncSession = Depends(get_db)):
     return {"refreshed": await crud.refresh_all_person_statuses(db)}
 
 
+# --- Linking: merge suggestions, merges, detach ---
+
+async def suggestions_payload(db: AsyncSession, suggestions: List[PersonMergeSuggestion]) -> list[dict]:
+    """[{id, reason, score, created_at, person_a, person_b}] with full Person payloads."""
+    ids = {pid for s in suggestions for pid in (s.person_a_id, s.person_b_id)}
+    people = await crud.get_people(db, ids)
+    payloads = {p["id"]: p for p in await people_payload(db, people.values())}
+    return [
+        {
+            "id": s.id,
+            "reason": s.reason,
+            "score": s.score,
+            "created_at": iso_utc(s.created_at),
+            "person_a": payloads[s.person_a_id],
+            "person_b": payloads[s.person_b_id],
+        }
+        for s in suggestions if s.person_a_id in payloads and s.person_b_id in payloads
+    ]
+
+
+def merge_dict(m: PersonMerge) -> dict:
+    snap = json.loads(m.snapshot_json)
+    return {
+        "id": m.id,
+        "into_person_id": m.into_person_id,
+        "from_person_id": m.from_person_id,
+        "from_name": snap.get("name"),
+        "identities": snap.get("identities", []),  # [{id, channel, label}] that moved
+        "automatic": bool(m.automatic),
+        "created_at": iso_utc(m.created_at),
+        "undone_at": iso_utc(m.undone_at),
+    }
+
+
+async def _linked(db: AsyncSession, person_ids: Iterable[int]) -> None:
+    """Commit a linking change and broadcast person_changed for every person it touched."""
+    await db.commit()
+    for pid in dict.fromkeys(person_ids):
+        await broadcast_person_changed(pid)
+
+
+@router.get("/merge-suggestions")
+async def list_merge_suggestions(db: AsyncSession = Depends(get_db)):
+    """Pending "maybe the same human" pairs, most likely first."""
+    return await suggestions_payload(db, await crud.list_merge_suggestions(db))
+
+
+@router.post("/merge-suggestions/refresh")
+async def refresh_merge_suggestions(db: AsyncSession = Depends(get_db)):
+    """Recompute suggestions across everyone. Returns {created}."""
+    created = await linking.refresh_all_suggestions(db)
+    await db.commit()
+    return {"created": created}
+
+
+@router.post("/merge-suggestions/{suggestion_id}/dismiss")
+async def dismiss_merge_suggestion(suggestion_id: int, db: AsyncSession = Depends(get_db)):
+    suggestion = await crud.get_merge_suggestion(db, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    suggestion.status = "dismissed"
+    await _linked(db, (suggestion.person_a_id, suggestion.person_b_id))
+    return {"success": True}
+
+
+@router.post("/merges/{merge_id}/undo")
+async def undo_merge(merge_id: int, db: AsyncSession = Depends(get_db)):
+    """Undo a merge. Returns the restored person (with a new id)."""
+    try:
+        person = await linking.undo(db, merge_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except linking.LinkingError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    record = await crud.get_person_merge(db, merge_id)
+    await _linked(db, (record.into_person_id, person.id))
+    await db.refresh(person)
+    return await person_payload(db, person)
+
+
 # --- One person ---
 
 @router.get("/{person_id}")
@@ -252,6 +339,37 @@ async def person_conversations(person_id: int, db: AsyncSession = Depends(get_db
     ids = await crud.direct_conversation_ids_for_person(db, person_id)
     convs = await crud.get_conversations(db, ids)
     return [conversation_out(convs[i]) for i in ids if i in convs]
+
+
+@router.get("/{person_id}/timeline")
+async def person_timeline(
+    person_id: int,
+    limit: int = 50,
+    before: Optional[str] = None,
+    before_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cross-channel timeline, newest first: the person's one-to-one
+    conversations (both directions), what they sent in groups, and emails
+    they're a participant of. Page with ``before`` (ISO date of the oldest
+    item shown) and ``before_id`` (its message id, breaks date ties)."""
+    await person_or_404(db, person_id)
+    limit = max(1, min(limit, 200))
+    rows, has_more = await crud.person_timeline(
+        db, person_id, limit=limit,
+        before=_parse_date(before) if before else None, before_id=before_id,
+    )
+    convs = await crud.get_conversations(db, {r[0].conversation_id for r in rows})
+    items = []
+    for row, msg in zip(rows, await messages_out(db, rows)):
+        conv = convs.get(row[0].conversation_id)
+        items.append({
+            "message": msg,
+            "conversation": {
+                "id": conv.id, "title": conv.title, "kind": conv.kind, "channel": channel_of(conv),
+            } if conv is not None else None,
+        })
+    return {"items": items, "has_more": has_more}
 
 
 @router.put("/{person_id}")
@@ -368,4 +486,52 @@ async def reset_relationship_status(person_id: int, db: AsyncSession = Depends(g
     if person is None:
         raise HTTPException(status_code=404, detail="Person not found")
     await broadcast_person_changed(person_id)
+    return await person_payload(db, person)
+
+
+# --- Linking (one person) ---
+
+@router.get("/{person_id}/merge-suggestions")
+async def person_merge_suggestions(person_id: int, db: AsyncSession = Depends(get_db)):
+    """Pending suggestions involving this person (same shape as /merge-suggestions)."""
+    await person_or_404(db, person_id)
+    return await suggestions_payload(db, await crud.list_merge_suggestions(db, person_id))
+
+
+@router.get("/{person_id}/merges")
+async def person_merges(person_id: int, db: AsyncSession = Depends(get_db)):
+    """Merges into this person that can still be undone, newest first."""
+    await person_or_404(db, person_id)
+    return [merge_dict(m) for m in await crud.merges_into_person(db, person_id)]
+
+
+@router.post("/{person_id}/merge")
+async def merge_person(person_id: int, data: MergeRequest, db: AsyncSession = Depends(get_db)):
+    """Merge ``other_person_id`` into this person. Returns the surviving
+    person plus ``merge_id`` (for POST /merges/{merge_id}/undo)."""
+    try:
+        record = await linking.merge(db, person_id, data.other_person_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except linking.LinkingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await linking.suggest_for_person(db, person_id)
+    await _linked(db, (person_id, data.other_person_id))
+    person = await person_or_404(db, person_id)
+    await db.refresh(person)
+    return {**await person_payload(db, person), "merge_id": record.id}
+
+
+@router.post("/{person_id}/identities/{identity_id}/detach")
+async def detach_identity(person_id: int, identity_id: int, db: AsyncSession = Depends(get_db)):
+    """Move one of the person's identities to a new person. Returns the new person."""
+    await person_or_404(db, person_id)
+    try:
+        person = await linking.detach(db, identity_id, person_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except linking.LinkingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await _linked(db, (person_id, person.id))
+    await db.refresh(person)
     return await person_payload(db, person)

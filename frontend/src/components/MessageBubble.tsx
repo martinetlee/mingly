@@ -2,7 +2,7 @@ import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react'
 import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy, User, MessageSquare, AtSign, ShieldBan, Pin, PinOff, BarChart3, MapPin, Contact as ContactIcon } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { personUrl } from '../lib/routes'
-import type { Attachment, ChannelName, Message, MessageSender } from '../api/types'
+import type { Attachment, ChannelName, ConversationKind, Message, MessageSender } from '../api/types'
 import { translateMessage, getPrefs, openExternalUrl } from '../api/client'
 import { reportError, toast } from '../lib/toast'
 import { fmtTime } from '../utils/time'
@@ -12,6 +12,7 @@ import SenderAvatar from './SenderAvatar'
 import MediaView, { RENDERED_MEDIA } from './MediaView'
 import MediaAlbumGrid from './MediaAlbumGrid'
 import { mentionUrl } from '../lib/mentions'
+import EmailMessageView from './EmailMessageView'
 
 export type ScamVerdictScope = 'message' | 'sender'
 
@@ -35,6 +36,8 @@ interface Props {
   onJumpToExternal?: (externalId: string) => void
   /** The conversation's channel (channel-specific text handling such as Telegram mentions) */
   channel?: ChannelName | null
+  /** Email threads render each message as an email (EmailMessageView) */
+  conversationKind?: ConversationKind
   /** Show avatar on this message (first in a sender group) */
   showAvatar?: boolean
   /** Whether this is a group/channel chat (controls avatar indent) */
@@ -443,7 +446,7 @@ function ActionMenu({ isOut, items, onClose }: { isOut: boolean; items: MenuItem
 }
 
 /** Scam status for a message: server verdict + any user-initiated check in progress. */
-function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void }) {
+export function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void }) {
   const check = useScamCheck(message.conversation_id, message.id)
   const [expanded, setExpanded] = useState(false)
   // THE verdict comes from the server; never re-derived from scam_score
@@ -808,8 +811,23 @@ function sameAlbum(a?: Message[], b?: Message[]): boolean {
   return a.every((m, i) => m === b[i])
 }
 
+/** Emails (an email thread, or any message with a subject) render as an email, everything else as a chat bubble. */
+function MessageView(props: Props) {
+  if (props.conversationKind === 'email_thread' || props.message.subject != null) {
+    return (
+      <EmailMessageView
+        message={props.message}
+        highlighted={props.highlighted}
+        onReply={props.onReply}
+        onScamVerdict={props.onScamVerdict}
+      />
+    )
+  }
+  return <MessageBubble {...props} />
+}
+
 /** Re-renders only when its own message (or album items) or a prop actually changes. */
-export default memo(MessageBubble, (prev, next) => {
+export default memo(MessageView, (prev, next) => {
   for (const k of Object.keys(next) as (keyof Props)[]) {
     if (k === 'album') continue
     if (prev[k] !== next[k]) return false

@@ -47,6 +47,8 @@ class Account(Base):
     self_identity_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("identities.id", ondelete="SET NULL", use_alter=True), nullable=True
     )
+    # Connector-owned incremental sync state (e.g. Gmail historyId), JSON
+    sync_state_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -200,6 +202,8 @@ class Conversation(Base):
     last_message_sender: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Channel folders / labels (Gmail labels), JSON list of strings
+    labels_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Eager (selectin): every serializer needs the channel and the other party.
@@ -343,6 +347,95 @@ class MessageAttachment(Base):
     local_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # relative to DATA_DIR; NULL until downloaded
     external_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # channel handle to fetch it
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MessageParticipant(Base):
+    """Addressees of a message beyond its sender (email from/to/cc/bcc)."""
+    __tablename__ = "message_participants"
+    __table_args__ = (
+        UniqueConstraint("message_id", "identity_id", "role", name="uq_message_participant"),
+        Index("ix_message_participants_identity", "identity_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    identity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String, nullable=False)  # from | to | cc | bcc
+
+
+class PersonMergeSuggestion(Base):
+    """Two people who may be the same human (never merged automatically)."""
+    __tablename__ = "person_merge_suggestions"
+    __table_args__ = (UniqueConstraint("person_a_id", "person_b_id", name="uq_merge_suggestion_pair"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # person_a_id < person_b_id
+    person_a_id: Mapped[int] = mapped_column(Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False)
+    person_b_id: Mapped[int] = mapped_column(Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False)
+    reason: Mapped[str] = mapped_column(String, nullable=False)  # same_name_shared_group | username_matches_email | ...
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")  # pending | dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PersonMerge(Base):
+    """Undo log of a merge: which identities (and CRM rows) moved from a
+    removed person into the surviving one."""
+    __tablename__ = "person_merges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    into_person_id: Mapped[int] = mapped_column(Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False)
+    from_person_id: Mapped[int] = mapped_column(Integer, nullable=False)  # the removed person's former id
+    snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)  # removed person's fields + moved row ids
+    automatic: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    undone_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class CalendarEvent(Base):
+    """A calendar event on an account (Google Calendar)."""
+    __tablename__ = "calendar_events"
+    __table_args__ = (
+        UniqueConstraint("account_id", "external_id", name="uq_calendar_event_account_external"),
+        Index("ix_calendar_events_start", "start_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    calendar_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # naive UTC
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # confirmed | tentative | cancelled
+    organizer_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+    html_link: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CalendarAttendee(Base):
+    __tablename__ = "calendar_attendees"
+    __table_args__ = (UniqueConstraint("event_id", "identity_id", name="uq_calendar_attendee"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("calendar_events.id", ondelete="CASCADE"), nullable=False
+    )
+    identity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    response_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # accepted | declined | tentative | needsAction
+    is_organizer: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # ── Tags, workspaces, organizations ──────────────────────────────────────────

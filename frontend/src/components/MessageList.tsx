@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { VirtuosoHandle } from 'react-virtuoso'
 import { ArrowDown, Loader2 } from 'lucide-react'
-import type { ChannelName, Message, MessageSender } from '../api/types'
+import type { ChannelName, ConversationKind, Message, MessageSender } from '../api/types'
 import type { ScrollIntent } from '../hooks/useChatMessages'
 import { parseServerDate } from '../utils/time'
 import MessageBubble, { ServiceMessage } from './MessageBubble'
@@ -14,6 +14,8 @@ interface Props {
   /** Group / channel / email thread: show sender names and avatars */
   multiParty: boolean
   channel?: ChannelName | null
+  /** Email threads render messages as emails */
+  conversationKind?: ConversationKind
   /** Visual highlight only (scrolling is driven by `scrollIntent`) */
   highlightMessageId?: number | null
   onReply?: (msg: Message) => void
@@ -157,7 +159,7 @@ const ListFooter = ({ context }: { context?: ListContext }) => (
 const COMPONENTS = { Header: ListHeader, Footer: ListFooter }
 
 export default function MessageList({
-  messages, multiParty, channel, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
+  messages, multiParty, channel, conversationKind, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
   onJumpToExternal, firstUnreadMessageId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header,
   hasNewer, onJumpToLatest, flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict,
 }: Props) {
@@ -299,6 +301,7 @@ export default function MessageList({
             isGroupChat={isGroup}
             highlighted={highlightMessageId != null && item.ids.includes(highlightMessageId)}
             channel={channel}
+            conversationKind={conversationKind}
             onReply={onReply}
             onReact={onReact}
             onEdit={onEdit}
@@ -318,7 +321,7 @@ export default function MessageList({
         )}
       </div>
     )
-  }, [firstUnreadMessageId, isGroup, channel, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage, onJumpToExternal,
+  }, [firstUnreadMessageId, isGroup, channel, conversationKind, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage, onJumpToExternal,
     flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict])
 
   if (items.length === 0) {

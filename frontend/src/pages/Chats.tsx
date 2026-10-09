@@ -27,15 +27,18 @@ import { useWorkspaces } from '../context/WorkspaceContext'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useAccounts } from '../hooks/useAccounts'
 import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
 import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { reportError } from '../lib/toast'
 import ChatInfoPanel from '../components/ChatInfoPanel'
 import NewChatDialog from '../components/NewChatDialog'
+import NoAccountsNotice from '../components/NoAccountsNotice'
 import ChatListPane from './chats/ChatListPane'
 import type { ChatActions, SortBy } from './chats/ChatListPane'
 import ChatPane from './chats/ChatPane'
 import { useChatList } from './chats/useChatList'
+import { loadChannelFilter, messengerChannels, saveChannelFilter } from './chats/channelFilter'
 import { getChatUi, updateChatUi, useChatUiSelect } from './chats/chatUiStore'
 
 /** How long an open, focused chat waits before acknowledging new messages as read */
@@ -108,13 +111,26 @@ export default function Chats() {
   const [selectedTag, setSelectedTag] = useState<Tag | null>(null)
   const [selectedFolder, setSelectedFolder] = useState<number | null>(null)
   const [search, setSearch] = useState('')
-  const list = useChatList({ sortBy, tagId: selectedTag?.id ?? null, workspaceId: activeWorkspaceId })
+  // Channel chips: remembered choice, dropped while that channel isn't connected
+  // (or is the only one); the stored value applies until accounts have loaded
+  const accounts = useAccounts()
+  const channels = useMemo(() => messengerChannels(accounts.accounts), [accounts.accounts])
+  const [storedChannel, setStoredChannel] = useState<string | null>(loadChannelFilter)
+  const selectedChannel = !accounts.loaded ? storedChannel
+    : storedChannel != null && channels.length > 1 && channels.includes(storedChannel) ? storedChannel : null
+  const selectChannel = useCallback((channel: string | null) => {
+    setStoredChannel(channel)
+    saveChannelFilter(channel)
+  }, [])
+  const list = useChatList({ sortBy, tagId: selectedTag?.id ?? null, workspaceId: activeWorkspaceId, channel: selectedChannel })
   const chatsRef = useRef(list.chats)
   chatsRef.current = list.chats
 
   // Telegram chat folders (Telegram-only)
   const folders = useLatestQuery(['folders'], () => getTelegramFolders())
-  const folder = selectedFolder == null ? null : (folders.data ?? []).find((f) => f.id === selectedFolder) ?? null
+  // Telegram folders only apply while Telegram chats are listed
+  const shownFolders = selectedChannel == null || selectedChannel === 'telegram' ? folders.data ?? [] : []
+  const folder = selectedFolder == null ? null : shownFolders.find((f) => f.id === selectedFolder) ?? null
   // Folder members can live beyond the loaded pages: fetched by id, kept apart from the list
   const folderMembers = useLatestQuery(
     ['folder-members', folder?.id ?? null, folder?.conversation_ids ?? []],
@@ -519,7 +535,10 @@ export default function Chats() {
         listRef={chatListRef}
         virtuosoRef={chatListVirtuosoRef}
         searchInputRef={searchInputRef}
-        folders={folders.data ?? []}
+        channels={channels}
+        selectedChannel={selectedChannel}
+        onSelectChannel={selectChannel}
+        folders={shownFolders}
         selectedFolder={selectedFolder}
         onSelectFolder={setSelectedFolder}
         search={search}
@@ -570,7 +589,7 @@ export default function Chats() {
                 <p className="text-sm text-slate-400">Loading chat…</p>
               </>
             ) : (
-              <p className="text-sm">Select a chat to start</p>
+              <NoAccountsNotice className="max-w-sm" fallback={<p className="text-sm">Select a chat to start</p>} />
             )}
           </div>
         )}

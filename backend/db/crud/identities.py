@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from typing import Iterable, Optional
 
+import phonenumbers
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,13 +29,26 @@ PROFILE_FIELDS = (
 )
 
 
-def normalize_phone(raw: Optional[str]) -> Optional[str]:
-    """Digits with a leading '+' (Telegram reports international numbers
-    without it). None when there are too few digits to be a phone number."""
+def normalize_phone(raw: Optional[str], region: Optional[str] = None) -> Optional[str]:
+    """E.164 (``+15551234567``) or None when ``raw`` can't be a phone number.
+
+    Telegram reports international numbers without the '+', so a number
+    without one is read as international unless ``region`` (ISO 3166 code
+    for national-format numbers, e.g. from a local address book) is given."""
     if not raw:
         return None
-    digits = re.sub(r"\D", "", raw)
-    return f"+{digits}" if len(digits) >= 6 else None
+    text = raw.strip()
+    if text.startswith("00"):
+        text = "+" + text[2:]
+    if not text.startswith("+") and region is None:
+        text = "+" + re.sub(r"\D", "", text)
+    try:
+        number = phonenumbers.parse(text, region)
+    except phonenumbers.NumberParseException:
+        return None
+    if not phonenumbers.is_possible_number(number):
+        return None
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
 
 
 def normalize_email(raw: Optional[str]) -> Optional[str]:
@@ -43,7 +57,9 @@ def normalize_email(raw: Optional[str]) -> Optional[str]:
     return raw.strip().lower()
 
 
-async def _sync_contact_points(db: AsyncSession, identity: Identity) -> None:
+async def _sync_contact_points(db: AsyncSession, identity: Identity) -> bool:
+    """Make the identity's contact points match its handles. Returns whether
+    any point was added (a new key for cross-channel linking)."""
     wanted = set()
     phone = normalize_phone(identity.phone)
     if phone:
@@ -57,11 +73,13 @@ async def _sync_contact_points(db: AsyncSession, identity: Identity) -> None:
             select(ContactPoint).where(ContactPoint.identity_id == identity.id)
         )).scalars().all()
     }
-    for key in wanted - set(current):
+    added = wanted - set(current)
+    for key in added:
         db.add(ContactPoint(identity_id=identity.id, kind=key[0], value=key[1]))
     stale = [cp.id for key, cp in current.items() if key not in wanted]
     if stale:
         await db.execute(delete(ContactPoint).where(ContactPoint.id.in_(stale)))
+    return bool(added)
 
 
 async def upsert_identity(
@@ -71,7 +89,10 @@ async def upsert_identity(
 
     Profile fields (see PROFILE_FIELDS) that are not None take the new
     value. A new identity gets a new person (marked ``is_self`` when the
-    identity is). Returns the stored identity.
+    identity is). When a phone / email contact point is added,
+    ``backend.people.linking`` may merge the person into an existing one
+    with the same verified handle; a new username may yield a merge
+    suggestion. Returns the stored identity.
     """
     unknown = set(profile) - set(PROFILE_FIELDS)
     if unknown:
@@ -79,6 +100,7 @@ async def upsert_identity(
     given = {k: v for k, v in profile.items() if v is not None}
 
     identity = await get_identity_by_external(db, channel, external_id)
+    new_username = bool(given.get("username")) and (identity is None or identity.username != given["username"])
     if identity is None:
         person = Person(is_self=bool(given.get("is_self")))
         db.add(person)
@@ -107,7 +129,12 @@ async def upsert_identity(
     if given.get("is_self"):
         await db.execute(update(Person).where(Person.id == identity.person_id).values(is_self=True))
     await db.flush()
-    await _sync_contact_points(db, identity)
+    from backend.people import linking  # business rule, kept out of the data layer's imports
+    if await _sync_contact_points(db, identity):
+        await db.flush()
+        await linking.on_contact_points_added(db, identity)
+    elif new_username:
+        await linking.on_username_changed(db, identity)
     if commit:
         await db.commit()
     return identity

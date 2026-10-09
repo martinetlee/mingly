@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getPrefs } from '../api/client'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { notifyNewMessage, setCachedNotifPref } from '../lib/notifications'
-import { chatUrl } from '../lib/routes'
+import { openConversationUrl } from '../lib/routes'
 
 /**
  * The single place desktop notifications are raised from (one per incoming
@@ -22,7 +22,7 @@ export default function NotificationBridge() {
   useWsEvent('resync', loadPref)
 
   useWsEvent('new_message', (event) => {
-    notifyNewMessage(event, (conversationId) => navigate(chatUrl(conversationId)))
+    notifyNewMessage(event, (conversationId) => navigate(openConversationUrl(conversationId)))
   })
 
   return null

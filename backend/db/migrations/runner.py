@@ -47,7 +47,16 @@ BACKUPS_KEPT = 3
 
 MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
     # Schema generation 2 starts here: create_all builds the full v2 schema
-    # (backend/db/models.py) on a fresh DB. Append schema changes from 1 on.
+    # (backend/db/models.py) on a fresh DB, and creates tables added later
+    # on an existing one. Append column / data changes from 1 on.
+    (
+        1,
+        "Connector sync state on accounts; channel labels on conversations",
+        [
+            "ALTER TABLE accounts ADD COLUMN sync_state_json TEXT",
+            "ALTER TABLE conversations ADD COLUMN labels_json TEXT",
+        ],
+    ),
 ]
 
 

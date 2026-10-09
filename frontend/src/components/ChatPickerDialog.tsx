@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Loader2, Search } from 'lucide-react'
 import type { Conversation } from '../api/types'
-import { getConversations, searchConversationsLocal } from '../api/client'
+import { getConversations, MESSENGERS_ONLY, searchConversationsLocal } from '../api/client'
 import { conversationTitle, kindLabel } from '../lib/conversation'
 import ChannelIcon from './ChannelIcon'
 import ConversationAvatar from './ConversationAvatar'
@@ -38,13 +38,15 @@ export default function ChatPickerDialog({ open, onClose, onSelect, filter, titl
 
 function PickerBody({ onSelect, filter, busy }: { onSelect: (chat: Conversation) => void; filter?: (chat: Conversation) => boolean; busy?: boolean }) {
   const [search, setSearch] = useState('')
-  const recent = useLatestQuery(['picker-recent'], () => getConversations(100, 0, 'recent'))
-  // Beyond the 100 most recent: search the local conversation store
+  // Chat-only picker: email threads belong to Mail
+  const recent = useLatestQuery(['picker-recent'], () => getConversations(100, 0, 'recent', undefined, undefined, undefined, MESSENGERS_ONLY))
+  // Beyond the 100 most recent: search the local conversation store (every channel)
   const found = useDebouncedQuery(search, (q) => searchConversationsLocal(q).then((r) => r.local), { minLength: 1 })
   const q = search.trim().toLowerCase()
-  const all: Conversation[] = q
+  const all: Conversation[] = (q
     ? (found.data ?? (recent.data ?? []).filter((c) => conversationTitle(c).toLowerCase().includes(q)))
     : (recent.data ?? [])
+  ).filter((c) => c.kind !== MESSENGERS_ONLY.excludeKind)
   const list = filter ? all.filter(filter) : all
   const loading = q ? found.pending && !found.data : recent.loading
 

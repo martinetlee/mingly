@@ -59,6 +59,16 @@ async def _reopen_catchup(conversation_id: int) -> None:
             await db.commit()
 
 
+def _channel(conv: Conversation) -> Optional[str]:
+    from sqlalchemy.orm.exc import DetachedInstanceError
+
+    from backend.serializers import channel_of
+    try:
+        return channel_of(conv)
+    except DetachedInstanceError:  # account not loaded on a detached row
+        return None
+
+
 async def message_received(conv: Conversation, saved: Message, *, sender_profile: Optional[dict] = None) -> None:
     """Fan out a newly stored live message.
 
@@ -68,6 +78,13 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
     if not saved.is_outgoing:
         await _reopen_catchup(conv.id)
         await stamp_triage(conv.id, saved.date)
+
+    channel = _channel(conv)
+    participants = None
+    if channel not in (None, "telegram"):  # Telegram stores no participants
+        from backend.ingest.service import message_participants
+        async with AsyncSessionLocal() as db:
+            participants = (await message_participants(db, [saved.id])).get(saved.id)
 
     # Full serialized message lets the frontend apply the event as a delta.
     await ws_manager.broadcast({
@@ -79,7 +96,7 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
         "text": (saved.text or saved.subject or "")[:120],
         "is_tracked": conv.is_tracked,
         "is_outgoing": saved.is_outgoing,
-        "message": message_out(saved),
+        "message": message_out(saved, participants),
     })
 
     if saved.is_outgoing:
@@ -95,7 +112,7 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
         await enqueue_scam(conv.id, [saved.id], "realtime")
 
     from backend.api.settings import get_notif_pref
-    pref = get_notif_pref()
+    pref = get_notif_pref(channel)
     if pref == "all" or (pref == "tracked" and conv.is_tracked):
         body_text = (saved.text or saved.subject or "")[:100]
         body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text

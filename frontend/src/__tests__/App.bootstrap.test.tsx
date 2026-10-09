@@ -4,26 +4,24 @@
  * - an unlocked vault without a valid token for *this* tab → Unlock, not the full app
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, act, cleanup } from '@testing-library/react'
+import { render, screen, act, cleanup, fireEvent } from '@testing-library/react'
 import { ApiError } from '../lib/http'
 
 const getVaultStatus = vi.fn()
-const getAuthStatus = vi.fn()
 const validateSession = vi.fn()
 
 vi.mock('../api/client', async (orig) => ({
   ...(await orig<typeof import('../api/client')>()),
   getVaultStatus: () => getVaultStatus(),
-  getAuthStatus: () => getAuthStatus(),
   validateSession: () => validateSession(),
   openExternalUrl: vi.fn(),
   getPrefs: vi.fn(async () => ({})),
 }))
 
 const { stub } = vi.hoisted(() => ({ stub: (name: string) => ({ default: () => name }) }))
-vi.mock('../pages/Onboarding', () => ({ default: ({ needsVaultSetup }: { needsVaultSetup?: boolean }) => <div>{needsVaultSetup ? 'CreateVault' : 'Onboarding'}</div> }))
-vi.mock('../pages/Unlock', () => stub('UnlockScreen'))
-vi.mock('../pages/LlmSetup', () => stub('LlmSetup'))
+vi.mock('../pages/Onboarding', () => ({ default: ({ onComplete }: { onComplete: () => void }) => <button onClick={onComplete}>CreateVault</button> }))
+vi.mock('../pages/Unlock', () => ({ default: ({ onUnlock }: { onUnlock: () => void }) => <button onClick={onUnlock}>UnlockScreen</button> }))
+vi.mock('../pages/LlmSetup', () => ({ default: ({ onComplete }: { onComplete: () => void }) => <button onClick={onComplete}>LlmSetup</button> }))
 vi.mock('../components/Layout', () => stub('MainApp'))
 vi.mock('../pages/Home', () => stub('Home'))
 vi.mock('../pages/Chats', () => stub('Chats'))
@@ -70,7 +68,6 @@ describe('App bootstrap', () => {
     validateSession.mockResolvedValue({ valid: false, vault_status: 'unlocked' })
     render(<App />)
     expect(await screen.findByText('UnlockScreen')).toBeTruthy()
-    expect(getAuthStatus).not.toHaveBeenCalled()
   })
 
   it('stale token rejected by /api/session/validate → cleared, Unlock', async () => {
@@ -87,18 +84,30 @@ describe('App bootstrap', () => {
     expect(await screen.findByText('CreateVault')).toBeTruthy()
   })
 
-  it('valid token → app', async () => {
+  it('valid token → app, whatever accounts are connected (no channel gate)', async () => {
     setSessionToken('good')
     validateSession.mockResolvedValue({ valid: true, vault_status: 'unlocked', idle_timeout_minutes: 720 })
-    getAuthStatus.mockResolvedValue({ authenticated: true })
     render(<App />)
     expect(await screen.findByText('MainApp')).toBeTruthy()
   })
 
-  it('401 from /api/auth/status → Unlock (not backend-unavailable)', async () => {
-    setSessionToken('good')
-    validateSession.mockResolvedValue({ valid: true, vault_status: 'unlocked' })
-    getAuthStatus.mockRejectedValue(new ApiError('Session expired', { status: 401, code: 'session_expired', path: '/api/auth/status' }))
+  it('unlock → app directly', async () => {
+    validateSession.mockResolvedValue({ valid: false, vault_status: 'locked' })
+    render(<App />)
+    fireEvent.click(await screen.findByText('UnlockScreen'))
+    expect(await screen.findByText('MainApp')).toBeTruthy()
+  })
+
+  it('new vault → LLM setup → app', async () => {
+    validateSession.mockResolvedValue({ valid: false, vault_status: 'unset' })
+    render(<App />)
+    fireEvent.click(await screen.findByText('CreateVault'))
+    fireEvent.click(await screen.findByText('LlmSetup'))
+    expect(await screen.findByText('MainApp')).toBeTruthy()
+  })
+
+  it('401 while validating → Unlock (not backend-unavailable)', async () => {
+    validateSession.mockRejectedValue(new ApiError('Session expired', { status: 401, code: 'session_expired', path: '/api/session/validate' }))
     render(<App />)
     expect(await screen.findByText('UnlockScreen')).toBeTruthy()
     expect(screen.queryByText("Can't reach the Mingly backend")).toBeNull()

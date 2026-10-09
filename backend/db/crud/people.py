@@ -8,13 +8,18 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from sqlalchemy import desc, exists, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.crud.organizations import get_or_create_organization
 from backend.db.crud.text import contains_ci
 from backend.db.crud.conversations import one_to_one_filter
-from backend.db.models import Conversation, Identity, Message, Organization, Person, PersonPosition
+from backend.db.crud.messages import with_reply_preview
+from backend.db.models import (
+    Conversation, Identity, Message, MessageParticipant, Organization, Person, PersonMerge, PersonMergeSuggestion,
+    PersonPosition,
+)
 from backend.db.results import affected_rows
 
 __all__ = [
@@ -35,7 +40,14 @@ __all__ = [
     "get_person_position",
     "add_person_position",
     "direct_conversation_ids_for_person",
+    "person_timeline",
     "set_address_book",
+    "list_merge_suggestions",
+    "get_merge_suggestion",
+    "merge_suggestion_for_pair",
+    "add_merge_suggestion",
+    "get_person_merge",
+    "merges_into_person",
 ]
 
 VALID_STATUSES = {"new", "active", "nurturing", "stalled", "cold", "needs_reply"}
@@ -327,6 +339,42 @@ async def direct_conversation_ids_for_person(db: AsyncSession, person_id: int) -
     )).scalars().all())
 
 
+async def person_timeline(
+    db: AsyncSession,
+    person_id: int,
+    limit: int = 50,
+    before: Optional[datetime] = None,
+    before_id: Optional[int] = None,
+) -> tuple[list, bool]:
+    """The person's messages across channels, newest first: both directions of
+    their one-to-one conversations, what they sent anywhere else (groups), and
+    messages they're a from/to/cc/bcc participant of (email). Each message
+    appears once. Rows are ``with_reply_preview`` rows; paging is the keyset
+    ``(date, id)`` — ``before`` alone excludes everything at or after that
+    instant, ``before_id`` breaks ties at exactly ``before``.
+
+    Returns ``(rows, has_more)``."""
+    direct = _direct_conversations().where(Identity.person_id == person_id).subquery()
+    own_identities = select(Identity.id).where(Identity.person_id == person_id)
+    q = with_reply_preview().where(or_(
+        Message.conversation_id.in_(select(direct.c.conversation_id)),
+        Message.sender_identity_id.in_(own_identities),
+        exists().where(
+            MessageParticipant.message_id == Message.id,
+            MessageParticipant.identity_id.in_(own_identities),
+        ),
+    ))
+    if before is not None:
+        if before_id is not None:
+            q = q.where(or_(Message.date < before, (Message.date == before) & (Message.id < before_id)))
+        else:
+            q = q.where(Message.date < before)
+    rows = (await db.execute(
+        q.order_by(desc(Message.date), desc(Message.id)).limit(limit + 1)
+    )).all()
+    return rows[:limit], len(rows) > limit
+
+
 # ── Writes ───────────────────────────────────────────────────────────────────
 
 def apply_person_fields(
@@ -457,3 +505,67 @@ async def set_address_book(db: AsyncSession, channel: str, contact_identity_ids:
     res = await db.execute(q.values(is_contact=False, updated_at=datetime.utcnow()))
     return affected_rows(res)
 
+
+
+# ── Merge suggestions & merge log (logic: backend.people.linking) ───────────
+
+async def list_merge_suggestions(
+    db: AsyncSession, person_id: Optional[int] = None, status: str = "pending"
+) -> list[PersonMergeSuggestion]:
+    """Suggestions with ``status`` (all of them, or those involving
+    ``person_id``), most likely first."""
+    q = select(PersonMergeSuggestion).where(PersonMergeSuggestion.status == status)
+    if person_id is not None:
+        q = q.where(or_(PersonMergeSuggestion.person_a_id == person_id, PersonMergeSuggestion.person_b_id == person_id))
+    q = q.order_by(desc(PersonMergeSuggestion.score), desc(PersonMergeSuggestion.id))
+    return list((await db.execute(q)).scalars().all())
+
+
+async def get_merge_suggestion(db: AsyncSession, suggestion_id: int) -> Optional[PersonMergeSuggestion]:
+    return await db.get(PersonMergeSuggestion, suggestion_id)
+
+
+async def merge_suggestion_for_pair(db: AsyncSession, a: int, b: int) -> Optional[PersonMergeSuggestion]:
+    lo, hi = sorted((a, b))
+    return (await db.execute(select(PersonMergeSuggestion).where(
+        PersonMergeSuggestion.person_a_id == lo, PersonMergeSuggestion.person_b_id == hi,
+    ))).scalar_one_or_none()
+
+
+async def add_merge_suggestion(
+    db: AsyncSession, a: int, b: int, reason: str, score: float, status: str = "pending"
+) -> bool:
+    """Record that people ``a`` and ``b`` may be the same human. An existing
+    pair keeps its status (a dismissed one stays dismissed); a pending one
+    takes the higher score's reason. Returns whether a row was created.
+    Doesn't commit."""
+    if a == b:
+        return False
+    lo, hi = sorted((a, b))
+    existing = await merge_suggestion_for_pair(db, lo, hi)
+    if existing is not None:
+        if existing.status == "pending" and status == "pending" and score > existing.score:
+            existing.score, existing.reason = score, reason
+        elif status == "dismissed":
+            existing.status = "dismissed"
+        return False
+    created = (await db.execute(
+        sqlite_insert(PersonMergeSuggestion)
+        .values(person_a_id=lo, person_b_id=hi, reason=reason, score=score, status=status,
+                created_at=datetime.utcnow())
+        .on_conflict_do_nothing(index_elements=[PersonMergeSuggestion.person_a_id, PersonMergeSuggestion.person_b_id])
+        .returning(PersonMergeSuggestion.id)
+    )).scalar()
+    return created is not None
+
+
+async def get_person_merge(db: AsyncSession, merge_id: int) -> Optional[PersonMerge]:
+    return await db.get(PersonMerge, merge_id)
+
+
+async def merges_into_person(db: AsyncSession, person_id: int, include_undone: bool = False) -> list[PersonMerge]:
+    """Merges whose surviving person is ``person_id``, newest first."""
+    q = select(PersonMerge).where(PersonMerge.into_person_id == person_id)
+    if not include_undone:
+        q = q.where(PersonMerge.undone_at.is_(None))
+    return list((await db.execute(q.order_by(desc(PersonMerge.id)))).scalars().all())

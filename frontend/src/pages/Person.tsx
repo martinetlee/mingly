@@ -1,19 +1,29 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState, type ReactNode } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { ArrowLeft, MessageSquare, Star, CloudOff, RefreshCw, Phone, BookUser } from 'lucide-react'
+import {
+  ArrowLeft, MessageSquare, Star, CloudOff, RefreshCw, Phone, BookUser, GitMerge, Unlink, Undo2, X,
+} from 'lucide-react'
 import type { Identity, Person as PersonT } from '../api/types'
 import { getPerson, getTelegramProfile, setPersonImportant, ApiError } from '../api/client'
+import {
+  detachIdentity, dismissMergeSuggestion, getPersonMergeSuggestions, getPersonMerges, mergePerson,
+  suggestionOther, suggestionReasonLabel, undoPersonMerge, type MergeResult, type MergeSuggestion,
+  type PersonMergeRecord,
+} from '../api/peopleLinks'
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { invalidatePerson } from '../hooks/usePersonSummary'
-import { errorMessage } from '../lib/toast'
-import { chatUrl } from '../lib/routes'
+import { errorMessage, toast } from '../lib/toast'
+import { chatUrl, personUrl } from '../lib/routes'
 import { fmtRelative } from '../utils/time'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard from '../components/PersonCard'
 import PersonNotes from '../components/PersonNotes'
+import PersonTimeline from '../components/PersonTimeline'
 import ChannelIcon, { channelLabel } from '../components/ChannelIcon'
+import MergePersonDialog from '../components/MergePersonDialog'
+import { useConfirm } from '../components/ui'
 
 /**
  * A person: the CRM record (local, works offline) plus every identity they
@@ -190,17 +200,8 @@ export default function Person() {
           }
         />
 
-        {/* Identities: one per channel handle */}
-        {person.identities.length > 0 && (
-          <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4">
-            <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-500">
-              Identities ({person.identities.length})
-            </h3>
-            <div className="flex flex-col gap-2.5">
-              {person.identities.map((ident) => <IdentityRow key={ident.id} identity={ident} />)}
-            </div>
-          </div>
-        )}
+        {/* Linked accounts (identities) + possible duplicates, merges, undo */}
+        <LinkedAccounts person={person} onPersonChange={setPerson} />
 
         {/* Local CRM data: contact info + positions */}
         <div className="mb-6 flex flex-col gap-4">
@@ -209,6 +210,9 @@ export default function Person() {
 
         {/* Notes timeline (agent + user) */}
         <PersonNotes personId={person.id} />
+
+        {/* Messages across every channel: chats, groups, email */}
+        <PersonTimeline personId={person.id} />
 
         {/* Common chats (Telegram) */}
         {profile?.common_conversations && profile.common_conversations.length > 0 && (
@@ -235,7 +239,216 @@ export default function Person() {
   )
 }
 
-function IdentityRow({ identity }: { identity: Identity }) {
+/**
+ * The person's linked accounts (one identity per channel handle), people who
+ * may be the same human (merge / dismiss), "merge with…" search, detaching
+ * an account into its own person, and undo of merges into this person.
+ */
+function LinkedAccounts({ person, onPersonChange }: { person: PersonT; onPersonChange: (p: PersonT) => void }) {
+  const confirm = useConfirm()
+  const [merging, setMerging] = useState(false)
+  const personId = person.id
+  const suggestionsQ = useLatestQuery(
+    ['person-merge-suggestions', personId],
+    (signal) => getPersonMergeSuggestions(personId, signal),
+  )
+  const mergesQ = useLatestQuery(['person-merges', personId], (signal) => getPersonMerges(personId, signal))
+  const suggestions = suggestionsQ.data ?? []
+  const merges = mergesQ.data ?? []
+
+  const idRef = useRef(personId)
+  idRef.current = personId
+  const relatedRef = useRef<Set<number>>(new Set())
+  relatedRef.current = new Set(suggestions.map((s) => suggestionOther(s, personId).id))
+
+  const refetchLinks = useCallback(() => {
+    void suggestionsQ.refetch()
+    void mergesQ.refetch()
+  }, [suggestionsQ, mergesQ])
+  useWsEvent('person_changed', (e) => {
+    if (e.person_id === idRef.current || relatedRef.current.has(e.person_id)) refetchLinks()
+  })
+
+  /** Reload this person after a linking change elsewhere in the graph */
+  const reloadPerson = async (id: number) => {
+    const fresh = await getPerson(id)
+    if (idRef.current === id) onPersonChange(fresh)
+  }
+
+  const merged = (result: MergeResult, otherId: number, otherName: string) => {
+    invalidatePerson(otherId)
+    const { merge_id: _mergeId, ...fresh } = result
+    if (idRef.current === result.id) onPersonChange(fresh)
+    refetchLinks()
+    toast.success(`Merged ${otherName} into ${result.name}`)
+  }
+
+  const mergeSuggested = (s: MergeSuggestion) => {
+    const other = suggestionOther(s, personId)
+    void confirm({
+      title: `Merge ${other.name} into ${person.name}?`,
+      message: `${suggestionReasonLabel(s.reason)}. ${other.name}'s linked accounts, positions and notes move here and ${other.name} is removed. You can undo this.`,
+      confirmLabel: 'Merge',
+      onConfirm: async () => merged(await mergePerson(personId, other.id), other.id, other.name),
+    })
+  }
+
+  const dismiss = useAsyncAction(async (s: MergeSuggestion) => {
+    await dismissMergeSuggestion(s.id)
+    suggestionsQ.setData((prev) => prev?.filter((x) => x.id !== s.id))
+  }, { errorContext: 'Couldn\'t dismiss suggestion' })
+
+  const detach = (ident: Identity) => {
+    const label = identityLabel(ident)
+    void confirm({
+      title: `Detach ${label}?`,
+      message: `This ${channelLabel(ident.channel)} account becomes a separate person, with its conversations. Notes and positions stay with ${person.name}.`,
+      confirmLabel: 'Detach',
+      onConfirm: async () => {
+        const created = await detachIdentity(personId, ident.id)
+        invalidatePerson(created.id)
+        await reloadPerson(personId)
+        refetchLinks()
+        toast.success(`${label} is now a separate person`)
+      },
+    })
+  }
+
+  const undo = (m: PersonMergeRecord) => {
+    const name = m.from_name || 'the merged person'
+    void confirm({
+      title: `Undo merge of ${name}?`,
+      message: `${name} becomes a separate person again with the accounts, positions and notes that came with the merge.`,
+      confirmLabel: 'Undo merge',
+      onConfirm: async () => {
+        const restored = await undoPersonMerge(m.id)
+        invalidatePerson(restored.id)
+        await reloadPerson(personId)
+        refetchLinks()
+        toast.success(`${restored.name} is a separate person again`)
+      },
+    })
+  }
+
+  const canDetach = person.identities.length > 1
+  return (
+    <div className="mb-6 rounded-xl bg-slate-800 border border-slate-700/50 p-4" data-testid="linked-accounts">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">
+          Linked accounts ({person.identities.length})
+        </h3>
+        {!person.is_self && (
+          <button
+            onClick={() => setMerging(true)}
+            className="flex items-center gap-1 text-xs text-slate-400 hover:text-indigo-300 transition-colors"
+          >
+            <GitMerge size={12} /> Merge with…
+          </button>
+        )}
+      </div>
+      <div className="flex flex-col gap-2.5">
+        {person.identities.map((ident) => (
+          <IdentityRow
+            key={ident.id}
+            identity={ident}
+            action={canDetach ? (
+              <button
+                onClick={() => detach(ident)}
+                title="Detach into a separate person"
+                aria-label={`Detach ${identityLabel(ident)}`}
+                className="rounded p-0.5 text-slate-600 hover:text-slate-300 transition-colors"
+              >
+                <Unlink size={12} />
+              </button>
+            ) : null}
+          />
+        ))}
+      </div>
+
+      {suggestions.length > 0 && (
+        <div className="mt-4 border-t border-slate-700/50 pt-3" data-testid="merge-suggestions">
+          <h4 className="mb-2 text-[11px] font-medium uppercase tracking-wider text-slate-500">Possible duplicates</h4>
+          <div className="flex flex-col gap-2">
+            {suggestions.map((s) => {
+              const other = suggestionOther(s, personId)
+              return (
+                <div key={s.id} className="flex items-center gap-2 text-sm">
+                  <span className="flex items-center gap-1">
+                    {other.identities.map((i) => <ChannelIcon key={i.id} channel={i.channel} size={11} />)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">
+                    <Link to={personUrl(other.id)} className="text-gray-200 hover:text-indigo-300">{other.name}</Link>
+                    <span className="ml-1.5 text-xs text-slate-500">{suggestionReasonLabel(s.reason)}</span>
+                  </span>
+                  <button
+                    onClick={() => mergeSuggested(s)}
+                    className="rounded px-2 py-0.5 text-xs text-indigo-300 hover:bg-indigo-500/10"
+                  >
+                    Merge
+                  </button>
+                  <button
+                    onClick={() => dismiss.run(s)}
+                    disabled={dismiss.pending}
+                    title="Not the same person"
+                    aria-label={`Dismiss ${other.name}`}
+                    className="rounded p-0.5 text-slate-500 hover:text-slate-300 disabled:opacity-50"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {merges.length > 0 && (
+        <div className="mt-4 border-t border-slate-700/50 pt-3" data-testid="recent-merges">
+          <h4 className="mb-2 text-[11px] font-medium uppercase tracking-wider text-slate-500">Merged here</h4>
+          <div className="flex flex-col gap-2">
+            {merges.map((m) => (
+              <div key={m.id} className="flex items-center gap-2 text-xs text-slate-400">
+                <span className="flex items-center gap-1">
+                  {m.identities.map((i) => <ChannelIcon key={i.id} channel={i.channel} size={11} />)}
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {m.from_name || 'Someone'}
+                  <span className="ml-1.5 text-slate-500">
+                    {m.automatic ? 'linked automatically' : 'merged'}
+                    {m.created_at ? ` ${fmtRelative(m.created_at)}` : ''}
+                  </span>
+                </span>
+                <button
+                  onClick={() => undo(m)}
+                  className="flex items-center gap-1 rounded px-2 py-0.5 text-slate-400 hover:bg-slate-700/50 hover:text-slate-200"
+                >
+                  <Undo2 size={11} /> Undo
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {merging && (
+        <MergePersonDialog
+          person={person}
+          onClose={() => setMerging(false)}
+          onMerged={(result, other) => {
+            setMerging(false)
+            merged(result, other.id, other.name)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function identityLabel(identity: Identity): string {
+  return identity.display_name || (identity.username ? `@${identity.username}` : identity.external_id)
+}
+
+function IdentityRow({ identity, action }: { identity: Identity; action?: ReactNode }) {
   const handle = identity.username ? `@${identity.username}` : identity.channel === 'telegram' ? null : identity.external_id
   return (
     <div className="flex items-center gap-3 text-sm" data-testid="identity">
@@ -254,6 +467,7 @@ function IdentityRow({ identity }: { identity: Identity }) {
           <BookUser size={12} />
         </span>
       )}
+      {action}
     </div>
   )
 }

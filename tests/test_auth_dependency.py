@@ -51,11 +51,8 @@ def test_generate_new_token_keeps_old_valid():
 
 @pytest.fixture
 def app():
-    # Patch heavy dependencies so the app can be constructed without Telegram
-    with patch("backend.api.auth.get_client", return_value=None), \
-         patch("backend.api.auth.has_credentials", return_value=False):
-        from backend.api.router import create_app
-        return create_app()
+    from backend.api.router import create_app
+    return create_app()
 
 
 @pytest.mark.asyncio
@@ -114,7 +111,7 @@ async def test_vault_init_returns_session_token(app):
 async def test_vault_unlock_returns_session_token(app):
     """POST /api/auth/vault/unlock should return a session_token."""
     with patch("backend.api.auth.unlock_vault_fn", return_value=True), \
-         patch("backend.api.auth.has_credentials", return_value=False):
+         patch("backend.telegram.client.has_credentials", return_value=False):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://127.0.0.1"
         ) as client:

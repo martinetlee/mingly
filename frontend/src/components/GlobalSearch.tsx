@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2, AlertTriangle } from 'lucide-react'
 import type { ChannelName, GlobalSearchResults, TelegramDirectoryResult } from '../api/types'
 import { globalSearch, searchTelegramDirectory, ensureTelegramConversation } from '../api/client'
-import { chatUrl, personUrl } from '../lib/routes'
+import { chatUrl, conversationUrl, openConversationUrl, personUrl } from '../lib/routes'
 import { conversationTitle, isDirectoryHit, kindLabel } from '../lib/conversation'
 import ChannelIcon from './ChannelIcon'
 import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
@@ -49,7 +49,7 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
       label: conversationTitle(c),
       sublabel: c.kind === 'direct' ? 'direct' : c.kind.replace('_', ' '),
       icon: 'chat',
-      navigateTo: chatUrl(c.id),
+      navigateTo: conversationUrl(c),
       channel: c.channel,
     })
   }
@@ -84,7 +84,7 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
       label: m.subject ? `${m.subject} — ${m.text}` : m.text,
       sublabel: `${m.conversation_title}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtRelative(m.date)}`,
       icon: 'message',
-      navigateTo: chatUrl(m.conversation_id, m.message_id),
+      navigateTo: openConversationUrl(m.conversation_id, m.message_id),
     })
   }
 

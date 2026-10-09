@@ -1,5 +1,6 @@
 /**
- * Left pane of the Chats page: folders, search (local + Telegram directory +
+ * Left pane of the Chats page (messengers only — email lives in Mail): channel
+ * chips, folders, search (local + Telegram directory +
  * message content), tag filter, sort, the chat list, and the archived/hidden panels.
  * Presentational: every action is a callback into Chats, which owns the one
  * selectChat() entry point.
@@ -9,13 +10,13 @@ import type { ReactNode, Ref, RefObject } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { VirtuosoHandle } from 'react-virtuoso'
 import { Radio, EyeOff, Eye, FileText, Search, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert, Tag as TagIcon, Columns3, X, Loader2 } from 'lucide-react'
-import type { Conversation, Folder, Tag, TelegramDirectoryResult } from '../../api/types'
+import type { ChannelName, Conversation, Folder, Tag, TelegramDirectoryResult } from '../../api/types'
 import type { MessageSearchResult } from '../../api/client'
-import { getArchivedConversations, getHiddenConversations, getTags } from '../../api/client'
+import { getArchivedConversations, getHiddenConversations, getTags, MESSENGERS_ONLY } from '../../api/client'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { errorMessage } from '../../lib/toast'
 import { fmtDate } from '../../utils/time'
-import ChannelIcon from '../../components/ChannelIcon'
+import ChannelIcon, { channelLabel } from '../../components/ChannelIcon'
 import SenderAvatar from '../../components/SenderAvatar'
 import ConversationAvatar from '../../components/ConversationAvatar'
 import { conversationTitle, isDirectoryHit, kindLabel } from '../../lib/conversation'
@@ -324,10 +325,40 @@ function TagFilter({ selectedTag, onSelectTag }: { selectedTag: Tag | null; onSe
   )
 }
 
-/** Archived / hidden chats drawer (fetched when opened, refetched after a restore) */
-function SideDrawer({ kind, onRestore }: { kind: 'archived' | 'hidden'; onRestore: (chat: Conversation) => Promise<boolean> }) {
+/** "All" + one chip per connected messenger channel */
+function ChannelChips({ channels, selected, onSelect }: {
+  channels: ChannelName[]; selected: string | null; onSelect: (channel: string | null) => void
+}) {
+  return (
+    <div role="group" aria-label="Filter by channel" className="flex flex-wrap gap-1 border-b border-slate-700/50 px-3 pt-2 pb-1.5">
+      {[null, ...channels].map((c) => (
+        <button
+          key={c ?? 'all'}
+          onClick={() => onSelect(c)}
+          aria-pressed={selected === c}
+          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+            selected === c ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-700'
+          }`}
+        >
+          {c && <span aria-hidden><ChannelIcon channel={c} className="text-current" /></span>}
+          {c ? channelLabel(c) : 'All'}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Archived / hidden chats drawer (fetched when opened, refetched after a restore).
+ * Messengers only, narrowed to the selected channel like the list. */
+function SideDrawer({ kind, channel, onRestore }: {
+  kind: 'archived' | 'hidden'; channel: string | null; onRestore: (chat: Conversation) => Promise<boolean>
+}) {
   const [open, setOpen] = useState(false)
-  const list = useLatestQuery([kind], () => (kind === 'archived' ? getArchivedConversations() : getHiddenConversations()), { enabled: open })
+  const query = useLatestQuery([kind], () => (kind === 'archived' ? getArchivedConversations() : getHiddenConversations()), { enabled: open })
+  const list = {
+    ...query,
+    data: query.data?.filter((c) => c.kind !== MESSENGERS_ONLY.excludeKind && (channel == null || c.channel === channel)),
+  }
   const Icon = kind === 'archived' ? Archive : Eye
   const label = kind === 'archived' ? 'archived' : 'hidden'
   return (
@@ -379,6 +410,10 @@ export interface ChatListPaneProps {
   onResizeStart: (e: React.MouseEvent) => void
   listRef: RefObject<HTMLDivElement>
   searchInputRef: RefObject<HTMLInputElement>
+  /** Connected messenger channels; chips show when there are two or more */
+  channels: ChannelName[]
+  selectedChannel: string | null
+  onSelectChannel: (channel: string | null) => void
   folders: Folder[]
   selectedFolder: number | null
   onSelectFolder: (id: number | null) => void
@@ -482,6 +517,9 @@ export default function ChatListPane(p: ChatListPaneProps) {
         className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-indigo-500 transition-colors z-10"
         aria-hidden="true"
       />
+      {p.channels.length > 1 && (
+        <ChannelChips channels={p.channels} selected={p.selectedChannel} onSelect={p.onSelectChannel} />
+      )}
       {p.folders.length > 0 && (
         <div className="folder-scrollbar flex overflow-x-auto border-b border-slate-700/50 px-2 pt-2 pb-1 gap-1">
           {[{ id: null as number | null, title: 'All' }, ...p.folders].map((f) => (
@@ -583,8 +621,8 @@ export default function ChatListPane(p: ChatListPaneProps) {
         )}
       </div>
 
-      <SideDrawer kind="archived" onRestore={p.actions.archive} />
-      <SideDrawer kind="hidden" onRestore={p.actions.unhide} />
+      <SideDrawer kind="archived" channel={p.selectedChannel} onRestore={p.actions.archive} />
+      <SideDrawer kind="hidden" channel={p.selectedChannel} onRestore={p.actions.unhide} />
 
       {contextMenu && (
         <ChatContextMenu

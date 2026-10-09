@@ -133,6 +133,7 @@ class _Fake(Connector):
     capabilities = frozenset({Capability.SEND})
 
     def __init__(self, channel="fake", configured=True, start_result=True):
+        super().__init__(account_id=None)
         self.channel = channel
         self._configured = configured
         self._start_result = start_result
@@ -163,6 +164,10 @@ class _Fake(Connector):
     async def logout(self):
         pass
 
+    @property
+    def account_key(self):
+        return f"{self.channel}:default"
+
 
 @pytest.mark.asyncio
 async def test_manager_starts_configured_connectors_and_isolates_failures():
@@ -182,9 +187,101 @@ async def test_manager_starts_configured_connectors_and_isolates_failures():
 def test_describe_lists_sorted_capabilities():
     d = _Fake("a").describe()
     assert d == {
-        "account_key": "a:default", "channel": "a", "display_name": "Fake",
+        "account_key": "a:default", "account_id": None, "channel": "a", "display_name": "Fake",
         "capabilities": ["send"], "configured": True, "status": {"state": "ready", "error": None},
     }
+
+
+class _Mail(Connector):
+    """A multi-account channel whose sign-in creates the account row."""
+    channel = "mail"
+    display_name = "Mail"
+    capabilities = frozenset({Capability.SEND, Capability.SUBJECT})
+    multi_account = True
+    started: list = []
+
+    def is_configured(self):
+        return self.account_id is not None
+
+    async def start(self):
+        _Mail.started.append(self.account_id)
+        return True
+
+    async def stop(self):
+        pass
+
+    def status(self):
+        return ConnectorStatus("ready" if self.account_id else "stopped")
+
+    async def begin_auth(self, params):
+        return AuthStep("flow-1", "fields")
+
+    async def continue_auth(self, flow_id, data):
+        from backend.db.models import Account
+        async with AsyncSessionLocal() as s:
+            acc = Account(channel="mail", external_id=data["email"], label=data["email"])
+            s.add(acc)
+            await s.commit()
+            self.account_id = acc.id
+        return AuthStep(flow_id, "done")
+
+    async def logout(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_multi_account_sign_in_registers_and_starts_the_new_account(db):
+    import asyncio
+    m = ConnectorManager()
+    m.register_factory("mail", "Mail", lambda account_id: _Mail(account_id))
+    _Mail.started = []
+    assert {"channel": "mail", "display_name": "Mail", "multi_account": True} in m.channels()
+
+    step = await m.begin_auth("mail", {})
+    assert step.kind == "fields" and m.all() == []  # provisional until the flow creates the account
+    done = await m.continue_auth(step.flow_id, {"email": "a@x.com"})
+    await asyncio.sleep(0.01)
+    [conn] = m.all()
+    assert done.kind == "done" and conn.account_key == f"mail:{conn.account_id}" and _Mail.started == [conn.account_id]
+    from backend.connectors.base import AuthFlowError
+    with pytest.raises(AuthFlowError):
+        await m.continue_auth(step.flow_id, {})
+
+    # A second account of the same channel is a separate connector.
+    step = await m.begin_auth("mail", {})
+    await m.continue_auth(step.flow_id, {"email": "b@x.com"})
+    await asyncio.sleep(0.01)
+    assert len(m.all()) == 2 and m.get("mail") is None  # ambiguous by channel name
+
+    # A fresh manager (app restart) recreates both from the accounts table.
+    m2 = ConnectorManager()
+    m2.register_factory("mail", "Mail", lambda account_id: _Mail(account_id))
+    await m2.load_accounts()
+    assert sorted(c.account_id for c in m2.all()) == sorted(c.account_id for c in m.all())
+    assert m2.for_account("mail", conn.account_id).account_id == conn.account_id
+
+    # Removing deletes the account (and with it its conversations).
+    conv = await f.conversation(db, "t1", title="Hi", kind="email_thread", channel="mail")
+    assert conv.account_id in [c.account_id for c in m2.all()]
+    assert await m2.remove(f"mail:{conv.account_id}") is True
+    from backend.db.models import Account, Conversation
+    async with AsyncSessionLocal() as s:
+        assert await s.get(Account, conv.account_id) is None
+        assert await s.get(Conversation, conv.id) is None
+
+
+@pytest.mark.asyncio
+async def test_capabilities_come_from_the_conversations_own_account(db):
+    from backend.connectors import manager as mgr_mod
+    from backend.serializers import conversation_out
+    conn = _Mail(None)
+    conv = await f.conversation(db, "t1", title="Hi", kind="email_thread", channel="mail")
+    conn.account_id = conv.account_id
+    other = await f.conversation(db, "t2", title="Other", kind="email_thread", channel="mail")
+    with patch.object(mgr_mod.manager, "_connectors", {**mgr_mod.manager._connectors, conn.account_key: conn}):
+        assert conversation_out(conv)["capabilities"] == ["send", "subject"]
+        if other.account_id != conv.account_id:
+            assert conversation_out(other)["capabilities"] == []
 
 
 # ── Telegram sign-in step machine ────────────────────────────────────────────
@@ -276,7 +373,8 @@ async def test_accounts_routes_list_and_drive_auth(api):
     with patch.object(telegram, "is_configured", return_value=False):
         r = await api.get("/api/accounts")
         assert r.status_code == 200
-        [tg] = [a for a in r.json() if a["channel"] == "telegram"]
+        assert {"channel": "telegram", "display_name": "Telegram", "multi_account": False} in r.json()["channels"]
+        [tg] = [a for a in r.json()["accounts"] if a["channel"] == "telegram"]
         assert tg["account_key"] == "telegram:default" and tg["configured"] is False
         assert "forum_topics" in tg["capabilities"]
 
@@ -386,3 +484,22 @@ async def test_only_newest_backups_are_kept(tmp_path):
     kept = sorted(p.name for p in backups.iterdir())
     assert len(kept) == runner.BACKUPS_KEPT
     assert "m-pre-v5-20200101000000.db" not in kept and "m-pre-v5-20200101000001.db" not in kept
+
+
+@pytest.mark.asyncio
+async def test_telegram_sign_in_can_restart_at_the_credentials_step():
+    from backend.telegram import connector as mod
+    conn = mod.TelegramConnector()
+    with patch.object(mod.tg_client, "has_credentials", return_value=True):
+        assert [f.name for f in (await conn.begin_auth({})).fields] == ["phone"]
+        step = await conn.begin_auth({"reset_credentials": True})
+    assert [f.name for f in step.fields] == ["api_id", "api_hash"]
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_carries_each_accounts_label(api, db):
+    acc = await f.account(db)
+    acc.label = "@ann"
+    await db.commit()
+    [tg] = [a for a in (await api.get("/api/accounts")).json()["accounts"] if a["channel"] == "telegram"]
+    assert tg["label"] == "@ann"

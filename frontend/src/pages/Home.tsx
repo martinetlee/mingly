@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { chatUrl, personUrl } from '../lib/routes'
+import { conversationUrl, personUrl } from '../lib/routes'
 import { canStartConversation, NoConversationError, openDirectConversation } from '../lib/directConversation'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { Mail, MessageSquare, ArrowRight, FileText, AtSign, RefreshCw, ListChecks, Users, AlertCircle } from 'lucide-react'
@@ -20,6 +20,7 @@ import MentionCard, {
   type MentionFilter,
 } from '../components/MentionCard'
 import { BriefingEntryList } from '../components/BriefingEntryCard'
+import NoAccountsNotice from '../components/NoAccountsNotice'
 import { errorMessage, toast } from '../lib/toast'
 import { fmtRelative } from '../utils/time'
 
@@ -42,7 +43,7 @@ export default function Home() {
   const messagePerson = useAsyncAction(async (p: Person) => {
     try {
       const conv = await openDirectConversation(p.id, { canStart: canStartConversation(p.identities) })
-      navigate(chatUrl(conv.id))
+      navigate(conversationUrl(conv))
     } catch (e) {
       if (e instanceof NoConversationError) { toast.info(`No conversation with ${p.name} yet`); return }
       throw e
@@ -108,6 +109,8 @@ export default function Home() {
       <div className="mx-auto max-w-3xl px-6 py-8">
         {/* Greeting */}
         <h1 className="text-2xl font-bold text-gray-100 mb-6">{getGreeting()}</h1>
+
+        <NoAccountsNotice className="mb-8" />
 
         {/* Stats */}
         <div className="mb-8">

@@ -1,5 +1,6 @@
 /**
- * The paginated chat list for one filter key {sortBy, tagId, workspaceId}.
+ * The paginated chat list for one filter key {sortBy, tagId, workspaceId,
+ * channel}. Chats is the messengers space: email threads are never listed.
  *
  * - Latest-only: a response is applied only if its key is still current and
  *   no newer replace (key change / reload) started since — a slow page for
@@ -11,7 +12,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Conversation } from '../../api/types'
-import { getConversations, isAbortError } from '../../api/client'
+import { getConversations, isAbortError, MESSENGERS_ONLY } from '../../api/client'
 import { reportError } from '../../lib/toast'
 
 export const CHAT_PAGE = 50
@@ -22,6 +23,8 @@ export interface ChatListKey {
   sortBy: 'recent' | 'unread' | 'alpha'
   tagId: number | null
   workspaceId: number | null
+  /** One messenger channel; null/absent = all of them */
+  channel?: string | null
 }
 
 export interface ChatListState {
@@ -52,7 +55,10 @@ export function useChatList(listKey: ChatListKey) {
 
   const fetchPage = useCallback((limit: number, offset: number, signal?: AbortSignal) => {
     const p = paramsRef.current
-    return getConversations(limit, offset, p.sortBy, p.tagId ?? undefined, p.workspaceId ?? undefined, signal)
+    return getConversations(
+      limit, offset, p.sortBy, p.tagId ?? undefined, p.workspaceId ?? undefined, signal,
+      { ...MESSENGERS_ONLY, channel: p.channel ?? null },
+    )
   }, [])
 
   const replace = useCallback(async (limit: number) => {

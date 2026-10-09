@@ -1,55 +1,84 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ApiError } from '../../lib/http'
 
 vi.mock('../../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/client')>()),
-  hasCredentials: vi.fn(),
-  sendCode: vi.fn(),
   initVault: vi.fn(),
 }))
+vi.mock('../../api/accounts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/accounts')>()),
+  getAccounts: vi.fn(),
+  beginAccountAuth: vi.fn(),
+  continueAccountAuth: vi.fn(),
+}))
 
-import { hasCredentials, sendCode, initVault } from '../../api/client'
+import { initVault } from '../../api/client'
+import { beginAccountAuth, continueAccountAuth, getAccounts } from '../../api/accounts'
+import type { AuthStep } from '../../api/accounts'
 import Onboarding from '../Onboarding'
+
+const step = (over: Partial<AuthStep>): AuthStep => ({
+  flow_id: 'f1', kind: 'fields', title: null, message: null, fields: [],
+  qr_payload: null, auth_url: null, poll: false, ...over,
+})
 
 beforeEach(() => vi.clearAllMocks())
 afterEach(cleanup)
 
+function setPassword() {
+  fireEvent.change(screen.getByPlaceholderText('At least 6 characters'), { target: { value: 'secret123' } })
+  const confirm = screen.getByPlaceholderText('Repeat password')
+  fireEvent.change(confirm, { target: { value: 'secret123' } })
+  fireEvent.keyDown(confirm, { key: 'Enter' })
+  return confirm
+}
+
 describe('Onboarding', () => {
-  it('Enter while a code request is in flight does not send a second one', async () => {
-    vi.mocked(hasCredentials).mockResolvedValue({ has_credentials: true })
-    let resolve!: (v: { phone_code_hash: string }) => void
-    vi.mocked(sendCode).mockImplementation(() => new Promise((r) => { resolve = r }))
-    render(<Onboarding onComplete={vi.fn()} />)
-
-    const phone = await screen.findByPlaceholderText('+1 234 567 8900')
-    fireEvent.change(phone, { target: { value: '+15551234567' } })
-    fireEvent.keyDown(phone, { key: 'Enter' })
-    fireEvent.keyDown(phone, { key: 'Enter' })
-    fireEvent.keyDown(phone, { key: 'Enter' })
-    expect(sendCode).toHaveBeenCalledTimes(1)
-
-    await act(async () => { resolve({ phone_code_hash: 'h' }) })
-    expect(await screen.findByText('Enter the code')).toBeTruthy()
-  })
-
-  it('surfaces a failed step with the server message', async () => {
+  it('surfaces a failed step with the server message (single request)', async () => {
     vi.mocked(initVault).mockRejectedValue(new ApiError('Vault already exists', { status: 409, code: 'http', path: '/api/auth/vault/init' }))
-    render(<Onboarding needsVaultSetup onComplete={vi.fn()} />)
-    fireEvent.change(screen.getByPlaceholderText('At least 6 characters'), { target: { value: 'secret123' } })
-    const confirm = screen.getByPlaceholderText('Repeat password')
-    fireEvent.change(confirm, { target: { value: 'secret123' } })
-    fireEvent.keyDown(confirm, { key: 'Enter' })
+    render(<Onboarding onComplete={vi.fn()} />)
+    const confirm = setPassword()
     fireEvent.keyDown(confirm, { key: 'Enter' })
     expect(await screen.findByText('Vault already exists')).toBeTruthy()
     expect(initVault).toHaveBeenCalledTimes(1)
   })
 
-  it('shows Retry instead of guessing a step when the setup probe fails', async () => {
-    vi.mocked(hasCredentials).mockRejectedValueOnce(new ApiError('Network error', { status: 0, code: 'network', path: '/api/auth/has-credentials' }))
-    vi.mocked(hasCredentials).mockResolvedValueOnce({ has_credentials: false })
-    render(<Onboarding onComplete={vi.fn()} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('Connect to Telegram')).toBeTruthy()
+  it('after the password, offers the channels and can be skipped', async () => {
+    vi.mocked(initVault).mockResolvedValue({ success: true, session_token: 't' })
+    vi.mocked(getAccounts).mockResolvedValue({
+      accounts: [],
+      channels: [{ channel: 'telegram', display_name: 'Telegram', multi_account: false }],
+    })
+    const onComplete = vi.fn()
+    render(<Onboarding onComplete={onComplete} />)
+    setPassword()
+    expect(await screen.findByRole('button', { name: 'Telegram' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('connects the chosen channel through the generic sign-in, then continues', async () => {
+    vi.mocked(initVault).mockResolvedValue({ success: true, session_token: 't' })
+    vi.mocked(getAccounts).mockResolvedValue({
+      accounts: [],
+      channels: [{ channel: 'telegram', display_name: 'Telegram', multi_account: false }],
+    })
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      title: 'Your phone number',
+      fields: [{ name: 'phone', label: 'Phone number', kind: 'phone', required: true, placeholder: '+1 555 123 4567' }],
+    }))
+    vi.mocked(continueAccountAuth).mockResolvedValue(step({ kind: 'done', message: 'Signed in as ann' }))
+    const onComplete = vi.fn()
+    render(<Onboarding onComplete={onComplete} />)
+    setPassword()
+    fireEvent.click(await screen.findByRole('button', { name: 'Telegram' }))
+    fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '+15551234567' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText('Signed in as ann')).toBeTruthy()
+    expect(beginAccountAuth).toHaveBeenCalledWith('telegram', {})
+    expect(continueAccountAuth).toHaveBeenCalledWith('telegram', 'f1', { phone: '+15551234567' })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(onComplete).toHaveBeenCalledTimes(1)
   })
 })

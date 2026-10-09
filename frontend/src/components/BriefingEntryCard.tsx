@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, Newspaper, Radio, RefreshCw, Star, X } from 
 import type { LucideIcon } from 'lucide-react'
 import type { BriefingHistoryEntry, BriefingSource, BriefingSummary } from '../api/types'
 import Markdown from './Markdown'
-import { chatUrl, personUrl } from '../lib/routes'
+import { openConversationUrl, personUrl } from '../lib/routes'
 
 type Category = BriefingSummary['category']
 
@@ -68,7 +68,7 @@ const isHistoryEntry = (e: BriefingSummary | BriefingHistoryEntry): e is Briefin
 /** Navigate to a cited source message */
 export function useCiteNavigation() {
   const navigate = useNavigate()
-  return useCallback((src: BriefingSource) => navigate(chatUrl(src.conversation_id, src.message_id)), [navigate])
+  return useCallback((src: BriefingSource) => navigate(openConversationUrl(src.conversation_id, src.message_id)), [navigate])
 }
 
 interface CardProps {
@@ -90,7 +90,7 @@ export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
         {(() => {
           // Important-person entries link to the person; the rest to their conversation
           const to = entry.person_id != null && entry.conversation_id == null ? personUrl(entry.person_id)
-            : entry.conversation_id != null ? chatUrl(entry.conversation_id) : null
+            : entry.conversation_id != null ? openConversationUrl(entry.conversation_id) : null
           return to
             ? <Link to={to} className={`text-[11px] font-medium hover:underline ${accent.name}`}>{entry.conversation_title}</Link>
             : <p className={`text-[11px] font-medium ${accent.name}`}>{entry.conversation_title}</p>
