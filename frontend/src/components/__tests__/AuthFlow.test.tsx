@@ -137,3 +137,19 @@ describe('AuthFlow', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toHaveProperty('disabled', false)
   })
 })
+
+describe('AuthFlow under StrictMode', () => {
+  afterEach(() => cleanup())
+
+  it('shows the first step after the dev double-mount (no stuck "Starting sign-in…")', async () => {
+    const { StrictMode } = await import('react')
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      kind: 'error', title: 'signal-cli is required', message: 'Install it with Homebrew: brew install signal-cli',
+    }))
+    await act(async () => {
+      render(<StrictMode><AuthFlow accountKey="signal" onClose={() => {}} /></StrictMode>)
+    })
+    expect(screen.queryByText(/Starting sign-in/)).toBeNull()
+    expect(screen.getByText(/brew install signal-cli/)).toBeTruthy()
+  })
+})

@@ -56,7 +56,11 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
   const paramsRef = useRef(params)
   paramsRef.current = params
   const mounted = useRef(true)
-  useEffect(() => () => { mounted.current = false }, [])
+  // Set on every mount: StrictMode (and any remount) unmounts and mounts again
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   const adopt = useCallback((next: AuthStep, prev: AuthStep | null) => {
     if (!mounted.current) return
