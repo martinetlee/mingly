@@ -67,7 +67,8 @@ def _isolate_data_dir(tmp_path, monkeypatch):
     fake = tmp_path / "appdata"
     fake.mkdir()
     monkeypatch.setattr(config, "DATA_DIR", fake)
-    for name, mod in list(sys.modules.items()):
+    # copy() is atomic; list(items()) races with imports on worker threads
+    for name, mod in sys.modules.copy().items():
         if not name.startswith("backend") or mod is None:
             continue
         for attr, val in list(vars(mod).items()):
