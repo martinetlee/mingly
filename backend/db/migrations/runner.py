@@ -9,17 +9,32 @@ startup to abort so that partial schema states are never silently ignored.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sqlite3
 from datetime import datetime
+from pathlib import Path
+from typing import Awaitable, Callable, Optional, Union
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 logger = logging.getLogger(__name__)
 
+# A migration step is a SQL string, or an async callable for data transforms
+# that SQL can't express safely (JSON rewrites, per-row mapping). A callable
+# runs inside the migration's transaction and must be a no-op on empty tables
+# (a fresh DB already has the final schema from create_all).
+MigrationStep = Union[str, Callable[[AsyncConnection], Awaitable[None]]]
+
+# Pending migrations at or above this version rewrite user data in place, so
+# an existing database is backed up first (see _backup_before).
+BACKUP_FROM_VERSION = 120
+BACKUPS_KEPT = 3
+
 # ---------------------------------------------------------------------------
 # Migration definitions -- append-only list.
-# Each entry: (version: int, description: str, stmts: list[str])
+# Each entry: (version: int, description: str, steps: list[MigrationStep])
 #
 # Rules:
 #   * Never reorder or delete entries.
@@ -30,7 +45,7 @@ logger = logging.getLogger(__name__)
 #     cleanup before a constraint change (see migration 4 for example).
 # ---------------------------------------------------------------------------
 
-MIGRATIONS: list[tuple[int, str, list[str]]] = [
+MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
     (
         1,
         "Add is_hidden and is_briefing columns to chats",
@@ -619,7 +634,13 @@ async def run_migrations(conn: AsyncConnection, *, fresh: bool = False) -> None:
     applied = await _applied_versions(conn)
     await conn.commit()
 
-    for version, description, stmts in all_migrations():
+    migrations = all_migrations()
+    if not fresh:
+        pending = [v for v, _, _ in migrations if v not in applied and v >= BACKUP_FROM_VERSION]
+        if pending:
+            await _backup_before(conn, min(pending))
+
+    for version, description, stmts in migrations:
         if version in applied:
             continue
 
@@ -653,10 +674,47 @@ async def run_migrations(conn: AsyncConnection, *, fresh: bool = False) -> None:
         await conn.commit()
 
 
+async def _database_path(conn: AsyncConnection) -> Optional[Path]:
+    rows = (await conn.exec_driver_sql("PRAGMA database_list")).all()
+    main = next((r[2] for r in rows if r[1] == "main"), "")
+    return Path(main) if main else None  # "" = in-memory DB
+
+
+def _copy_database(src: Path, dest: Path) -> None:
+    # sqlite3's online backup reads a consistent snapshot (WAL included),
+    # unlike a raw file copy.
+    with sqlite3.connect(str(src)) as source, sqlite3.connect(str(dest)) as target:
+        source.backup(target)
+
+
+async def _backup_before(conn: AsyncConnection, version: int) -> Optional[Path]:
+    """Snapshot the database before data-rewriting migrations. Restoring the
+    file and running the previous build is the rollback (there are no
+    down-migrations). Keeps the newest BACKUPS_KEPT snapshots."""
+    src = await _database_path(conn)
+    if src is None or not src.exists():
+        return None
+    backups = src.parent / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    dest = backups / f"{src.stem}-pre-v{version}-{datetime.utcnow():%Y%m%d%H%M%S}.db"
+    await asyncio.to_thread(_copy_database, src, dest)
+    logger.info("Backed up database to %s before migration %d", dest, version)
+    for old in sorted(backups.glob(f"{src.stem}-pre-v*.db"), key=lambda p: p.stat().st_mtime)[:-BACKUPS_KEPT]:
+        old.unlink(missing_ok=True)
+    return dest
+
+
 async def _apply_statements(
-    conn: AsyncConnection, version: int, stmts: list[str], *, fresh: bool = False
+    conn: AsyncConnection, version: int, stmts: list[MigrationStep], *, fresh: bool = False
 ) -> None:
     for stmt in stmts:
+        if callable(stmt):
+            try:
+                await stmt(conn)
+            except Exception as exc:
+                logger.error("Migration %d failed in step %s -- %s", version, getattr(stmt, "__name__", stmt), exc)
+                raise
+            continue
         try:
             await conn.execute(sa.text(stmt))
         except Exception as exc:
@@ -674,7 +732,7 @@ async def _apply_statements(
                 raise
 
 
-def all_migrations() -> list[tuple[int, str, list[str]]]:
+def all_migrations() -> list[tuple[int, str, list[MigrationStep]]]:
     """Core migrations plus per-area modules, ordered by version."""
     from backend.db.migrations import areas
 

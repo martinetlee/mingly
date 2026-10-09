@@ -19,7 +19,7 @@ from backend import instance
 from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import admin, archive, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, session, settings, llm, tags, intelligence, profiles, translate, workspaces
+from backend.api import accounts, admin, archive, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, session, settings, llm, tags, intelligence, profiles, translate, workspaces
 from backend.api.dependencies import HostOriginMiddleware, is_valid_session_token, require_session_token, validate_ws_origin
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ def create_app() -> FastAPI:
 
     # All other API routes require a valid session token
     protected = [Depends(require_session_token)]
+    app.include_router(accounts.router, prefix="/api/accounts", tags=["accounts"], dependencies=protected)
     app.include_router(admin.router, prefix="/api/admin", tags=["admin"], dependencies=protected)
     app.include_router(chats.router, prefix="/api/chats", tags=["chats"], dependencies=protected)
     app.include_router(archive.router, prefix="/api/archive", tags=["archive"], dependencies=protected)

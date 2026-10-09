@@ -9,7 +9,8 @@ from telethon.tl.types import User
 
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, CatchUpItem, Message
+from backend.db.models import Chat, Message
+from backend.ingest import fanout
 from backend.serialization import iso_utc
 from backend.telegram.runtime import runtime
 from backend.telegram.convert import extract_reactions, is_storable, message_to_row, media_type
@@ -22,84 +23,6 @@ from backend.telegram.entities import (
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
-
-try:
-    import Foundation
-    import objc
-
-    _NS_AVAILABLE = True
-except ImportError:
-    _NS_AVAILABLE = False
-
-
-# ---------------------------------------------------------------------------
-# Notification delegate – handles clicks and navigates to the right chat
-# ---------------------------------------------------------------------------
-_webview_window = None  # set by main.py after webview.create_window()
-
-
-def set_webview_window(window):
-    """Register the pywebview window so notification clicks can navigate."""
-    global _webview_window
-    _webview_window = window
-
-
-def _handle_notification_click(chat_id):
-    """Handle notification click: bring app to front and navigate to chat via WebSocket."""
-    try:
-        from AppKit import NSApplication
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-    except Exception:
-        pass
-
-    # Clicks arrive on the Cocoa main thread: hand the broadcast to the
-    # server loop that owns the sockets.
-    if chat_id:
-        ws_manager.broadcast_threadsafe({"type": "navigate_to_chat", "chat_id": int(chat_id)})
-
-
-if _NS_AVAILABLE:
-    NSUserNotificationCenter = objc.lookUpClass("NSUserNotificationCenter")
-    NSUserNotification = objc.lookUpClass("NSUserNotification")
-
-    class _NotificationDelegate(Foundation.NSObject):
-        """Delegate that forces notification display and handles clicks."""
-
-        def userNotificationCenter_shouldPresentNotification_(
-            self, center, notification
-        ):
-            return True
-
-        def userNotificationCenter_didActivateNotification_(
-            self, center, notification
-        ):
-            user_info = notification.userInfo()
-            chat_id = user_info.get("chat_id") if user_info else None
-            _handle_notification_click(chat_id)
-
-    _delegate = _NotificationDelegate.alloc().init()
-    _center = NSUserNotificationCenter.defaultUserNotificationCenter()
-    if _center is not None:
-        _center.setDelegate_(_delegate)
-
-
-def _send_native_notification(
-    title: str, body: str, chat_id: Optional[int] = None
-) -> None:
-    """Send a macOS native notification attributed to the Mingly app."""
-    if _NS_AVAILABLE:
-        try:
-            n = NSUserNotification.alloc().init()
-            n.setTitle_(title)
-            n.setInformativeText_(body)
-            if chat_id is not None:
-                n.setUserInfo_({"chat_id": chat_id})
-            NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
-            return
-        except Exception:
-            pass
-    logger.debug("Native notification unavailable, skipping")
-
 
 # ---------------------------------------------------------------------------
 # Dialogs
@@ -512,18 +435,6 @@ async def repair_garbled_text(batch: int = 100) -> int:
 # Live update handlers
 # ---------------------------------------------------------------------------
 
-async def _enqueue_scam(chat_id: int, tg_ids: list[int], source: str) -> None:
-    try:
-        from backend.scam.queue import enqueue_targets
-    except ImportError:
-        logger.debug("backend.scam.queue not available; skipping scam enqueue")
-        return
-    try:
-        await enqueue_targets(chat_id, tg_ids, source=source)
-    except Exception:
-        logger.exception("Scam enqueue failed for chat %s msgs %s", chat_id, tg_ids)
-
-
 async def _ensure_chat_for_event(db, event, msg):
     """Return the Chat row for an incoming event, creating it if new."""
     chat = await crud.get_chat_by_telegram_id(db, event.chat_id)
@@ -542,11 +453,6 @@ async def _ensure_chat_for_event(db, event, msg):
     )
     logger.info("Auto-created chat %s (%s) from incoming message", chat.name, event.chat_id)
     return chat
-
-
-def _serialize(saved) -> dict:
-    from backend.api.chats import _serialize_msg
-    return _serialize_msg((saved, None, None, None))
 
 
 async def _sync_after_service_message(chat_id: int) -> None:
@@ -587,61 +493,14 @@ def register_event_handlers(client) -> list:
                 logger.error("Failed to persist incoming message %s in chat %s", msg.id, event.chat_id)
                 return
 
-            if not saved.is_outgoing:
-                # Auto-reopen handled catch-up items on new incoming messages
-                catchup_item = (await db.execute(
-                    select(CatchUpItem).where(
-                        CatchUpItem.chat_telegram_id == event.chat_id,
-                        CatchUpItem.status == "handled",
-                    )
-                )).scalar_one_or_none()
-                if catchup_item:
-                    catchup_item.status = "pending"
-                    catchup_item.handled_at = None
-                    catchup_item.updated_at = datetime.utcnow()
-                    await db.commit()
-                try:
-                    await crud.mark_workspace_triage(db, event.chat_id, saved.date)
-                except Exception:
-                    logger.warning("workspace triage stamp failed for chat %s", event.chat_id, exc_info=True)
-
-        # Full serialized message lets the frontend apply the event as a delta.
-        await ws_manager.broadcast({
-            "type": "new_message",
-            "chat_id": event.chat_id,
-            "message_id": saved.id,
-            "chat_name": chat.name,
-            "sender_name": saved.sender_name,
-            "text": (saved.text or "")[:120],
-            "is_tracked": chat.is_tracked,
-            "is_outgoing": saved.is_outgoing,
-            "message": _serialize(saved),
-        })
+        profile = None
+        if sender is not None:
+            profile = {"bio": getattr(sender, "about", None), "is_contact": getattr(sender, "contact", None)}
+        await fanout.message_received(chat, saved, sender_profile=profile)
 
         if media_type(msg) == "photo" and not saved.media_path:
             from backend.telegram.media import enqueue_photo
             enqueue_photo(event.chat_id, msg)
-
-        if not saved.is_outgoing and saved.text:
-            if sender is not None and saved.sender_id:
-                try:
-                    from backend.scam.queue import note_sender_profile
-                    note_sender_profile(
-                        saved.sender_id,
-                        bio=getattr(sender, "about", None),
-                        is_contact=getattr(sender, "contact", None),
-                    )
-                except ImportError:
-                    pass
-            await _enqueue_scam(event.chat_id, [saved.tg_message_id], "realtime")
-
-        if not saved.is_outgoing:
-            from backend.api.settings import get_notif_pref
-            pref = get_notif_pref()
-            if pref == "all" or (pref == "tracked" and chat.is_tracked):
-                body_text = (saved.text or "")[:100]
-                body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
-                _send_native_notification(chat.name, body, chat_id=event.chat_id)
 
     async def on_message_edited(event):
         msg = event.message
@@ -658,14 +517,7 @@ def register_event_handlers(client) -> list:
             saved = await crud.save_message(db, **message_to_row(msg, event.chat_id, sender, forum=chat.is_forum))
         if saved is None or saved._change is None:
             return
-        await ws_manager.broadcast({
-            "type": "message_edited",
-            "chat_id": event.chat_id,
-            "tg_message_id": saved.tg_message_id,
-            "message": _serialize(saved),
-        })
-        if not saved.is_outgoing and saved.text and saved.text != old_text:
-            await _enqueue_scam(event.chat_id, [saved.tg_message_id], "edit")
+        await fanout.message_edited(event.chat_id, saved, text_changed=saved.text != old_text)
 
     async def on_raw_update(update_obj):
         if isinstance(update_obj, (UpdateNewMessage, UpdateNewChannelMessage)):
@@ -690,12 +542,7 @@ def register_event_handlers(client) -> list:
                     select(Message).where(Message.chat_id == chat_id, Message.tg_message_id == update_obj.msg_id)
                 )).scalars().first()
             if saved is not None:
-                await ws_manager.broadcast({
-                    "type": "message_edited",
-                    "chat_id": chat_id,
-                    "tg_message_id": saved.tg_message_id,
-                    "message": _serialize(saved),
-                })
+                await fanout.message_edited(chat_id, saved, text_changed=False)
         elif isinstance(update_obj, (UpdatePinnedMessages, UpdatePinnedChannelMessages)):
             if isinstance(update_obj, UpdatePinnedChannelMessages):
                 chat_id = tl_utils.get_peer_id(PeerChannel(update_obj.channel_id))

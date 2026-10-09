@@ -4,12 +4,14 @@ import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.errors import PhoneCodeInvalidError
 
-from backend.telegram.client import get_client, persist_session, get_me, has_credentials, log_out
+from backend.connectors.manager import manager
+from backend.telegram.client import get_client, get_me, has_credentials
+from backend.telegram.connector import InvalidCredentials, connector as telegram
 from backend.telegram.runtime import runtime
 from backend.secrets import (
-    save_secret, get_secret, delete_secret,
+    get_secret,
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault, lock as lock_vault_fn,
 )
 from backend.api.dependencies import generate_session_token, require_session_token, revoke_session
@@ -24,8 +26,9 @@ router = APIRouter()
 # out or overwrite the API credentials.
 protected = [Depends(require_session_token)]
 
-# How long unlock waits for Telegram to connect before answering anyway; the
-# start keeps going in the background and reports via `telegram_status`.
+# How long unlock waits for the connectors to connect before answering
+# anyway; the start keeps going in the background and reports via
+# `connector_status` / `telegram_status`.
 UNLOCK_START_TIMEOUT = 12
 
 
@@ -60,23 +63,19 @@ class VaultResetRequest(BaseModel):
     confirm: str = ""
 
 
-async def _start_runtime_bounded() -> None:
-    """Start the Telegram runtime, waiting at most UNLOCK_START_TIMEOUT.
+async def _start_connectors_bounded() -> None:
+    """Start every configured connector, waiting at most UNLOCK_START_TIMEOUT.
 
     Connect + authorize + handler registration are fast; syncing always runs in
     the background. A slow network must not hang the unlock screen, so after
     the timeout the start continues detached."""
-    if not has_credentials():
+    if not any(c.is_configured() for c in manager.all()):
         return
-    task = spawn(runtime.ensure_started(), name="runtime_ensure_started")
+    task = spawn(manager.start_all(), name="connectors_start_all")
     try:
         await asyncio.wait_for(asyncio.shield(task), UNLOCK_START_TIMEOUT)
     except asyncio.TimeoutError:
-        logger.warning("Telegram start still in progress after %ss; continuing in background", UNLOCK_START_TIMEOUT)
-    except Exception:
-        # Logged by ensure_started / spawn; the vault is unlocked regardless and
-        # /api/auth/status reports the runtime error.
-        logger.warning("Telegram runtime failed to start after unlock", exc_info=True)
+        logger.warning("Connector start still in progress after %ss; continuing in background", UNLOCK_START_TIMEOUT)
 
 
 # ── Vault endpoints ───────────────────────────────────────────────────────────
@@ -107,9 +106,9 @@ async def do_unlock_vault(req: VaultPasswordRequest):
     if already_unlocked:
         # Re-unlock (second window, double Enter): only issue a token. The
         # runtime is idempotent, so make sure it is up without re-initialising.
-        spawn(runtime.ensure_started(), name="runtime_ensure_started")
+        spawn(manager.start_all(), name="connectors_start_all")
     else:
-        await _start_runtime_bounded()
+        await _start_connectors_bounded()
     return {"success": True, "session_token": token}
 
 
@@ -121,7 +120,7 @@ async def do_reset_vault(req: VaultResetRequest):
         raise HTTPException(status_code=400, detail='Type "RESET" to confirm')
     from backend.api.mcp import clear_mcp_sessions
 
-    await runtime.stop()
+    await manager.stop_all()
     clear_mcp_sessions()
     reset_vault()
     # Revoke every session token and close every WebSocket.
@@ -131,10 +130,11 @@ async def do_reset_vault(req: VaultResetRequest):
 
 @router.post("/lock", dependencies=protected)
 async def do_lock_vault():
-    """Lock the vault: stop Telegram (dropping the in-memory session), forget
-    the decrypted secrets (lock listeners drop derived caches, tokens and MCP
-    sessions), then revoke every session token and close every WebSocket."""
-    await runtime.stop()
+    """Lock the vault: stop every connector (dropping in-memory sessions),
+    forget the decrypted secrets (lock listeners drop derived caches, tokens
+    and MCP sessions), then revoke every session token and close every
+    WebSocket."""
+    await manager.stop_all()
     lock_vault_fn()
     await revoke_session()
     return {"success": True}
@@ -175,19 +175,10 @@ async def auth_resolve_1password(req: ResolveRequest):
 @router.post("/setup", dependencies=protected)
 async def auth_setup(req: CredentialsRequest):
     """Save Telegram API credentials to the vault and connect a client."""
-    api_id = req.api_id.strip()
-    api_hash = req.api_hash.strip()
-    if not api_id.isdigit():
-        raise HTTPException(status_code=400, detail="API ID must be a number")
-    if not api_hash:
-        raise HTTPException(status_code=400, detail="API Hash is required")
-    save_secret("tg_api_id", api_id)
-    save_secret("tg_api_hash", api_hash)
     try:
-        # New credentials: tear down any running runtime, then connect fresh.
-        authorized = await runtime.replace_client()
-        if authorized:
-            await runtime.ensure_started()
+        await telegram.save_credentials(req.api_id, req.api_hash)
+    except InvalidCredentials as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Credentials saved but client init failed: {e}")
     return {"success": True}
@@ -224,41 +215,29 @@ async def auth_status():
 @router.post("/send-code", dependencies=protected)
 async def auth_send_code(req: PhoneRequest):
     try:
-        phone_code_hash = await runtime.send_code(req.phone)
+        phone_code_hash = await telegram.send_code(req.phone)
         return {"phone_code_hash": phone_code_hash}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-async def _after_sign_in() -> dict:
-    await persist_session()
-    await runtime.ensure_started()
-    me = await get_me()
-    return {"username": me.username, "first_name": me.first_name}
-
-
 @router.post("/verify-code", dependencies=protected)
 async def auth_verify_code(req: CodeRequest):
     try:
-        await runtime.sign_in(req.phone, req.code, req.phone_code_hash)
-    except SessionPasswordNeededError:
-        return {"success": True, "requires_2fa": True}
+        info = await telegram.sign_in(req.phone, req.code, req.phone_code_hash)
     except PhoneCodeInvalidError:
         raise HTTPException(status_code=400, detail="Invalid code. Please try again.")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    try:
-        info = await _after_sign_in()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if info is None:
+        return {"success": True, "requires_2fa": True}
     return {"success": True, "requires_2fa": False, **info}
 
 
 @router.post("/verify-2fa", dependencies=protected)
 async def auth_verify_2fa(req: PasswordRequest):
     try:
-        await runtime.sign_in_2fa(req.password)
-        info = await _after_sign_in()
+        info = await telegram.sign_in_2fa(req.password)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, **info}
@@ -268,9 +247,7 @@ async def auth_verify_2fa(req: PasswordRequest):
 async def auth_logout():
     """Log out of Telegram: terminate the server-side session, stop all sync
     work and forget the local session string."""
-    await runtime.stop(disconnect=False)
-    await log_out()
-    delete_secret("telegram_session")
+    await telegram.logout()
     # The vault stays unlocked (the user continues to onboarding with the same
     # session token), so only drop the sockets carrying the old account's events.
     from backend.ws.manager import ws_manager

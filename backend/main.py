@@ -4,7 +4,7 @@ import threading
 from backend.api.router import create_app
 from backend.config import API_HOST, API_PORT
 from backend.db.database import init_db
-from backend.telegram.runtime import runtime
+from backend.connectors.manager import manager
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
@@ -63,22 +63,22 @@ async def on_startup():
     if shield_enabled():
         _start_shield()
 
-    # The vault is normally still locked here (credentials unavailable), in
-    # which case unlock starts the runtime. If it is already unlocked (dev
-    # reload), start now — in the background so startup never blocks on it.
     # Clear media files truncated by the old non-atomic downloader before the
     # UI can be served them (local-only; no Telegram needed).
     from backend.telegram.media import audit_media_files
     spawn(audit_media_files(), name="media_audit")
 
+    # The vault is normally still locked here (credentials unavailable), in
+    # which case unlock starts the connectors. If it is already unlocked (dev
+    # reload), start now — in the background so startup never blocks on it.
     from backend.secrets import vault_status
     if vault_status() == "unlocked":
-        spawn(runtime.ensure_started(), name="startup_runtime")
+        spawn(manager.start_all(), name="startup_connectors")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await runtime.stop()
+    await manager.stop_all()
 
 if __name__ == "__main__":
     import sys
@@ -152,12 +152,12 @@ if __name__ == "__main__":
     set_focus_callback(lambda: (window.restore(), window.show()))
 
     # Register the window so notification clicks can navigate to chats
-    from backend.telegram.sync import set_webview_window
+    from backend.notify import set_webview_window
     set_webview_window(window)
 
     webview.start()
 
-    # Window closed: let uvicorn run its lifespan shutdown (runtime.stop,
+    # Window closed: let uvicorn run its lifespan shutdown (connectors stop,
     # WebSocket close, engine.dispose) instead of killing the daemon thread
     # mid-write. Bounded so a stuck shutdown can't hang the quit.
     server.should_exit = True

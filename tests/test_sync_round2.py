@@ -305,9 +305,10 @@ async def test_lock_endpoint_stops_runtime_and_locks_vault(db_engine):
 
 @pytest.mark.asyncio
 async def test_vault_lock_from_any_path_stops_runtime():
+    from backend.connectors import manager as mgr_mod
     from backend.telegram import runtime as rt_mod
     with patch.object(rt_mod.runtime, "stop", AsyncMock()) as stop:
-        rt_mod._on_vault_lock()
+        mgr_mod._on_vault_lock()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
     assert stop.called

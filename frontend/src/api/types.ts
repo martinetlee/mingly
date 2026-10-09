@@ -898,6 +898,8 @@ export type WSEvent =
   | { type: 'media_ready'; chat_id: number; tg_message_id: number; media_type: string; media_url: string }
   | { type: 'chat_sync_failed'; chat_id: number; status: 'unavailable' | 'error' | 'skipped'; error: string | null }
   | { type: 'telegram_status'; state: TelegramRuntimeState; error: string | null }
+  /** Channel-neutral runtime status; telegram_status is the Telegram-only alias */
+  | { type: 'connector_status'; channel: string; account_key: string; state: string; error: string | null }
   | { type: 'catchup_summaries_updated'; job_id: string }
   | ({ type: 'archive_progress' } & ArchiveStatus)
   | { type: 'person_notes_changed'; telegram_id: number }

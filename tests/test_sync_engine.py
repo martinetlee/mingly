@@ -366,6 +366,7 @@ class FakeEvent:
 
 @pytest.mark.asyncio
 async def test_new_message_for_unknown_chat_is_saved_and_edits_propagate(db_engine):
+    from backend.ingest import fanout
     from backend.telegram import sync
     client = FakeRuntimeClient()
     handlers = {cb.__name__: cb for cb, _ in sync.register_event_handlers(client)}
@@ -378,7 +379,7 @@ async def test_new_message_for_unknown_chat_is_saved_and_edits_propagate(db_engi
     msg = tg_msg(1, "meet at 5")
     msg.get_sender = AsyncMock(return_value=user)
     with patch.object(sync.ws_manager, "broadcast", capture), \
-         patch.object(sync, "_enqueue_scam", AsyncMock()) as scam, \
+         patch.object(fanout, "enqueue_scam", AsyncMock()) as scam, \
          patch("backend.api.settings.get_notif_pref", return_value="none"):
         await handlers["on_new_message"](FakeEvent(msg, 77, user))
         edited = tg_msg(1, "meet at 6", edit_date=datetime(2026, 1, 1, 13, tzinfo=UTC))

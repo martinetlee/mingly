@@ -1,8 +1,9 @@
 """The single owner of the live Telegram runtime.
 
-Startup, vault unlock, onboarding (setup / verify-code / verify-2fa) all call
-``runtime.ensure_started()``; logout, vault reset and shutdown call
-``runtime.stop()``. Nothing else creates clients, registers handlers or starts
+Startup, vault unlock, onboarding (setup / verify-code / verify-2fa) all reach
+``runtime.ensure_started()`` through the Telegram connector
+(``backend.telegram.connector``); logout, vault lock/reset and shutdown reach
+``runtime.stop()`` the same way. Nothing else creates clients, registers handlers or starts
 sync loops, so a second unlock can never stack a client or a handler set.
 
 ``ensure_started`` only does the fast part inline (connect, authorize,
@@ -46,6 +47,10 @@ class TelegramRuntime:
         self.state = state
         self.last_error = error
         await ws_manager.broadcast({"type": "telegram_status", "state": state, "error": error})
+        await ws_manager.broadcast({
+            "type": "connector_status", "channel": "telegram", "account_key": "telegram:default",
+            "state": state, "error": error,
+        })
 
     def _spawn(self, coro, name: str) -> None:
         self._tasks.append(spawn(coro, name=name))
@@ -260,20 +265,3 @@ class TelegramRuntime:
 
 runtime = TelegramRuntime()
 
-
-def _on_vault_lock() -> None:
-    """Vault locked or reset from any path: the Telegram session is a vault
-    secret too, so drop the client and every task that uses it."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    spawn(runtime.stop(), name="runtime_stop_on_vault_lock")
-
-
-def _register_vault_listener() -> None:
-    from backend import secrets as vault
-    vault.add_lock_listener(_on_vault_lock)
-
-
-_register_vault_listener()
