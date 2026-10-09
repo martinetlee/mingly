@@ -8,7 +8,15 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent
 
-if getattr(sys, "frozen", False):
+if os.environ.get("MINGLY_DATA_DIR"):
+    DATA_DIR = Path(os.environ["MINGLY_DATA_DIR"]).expanduser()
+elif "pytest" in sys.modules:
+    # Any test process (whatever conftest it loads) gets a throwaway data dir,
+    # so no test or test-like script can ever touch the real app data.
+    import tempfile
+
+    DATA_DIR = Path(tempfile.mkdtemp(prefix="mingly-test-data-"))
+elif getattr(sys, "frozen", False):
     # Running inside a PyInstaller .app bundle — persist data in ~/Library
     DATA_DIR = Path.home() / "Library" / "Application Support" / "Mingly"
 else:
