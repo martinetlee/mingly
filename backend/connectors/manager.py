@@ -71,14 +71,21 @@ class ConnectorManager:
         return None
 
     async def load_accounts(self) -> None:
-        """Create connectors for stored accounts of multi-account channels."""
-        if not self._factories:
-            return
+        """Create connectors for stored accounts of multi-account channels,
+        and tell single-account connectors their stored account (the oldest
+        signed-in row of their channel; None when there is none)."""
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             accounts = await crud.get_accounts(db)
+        signed_in = {}
+        for acc in accounts:
+            if acc.external_id is not None:
+                signed_in.setdefault(acc.channel, acc.id)
+        for c in self._connectors.values():
+            if not c.multi_account:
+                c.account_id = signed_in.get(c.channel)
         for acc in accounts:
             factory = self._factories.get(acc.channel)
             if factory is None or f"{acc.channel}:{acc.id}" in self._connectors:
@@ -171,12 +178,13 @@ class ConnectorManager:
 def _build_manager() -> ConnectorManager:
     from backend.telegram.connector import connector as telegram
 
-    from backend.connectors import gmail, signal
+    from backend.connectors import gmail, signal, sms
 
     m = ConnectorManager()
     m.register(telegram)
     gmail.register(m)
     signal.register(m)
+    sms.register(m)
     return m
 
 

@@ -1,4 +1,5 @@
-"""Thin async client for the Gmail REST API (v1) over httpx.
+"""Thin async client for the Gmail REST API (v1) — and Google Calendar (v3),
+which rides on the same grant — over httpx.
 
 Access tokens are refreshed on demand from the stored refresh token; a 401
 forces one refresh and retry. Errors are classified so the sync loop can
@@ -11,12 +12,14 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
 from backend.connectors.gmail import oauth
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 
 
 class GmailError(Exception):
@@ -94,7 +97,8 @@ class GmailApi:
                 detail = r.text
             # 403 rateLimitExceeded / userRateLimitExceeded behave like 429
             status = 429 if r.status_code == 403 and "rate" in (detail or "").lower() else r.status_code
-            raise GmailError(f"Gmail API {r.status_code}: {detail[:200]}", status, retry_after)
+            service = "Google Calendar API" if url.startswith(CALENDAR_BASE) else "Gmail API"
+            raise GmailError(f"{service} {r.status_code}: {detail[:200]}", status, retry_after)
         if not r.content:
             return {}
         return r.json()
@@ -136,6 +140,24 @@ class GmailApi:
         return await self.request(
             "POST", f"/threads/{thread_id}/modify", json={"addLabelIds": add, "removeLabelIds": remove},
         )
+
+    # -- Google Calendar (v3), same grant ------------------------------------------
+
+    async def calendar_list(self) -> list[dict]:
+        items: list[dict] = []
+        page: Optional[str] = None
+        while True:
+            params: dict[str, Any] = {"maxResults": 250}
+            if page:
+                params["pageToken"] = page
+            resp = await self.request("GET", f"{CALENDAR_BASE}/users/me/calendarList", params=params)
+            items += resp.get("items") or []
+            page = resp.get("nextPageToken")
+            if not page:
+                return items
+
+    async def list_events(self, calendar_id: str, params: dict) -> dict:
+        return await self.request("GET", f"{CALENDAR_BASE}/calendars/{quote(calendar_id, safe='')}/events", params=params)
 
     async def send(self, raw: str, thread_id: Optional[str]) -> dict:
         body: dict[str, Any] = {"raw": raw}

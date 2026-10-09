@@ -25,7 +25,7 @@ Before implementing any feature, trace ALL user-facing code paths that touch the
 
 # Mingly — Relationship Manager
 
-A desktop app (macOS) for managing relationships across messaging channels (Telegram today; Gmail, Signal and more being added — see `docs/multichannel/PLAN.md`), powered by local LLMs. Built with FastAPI + React, packaged via PyInstaller + pywebview.
+A desktop app (macOS) for managing relationships across channels — Telegram, Signal, SMS/iMessage, Gmail and Google Calendar (see `docs/multichannel/`) — powered by local LLMs. Built with FastAPI + React, packaged via PyInstaller + pywebview.
 
 ## Tech Stack
 
@@ -40,7 +40,8 @@ A desktop app (macOS) for managing relationships across messaging channels (Tele
 ```
 backend/
   api/          # FastAPI routers (one per domain: conversations, people, organizations, telegram, …)
-  connectors/   # Channel connector contract + manager (lifecycle, sign-in steps, capabilities)
+  connectors/   # Channel connector contract + manager; gmail/ (+ Calendar), signal/, sms/ packages
+  people/       # linking.py: cross-channel person merge / undo / detach
   ingest/       # fanout.py: what every channel's new/edited message triggers (WS, Shield, catch-up, notify)
   db/           # models.py, crud/ (one module per area), migrations/runner.py
   serializers.py# The JSON shapes of Conversation / Message / Person / Identity

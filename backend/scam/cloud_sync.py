@@ -16,10 +16,14 @@ Safety rules:
 * Uploads snapshot rows, close the DB session, POST, then mark rows synced
   only if they did not change meanwhile (``scam_updated_at <= snapshot``), so
   re-scores and manual corrections always reach the cloud.
-* The cloud contract is still Telegram-shaped (telegram_id, chat_id,
-  tg_message_id). Rows are stored with internal ids; uploads resolve the
-  Telegram ids through ``backend.scam.channel_ids`` and skip rows from other
-  channels (they stay unsynced until cloud contract v2).
+* Two upload contracts (docs/multichannel/SHIELD_CLOUD_CONTRACT_V2.md). The
+  server's ``contract_versions`` (``GET /sync/capabilities`` or the manifest)
+  are cached with a TTL. v1 (the default, and whenever the server does not
+  advertise 2) is Telegram-shaped (telegram_id, chat_id, tg_message_id):
+  uploads resolve the Telegram ids through ``backend.scam.channel_ids`` and
+  skip rows from other channels (they stay unsynced). v2 is channel-neutral
+  (``channel``, hashed private handles, opaque refs, per-channel content
+  opt-in) and uploads every channel; requests carry ``X-Mingly-Contract: 2``.
 """
 
 import asyncio
@@ -29,12 +33,13 @@ import json
 import logging
 import re
 import shutil
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -48,7 +53,9 @@ from backend.db.models import (
 from backend.fsutil import atomic_write_text
 from backend.jobs import await_single
 from backend.prefs import get_pref, update_prefs
-from backend.scam.channel_ids import TELEGRAM, telegram_message_id, telegram_peer_ids, telegram_user_ids
+from backend.scam.channel_ids import (
+    TELEGRAM, CloudRefs, cloud_refs, handle_salt, telegram_message_id, telegram_peer_ids, telegram_user_ids,
+)
 from backend.scam.verdict import not_pending_condition
 
 logger = logging.getLogger(__name__)
@@ -123,20 +130,135 @@ def verify_artifact(data: bytes, file_info: dict, name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Telegram ids for the current cloud contract
+# Contract versions (capability discovery)
+# ---------------------------------------------------------------------------
+
+CONTRACT_HEADER = "X-Mingly-Contract"
+CAPABILITIES_TTL = 3600.0  # a server's answer (including "no such endpoint")
+CAPABILITIES_RETRY_TTL = 300.0  # after an error: v1 until then, then ask again
+
+
+def parse_contract_versions(value) -> frozenset:
+    """``contract_versions`` as advertised; anything unusable means v1."""
+    versions = frozenset(
+        v for v in (value if isinstance(value, list) else [])
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0
+    )
+    return versions or frozenset({1})
+
+
+class ContractDiscovery:
+    """Which upload contract versions a server speaks, cached with a TTL.
+
+    ``GET <base><path>`` → ``{"contract_versions": [1, 2]}``. A server
+    without the endpoint (404/405/501) is a v1 server; any other failure
+    also means v1, re-asked sooner. Nothing is ever retried within a call.
+    """
+
+    def __init__(self, path: str, *, clock: Callable[[], float] = time.monotonic):
+        self._path = path
+        self._clock = clock
+        self._versions: Optional[frozenset] = None
+        self._expires_at = 0.0
+
+    def reset(self) -> None:
+        self._versions = None
+        self._expires_at = 0.0
+
+    def remember(self, versions: Iterable[int], ttl: float = CAPABILITIES_TTL) -> None:
+        self._versions = frozenset(versions)
+        self._expires_at = self._clock() + ttl
+
+    def cached(self) -> Optional[frozenset]:
+        if self._versions is not None and self._clock() < self._expires_at:
+            return self._versions
+        return None
+
+    async def versions(self, base_url: str, headers: dict, transport=None) -> frozenset:
+        cached = self.cached()
+        if cached is not None:
+            return cached
+        ttl = CAPABILITIES_RETRY_TTL
+        versions = frozenset({1})
+        try:
+            async with httpx.AsyncClient(timeout=10.0, transport=transport) as client:
+                resp = await client.get(f"{base_url}{self._path}", headers=headers)
+            if resp.is_success:
+                data = resp.json()
+                versions = parse_contract_versions(data.get("contract_versions") if isinstance(data, dict) else None)
+                ttl = CAPABILITIES_TTL
+            elif resp.status_code in (404, 405, 501):
+                ttl = CAPABILITIES_TTL
+            else:
+                logger.warning("Capabilities request failed: %d", resp.status_code)
+        except Exception as e:
+            logger.warning("Capabilities request error: %s", e)
+        self.remember(versions, ttl)
+        return versions
+
+    async def contract(self, base_url: str, headers: dict, transport=None) -> int:
+        """2 when the server advertises it, else 1."""
+        return 2 if 2 in await self.versions(base_url, headers, transport) else 1
+
+
+# ---------------------------------------------------------------------------
+# v2 content opt-in
+# ---------------------------------------------------------------------------
+
+CONTENT_UPLOAD_PREF = "shield_cloud_upload_content"
+# Message-derived text (flagged text, pipeline input, prompts, traces) per
+# channel under v2. Chats keep what v1 uploads for Telegram; email bodies are
+# off by default (verdict metadata only). Unknown channels: off.
+DEFAULT_CONTENT_UPLOAD = {"telegram": True, "signal": True, "sms": True, "gmail": False}
+
+
+def content_upload_allowed(channel: Optional[str]) -> bool:
+    prefs = get_pref(CONTENT_UPLOAD_PREF, None)
+    if isinstance(prefs, dict) and isinstance(prefs.get(channel), bool):
+        return prefs[channel]
+    return DEFAULT_CONTENT_UPLOAD.get(channel, False)
+
+
+_TRACE_KEYS = ("status", "pipeline_version", "duration_ms")
+_TRACE_STEP_KEYS = ("node_id", "type", "status", "duration_ms", "model_name", "provider_name",
+                    "max_tokens", "temperature")
+
+
+def _trace_without_content(trace: dict) -> dict:
+    """A pipeline trace reduced to its structure (no inputs, prompts,
+    responses or tool calls)."""
+    out = {k: trace[k] for k in _TRACE_KEYS if k in trace}
+    steps = trace.get("steps")
+    if isinstance(steps, list):
+        out["steps"] = [{k: s[k] for k in _TRACE_STEP_KEYS if k in s} for s in steps if isinstance(s, dict)]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Which rows each contract carries
 # ---------------------------------------------------------------------------
 
 def telegram_flag_condition():
-    """Flags the current cloud contract can carry (Telegram senders)."""
+    """Flags cloud contract v1 can carry (Telegram senders)."""
     return ScamFlag.identity_id.in_(select(Identity.id).where(Identity.channel == TELEGRAM))
 
 
 def telegram_message_condition():
-    """Messages the current cloud contract can carry (Telegram conversations)."""
+    """Messages cloud contract v1 can carry (Telegram conversations)."""
     return Message.conversation_id.in_(
         select(Conversation.id).join(Account, Account.id == Conversation.account_id)
         .where(Account.channel == TELEGRAM)
     )
+
+
+def flag_upload_conditions(contract: int) -> list:
+    """Extra WHERE clauses for the flags ``contract`` uploads (v2: all)."""
+    return [] if contract >= 2 else [telegram_flag_condition()]
+
+
+def message_upload_conditions(contract: int) -> list:
+    """Extra WHERE clauses for the scan rows ``contract`` uploads (v2: all)."""
+    return [] if contract >= 2 else [telegram_message_condition()]
 
 
 @dataclass
@@ -304,11 +426,16 @@ class CloudSyncManager:
         self._last_sync_status: Optional[str] = None  # success, partial, failed
         self._last_sync_error: Optional[str] = None
         self._last_sync_details: Optional[dict] = None
+        self._contracts = ContractDiscovery("/sync/capabilities")
+        self._transport: Optional[httpx.AsyncBaseTransport] = None  # tests inject one
 
     def configure(self, base_url: str, api_key: Optional[str] = None):
         """Set the cloud URL. ``api_key`` is accepted for old callers and
         ignored: the key is read from the vault on each use."""
-        self._base_url = base_url.rstrip("/") if base_url else ""
+        base_url = base_url.rstrip("/") if base_url else ""
+        if base_url != self._base_url:
+            self._contracts.reset()
+        self._base_url = base_url
 
     @property
     def _api_key(self) -> str:
@@ -344,6 +471,20 @@ class CloudSyncManager:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}"}
 
+    def _client(self, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+
+    async def contract_version(self) -> int:
+        """The upload contract to use now: 2 when the server advertises it."""
+        if not self._base_url or self.url_error:
+            return 1
+        return await self._contracts.contract(self._base_url, self._headers, self._transport)
+
+    def cached_contract_version(self) -> int:
+        """The last known contract without asking the server (1 if unknown)."""
+        versions = self._contracts.cached()
+        return 2 if versions and 2 in versions else 1
+
     async def sync(self) -> SyncResult:
         """Run a full sync cycle, or join the one already running."""
         if not self.is_configured:
@@ -361,6 +502,9 @@ class CloudSyncManager:
                 result.error = "Could not reach cloud server"
                 self._record_state(result)
                 return result
+
+            if "contract_versions" in manifest:
+                self._contracts.remember(parse_contract_versions(manifest["contract_versions"]))
 
             sync_errors: list[str] = []
             result.files_updated = await self._download_files(manifest, sync_errors)
@@ -491,7 +635,7 @@ class CloudSyncManager:
                 invalidate_cache(fname)
 
     async def _download_bytes(self, path: str, timeout: float = 30.0) -> bytes:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._client(timeout) as client:
             resp = await client.get(f"{self._base_url}{path}", headers=self._headers)
             _raise_for_status(resp)
             return resp.content
@@ -509,12 +653,28 @@ class CloudSyncManager:
     # Uploads (snapshot → close session → POST → mark if unchanged)
     # ------------------------------------------------------------------
 
-    async def _post(self, path: str, payload: dict) -> None:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{self._base_url}{path}", json=payload, headers=self._headers)
+    async def _post(self, path: str, payload: dict, contract: int = 1) -> None:
+        headers = self._headers
+        if contract >= 2:
+            headers[CONTRACT_HEADER] = str(contract)
+        async with self._client(30.0) as client:
+            resp = await client.post(f"{self._base_url}{path}", json=payload, headers=headers)
             _raise_for_status(resp)
 
+    async def _post_items(self, path: str, key: str, items: list, v2: bool) -> None:
+        if v2:
+            await self._post(path, {"contract": 2, key: items}, contract=2)
+        else:
+            await self._post(path, {key: items})
+
+    async def _v2_salt(self) -> Optional[bytes]:
+        """The install salt when the server speaks contract v2; None means v1."""
+        if await self.contract_version() < 2:
+            return None
+        return handle_salt()
+
     async def _upload_pending_reports(self) -> int:
+        salt = await self._v2_salt()
         total = 0
         last_id = 0
         for _ in range(_MAX_BATCHES):
@@ -530,10 +690,10 @@ class CloudSyncManager:
                 break
             last_id = reports[-1].id
             async with AsyncSessionLocal() as db:
-                payloads = await _report_payloads(db, reports)
+                payloads = await _report_payloads(db, reports, salt)
             if not payloads:
                 continue
-            await self._post("/sync/reports", {"reports": [p for _, p in payloads]})
+            await self._post_items("/sync/reports", "reports", [p for _, p in payloads], salt is not None)
             async with AsyncSessionLocal() as db:
                 await db.execute(
                     update(ScamReport).where(ScamReport.id.in_([r.id for r, _ in payloads]))
@@ -547,15 +707,20 @@ class CloudSyncManager:
         """Try to upload one report right after submission."""
         if not self.is_configured or self.url_error:
             return False
+        try:
+            salt = await self._v2_salt()
+        except Exception as e:
+            logger.warning("Failed to upload report %s: %s", report_id, e)
+            return False
         async with AsyncSessionLocal() as db:
             report = (await db.execute(
                 select(ScamReport).where(ScamReport.report_id == report_id)
             )).scalars().first()
-            payloads = await _report_payloads(db, [report]) if report else []
+            payloads = await _report_payloads(db, [report], salt) if report else []
         if not payloads:
             return False
         try:
-            await self._post("/sync/reports", {"reports": [payloads[0][1]]})
+            await self._post_items("/sync/reports", "reports", [payloads[0][1]], salt is not None)
         except Exception as e:
             logger.warning("Failed to upload report %s: %s", report_id, e)
             return False
@@ -567,36 +732,37 @@ class CloudSyncManager:
         return True
 
     async def _upload_unsent_flags(self) -> int:
+        salt = await self._v2_salt()
+        contract = 1 if salt is None else 2
         total = 0
         last_id = 0
         for _ in range(_MAX_BATCHES):
+            users: dict = {}
+            refs = CloudRefs()
             async with AsyncSessionLocal() as db:
                 flags = (await db.execute(
                     select(ScamFlag).where(
                         ScamFlag.synced_to_cloud == False,  # noqa: E712
                         ScamFlag.id > last_id,
-                        telegram_flag_condition(),
+                        *flag_upload_conditions(contract),
                     ).order_by(ScamFlag.id).limit(_BATCH)
                 )).scalars().all()
-                users = await telegram_user_ids(db, [f.identity_id for f in flags])
+                if salt is None:
+                    users = await telegram_user_ids(db, [f.identity_id for f in flags])
+                else:
+                    refs = await cloud_refs(db, salt, identity_ids=[f.identity_id for f in flags])
             if not flags:
                 break
             last_id = flags[-1].id
-            flags = [f for f in flags if f.identity_id in users]
+            if salt is None:
+                flags = [f for f in flags if f.identity_id in users]
+                items = [_v1_flag(f, users[f.identity_id]) for f in flags]
+            else:
+                flags = [f for f in flags if f.identity_id in refs.handles]
+                items = [_v2_flag(f, refs) for f in flags]
             if not flags:
                 continue
-            payload = {"flags": [{
-                "telegram_id": users[f.identity_id],
-                "source": f.source,
-                "status": f.status,
-                "confidence": f.confidence,
-                "reason": f.reason,
-                "category": f.category or "unknown",
-                "flagged_message_text": f.flagged_message_text,
-                "flagged_at": f.flagged_at.isoformat() if f.flagged_at else None,
-                "dismissed_at": f.dismissed_at.isoformat() if f.dismissed_at else None,
-            } for f in flags]}
-            await self._post("/sync/flags", payload)
+            await self._post_items("/sync/flags", "flags", items, salt is not None)
             async with AsyncSessionLocal() as db:
                 for f in flags:
                     await db.execute(
@@ -614,11 +780,13 @@ class CloudSyncManager:
         """Upload scan rows changed since their last upload: pipeline scam,
         failed scans, manual verdicts, and corrections to anything uploaded
         before."""
+        salt = await self._v2_salt()
+        contract = 1 if salt is None else 2
         total = 0
         cursor: Optional[tuple] = None
         for _ in range(_MAX_BATCHES):
             conditions = [
-                telegram_message_condition(),
+                *message_upload_conditions(contract),
                 Message.scam_updated_at.isnot(None),
                 not_pending_condition(),
                 or_(Message.scam_synced_at.is_(None), Message.scam_updated_at > Message.scam_synced_at),
@@ -639,35 +807,25 @@ class CloudSyncManager:
                     select(Message).where(*conditions)
                     .order_by(Message.scam_updated_at, Message.id).limit(_BATCH)
                 )).scalars().all()
-                refs = await _telegram_refs(
-                    db, identity_ids=[m.sender_identity_id for m in msgs],
-                    conversation_ids=[m.conversation_id for m in msgs],
-                )
+                if salt is None:
+                    refs = await _telegram_refs(
+                        db, identity_ids=[m.sender_identity_id for m in msgs],
+                        conversation_ids=[m.conversation_id for m in msgs],
+                    )
+                else:
+                    refs = await cloud_refs(
+                        db, salt, identity_ids=[m.sender_identity_id for m in msgs],
+                        conversation_ids=[m.conversation_id for m in msgs], message_ids=[m.id for m in msgs],
+                    )
             if not msgs:
                 break
             cursor = (msgs[-1].scam_updated_at, msgs[-1].id)
 
-            scan_results = []
-            for m in msgs:
-                trace = _trace(m.scam_trace_json)
-                scan_results.append({
-                    "chat_id": refs.peers.get(m.conversation_id),
-                    "tg_message_id": telegram_message_id(m),
-                    "sender_id": refs.users.get(m.sender_identity_id),
-                    "scam_score": m.scam_score,
-                    "scam_reason": m.scam_reason,
-                    "scam_category": m.scam_category,
-                    "scan_status": m.scam_status or "unknown",
-                    "scan_error": m.scam_error,
-                    "manual_verdict": m.scam_manual_verdict,
-                    "effective_is_scam": bool(m.effective_is_scam),
-                    "date": m.date.isoformat() if m.date else None,
-                    "updated_at": m.scam_updated_at.isoformat() if m.scam_updated_at else None,
-                    "pipeline_version": trace.get("pipeline_version"),
-                    "pipeline_input": _extract_pipeline_input(trace),
-                    "models_used": _extract_models_used(trace),
-                })
-            await self._post("/sync/scan-results", {"scan_results": scan_results})
+            if salt is None:
+                scan_results = [_v1_scan(m, refs) for m in msgs]
+            else:
+                scan_results = [_v2_scan(m, refs) for m in msgs]
+            await self._post_items("/sync/scan-results", "scan_results", scan_results, salt is not None)
 
             now = datetime.utcnow()
             async with AsyncSessionLocal() as db:
@@ -683,6 +841,7 @@ class CloudSyncManager:
 
     async def _upload_pending_dismissals(self) -> int:
         """Upload queued dismissals (sender flags and scan verdicts)."""
+        salt = await self._v2_salt()
         total = 0
         last_id = 0
         for _ in range(_MAX_BATCHES):
@@ -702,52 +861,35 @@ class CloudSyncManager:
                 except (ValueError, TypeError):
                     data = {}
                 parsed.append((d, data if isinstance(data, dict) else {}))
+            ids = dict(
+                identity_ids=[data.get("identity_id") for _, data in parsed],
+                conversation_ids=[data.get("conversation_id") for _, data in parsed],
+                message_ids=[data.get("message_id") for _, data in parsed],
+            )
             async with AsyncSessionLocal() as db:
-                refs = await _telegram_refs(
-                    db,
-                    identity_ids=[data.get("identity_id") for _, data in parsed],
-                    conversation_ids=[data.get("conversation_id") for _, data in parsed],
-                    message_ids=[data.get("message_id") for _, data in parsed],
-                )
+                refs = await (_telegram_refs(db, **ids) if salt is None else cloud_refs(db, salt, **ids))
+            # v1: Telegram rows only (a sender flag needs its Telegram user, a
+            # scan its Telegram conversation). v2: any row still resolvable.
+            known_senders = refs.users if salt is None else refs.handles
+            known_conversations = refs.peers if salt is None else refs.conversations
 
-            # Telegram rows only: a sender flag needs its Telegram user, a scan
-            # its Telegram conversation.
             scammer_items, scan_items = [], []
             for d, data in parsed:
                 if d.dismissal_type == "scammer":
-                    if data.get("identity_id") in refs.users:
+                    if data.get("identity_id") in known_senders:
                         scammer_items.append((d, data))
-                elif data.get("conversation_id") in refs.peers:
+                elif data.get("conversation_id") in known_conversations:
                     scan_items.append((d, data))
 
             if scammer_items:
-                await self._post("/sync/dismissals", {"dismissals": [
-                    {**{k: v for k, v in data.items() if k != "identity_id"},
-                     "telegram_id": refs.users[data["identity_id"]]}
-                    for _, data in scammer_items
-                ]})
+                build = _v1_dismissal if salt is None else _v2_dismissal
+                await self._post_items("/sync/dismissals", "dismissals",
+                                       [build(data, refs) for _, data in scammer_items], salt is not None)
                 await self._mark_dismissals([d.id for d, _ in scammer_items])
             if scan_items:
-                scan_results = []
-                for _, data in scan_items:
-                    trace = data.get("trace") or {}
-                    scan_results.append({
-                        "chat_id": refs.peers.get(data.get("conversation_id")),
-                        "tg_message_id": refs.messages.get(data.get("message_id")),
-                        "sender_id": refs.users.get(data.get("identity_id")),
-                        "scam_score": data.get("scam_score"),
-                        "scam_reason": data.get("scam_reason"),
-                        "scam_category": data.get("scam_category"),
-                        "scan_status": "dismissed",
-                        "dismissed": True,
-                        "pipeline_version": trace.get("pipeline_version") if isinstance(trace, dict) else None,
-                        "pipeline_input": _extract_pipeline_input(trace) if isinstance(trace, dict) else None,
-                        "models_used": _extract_models_used(trace) if isinstance(trace, dict) else None,
-                        "llm_prompt": data.get("llm_prompt"),
-                        "llm_response": data.get("llm_response"),
-                        "trace": trace or None,
-                    })
-                await self._post("/sync/scan-results", {"scan_results": scan_results})
+                build = _v1_dismissed_scan if salt is None else _v2_dismissed_scan
+                await self._post_items("/sync/scan-results", "scan_results",
+                                       [build(data, refs) for _, data in scan_items], salt is not None)
                 await self._mark_dismissals([d.id for d, _ in scan_items])
             total += len(scammer_items) + len(scan_items)
         return total
@@ -765,28 +907,43 @@ class CloudSyncManager:
             return False
         if self.url_error:
             raise ValueError(self.url_error)
+        salt = await self._v2_salt()
         async with AsyncSessionLocal() as db:
             fb = (await db.execute(select(ScamFeedback).where(ScamFeedback.id == feedback_id))).scalars().first()
             if not fb:
                 return False
-            refs = await _telegram_refs(
-                db, identity_ids=[fb.related_flag_identity_id],
-                conversation_ids=[fb.related_conversation_id], message_ids=[fb.related_message_id],
-            )
-        # Feedback about another channel's rows waits for cloud contract v2
-        if ((fb.related_conversation_id and fb.related_conversation_id not in refs.peers)
-                or (fb.related_message_id and fb.related_message_id not in refs.messages)
-                or (fb.related_flag_identity_id and fb.related_flag_identity_id not in refs.users)):
-            return False
-        await self._post("/sync/feedback", {"feedback": [{
-            "id": fb.id,
-            "feedback_type": fb.feedback_type,
-            "message": fb.message,
-            "related_chat_id": refs.peers.get(fb.related_conversation_id),
-            "related_message_id": refs.messages.get(fb.related_message_id),
-            "related_flag_telegram_id": refs.users.get(fb.related_flag_identity_id),
-            "created_at": fb.created_at.isoformat() if fb.created_at else None,
-        }]})
+            ids = dict(identity_ids=[fb.related_flag_identity_id],
+                       conversation_ids=[fb.related_conversation_id], message_ids=[fb.related_message_id])
+            refs = await (_telegram_refs(db, **ids) if salt is None else cloud_refs(db, salt, **ids))
+        if salt is None:
+            # Feedback about another channel's rows needs cloud contract v2
+            if ((fb.related_conversation_id and fb.related_conversation_id not in refs.peers)
+                    or (fb.related_message_id and fb.related_message_id not in refs.messages)
+                    or (fb.related_flag_identity_id and fb.related_flag_identity_id not in refs.users)):
+                return False
+            item = {
+                "id": fb.id,
+                "feedback_type": fb.feedback_type,
+                "message": fb.message,
+                "related_chat_id": refs.peers.get(fb.related_conversation_id),
+                "related_message_id": refs.messages.get(fb.related_message_id),
+                "related_flag_telegram_id": refs.users.get(fb.related_flag_identity_id),
+                "created_at": fb.created_at.isoformat() if fb.created_at else None,
+            }
+        else:
+            item = {
+                "id": fb.id,
+                "channel": refs.channel_of(conversation_id=fb.related_conversation_id,
+                                           message_id=fb.related_message_id,
+                                           identity_id=fb.related_flag_identity_id),
+                "feedback_type": fb.feedback_type,
+                "message": fb.message,
+                "related_conversation": refs.conversations.get(fb.related_conversation_id),
+                "related_message": refs.messages.get(fb.related_message_id),
+                "related_sender": refs.handles.get(fb.related_flag_identity_id),
+                "created_at": fb.created_at.isoformat() if fb.created_at else None,
+            }
+        await self._post_items("/sync/feedback", "feedback", [item], salt is not None)
         async with AsyncSessionLocal() as db:
             await db.execute(
                 update(ScamFeedback).where(ScamFeedback.id == feedback_id)
@@ -804,7 +961,8 @@ class CloudSyncManager:
         periods = await tracker.get_pending_periods()
         if not periods:
             return 0
-        await self._post("/sync/analytics", {"periods": periods})
+        v2 = await self.contract_version() >= 2
+        await self._post_items("/sync/analytics", "periods", [_v2_period(p) for p in periods] if v2 else periods, v2)
         await tracker.mark_synced([p["period_start"] for p in periods])
         return len(periods)
 
@@ -814,7 +972,7 @@ class CloudSyncManager:
 
     async def _get_manifest(self) -> Optional[dict]:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with self._client(15.0) as client:
                 resp = await client.get(f"{self._base_url}/sync/manifest", headers=self._headers)
                 if resp.is_success:
                     data = resp.json()
@@ -833,18 +991,186 @@ class CloudSyncManager:
             return ""
 
 
-async def _report_payloads(db, reports: list) -> list[tuple]:
-    """[(report, cloud payload)] for the Telegram reports among ``reports``.
-    Stored reports carry internal ids (``messages_json`` entries an
-    ``identity_id``, local detection scores a ``message_id``); the payload
-    gets the Telegram ids the current cloud contract expects."""
+# ---------------------------------------------------------------------------
+# Payload builders: v1 (Telegram ids) and v2 (channel-neutral)
+# ---------------------------------------------------------------------------
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
+def _v1_flag(f: ScamFlag, telegram_id: int) -> dict:
+    return {
+        "telegram_id": telegram_id,
+        "source": f.source,
+        "status": f.status,
+        "confidence": f.confidence,
+        "reason": f.reason,
+        "category": f.category or "unknown",
+        "flagged_message_text": f.flagged_message_text,
+        "flagged_at": _iso(f.flagged_at),
+        "dismissed_at": _iso(f.dismissed_at),
+    }
+
+
+def _v2_flag(f: ScamFlag, refs: CloudRefs) -> dict:
+    channel = refs.identity_channels[f.identity_id]
+    content = content_upload_allowed(channel)
+    return {
+        "channel": channel,
+        "sender": refs.handles[f.identity_id],
+        "source": f.source,
+        "status": f.status,
+        "confidence": f.confidence,
+        "reason": f.reason,
+        "category": f.category or "unknown",
+        "content_included": content,
+        "flagged_message_text": f.flagged_message_text if content else None,
+        "flagged_at": _iso(f.flagged_at),
+        "dismissed_at": _iso(f.dismissed_at),
+    }
+
+
+def _scan_verdict(m: Message, trace: dict) -> dict:
+    return {
+        "scam_score": m.scam_score,
+        "scam_reason": m.scam_reason,
+        "scam_category": m.scam_category,
+        "scan_status": m.scam_status or "unknown",
+        "scan_error": m.scam_error,
+        "manual_verdict": m.scam_manual_verdict,
+        "effective_is_scam": bool(m.effective_is_scam),
+        "date": _iso(m.date),
+        "updated_at": _iso(m.scam_updated_at),
+        "pipeline_version": trace.get("pipeline_version"),
+    }
+
+
+def _v1_scan(m: Message, refs: _TelegramRefs) -> dict:
+    trace = _trace(m.scam_trace_json)
+    return {
+        "chat_id": refs.peers.get(m.conversation_id),
+        "tg_message_id": telegram_message_id(m),
+        "sender_id": refs.users.get(m.sender_identity_id),
+        **_scan_verdict(m, trace),
+        "pipeline_input": _extract_pipeline_input(trace),
+        "models_used": _extract_models_used(trace),
+    }
+
+
+def _v2_scan(m: Message, refs: CloudRefs) -> dict:
+    trace = _trace(m.scam_trace_json)
+    channel = refs.conversation_channels.get(m.conversation_id)
+    content = content_upload_allowed(channel)
+    return {
+        "channel": channel,
+        "conversation": refs.conversations.get(m.conversation_id),
+        "message": refs.messages.get(m.id),
+        "sender": refs.handles.get(m.sender_identity_id),
+        **_scan_verdict(m, trace),
+        "models_used": _extract_models_used(trace),
+        "content_included": content,
+        "pipeline_input": _extract_pipeline_input(trace) if content else None,
+    }
+
+
+def _v1_dismissal(data: dict, refs: _TelegramRefs) -> dict:
+    return {**{k: v for k, v in data.items() if k != "identity_id"}, "telegram_id": refs.users[data["identity_id"]]}
+
+
+def _v2_dismissal(data: dict, refs: CloudRefs) -> dict:
+    channel = refs.identity_channels[data["identity_id"]]
+    content = content_upload_allowed(channel)
+    return {
+        "channel": channel,
+        "sender": refs.handles[data["identity_id"]],
+        "source": data.get("source"),
+        "confidence": data.get("confidence"),
+        "reason": data.get("reason"),
+        "category": data.get("category"),
+        "content_included": content,
+        "flagged_message_text": data.get("flagged_message_text") if content else None,
+        "flagged_at": data.get("flagged_at"),
+    }
+
+
+def _dismissal_trace(data: dict) -> dict:
+    trace = data.get("trace") or {}
+    return trace if isinstance(trace, dict) else {}
+
+
+def _v1_dismissed_scan(data: dict, refs: _TelegramRefs) -> dict:
+    trace = data.get("trace") or {}
+    return {
+        "chat_id": refs.peers.get(data.get("conversation_id")),
+        "tg_message_id": refs.messages.get(data.get("message_id")),
+        "sender_id": refs.users.get(data.get("identity_id")),
+        "scam_score": data.get("scam_score"),
+        "scam_reason": data.get("scam_reason"),
+        "scam_category": data.get("scam_category"),
+        "scan_status": "dismissed",
+        "dismissed": True,
+        "pipeline_version": trace.get("pipeline_version") if isinstance(trace, dict) else None,
+        "pipeline_input": _extract_pipeline_input(trace) if isinstance(trace, dict) else None,
+        "models_used": _extract_models_used(trace) if isinstance(trace, dict) else None,
+        "llm_prompt": data.get("llm_prompt"),
+        "llm_response": data.get("llm_response"),
+        "trace": trace or None,
+    }
+
+
+def _v2_dismissed_scan(data: dict, refs: CloudRefs) -> dict:
+    trace = _dismissal_trace(data)
+    cid = data.get("conversation_id")
+    channel = refs.conversation_channels[cid]
+    content = content_upload_allowed(channel)
+    return {
+        "channel": channel,
+        "conversation": refs.conversations[cid],
+        "message": refs.messages.get(data.get("message_id")),
+        "sender": refs.handles.get(data.get("identity_id")),
+        "scam_score": data.get("scam_score"),
+        "scam_reason": data.get("scam_reason"),
+        "scam_category": data.get("scam_category"),
+        "scan_status": "dismissed",
+        "dismissed": True,
+        "pipeline_version": trace.get("pipeline_version"),
+        "models_used": _extract_models_used(trace),
+        "content_included": content,
+        "pipeline_input": _extract_pipeline_input(trace) if content else None,
+        "llm_prompt": data.get("llm_prompt") if content else None,
+        "llm_response": data.get("llm_response") if content else None,
+        "trace": (trace if content else _trace_without_content(trace)) or None,
+    }
+
+
+def _v2_period(period: dict) -> dict:
+    """An analytics period with v2 conversation kinds ("private" → "direct")."""
+    kinds = dict(period.get("chat_types") or {})
+    if "private" in kinds:
+        kinds["direct"] = kinds.pop("private")
+    return {**period, "chat_types": kinds}
+
+
+async def _report_payloads(db, reports: list, salt: Optional[bytes] = None) -> list[tuple]:
+    """[(report, cloud payload)] for the reports ``reports`` the contract can
+    carry: v1 (no salt) the Telegram ones, v2 every report whose channel is
+    still known. Stored reports carry internal ids (``messages_json`` entries
+    an ``identity_id``, local detection scores a ``message_id``); the payload
+    gets the contract's ids."""
     parsed = {r.id: (_json_list(r.messages_json), _json_obj(r.local_detection_json)) for r in reports}
     identity_ids = {r.reported_identity_id for r in reports}
     message_ids: set = set()
     for msgs, detection in parsed.values():
         identity_ids.update(m.get("identity_id") for m in msgs if isinstance(m, dict))
         message_ids.update(s.get("message_id") for s in (detection or {}).get("scores") or [] if isinstance(s, dict))
-    refs = await _telegram_refs(
+    if salt is not None:
+        refs = await cloud_refs(
+            db, salt, identity_ids=identity_ids, conversation_ids=[r.reported_in_conversation_id for r in reports],
+            message_ids=message_ids,
+        )
+        return [(r, p) for r in reports if (p := _v2_report(r, parsed[r.id], refs)) is not None]
+    tg = await _telegram_refs(
         db, identity_ids=identity_ids, conversation_ids=[r.reported_in_conversation_id for r in reports],
         message_ids=message_ids,
     )
@@ -852,9 +1178,9 @@ async def _report_payloads(db, reports: list) -> list[tuple]:
     out = []
     for r in reports:
         if r.reported_in_conversation_id is not None:
-            is_telegram = r.reported_in_conversation_id in refs.peers
+            is_telegram = r.reported_in_conversation_id in tg.peers
         else:
-            is_telegram = r.reported_identity_id in refs.users
+            is_telegram = r.reported_identity_id in tg.users
         if not is_telegram:
             continue
         msgs, detection = parsed[r.id]
@@ -862,18 +1188,18 @@ async def _report_payloads(db, reports: list) -> list[tuple]:
         for m in msgs:
             if isinstance(m, dict):
                 m = {**{k: v for k, v in m.items() if k != "identity_id"},
-                     "telegram_id": refs.users.get(m.get("identity_id"))}
+                     "telegram_id": tg.users.get(m.get("identity_id"))}
             cloud_msgs.append(m)
         if detection is not None:
             detection = {**detection, "scores": [
                 {**{k: v for k, v in sc.items() if k != "message_id"},
-                 "tg_message_id": refs.messages.get(sc.get("message_id"))}
+                 "tg_message_id": tg.messages.get(sc.get("message_id"))}
                 for sc in detection.get("scores") or [] if isinstance(sc, dict)
             ]}
         out.append((r, {
             "report_id": r.report_id,
-            "reported_telegram_id": refs.users.get(r.reported_identity_id),
-            "reported_in_chat_id": refs.peers.get(r.reported_in_conversation_id),
+            "reported_telegram_id": tg.users.get(r.reported_identity_id),
+            "reported_in_chat_id": tg.peers.get(r.reported_in_conversation_id),
             "chat_type": _CLOUD_KIND.get(r.chat_type, r.chat_type),
             "reporter_verdict": r.reporter_verdict,
             "scam_category": r.scam_category,
@@ -883,6 +1209,37 @@ async def _report_payloads(db, reports: list) -> list[tuple]:
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }))
     return out
+
+
+def _v2_report(r: ScamReport, parsed: tuple, refs: CloudRefs) -> Optional[dict]:
+    """A user-submitted report: the messages the user chose to include are
+    sent whatever the content preference (submitting is the consent)."""
+    channel = refs.channel_of(conversation_id=r.reported_in_conversation_id, identity_id=r.reported_identity_id)
+    if channel is None:
+        return None
+    msgs, detection = parsed
+    out_msgs = [
+        {**{k: v for k, v in m.items() if k != "identity_id"}, "sender": refs.handles.get(m.get("identity_id"))}
+        if isinstance(m, dict) else m
+        for m in msgs
+    ]
+    if detection is not None:
+        detection = {**detection, "scores": [
+            {**{k: v for k, v in sc.items() if k != "message_id"}, "message": refs.messages.get(sc.get("message_id"))}
+            for sc in detection.get("scores") or [] if isinstance(sc, dict)
+        ]}
+    return {
+        "report_id": r.report_id,
+        "channel": channel,
+        "reported": refs.handles.get(r.reported_identity_id),
+        "conversation": refs.conversations.get(r.reported_in_conversation_id),
+        "reporter_verdict": r.reporter_verdict,
+        "scam_category": r.scam_category,
+        "custom_category": r.custom_category,
+        "messages": out_msgs,
+        "local_detection": detection,
+        "created_at": _iso(r.created_at),
+    }
 
 
 def _json_list(raw: Optional[str]) -> list:

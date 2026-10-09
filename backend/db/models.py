@@ -680,7 +680,7 @@ class BriefingEntry(Base):
         Integer, ForeignKey("people.id", ondelete="SET NULL"), nullable=True
     )
     conversation_title: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact'
+    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact' | 'meetings'
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [{conversation_id, message_id}]
 

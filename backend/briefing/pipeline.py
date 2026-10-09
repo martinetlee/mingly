@@ -99,6 +99,60 @@ class BriefingSettings:
 # Inputs
 # ---------------------------------------------------------------------------
 
+MEETINGS_CATEGORY = "meetings"
+MEETINGS_TITLE = "Today's meetings"
+MEETING_NAMES_MAX = 8
+
+
+def _md(text: str) -> str:
+    return re.sub(r"([\\`*_\[\]<>|])", r"\\\1", text)
+
+
+async def todays_meetings(db, now: Optional[datetime] = None) -> Optional[str]:
+    """Markdown list of today's calendar events (local day) with the people
+    involved — None when no calendar is synced at all (no section then).
+    ``now``: aware local time (default: the machine's)."""
+    from datetime import time as dtime, timezone
+
+    if not await crud.has_calendar_events(db):
+        return None
+    now = now or datetime.now().astimezone()
+    tz = now.tzinfo
+    day = now.date()
+    next_day = day + timedelta(days=1)
+
+    def utc(d) -> datetime:
+        return datetime.combine(d, dtime.min, tzinfo=tz).astimezone(timezone.utc).replace(tzinfo=None)
+
+    def local(dt: datetime) -> str:
+        return dt.replace(tzinfo=timezone.utc).astimezone(tz).strftime("%H:%M")
+
+    events = await crud.list_calendar_events(db, utc(day), utc(next_day), day_start=day, day_end=next_day)
+    if not events:
+        return "No meetings today."
+    attendees = await crud.calendar_event_attendees(db, [e.id for e in events])
+    lines = []
+    for ev in events:
+        if ev.all_day:
+            when = "All day"
+        else:
+            when = local(ev.start_at) + (f"–{local(ev.end_at)}" if ev.end_at else "")
+        names = []
+        for att, ident, name in attendees.get(ev.id, []):
+            if ident.is_self or att.response_status == "declined":
+                continue
+            label = name or ident.display_name or ident.external_id
+            names.append(f"{label} (organizer)" if att.is_organizer else label)
+        line = f"- **{when}** {_md(ev.title or '(no title)')}"
+        if names:
+            shown = ", ".join(_md(n) for n in names[:MEETING_NAMES_MAX])
+            more = len(names) - MEETING_NAMES_MAX
+            line += f" — with {shown}" + (f" and {more} more" if more > 0 else "")
+        if ev.location:
+            line += f" · {_md(ev.location)}"
+        lines.append(line)
+    return "\n".join(lines)
+
 @dataclass
 class Target:
     category: str  # 'tracked' | 'briefing' | 'important_contact'
@@ -446,17 +500,19 @@ async def run_briefing(job, days: int, *, sync_first: bool = True) -> BriefingOu
     async with AsyncSessionLocal() as db:
         targets = await load_targets(db)
         orgs = await OrgDirectory.load(db, settings.user_orgs, settings.user_org_ids)
+        meetings = await todays_meetings(db)
 
-    if not targets:
+    if not targets and meetings is None:
         # Nothing to summarize — completes without needing an LLM.
         emit("start", {"total": 0, "days": days, "run_id": None})
         emit("done", {"run_id": None, "status": "empty", "entries": 0, "failed": 0})
         _mark_last_run()
         return BriefingOutcome("empty")
 
-    provider = get_provider(LLM_ROLE)  # LLMUnavailable → error event via the job runner
+    # LLMUnavailable → error event via the job runner (today's meetings alone need no LLM)
+    provider = get_provider(LLM_ROLE) if targets else None
 
-    if sync_first:
+    if sync_first and targets:
         emit("progress", {"current": 0, "total": len(targets), "conversation_title": "", "stage": "syncing"})
         await presync([t.conversation_id for t in targets if t.conversation_id is not None], since)
 
@@ -468,6 +524,18 @@ async def run_briefing(job, days: int, *, sync_first: bool = True) -> BriefingOu
     ok = failed = persisted = 0
     abort: Optional[SummaryResult] = None
     try:
+        if meetings is not None:
+            async with AsyncSessionLocal() as db:
+                entry = await crud.add_briefing_entry(
+                    db, run_id, conversation_id=None, person_id=None, conversation_title=MEETINGS_TITLE,
+                    category=MEETINGS_CATEGORY, summary=meetings, sources_json=None,
+                )
+            persisted += 1
+            emit("chat_done", {
+                "entry_id": entry.id, "run_id": run_id, "conversation_id": None, "person_id": None,
+                "conversation_title": MEETINGS_TITLE, "category": MEETINGS_CATEGORY, "summary": meetings,
+                "sources": [],
+            })
         for idx, target in enumerate(targets):
             emit("progress", {"current": idx + 1, "total": len(targets), "conversation_title": target.name})
             result = await summarize_target(provider, target, since, until, settings, orgs, emit)

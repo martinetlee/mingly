@@ -72,6 +72,8 @@ Decisions made: internal surrogate integer ids · bring-your-own Google OAuth cl
 - `git fetch && git switch -c feature/multi-channel origin/main`. Commit at the end of each phase (and sub-steps within Phase 1) on this branch.
 
 ## Phases (each ends buildable + tested)
+
+Status (2026-10-10): all phases implemented on `feature/multi-channel` — 0 `8264ead`, 1 `57c5dac`, 2–4 `a1e5ed8`, 5 (Calendar, SMS, Shield cloud v2 client) in the following commit. UI follows the hybrid layout in `PHASES_2_5.md`.
 0. **Refactor, old schema, no behavior change** — `Connector` ABC, `ConnectorManager`, `TelegramConnector` wrapping `TelegramRuntime`; extract `IngestService` + fan-out from `telegram/sync.py`; generic `/api/accounts/{id}/auth` with `/api/auth` as wrapper; runner callable steps + backups; golden tests pinning current ingest behavior (rows, WS events, enqueues).
 1. **Schema cutover (Telegram-only still)** — migrations 120–132, models/crud rewrite, AI-conversation rename, routers re-keyed, WS events, MCP tools, frontend ids, cloud contract v2 (cloud first). Freeze other feature work during this phase.
 2. **People + Connections** — linking service, merge/split API+UI, Connections page, boot change, capability gating, `/api/telegram/*` mounts.

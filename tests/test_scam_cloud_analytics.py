@@ -20,6 +20,16 @@ from backend.scam.analytics import AnalyticsTracker
 from tests import factories as f
 
 
+@pytest.fixture(autouse=True)
+def _v1_server(monkeypatch):
+    """These tests cover cloud contract v1 (test_scam_cloud_v2 covers v2):
+    the server never advertises v2, and nothing asks a real host."""
+    async def v1(self):
+        return 1
+
+    monkeypatch.setattr(cloud_sync.CloudSyncManager, "contract_version", v1)
+
+
 # ---------------------------------------------------------------------------
 # Analytics
 # ---------------------------------------------------------------------------

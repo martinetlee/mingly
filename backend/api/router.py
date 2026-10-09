@@ -20,9 +20,9 @@ from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
 from backend.api import (
-    accounts, admin, ai_conversations, archive, auth, catchup, compose, conversations, dashboard, intelligence, llm,
-    mcp, media, organizations, people, person_notes, scam, search, session, settings, tags, telegram, translate,
-    workspaces,
+    accounts, admin, ai_conversations, archive, auth, calendar, catchup, compose, conversations, dashboard,
+    intelligence, llm, mcp, media, organizations, people, person_notes, scam, search, session, settings, tags,
+    telegram, translate, workspaces,
 )
 from backend.api.dependencies import HostOriginMiddleware, is_valid_session_token, require_session_token, validate_ws_origin
 
@@ -145,6 +145,7 @@ def create_app() -> FastAPI:
     app.include_router(scam.router, prefix="/api/scam", tags=["scam"], dependencies=protected + [Depends(require_shield)])
     app.include_router(translate.router, prefix="/api/translate", tags=["translate"], dependencies=protected)
     app.include_router(workspaces.router, prefix="/api/workspaces", tags=["workspaces"], dependencies=protected)
+    app.include_router(calendar.router, prefix="/api/calendar", tags=["calendar"], dependencies=protected)
 
     # OAuth redirect targets: the browser arrives without the session token;
     # each request is authenticated by its sign-in flow's state parameter.

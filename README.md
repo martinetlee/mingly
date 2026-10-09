@@ -4,9 +4,28 @@
 
 # Mingly
 
-AI-assisted desktop app that helps you stay on top of important Telegram conversations — chat browser, contact & org profiles, mentions tracking, daily briefings, catch-up triage, and AI-powered chat. All data stays on your machine.
+AI-assisted desktop app that helps you stay on top of the people and conversations that matter — across Telegram, Signal, SMS/iMessage, Gmail and Google Calendar. One person-centric view of everyone you talk to, chat and mail clients, mentions tracking, daily briefings, catch-up triage, and AI-powered chat. All data stays on your machine.
 
 ---
+
+## Channels
+
+Connect accounts in **Settings → Connections**. Each person's accounts on different
+channels are linked into one person automatically when they share a verified phone
+number or email (otherwise suggested for you to merge).
+
+| Channel | How it connects | Notes |
+|---|---|---|
+| Telegram | Your own API credentials ([my.telegram.org](https://my.telegram.org)) + phone login | Full history, sending, reactions, admin tools |
+| Signal | [signal-cli](https://github.com/AsamK/signal-cli) linked as a secondary device (`brew install signal-cli`, scan a QR code) | Messages from the time of linking on; send, reply, react |
+| SMS / iMessage | Reads macOS Messages' local database (needs Full Disk Access) | Read-only |
+| Gmail | Your own Google OAuth client (Desktop app) | Mail space with folders, labels, reply, compose |
+| Google Calendar | Same Google sign-in as Gmail | Calendar space, meetings on person pages and in briefings |
+
+**Setting up Gmail / Calendar:** in [Google Cloud Console](https://console.cloud.google.com/)
+create a project, enable the Gmail API and Google Calendar API, configure the OAuth
+consent screen (add yourself as a test user), and create an OAuth client of type
+**Desktop app**. Enter its client ID and secret when adding Gmail in Connections.
 
 ## Features
 
@@ -16,8 +35,8 @@ AI-assisted desktop app that helps you stay on top of important Telegram convers
 - **Important contacts overview** — relationship status cards showing who needs a check-in
 - **Latest briefing** — preview of the most recent AI-generated briefing
 
-### Chat Browser
-- Browse all your Telegram chats synced locally
+### Chats (Telegram, Signal, SMS)
+- Messengers in one list with channel chips (All / Telegram / Signal / SMS)
 - Folder tabs to categorize chats (tracked, brief, hidden, etc.) with a slim scrollable header
 - Resizable split-pane layout with chat list + message viewer
 - Unread message counts per chat
@@ -30,15 +49,26 @@ AI-assisted desktop app that helps you stay on top of important Telegram convers
 - Infinite scroll to load older messages
 - Keyboard shortcuts: j/k (navigate), / (search), i (toggle info), Cmd+F (in-chat search)
 
-### Contacts & Organizations
-- Import Telegram contacts with enriched profiles: organization, title, Twitter, LinkedIn, phone, notes
+### Mail (Gmail)
+- Email client with account switcher, Inbox / Sent / Archive / All mail and labels
+- Thread view with sanitized HTML (remote images blocked until you allow a sender), attachments
+- Reply, reply all, compose, archive, mark read/unread
+
+### Calendar (Google Calendar)
+- Agenda and week views across your Gmail accounts; attendees link to their person pages
+- Upcoming meetings on each person page; today's meetings at the top of briefings
+
+### People, Contacts & Organizations
+- One person per human across channels: linked accounts, merge suggestions, merge / undo / detach
+- Cross-channel timeline on each person page: chats, group messages, emails and meetings
+- Address-book contacts with enriched profiles: organization, title, Twitter, LinkedIn, notes
 - **Relationship status tracking** — auto-calculated (active, nurturing, stalled, cold, needs_reply) or manually overridden
-- **Position management** — add job positions (title + organization) to any Telegram user, even non-contacts
+- **Position management** — add job positions (title + organization) to any person, even non-contacts
 - Mark contacts as important for inclusion in briefings and dashboard
 - Organization management: members, former employees, related group chats
 - **AI-generated org context** — LLM summarizes organization purpose from member data
 - Auto-discover organizations from existing contact positions
-- Profile pages for any Telegram user — linked from group member lists, chat info, or message avatars
+- Person pages for anyone you've talked to — linked from member lists, chat info, message avatars and mail
 
 ### Intelligence Page
 Four tabs for staying informed:
@@ -87,8 +117,7 @@ Four tabs for staying informed:
 
 - Python 3.9+
 - Node.js 18+
-- A Telegram account
-- Telegram API credentials (free) — get them at [my.telegram.org](https://my.telegram.org)
+- Accounts for the channels you want to connect (see [Channels](#channels)); none is required to start
 
 ---
 
@@ -113,20 +142,20 @@ cd ..
 bash build_app.sh
 ```
 
-This builds the React frontend and packages everything into `dist/Mingly.app`.
+This builds the React frontend and packages everything into `dist/Common Defense.app`.
 
 ### 3. Launch
 
 ```bash
-open dist/Mingly.app
+open "dist/Common Defense.app"
 # or just double-click it in Finder
 ```
 
 On first launch you will be guided through:
 
-1. **Set a master password** — encrypts your credentials and Telegram session locally
-2. **Enter Telegram API credentials** — get them at [my.telegram.org](https://my.telegram.org) → API development tools
-3. **Sign in with your phone number** — OTP + optional 2FA
+1. **Set a master password** — encrypts every channel's credentials and sessions locally
+2. **Connect an account** (optional, can be skipped) — any channel from [Channels](#channels); more later in Settings → Connections
+3. **Pick an AI model**
 
 Credentials are encrypted with [Fernet](https://cryptography.io/en/latest/fernet/) (AES-128-CBC + HMAC) derived from your master password via PBKDF2. Nothing is sent to any server.
 
@@ -159,37 +188,35 @@ Open `http://localhost:5173`. The Vite proxy forwards all `/api` requests to the
 mingly/
 ├── backend/
 │   ├── main.py              # Entry point (dev + pywebview desktop mode)
-│   ├── api/                 # FastAPI routers (one per domain)
-│   │   ├── auth.py          # Vault unlock, Telegram login
-│   │   ├── chats.py         # Chat + message endpoints (sync, send, reply, react)
-│   │   ├── contacts.py      # Contact CRUD + position management (by telegram_id)
-│   │   ├── organizations.py # Org CRUD + member/former employee management
-│   │   ├── intelligence.py  # Mentions, LLM chat, briefing SSE stream
-│   │   ├── dashboard.py     # Home page stats, needs-reply, attention contacts
-│   │   ├── profiles.py      # Telegram profile lookup + photo serving
-│   │   ├── settings.py      # Prefs, briefing schedule, user orgs
-│   │   ├── search.py        # Global search across chats, contacts, messages, orgs
-│   │   └── tags.py          # Chat tag/folder management
-│   ├── telegram/            # Telethon client, message sync, event handlers
+│   ├── api/                 # FastAPI routers (one per domain): conversations, people,
+│   │                        #   accounts, telegram, compose, calendar, intelligence, scam, …
+│   ├── connectors/          # Channel connectors behind one contract (sign-in steps,
+│   │   ├── base.py          #   capabilities, send / fetch attachment / react / mark read)
+│   │   ├── manager.py       # Lifecycle of every connected account
+│   │   ├── gmail/           # Gmail + Google Calendar (httpx, OAuth PKCE)
+│   │   ├── signal/          # signal-cli JSON-RPC
+│   │   └── sms/             # macOS Messages chat.db (read-only)
+│   ├── telegram/            # Telethon runtime, sync, archive, media; ids.py maps Telegram ids
+│   ├── ingest/              # Normalized shapes + the one writer for non-Telegram channels;
+│   │                        #   fanout.py: what every new message triggers (WS, Shield, notify)
+│   ├── people/linking.py    # Cross-channel person linking (merge / undo / detach)
+│   ├── serializers.py       # JSON shapes of Conversation / Message / Person / Identity
 │   ├── llm/                 # Multi-provider registry (Ollama, Anthropic, OpenAI)
-│   │   ├── registry.py      # Provider singleton + config
-│   │   ├── orchestrator.py  # Tool-calling LLM orchestrator
-│   │   └── briefing_prompts.py  # Briefing system prompts
-│   ├── ai/                  # Message importance scoring
-│   ├── org_context.py       # Shared org awareness helpers for LLM features
-│   ├── catchup_summary_scheduler.py  # Cronjob-powered catch-up summaries
+│   ├── briefing/            # Briefing pipeline
+│   ├── scam/                # Shield scam detection + cloud sync
 │   ├── db/
-│   │   ├── database.py      # SQLAlchemy async engine + session
-│   │   ├── models.py        # ORM models (Message, Chat, Contact, ContactPosition, Org, …)
-│   │   ├── crud.py          # Async DB helpers + relationship status computation
-│   │   └── migrations/      # Append-only numbered SQL migrations (auto-applied)
+│   │   ├── models.py        # Schema v2 (accounts, people, identities, conversations, messages, …)
+│   │   ├── crud/            # Async DB helpers, one module per area
+│   │   └── migrations/      # Append-only migrations (auto-applied, DB backed up first)
 │   ├── config.py            # DATA_DIR (~/Library/Application Support/Mingly when bundled)
 │   └── secrets.py           # Fernet-encrypted vault (vault.enc)
 ├── frontend/
 │   └── src/
-│       ├── pages/           # Home, Chats, Contacts, Organizations, Intelligence, Settings, Profile, Tracked, Briefing
-│       ├── components/      # MessageBubble, SenderAvatar, ComposeBar, CatchUpQueue, PersonCard, …
+│       ├── pages/           # Home, Chats, Mail, Calendar, Person, Contacts, Organizations,
+│       │                    #   Intelligence, Settings (Connections), …
+│       ├── components/      # MessageBubble, EmailMessageView, AuthFlow, PersonTimeline, …
 │       └── api/             # Typed fetch wrappers, SSE helpers, session management
+├── docs/multichannel/       # Schema v2 contract, phase plan, Shield cloud contract v2
 ├── mingly.spec              # PyInstaller spec
 ├── build_app.sh             # One-command build script
 ├── run_dev.py               # Dev server launcher
@@ -198,11 +225,11 @@ mingly/
 
 ### Key Design Decisions
 
-- **ContactPosition uses `telegram_id`** (not a contact FK) — positions can be added to any Telegram user without creating a Contact record
+- **Internal ids, person-centric** — every row has an internal id; a channel's own ids live only in `external_id` columns read by that channel's code. A *person* owns *identities* (one per channel handle). See `docs/multichannel/SCHEMA_V2.md`.
+- **Connector contract** — every channel implements the same lifecycle, sign-in steps and capabilities; the UI gates channel-specific actions on a conversation's `capabilities`.
+- **Hybrid UI** — Chats for messengers, Mail for email, Calendar for meetings; people pages, Home, catch-up, briefings and search stay cross-channel.
 - **Multi-provider LLM** — Ollama for local inference, Anthropic/OpenAI for cloud; switchable in Settings
-- **Organizational awareness** — LLM features (chat, briefings, catch-up) inject colleague/org context from user's org memberships
-- **Session-based auth** — master password → Fernet vault → in-memory session token; all API routes (except auth) require `X-Session-Token`
-- **Append-only migrations** — numbered SQL tuples in `backend/db/migrations/runner.py`, auto-applied on startup
+- **Session-based auth** — master password → Fernet vault → in-memory session token; all API routes (except vault/auth bootstrap and the Google OAuth redirect) require `X-Session-Token`
 
 ---
 
@@ -212,18 +239,20 @@ All data is stored locally under `~/Library/Application Support/Mingly/` (app) o
 
 | Data | File |
 |---|---|
-| Messages, chats, contacts, orgs, positions, briefings, catch-up state | `mingly.db` (SQLite) |
-| Encrypted credentials + session | `vault.enc` (Fernet-encrypted) |
+| People, conversations, messages, emails, calendar events, orgs, briefings, catch-up state | `mingly.db` (SQLite) |
+| Encrypted credentials + sessions (Telegram, Google) | `vault.enc` (Fernet-encrypted) |
+| Signal device keys (signal-cli) | `signal/` (directory mode 0700) |
+| Database backups before migrations / schema changes | `backups/` |
 | Notification, briefing & UI preferences | `prefs.json` |
 | LLM provider configuration | `llm_config.json` |
-| Downloaded media thumbnails | `media/` |
-| Profile photos | `media/profile_photos/` |
+| Downloaded attachments | `media/<conversation>/` |
+| Avatars | `media/avatars/` |
 
 ---
 
 ## Notifications
 
-Mingly sends native macOS notifications when new messages arrive. Configure in **Settings → Notifications** (All messages / Tracked chats only / Off).
+Mingly sends native macOS notifications when new messages arrive. Configure in **Settings → Notifications** (All messages / Tracked chats only / Off), with a separate setting per email account (off by default).
 
 ---
 
@@ -249,21 +278,24 @@ Mingly is designed as a **fully local, offline-first application**. Your data ne
 
 | Data | Where it lives |
 |---|---|
-| Telegram messages, chats, contacts | `mingly.db` (SQLite, local) |
-| Telegram API credentials & session | `vault.enc` (Fernet-encrypted, local) |
+| Messages, emails, calendar events, people | `mingly.db` (SQLite, local) |
+| Channel credentials & sessions | `vault.enc` (Fernet-encrypted, local) |
 | App preferences & LLM config | `prefs.json`, `llm_config.json` (local) |
 | Downloaded media & profile photos | `media/` folder (local) |
 
 ### Credentials & Encryption
 
-- Your **Telegram API ID/hash** and **session token** are encrypted at rest using [Fernet](https://cryptography.io/en/latest/fernet/) (AES-128-CBC + HMAC-SHA256), derived from a master password you set on first launch via PBKDF2.
+- Your **channel credentials and session tokens** (Telegram API ID/hash and session, Google OAuth client and refresh tokens) are encrypted at rest using [Fernet](https://cryptography.io/en/latest/fernet/) (AES-128-CBC + HMAC-SHA256), derived from a master password you set on first launch via PBKDF2.
 - The master password itself is **never stored**. Only the encrypted vault file `vault.enc` is written to disk.
 - Decrypted credentials are held only in memory while the app is running and discarded when it exits.
 
-### Telegram Connection
+### Channel Connections
 
-- Mingly connects to Telegram's servers using the official [Telethon](https://docs.telethon.dev) library (MTProto protocol).
-- **No messages or metadata are relayed through any third-party server.** The connection is directly between your machine and Telegram's infrastructure.
+- **Telegram:** directly to Telegram's servers with [Telethon](https://docs.telethon.dev) (MTProto).
+- **Gmail / Google Calendar:** directly to Google's APIs with your own OAuth client.
+- **Signal:** through your local signal-cli, linked as one of your devices; its keys stay in `signal/` (outside the encrypted vault — protect your Mac account).
+- **SMS / iMessage:** read from the local Messages database; nothing is sent anywhere.
+- **No messages or metadata are relayed through any third-party server.**
 
 ### AI / LLM
 
@@ -273,7 +305,8 @@ Mingly is designed as a **fully local, offline-first application**. Your data ne
 ### Network Requests
 
 The only external network connections Mingly makes are:
-1. **Telegram's MTProto servers** — to sync messages and send replies.
+1. **The channels you connect** — Telegram, Google (Gmail, Calendar) and Signal's servers via signal-cli.
 2. **Your configured LLM endpoint** — for AI inference (local by default).
+3. **The Shield cloud endpoint, only if you enable Shield cloud sync** — scam verdicts; private handles (emails, phone numbers) are sent as per-install salted hashes, and email content is not uploaded unless you allow it.
 
 No analytics, telemetry, crash reporting, or third-party trackers of any kind are included.

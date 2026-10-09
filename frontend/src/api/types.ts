@@ -508,7 +508,7 @@ export interface DashboardBriefingEntry {
   conversation_id: number | null
   person_id?: number | null
   conversation_title: string
-  category: 'tracked' | 'briefing' | 'important_contact'
+  category: 'tracked' | 'briefing' | 'important_contact' | 'meetings'
   summary: string
   /** Citation targets for `[n]` markers (sources[n-1]) */
   sources?: BriefingSource[]
@@ -718,7 +718,7 @@ export interface BriefingSummary {
   conversation_id: number | null
   person_id?: number | null
   conversation_title: string
-  category: 'tracked' | 'briefing' | 'important_contact'
+  category: 'tracked' | 'briefing' | 'important_contact' | 'meetings'
   summary: string
   sources?: BriefingSource[]
 }
@@ -729,7 +729,7 @@ export interface BriefingHistoryEntry {
   conversation_id: number | null
   person_id?: number | null
   conversation_title: string
-  category: 'tracked' | 'briefing' | 'important_contact'
+  category: 'tracked' | 'briefing' | 'important_contact' | 'meetings'
   summary: string
   sources?: BriefingSource[]
 }
@@ -968,6 +968,8 @@ export type WSEvent =
   | { type: 'person_notes_changed'; person_id: number }
   /** An MCP agent changed a person's fields or positions */
   | { type: 'person_changed'; person_id: number }
+  /** Google Calendar events of a Gmail account changed (refetch calendar views) */
+  | { type: 'calendar_synced'; account_id: number }
   /** Client-side only: emitted by WebSocketProvider after a reconnect — events may have been missed, refetch */
   | { type: 'resync' }
 

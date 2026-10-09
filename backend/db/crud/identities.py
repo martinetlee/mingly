@@ -64,10 +64,11 @@ async def _sync_contact_points(db: AsyncSession, identity: Identity) -> bool:
     phone = normalize_phone(identity.phone)
     if phone:
         wanted.add(("phone", phone))
-    if identity.channel in ("gmail", "email"):
-        email = normalize_email(identity.external_id)
-        if email:
-            wanted.add(("email", email))
+    # Any channel whose handle is an email address (Gmail, iMessage by email);
+    # Telegram / Signal handles never contain "@".
+    email = normalize_email(identity.external_id)
+    if email:
+        wanted.add(("email", email))
     current = {
         (cp.kind, cp.value): cp for cp in (await db.execute(
             select(ContactPoint).where(ContactPoint.identity_id == identity.id)

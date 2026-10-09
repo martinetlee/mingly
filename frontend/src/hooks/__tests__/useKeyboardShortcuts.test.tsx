@@ -99,12 +99,15 @@ describe('useKeyboardShortcuts', () => {
 })
 
 describe('nav shortcuts', () => {
-  it('are derived from the visible sidebar NAV in order, Settings last', () => {
+  it('are derived from the visible sidebar NAV in order, Settings last as ⌘,', () => {
     for (const features of [{ shield: false }, { shield: true }]) {
       const shortcuts = navShortcuts(features)
       expect(shortcuts.map((s) => s.item.to)).toEqual([...visibleNav(features), SETTINGS_NAV].map((n) => n.to))
       expect(shortcuts[0]).toMatchObject({ combo: 'mod+1', keys: '⌘1' })
-      expect(shortcuts.length).toBeLessThanOrEqual(9)
+      expect(shortcuts[shortcuts.length - 1]).toMatchObject({ combo: 'mod+,', keys: '⌘,', item: SETTINGS_NAV })
+      // Every main item still gets a digit (⌘1…⌘9)
+      expect(shortcuts.slice(0, -1).map((s) => s.combo)).toEqual(visibleNav(features).map((_, i) => `mod+${i + 1}`))
+      expect(shortcuts.length - 1).toBeLessThanOrEqual(9)
     }
   })
 

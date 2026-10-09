@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import type { TimelineItem, TimelinePage } from '../../api/timeline'
+import type { TimelineMeetingItem, TimelineMessageItem, TimelinePage } from '../../api/timeline'
+import type { CalendarEvent } from '../../api/calendar'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import { msg } from '../../pages/chats/__tests__/fixtures'
@@ -18,9 +19,23 @@ const dm = { id: 10, title: 'Alice', kind: 'direct' as const, channel: 'telegram
 const group = { id: 20, title: 'Team', kind: 'group' as const, channel: 'signal' }
 const thread = { id: 30, title: 'Quarterly plan', kind: 'email_thread' as const, channel: 'gmail' }
 
-const item = (id: number, conversation: TimelineItem['conversation'], over: Partial<TimelineItem['message']> = {}): TimelineItem => ({
+const item = (id: number, conversation: TimelineMessageItem['conversation'], over: Partial<TimelineMessageItem['message']> = {}): TimelineMessageItem => ({
+  kind: 'message',
   message: msg(id, { conversation_id: conversation?.id ?? 0, sender: { identity_id: 1, person_id: 42, name: 'Alice', avatar_url: null }, ...over }),
   conversation,
+})
+
+const meeting = (id: number, title: string): TimelineMeetingItem => ({
+  kind: 'meeting',
+  event: {
+    id, account_id: 1, calendar_id: 'primary', title, description: null, location: 'Room 4',
+    start_at: '2026-10-01T09:00:00Z', end_at: '2026-10-01T10:00:00Z', all_day: false, status: 'confirmed',
+    html_link: 'https://calendar.google.com/x', organizer: null,
+    attendees: [
+      { identity_id: 1, person_id: 1, name: 'Me', email: 'me@x.com', response_status: 'accepted', is_organizer: true, is_self: true },
+      { identity_id: 2, person_id: 42, name: 'Alice', email: 'a@x.com', response_status: 'accepted', is_organizer: false, is_self: false },
+    ],
+  } satisfies CalendarEvent,
 })
 
 const firstPage: TimelinePage = {
@@ -78,9 +93,36 @@ describe('PersonTimeline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
     await waitFor(() => expect(rows()).toHaveLength(4))
     const opts = vi.mocked(getPersonTimeline).mock.calls[1][1]
-    expect(opts?.before).toMatchObject({ id: 3, date: firstPage.items[2].message.date })
+    expect(opts?.before).toMatchObject({ id: 3, date: (firstPage.items[2] as TimelineMessageItem).message.date })
     expect(rows()[3].textContent).toContain('hi there')
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('lists meetings between messages, linking to their day in Calendar', async () => {
+    vi.mocked(getPersonTimeline).mockResolvedValueOnce({ items: [item(5, dm, { text: 'see you there' }), meeting(7, 'Design review'), item(4, dm, { text: 'agenda?' })], has_more: false })
+    setup()
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const [m] = screen.getAllByTestId('timeline-meeting')
+    expect(m.textContent).toContain('Design review')
+    expect(m.textContent).toContain('Meeting')
+    expect(m.textContent).toContain('Room 4')
+    expect(m.textContent).toContain('1 person') // you aren't counted
+    expect(m.getAttribute('href')).toMatch(/^\/calendar\?event=7&date=\d{4}-\d{2}-\d{2}$/)
+    // Newest first, as the server sent them
+    const order = screen.getAllByTestId(/timeline-(row|meeting)/).map((el) => el.getAttribute('data-testid'))
+    expect(order).toEqual(['timeline-row', 'timeline-meeting', 'timeline-row'])
+  })
+
+  it('"Load more" continues before the oldest message even when a meeting is last', async () => {
+    vi.mocked(getPersonTimeline)
+      .mockResolvedValueOnce({ items: [item(5, dm, { text: 'x' }), meeting(7, 'Sync')], has_more: true })
+      .mockResolvedValueOnce({ items: [meeting(7, 'Sync'), item(2, dm, { text: 'older' })], has_more: false })
+    setup()
+    await waitFor(() => expect(screen.getAllByTestId('timeline-meeting')).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(vi.mocked(getPersonTimeline).mock.calls[1][1]?.before).toMatchObject({ id: 5 })
+    expect(screen.getAllByTestId('timeline-meeting')).toHaveLength(1) // not duplicated
   })
 
   it('shows an empty state', async () => {

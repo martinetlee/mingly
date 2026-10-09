@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ChevronDown, ChevronRight, Newspaper, Radio, RefreshCw, Star, X } from 'lucide-react'
+import { CalendarDays, ChevronDown, ChevronRight, Newspaper, Radio, RefreshCw, Star, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { BriefingHistoryEntry, BriefingSource, BriefingSummary } from '../api/types'
 import Markdown from './Markdown'
@@ -22,6 +22,13 @@ interface Accent {
 }
 
 const ACCENTS: Record<Category, Accent> = {
+  meetings: {
+    label: 'Today’s Meetings', icon: CalendarDays, iconClass: 'text-sky-400',
+    heading: 'text-sky-400', badge: 'bg-sky-500/20 text-sky-400',
+    card: 'border-sky-500/20 bg-sky-900/10', name: 'text-sky-300',
+    button: 'border-sky-500/30 text-sky-300 hover:bg-sky-900/40',
+    flow: 'border-sky-500/20 text-sky-200 hover:bg-sky-900/30', flowBox: 'border-sky-500/20',
+  },
   important_contact: {
     label: 'Important Contacts', icon: Star, iconClass: 'fill-amber-400 text-amber-400',
     heading: 'text-amber-400', badge: 'bg-amber-500/20 text-amber-400',
@@ -47,7 +54,10 @@ const ACCENTS: Record<Category, Accent> = {
 
 const NO_SOURCES: BriefingSource[] = []
 
-const CATEGORY_ORDER: Category[] = ['important_contact', 'tracked', 'briefing']
+const CATEGORY_ORDER: Category[] = ['meetings', 'important_contact', 'tracked', 'briefing']
+
+/** Categories the LLM writes (regeneratable); meetings are listed from the calendar */
+const GENERATED: ReadonlySet<Category> = new Set(['important_contact', 'tracked', 'briefing'])
 
 /** Regenerate controls for entries of a persisted run */
 export interface RegenerateControls {
@@ -88,14 +98,15 @@ export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
     <div className={`rounded-lg border px-3 py-2 ${accent.card}`}>
       <div className="mb-1 flex items-center justify-between gap-2">
         {(() => {
-          // Important-person entries link to the person; the rest to their conversation
-          const to = entry.person_id != null && entry.conversation_id == null ? personUrl(entry.person_id)
+          // Important-person entries link to the person; meetings to the Calendar; the rest to their conversation
+          const to = entry.category === 'meetings' ? '/calendar'
+            : entry.person_id != null && entry.conversation_id == null ? personUrl(entry.person_id)
             : entry.conversation_id != null ? openConversationUrl(entry.conversation_id) : null
           return to
             ? <Link to={to} className={`text-[11px] font-medium hover:underline ${accent.name}`}>{entry.conversation_title}</Link>
             : <p className={`text-[11px] font-medium ${accent.name}`}>{entry.conversation_title}</p>
         })()}
-        {regen && id != null && isHistoryEntry(entry) && (
+        {regen && id != null && isHistoryEntry(entry) && GENERATED.has(entry.category) && (
           <div className="inline-flex items-center gap-1">
             {active ? (
               <button
@@ -151,7 +162,7 @@ export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
   )
 }
 
-/** Entries of one run grouped by category (important contacts, tracked, briefing). */
+/** Entries of one run grouped by category (today's meetings, important contacts, tracked, briefing). */
 export function BriefingEntryList({
   entries,
   regen,

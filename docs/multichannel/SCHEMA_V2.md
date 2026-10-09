@@ -280,6 +280,8 @@ Telegram-only operations on a non-Telegram conversation answer
 | `/api/scam/status/{chat_id}` | `/api/scam/status/{conversation_id}` |
 | `/api/scam/check-users` `{telegram_ids}` / `check-messages` `{chat_id, message_ids}` | `{identity_ids}` / `{conversation_id, message_ids}` |
 | `/api/workspaces/{id}/move` `{chat_id}` | `{conversation_id}` |
+| (new) | `GET /api/people/{person_id}/timeline` items: `{kind: "message", message, conversation}` and, for meetings the person attends that have started, `{kind: "meeting", event}` (pages are cut by messages) |
+| (new, Phase 5) | `GET /api/calendar/events?start=&end=&from_date=&to_date=&account_id=&person_id=` → `{events: [CalendarEvent]}`; `GET /api/calendar/people/{person_id}/upcoming` → `{events}`; `GET /api/calendar/accounts`; `GET/PUT /api/calendar/accounts/{account_id}/calendars` (synced calendars, pref `calendar_ids`); `POST /api/calendar/sync`. CalendarEvent: `start_at`/`end_at` UTC ISO, or `YYYY-MM-DD` (end exclusive) when `all_day`; `attendees[]` = `{identity_id, person_id, name, email, response_status, is_organizer, is_self}`, organizer first |
 
 Telegram-only routes live in `backend/api/telegram.py` (prefix `/api/telegram`).
 
@@ -304,6 +306,7 @@ Telegram-only routes live in `backend/api/telegram.py` (prefix `/api/telegram`).
 { "type": "summary_ready", "conversation_id" }
 { "type": "person_notes_changed" | "person_changed", "person_id" }
 { "type": "scam_users_flagged", "identity_ids" }
+{ "type": "calendar_synced", "account_id" }                     // Google Calendar events of an account changed
 // scam_detected / scam_check_safe / scam_check_error: chat_id→conversation_id,
 //   sender_ids→identity_ids; messages[] entries carry message_id, conversation_id, identity_id
 // archive_progress: current_chat → {conversation_id, title}

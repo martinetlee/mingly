@@ -350,26 +350,33 @@ async def person_timeline(
     db: AsyncSession = Depends(get_db),
 ):
     """Cross-channel timeline, newest first: the person's one-to-one
-    conversations (both directions), what they sent in groups, and emails
-    they're a participant of. Page with ``before`` (ISO date of the oldest
-    item shown) and ``before_id`` (its message id, breaks date ties)."""
+    conversations (both directions), what they sent in groups, emails
+    they're a participant of — ``{kind: "message", message, conversation}``
+    — and meetings they attend that have started, ``{kind: "meeting",
+    event}``. Paged by messages: page with ``before`` (ISO date of the oldest
+    *message* item shown) and ``before_id`` (its id, breaks date ties); a
+    page carries the meetings between its oldest message and ``before``."""
+    from backend.api.calendar import timeline_meetings
+
     await person_or_404(db, person_id)
     limit = max(1, min(limit, 200))
-    rows, has_more = await crud.person_timeline(
-        db, person_id, limit=limit,
-        before=_parse_date(before) if before else None, before_id=before_id,
-    )
+    before_dt = _parse_date(before) if before else None
+    rows, has_more = await crud.person_timeline(db, person_id, limit=limit, before=before_dt, before_id=before_id)
     convs = await crud.get_conversations(db, {r[0].conversation_id for r in rows})
     items = []
     for row, msg in zip(rows, await messages_out(db, rows)):
         conv = convs.get(row[0].conversation_id)
-        items.append({
+        items.append((row[0].date, {
+            "kind": "message",
             "message": msg,
             "conversation": {
                 "id": conv.id, "title": conv.title, "kind": conv.kind, "channel": channel_of(conv),
             } if conv is not None else None,
-        })
-    return {"items": items, "has_more": has_more}
+        }))
+    oldest = rows[-1][0].date if has_more and rows else None
+    items += await timeline_meetings(db, person_id, before=before_dt, oldest=oldest)
+    items.sort(key=lambda it: it[0] or datetime.min, reverse=True)
+    return {"items": [it for _, it in items], "has_more": has_more}
 
 
 @router.put("/{person_id}")

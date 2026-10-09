@@ -1,8 +1,8 @@
 /**
- * Sidebar navigation — the single source for the Sidebar links, the ⌘1-9
+ * Sidebar navigation — the single source for the Sidebar links, the ⌘1-9 / ⌘,
  * shortcuts (Layout) and the shortcut help sheet.
  */
-import { Home, MessageSquare, Mail, Users, Building2, Radio, Shield, Brain, Settings, Lock } from 'lucide-react'
+import { Home, MessageSquare, Mail, CalendarDays, Users, Building2, Radio, Shield, Brain, Settings, Lock } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import type { Features } from '../api/types'
@@ -20,6 +20,7 @@ export const NAV: NavItem[] = [
   { to: '/home', icon: Home, label: 'Home' },
   { to: '/chats', icon: MessageSquare, label: 'Chats' },
   { to: '/mail', icon: Mail, label: 'Mail' },
+  { to: '/calendar', icon: CalendarDays, label: 'Calendar' },
   { to: '/contacts', icon: Users, label: 'Contacts' },
   { to: '/organizations', icon: Building2, label: 'Orgs' },
   { to: '/tracked', icon: Radio, label: 'Tracked' },
@@ -37,11 +38,14 @@ export function visibleNav(features: Features): NavItem[] {
 
 export interface NavShortcut { combo: string; keys: string; item: NavItem }
 
-/** ⌘1…⌘9 targets, in sidebar order (visible main nav, then Settings) */
+/** ⌘1…⌘9: the visible main nav in sidebar order; Settings is ⌘, (the macOS convention) */
 export function navShortcuts(features: Features): NavShortcut[] {
-  return [...visibleNav(features), SETTINGS_NAV]
-    .slice(0, 9)
-    .map((item, i) => ({ combo: `mod+${i + 1}`, keys: `⌘${i + 1}`, item }))
+  return [
+    ...visibleNav(features)
+      .slice(0, 9)
+      .map((item, i) => ({ combo: `mod+${i + 1}`, keys: `⌘${i + 1}`, item })),
+    { combo: 'mod+,', keys: '⌘,', item: SETTINGS_NAV },
+  ]
 }
 
 /** Sidebar "Lock" action (Layout binds the shortcut, ShortcutHelp lists it) */

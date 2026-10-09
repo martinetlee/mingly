@@ -11,6 +11,7 @@ import Unlock from './pages/Unlock'
 import Home from './pages/Home'
 import Chats from './pages/Chats'
 import Mail from './pages/Mail'
+import Calendar from './pages/Calendar'
 import OpenConversation from './pages/OpenConversation'
 import Contacts from './pages/Contacts'
 import Organizations from './pages/Organizations'
@@ -189,6 +190,7 @@ function AppRoot() {
             <Route path="home" element={<Home />} />
             <Route path="chats" element={<Chats />} />
             <Route path="mail" element={<Mail />} />
+            <Route path="calendar" element={<Calendar />} />
             <Route path="open/:conversationId" element={<OpenConversation />} />
             <Route path="board" element={<Board />} />
             <Route path="contacts" element={<Contacts />} />

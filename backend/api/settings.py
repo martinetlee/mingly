@@ -30,6 +30,7 @@ PUBLIC_PREF_KEYS = (
     "notif_pref_channels",
     "email_remote_images_senders",
     "gmail_backfill_days",
+    "sms_backfill_days",
     "briefing_schedule",
     "briefing_time",
     "briefing_day",

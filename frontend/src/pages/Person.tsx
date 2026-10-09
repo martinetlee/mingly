@@ -21,6 +21,7 @@ import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard from '../components/PersonCard'
 import PersonNotes from '../components/PersonNotes'
 import PersonTimeline from '../components/PersonTimeline'
+import UpcomingMeetings from './calendar/UpcomingMeetings'
 import ChannelIcon, { channelLabel } from '../components/ChannelIcon'
 import MergePersonDialog from '../components/MergePersonDialog'
 import { useConfirm } from '../components/ui'
@@ -211,7 +212,10 @@ export default function Person() {
         {/* Notes timeline (agent + user) */}
         <PersonNotes personId={person.id} />
 
-        {/* Messages across every channel: chats, groups, email */}
+        {/* Next calendar events with this person (hidden when there are none) */}
+        <UpcomingMeetings personId={person.id} />
+
+        {/* Messages across every channel (chats, groups, email) and past meetings */}
         <PersonTimeline personId={person.id} />
 
         {/* Common chats (Telegram) */}

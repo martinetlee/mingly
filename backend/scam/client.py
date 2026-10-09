@@ -235,9 +235,11 @@ def _vault_scam_api_key() -> str:
     return get_secret_pref("scam_detection_api_key")
 
 
-# The external API speaks the Telegram-shaped v1 contract: message ids only
-# need to be consistent within one request (internal ids are), senders are
-# Telegram user ids (None for other channels) and "private" means direct.
+# The external API's v1 contract is Telegram-shaped: message ids only need to
+# be consistent within one request (internal ids are), senders are Telegram
+# user ids (None for other channels) and "private" means direct. A server that
+# advertises contract 2 (GET /capabilities) gets the channel-neutral request
+# of docs/multichannel/SHIELD_CLOUD_CONTRACT_V2.md instead.
 _EXTERNAL_KIND = {"direct": "private"}
 
 
@@ -269,6 +271,50 @@ def _external_metadata(req: ScanRequest) -> dict:
     }
 
 
+def _external_v1_request(request_id: str, req: ScanRequest) -> dict:
+    return {
+        "request_id": request_id,
+        "messages": [_external_message(m) for m in req.all_messages()],
+        "target_message_ids": req.target_ids,
+        "user_telegram_id": 0,
+        "profiles": [_external_profile(p) for p in req.profiles],
+        "chat_metadata": _external_metadata(req),
+    }
+
+
+async def _external_v2_request(request_id: str, req: ScanRequest) -> dict:
+    """Channel-neutral isThisScam request: senders as v2 handles (Telegram
+    user id, else the install-salted hash), v2 conversation kinds."""
+    from backend.db.database import AsyncSessionLocal
+    from backend.scam.channel_ids import cloud_refs, handle_salt
+
+    messages = req.all_messages()
+    identity_ids = [m.get("identity_id") for m in messages] + [p.get("identity_id") for p in req.profiles]
+    salt = handle_salt()
+    async with AsyncSessionLocal() as db:
+        refs = await cloud_refs(db, salt, identity_ids=identity_ids)
+    return {
+        "contract": 2,
+        "request_id": request_id,
+        "channel": req.channel or req.metadata.get("channel"),
+        "conversation": {"kind": req.metadata.get("kind"), "name": req.metadata.get("title") or "Unknown"},
+        "messages": [{
+            "message_id": m.get("message_id"),
+            "sender": refs.handles.get(m.get("identity_id")),
+            "sender_name": m.get("sender_name"),
+            "text": m.get("text"),
+            "date": m.get("date"),
+        } for m in messages],
+        "target_message_ids": req.target_ids,
+        "profiles": [{
+            "sender": refs.handles.get(p.get("identity_id")),
+            "name": p.get("name"),
+            "bio": p.get("bio") or "",
+            "is_contact": bool(p.get("is_contact")),
+        } for p in req.profiles],
+    }
+
+
 class ExternalScamAPIClient(ScamAPIClient):
     """Real external API client."""
 
@@ -277,8 +323,24 @@ class ExternalScamAPIClient(ScamAPIClient):
         """``api_key`` is accepted for old callers and ignored: the key lives
         in the vault and is read on every request, so a lock or vault reset
         revokes it immediately."""
+        from backend.scam.cloud_sync import ContractDiscovery
+
         self._base_url = base_url
         self._key_provider = key_provider or _vault_scam_api_key
+        self._contracts = ContractDiscovery("/capabilities")
+        self._transport = None  # tests inject an httpx transport
+
+    def _client(self):
+        import httpx
+        return httpx.AsyncClient(transport=self._transport)
+
+    @property
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._api_key}"}
+
+    async def contract_version(self) -> int:
+        """2 when the server advertises it (cached with a TTL), else 1."""
+        return await self._contracts.contract(self._base_url, self._headers, self._transport)
 
     @property
     def _api_key(self) -> str:
@@ -289,12 +351,11 @@ class ExternalScamAPIClient(ScamAPIClient):
             return ""
 
     async def are_flagged_scams(self, telegram_ids: list[int]) -> dict[int, ScamCheckResult]:
-        import httpx
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.post(
                 f"{self._base_url}/areFlaggedScams",
                 json={"telegram_ids": telegram_ids},
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._headers,
                 timeout=30,
             )
             resp.raise_for_status()
@@ -311,20 +372,17 @@ class ExternalScamAPIClient(ScamAPIClient):
             return results
 
     async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
-        import httpx
-        async with httpx.AsyncClient() as client:
+        headers = self._headers
+        if await self.contract_version() >= 2:
+            from backend.scam.cloud_sync import CONTRACT_HEADER
+
+            payload = await _external_v2_request(request_id, req)
+            headers[CONTRACT_HEADER] = "2"
+        else:
+            payload = _external_v1_request(request_id, req)
+        async with self._client() as client:
             resp = await client.post(
-                f"{self._base_url}/isThisScam",
-                json={
-                    "request_id": request_id,
-                    "messages": [_external_message(m) for m in req.all_messages()],
-                    "target_message_ids": req.target_ids,
-                    "user_telegram_id": 0,
-                    "profiles": [_external_profile(p) for p in req.profiles],
-                    "chat_metadata": _external_metadata(req),
-                },
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=60,
+                f"{self._base_url}/isThisScam", json=payload, headers=headers, timeout=60,
             )
             if not resp.is_success:
                 detail = resp.text[:500]
@@ -351,11 +409,10 @@ class ExternalScamAPIClient(ScamAPIClient):
             )
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
-        import httpx
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.get(
                 f"{self._base_url}/result/{request_id}",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._headers,
                 timeout=30,
             )
             resp.raise_for_status()
@@ -370,12 +427,11 @@ class ExternalScamAPIClient(ScamAPIClient):
             )
 
     async def respond_to_followup(self, request_id: str, data: Any) -> Union[ScamCheckResult, FollowUpRequest, None]:
-        import httpx
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.post(
                 f"{self._base_url}/followup/{request_id}",
                 json={"data": data},
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._headers,
                 timeout=60,
             )
             resp.raise_for_status()

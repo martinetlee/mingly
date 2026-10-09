@@ -7,6 +7,7 @@ identity and the vault credentials exist.
 
 Runtime: a background loop backfills recent threads, then polls
 ``history.list`` from the stored ``historyId`` (``accounts.sync_state_json``).
+A second loop syncs the account's Google Calendar (``calendar_sync``).
 A thread is one ``email_thread`` conversation; its messages, senders and
 recipients go through ``backend.ingest.service``.
 """
@@ -23,13 +24,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import case, func, select, update
 
 from backend.connectors.base import (
     AuthField, AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage,
 )
 from backend.connectors.gmail import mime, oauth
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
+from backend.connectors.gmail.calendar_sync import CalendarSync
 from backend.ingest.normalized import (
     NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
 )
@@ -65,6 +67,41 @@ SETUP_HELP = (
 _MSGID = re.compile(r"<[^<>\s]+>")
 
 
+async def load_sync_state(account_id: int) -> dict:
+    """``accounts.sync_state_json`` of a Gmail account: the mail keys
+    (``history_id``, ``last_sync_at``) and the ``calendar`` key."""
+    from backend.db import crud
+    from backend.db.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        acc = await crud.get_account(db, account_id)
+    try:
+        state = json.loads(acc.sync_state_json) if acc is not None and acc.sync_state_json else {}
+    except ValueError:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+async def merge_sync_state(account_id: int, **values: Any) -> None:
+    """Set top-level keys of ``accounts.sync_state_json`` in one UPDATE, so
+    the mail and calendar loops of an account never overwrite each other's keys."""
+    from backend.db.database import AsyncSessionLocal
+    from backend.db.models import Account
+
+    if not values:
+        return
+    args: list = []
+    for key, value in values.items():
+        if not re.fullmatch(r"[a-z_]+", key):
+            raise ValueError(f"Invalid sync state key: {key}")
+        args += [f"$.{key}", func.json(json.dumps(value))]
+    current = case((func.json_valid(Account.sync_state_json), Account.sync_state_json), else_="{}")
+    async with AsyncSessionLocal() as db:
+        await db.execute(update(Account).where(Account.id == account_id)
+                         .values(sync_state_json=func.json_set(current, *args)))
+        await db.commit()
+
+
 def backfill_days() -> int:
     from backend.prefs import get_pref
     try:
@@ -95,6 +132,8 @@ class GmailConnector(Connector):
         self._labels_at: Optional[datetime] = None
         self._flows: dict[str, str] = {}  # flow_id -> stage (fields | browser)
         self._sem: Optional[asyncio.Semaphore] = None
+        self.calendar: Optional[CalendarSync] = None
+        self._calendar_task: Optional[asyncio.Task] = None
 
     # -- status ----------------------------------------------------------------------
 
@@ -148,16 +187,20 @@ class GmailConnector(Connector):
         self._wake = asyncio.Event()
         await self._set_state("starting")
         self._task = spawn(self._run(), name=f"gmail_sync:{self.account_id}")
+        self.calendar = CalendarSync(self.account_id, self._api)
+        self._calendar_task = spawn(self.calendar.run(), name=f"gcal_sync:{self.account_id}")
         return True
 
     async def stop(self) -> None:
-        task, self._task = self._task, None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (self._task, self._calendar_task):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._task = self._calendar_task = None
+        self.calendar = None
         if self._api is not None:
             await self._api.close()
             self._api = None
@@ -170,6 +213,8 @@ class GmailConnector(Connector):
     async def sync_now(self) -> None:
         if self._wake is not None:
             self._wake.set()
+        if self.calendar is not None:
+            self.calendar.wake()
 
     async def logout(self) -> None:
         await self._forget(keep_client=True)
@@ -351,26 +396,10 @@ class GmailConnector(Connector):
         self._wake.clear()
 
     async def _load_sync_state(self) -> dict:
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as db:
-            acc = await crud.get_account(db, self.account_id)
-        try:
-            return json.loads(acc.sync_state_json) if acc is not None and acc.sync_state_json else {}
-        except ValueError:
-            return {}
+        return await load_sync_state(self.account_id)
 
     async def _save_sync_state(self, **values: Any) -> None:
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import Account
-
-        state = await self._load_sync_state()
-        state.update(values)
-        async with AsyncSessionLocal() as db:
-            await db.execute(update(Account).where(Account.id == self.account_id)
-                             .values(sync_state_json=json.dumps(state)))
-            await db.commit()
+        await merge_sync_state(self.account_id, **values)
 
     def _require_api(self) -> GmailApi:
         if self._api is None:
