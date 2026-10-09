@@ -12,8 +12,8 @@ function Where() {
 describe('BriefingEntryList (Home → Latest Briefing)', () => {
   it('renders dashboard entries with clickable [n] citations that open the source message', () => {
     const entries: DashboardBriefingEntry[] = [{
-      id: 1, chat_id: -100123, chat_name: 'Team', category: 'tracked',
-      summary: '**Launch** moved to Friday [1]', sources: [{ chat_id: -100123, telegram_id: 4242 }],
+      id: 1, conversation_id: 123, conversation_title: 'Team', category: 'tracked',
+      summary: '**Launch** moved to Friday [1]', sources: [{ conversation_id: 123, message_id: 4242 }],
     }]
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -24,6 +24,6 @@ describe('BriefingEntryList (Home → Latest Briefing)', () => {
     )
     expect(screen.getByText('Launch').tagName).toBe('STRONG')
     fireEvent.click(screen.getByTitle('Jump to source message'))
-    expect(screen.getByTestId('where').textContent).toBe('/chats?chatId=-100123&msgId=4242')
+    expect(screen.getByTestId('where').textContent).toBe('/chats?conversationId=123&messageId=4242')
   })
 })

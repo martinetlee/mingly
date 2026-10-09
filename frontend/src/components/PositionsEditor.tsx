@@ -26,7 +26,7 @@ function sortPositions(list: ContactPosition[]): ContactPosition[] {
 }
 
 /**
- * Job history for any Telegram user (contact or not), keyed by telegram_id.
+ * Job history for any person (contact or not), keyed by person id.
  * The single positions UI for Profile, ContactInfoSection and the Contacts
  * info panel.
  *
@@ -35,13 +35,17 @@ function sortPositions(list: ContactPosition[]): ContactPosition[] {
  * each other. Failures are shown inline and keep the form open.
  */
 export default function PositionsEditor({
-  telegramId,
+  personId,
   initialPositions,
   onChange,
   compact = false,
 }: {
-  telegramId: number
-  /** Shown until the list for this person has loaded */
+  personId: number
+  /**
+   * The person's positions when the caller already has them (GET /api/people/{id}
+   * includes them): no fetch, and the caller's refreshes flow in through this prop.
+   * Omitted → the list is fetched (and reloaded on person_changed) here.
+   */
   initialPositions?: ContactPosition[]
   /** Called with the new list after every successful mutation */
   onChange?: (positions: ContactPosition[]) => void
@@ -49,19 +53,26 @@ export default function PositionsEditor({
   compact?: boolean
 }) {
   const confirm = useConfirm()
+  const provided = initialPositions !== undefined
   const { data, error: loadError, setData, refetch } = useLatestQuery(
-    ['positions', telegramId],
-    (signal) => getPositions(telegramId, signal),
+    ['positions', personId],
+    (signal) => getPositions(personId, signal),
+    { enabled: !provided },
   )
-  const positions = data ?? initialPositions ?? []
+  // Local result of this editor's own mutations, until the caller's copy catches up
+  const [local, setLocal] = useState<{ base: ContactPosition[] | undefined; list: ContactPosition[] } | null>(null)
+  const ownList = local && local.base === initialPositions ? local.list : null
+  const positions = provided ? (ownList ?? initialPositions ?? []) : (data ?? [])
 
   // Latest list, updated synchronously by every mutation so two completions
   // in the same tick both apply
   const listRef = useRef<ContactPosition[]>(positions)
-  const keyRef = useRef(telegramId)
+  const keyRef = useRef(personId)
   useEffect(() => { if (data) listRef.current = data }, [data])
+  // A fresh copy from the caller (its own refresh) replaces the list
+  useEffect(() => { if (provided && initialPositions) listRef.current = initialPositions }, [provided, initialPositions])
   useEffect(() => {
-    keyRef.current = telegramId
+    keyRef.current = personId
     listRef.current = initialPositions ?? []
     setShowAdd(false)
     resetForm()
@@ -70,7 +81,7 @@ export default function PositionsEditor({
     setEndingId(null)
     // initialPositions is only a placeholder for the new person
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [telegramId])
+  }, [personId])
 
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
@@ -82,7 +93,8 @@ export default function PositionsEditor({
     refreshingRef.current = true
     try { await refetch() } finally { refreshingRef.current = false }
   }, 1000)
-  useWsEvent('person_changed', (e) => { if (e.telegram_id === keyRef.current) refresh() })
+  // With caller-provided positions the caller refreshes the person (and passes the new list)
+  useWsEvent('person_changed', (e) => { if (e.person_id === keyRef.current) refresh() }, !provided)
 
   const [showAdd, setShowAdd] = useState(false)
   const [newOrg, setNewOrg] = useState('')
@@ -105,12 +117,13 @@ export default function PositionsEditor({
   }
 
   /** Apply `fn` to the latest list — only if we're still on the same person. */
-  const apply = (tid: number, fn: (prev: ContactPosition[]) => ContactPosition[]) => {
-    invalidatePerson(tid)
-    if (keyRef.current !== tid) return
+  const apply = (pid: number, fn: (prev: ContactPosition[]) => ContactPosition[]) => {
+    invalidatePerson(pid)
+    if (keyRef.current !== pid) return
     const next = fn(listRef.current)
     listRef.current = next
-    setData(next)
+    if (provided) setLocal({ base: initialPositions, list: next })
+    else setData(next)
     onChangeRef.current?.(next)
     // setData discards an in-flight agent refresh; run it again on top of this result
     if (refreshingRef.current) refresh()
@@ -125,43 +138,43 @@ export default function PositionsEditor({
 
   const rowAction = async (id: number, fn: () => Promise<void>) => {
     if (busy.has(id)) return
-    const tid = telegramId
+    const pid = personId
     setRowBusy(id, true)
     setRowError(({ [id]: _drop, ...rest }) => rest)
     try {
       await fn()
     } catch (e) {
-      if (keyRef.current === tid) setRowError((prev) => ({ ...prev, [id]: errorMessage(e) }))
+      if (keyRef.current === pid) setRowError((prev) => ({ ...prev, [id]: errorMessage(e) }))
     } finally {
-      if (keyRef.current === tid) setRowBusy(id, false)
+      if (keyRef.current === pid) setRowBusy(id, false)
     }
   }
 
   const handleAdd = async () => {
     const org = newOrg.trim()
     if (!org || adding) return
-    const tid = telegramId
+    const pid = personId
     setAdding(true)
     setFormError(null)
     try {
       const pos = await addPosition(
-        tid, org, newTitle.trim() || undefined, !newIsFormer, newIsFormer ? newEndedAt || undefined : undefined,
+        pid, org, newTitle.trim() || undefined, !newIsFormer, newIsFormer ? newEndedAt || undefined : undefined,
       )
-      apply(tid, (prev) => sortPositions([...prev.filter((p) => p.id !== pos.id), pos]))
-      if (keyRef.current === tid) {
+      apply(pid, (prev) => sortPositions([...prev.filter((p) => p.id !== pos.id), pos]))
+      if (keyRef.current === pid) {
         resetForm()
         setShowAdd(false)
       }
     } catch (e) {
       // Keep the form (and what was typed) so the user can fix and retry
-      if (keyRef.current === tid) setFormError(errorMessage(e))
+      if (keyRef.current === pid) setFormError(errorMessage(e))
     } finally {
-      if (keyRef.current === tid) setAdding(false)
+      if (keyRef.current === pid) setAdding(false)
     }
   }
 
   const handleRemove = async (p: ContactPosition) => {
-    const tid = telegramId
+    const pid = personId
     const ok = await confirm({
       title: 'Remove position?',
       message: `${p.title ? `${p.title} @ ` : ''}${p.organization} will be removed from this person's history.`,
@@ -170,25 +183,25 @@ export default function PositionsEditor({
     })
     if (!ok) return
     await rowAction(p.id, async () => {
-      await removePosition(tid, p.id)
-      apply(tid, (prev) => prev.filter((x) => x.id !== p.id))
+      await removePosition(pid, p.id)
+      apply(pid, (prev) => prev.filter((x) => x.id !== p.id))
     })
   }
 
   const handleMarkFormer = (p: ContactPosition) => {
-    const tid = telegramId
+    const pid = personId
     return rowAction(p.id, async () => {
-      const updated = await updatePosition(tid, p.id, { is_active: false, ended_at: endDraft || null })
-      apply(tid, (prev) => sortPositions(prev.map((x) => (x.id === p.id ? updated : x))))
-      if (keyRef.current === tid) setEndingId((v) => (v === p.id ? null : v))
+      const updated = await updatePosition(pid, p.id, { is_active: false, ended_at: endDraft || null })
+      apply(pid, (prev) => sortPositions(prev.map((x) => (x.id === p.id ? updated : x))))
+      if (keyRef.current === pid) setEndingId((v) => (v === p.id ? null : v))
     })
   }
 
   const handleReactivate = (p: ContactPosition) => {
-    const tid = telegramId
+    const pid = personId
     return rowAction(p.id, async () => {
-      const updated = await updatePosition(tid, p.id, { is_active: true, ended_at: '' })
-      apply(tid, (prev) => sortPositions(prev.map((x) => (x.id === p.id ? updated : x))))
+      const updated = await updatePosition(pid, p.id, { is_active: true, ended_at: '' })
+      apply(pid, (prev) => sortPositions(prev.map((x) => (x.id === p.id ? updated : x))))
     })
   }
 

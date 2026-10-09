@@ -2,7 +2,7 @@
 connector contract + manager, the Telegram sign-in step machine, the
 /api/accounts routes, and the migration runner's callable steps + backups."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,34 +10,13 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError
-from telethon.tl import types
 
 from backend.connectors.base import AuthStep, Capability, Connector, ConnectorStatus
 from backend.connectors.manager import ConnectorManager
-from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import CatchUpItem, Chat
+from backend.db.models import CatchUpItem
 from backend.ingest import fanout
-from backend.telegram.convert import message_to_row
-
-UTC = timezone.utc
-
-
-async def _chat(db, telegram_id=77, **kw):
-    kw.setdefault("name", "Alice")
-    kw.setdefault("type", "private")
-    chat = Chat(telegram_id=telegram_id, **kw)
-    db.add(chat)
-    await db.commit()
-    return chat
-
-
-async def _msg(db, mid, text="hello", out=False, chat_id=77):
-    m = types.Message(
-        id=mid, peer_id=types.PeerUser(chat_id), date=datetime(2026, 1, 1, 12, tzinfo=UTC),
-        message=text, out=out,
-    )
-    return await crud.save_message(db, **message_to_row(m, chat_id))
+from tests import factories as f
 
 
 class _Capture:
@@ -53,64 +32,79 @@ def _fanout_patches(pref="all"):
     scam = AsyncMock()
     notify = MagicMock()
     profile = MagicMock()
-    return capture, scam, notify, profile, [
+    triage = AsyncMock()
+    return capture, scam, notify, profile, triage, [
         patch.object(fanout.ws_manager, "broadcast", capture),
         patch.object(fanout, "enqueue_scam", scam),
         patch.object(fanout, "send_native_notification", notify),
+        patch.object(fanout, "stamp_triage", triage),
         patch("backend.scam.queue.note_sender_profile", profile),
         patch("backend.api.settings.get_notif_pref", return_value=pref),
     ]
+
+
+def _enter(stack, patches):
+    for p in patches:
+        stack.enter_context(p)
 
 
 # ── ingest fan-out ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_incoming_message_fans_out_to_every_feature(db):
-    chat = await _chat(db, is_tracked=True)
-    db.add(CatchUpItem(chat_telegram_id=77, status="handled", handled_at=datetime.utcnow()))
+    from contextlib import ExitStack
+    conv = await f.conversation(db, is_tracked=True)
+    ann = await f.identity(db, "77", display_name="Alice")
+    db.add(CatchUpItem(conversation_id=conv.id, status="handled", handled_at=datetime.utcnow()))
     await db.commit()
-    saved = await _msg(db, 1, "pay me")
+    saved = await f.message(db, conv, 1, "pay me", sender=ann)
 
-    capture, scam, notify, profile, ps = _fanout_patches()
-    with ps[0], ps[1], ps[2], ps[3], ps[4]:
-        await fanout.message_received(chat, saved, sender_profile={"bio": "b", "is_contact": False})
+    capture, scam, notify, profile, triage, ps = _fanout_patches()
+    with ExitStack() as stack:
+        _enter(stack, ps)
+        await fanout.message_received(conv, saved, sender_profile={"bio": "b", "is_contact": False})
 
     async with AsyncSessionLocal() as s:
         item = (await s.execute(select(CatchUpItem))).scalar_one()
     assert item.status == "pending" and item.handled_at is None
+    triage.assert_awaited_once_with(conv.id, saved.date)
     [event] = capture.events
-    assert event["type"] == "new_message" and event["chat_id"] == 77
+    assert event["type"] == "new_message" and event["conversation_id"] == conv.id
     assert event["message_id"] == saved.id and event["is_tracked"] is True
-    assert event["message"]["text"] == "pay me"
-    profile.assert_called_once_with(saved.sender_id, bio="b", is_contact=False)
-    scam.assert_awaited_once_with(77, [1], "realtime")
-    notify.assert_called_once_with("Alice", "pay me", chat_id=77)
+    assert event["message"]["text"] == "pay me" and event["message"]["sender"]["person_id"] == ann.person_id
+    profile.assert_called_once_with(ann.id, bio="b", is_contact=False)
+    scam.assert_awaited_once_with(conv.id, [saved.id], "realtime")
+    notify.assert_called_once_with("Alice", "Alice: pay me", conversation_id=conv.id)
 
 
 @pytest.mark.asyncio
 async def test_outgoing_message_only_broadcasts(db):
-    chat = await _chat(db)
-    db.add(CatchUpItem(chat_telegram_id=77, status="handled"))
+    from contextlib import ExitStack
+    conv = await f.conversation(db)
+    db.add(CatchUpItem(conversation_id=conv.id, status="handled"))
     await db.commit()
-    saved = await _msg(db, 2, "on my way", out=True)
+    saved = await f.message(db, conv, 2, "on my way", out=True)
 
-    capture, scam, notify, profile, ps = _fanout_patches()
-    with ps[0], ps[1], ps[2], ps[3], ps[4]:
-        await fanout.message_received(chat, saved, sender_profile={"bio": None, "is_contact": True})
+    capture, scam, notify, profile, triage, ps = _fanout_patches()
+    with ExitStack() as stack:
+        _enter(stack, ps)
+        await fanout.message_received(conv, saved, sender_profile={"bio": None, "is_contact": True})
 
     async with AsyncSessionLocal() as s:
         assert (await s.execute(select(CatchUpItem.status))).scalar_one() == "handled"
     assert [e["type"] for e in capture.events] == ["new_message"]
-    assert not scam.await_count and not notify.called and not profile.called
+    assert not scam.await_count and not notify.called and not profile.called and not triage.called
 
 
 @pytest.mark.asyncio
 async def test_notification_respects_tracked_preference(db):
-    chat = await _chat(db, is_tracked=False)
-    saved = await _msg(db, 3)
-    capture, scam, notify, profile, ps = _fanout_patches(pref="tracked")
-    with ps[0], ps[1], ps[2], ps[3], ps[4]:
-        await fanout.message_received(chat, saved)
+    from contextlib import ExitStack
+    conv = await f.conversation(db, is_tracked=False)
+    saved = await f.message(db, conv, 3)
+    capture, scam, notify, profile, triage, ps = _fanout_patches(pref="tracked")
+    with ExitStack() as stack:
+        _enter(stack, ps)
+        await fanout.message_received(conv, saved)
     assert not notify.called
     assert not profile.called  # no resolved sender → no Shield profile hint
     scam.assert_awaited_once()
@@ -118,15 +112,17 @@ async def test_notification_respects_tracked_preference(db):
 
 @pytest.mark.asyncio
 async def test_edit_rescans_only_when_text_changed(db):
-    await _chat(db)
-    saved = await _msg(db, 4)
-    capture, scam, notify, profile, ps = _fanout_patches()
-    with ps[0], ps[1], ps[2], ps[3], ps[4]:
-        await fanout.message_edited(77, saved, text_changed=False)
-        await fanout.message_edited(77, saved, text_changed=True)
+    from contextlib import ExitStack
+    conv = await f.conversation(db)
+    saved = await f.message(db, conv, 4)
+    capture, scam, notify, profile, triage, ps = _fanout_patches()
+    with ExitStack() as stack:
+        _enter(stack, ps)
+        await fanout.message_edited(conv.id, saved, text_changed=False)
+        await fanout.message_edited(conv.id, saved, text_changed=True)
     assert [e["type"] for e in capture.events] == ["message_edited", "message_edited"]
-    assert capture.events[0]["tg_message_id"] == 4
-    scam.assert_awaited_once_with(77, [4], "edit")
+    assert capture.events[0]["message_id"] == saved.id
+    scam.assert_awaited_once_with(conv.id, [saved.id], "edit")
 
 
 # ── connector manager ────────────────────────────────────────────────────────
@@ -308,7 +304,7 @@ async def test_accounts_routes_require_session_token(db_engine):
 # ── migration runner: callable steps + backups ───────────────────────────────
 
 async def _runner_db(tmp_path, migrations, *, fresh, seed_versions=()):
-    from backend.db.migrations import areas, runner
+    from backend.db.migrations import runner
 
     eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
     async with eng.connect() as c:
@@ -319,15 +315,13 @@ async def _runner_db(tmp_path, migrations, *, fresh, seed_versions=()):
             "is_default BOOLEAN, created_at DATETIME)"
         )
         await c.commit()
-    orig_core, orig_areas = list(runner.MIGRATIONS), list(areas.MODULES)
+    orig = list(runner.MIGRATIONS)
     runner.MIGRATIONS[:] = migrations
-    areas.MODULES[:] = []
     try:
         async with eng.connect() as c:
             await runner.run_migrations(c, fresh=fresh)
     finally:
-        runner.MIGRATIONS[:] = orig_core
-        areas.MODULES[:] = orig_areas
+        runner.MIGRATIONS[:] = orig
     return eng
 
 
@@ -342,11 +336,11 @@ async def _rewrite_then_fail(conn):
 
 @pytest.mark.asyncio
 async def test_callable_step_runs_and_backup_is_taken_first(tmp_path):
-    eng = await _runner_db(tmp_path, [(120, "rewrite", [_rewrite])], fresh=False)
+    eng = await _runner_db(tmp_path, [(3, "rewrite", [_rewrite])], fresh=False)
     async with eng.connect() as c:
         assert (await c.exec_driver_sql("SELECT v FROM t")).scalar() == "new"
     await eng.dispose()
-    [backup] = list((tmp_path / "backups").glob("m-pre-v120-*.db"))
+    [backup] = list((tmp_path / "backups").glob("m-pre-v3-*.db"))
     import sqlite3
     with sqlite3.connect(str(backup)) as b:
         assert b.execute("SELECT v FROM t").fetchone()[0] == "old"
@@ -355,23 +349,23 @@ async def test_callable_step_runs_and_backup_is_taken_first(tmp_path):
 @pytest.mark.asyncio
 async def test_failing_callable_step_rolls_back(tmp_path):
     with pytest.raises(RuntimeError):
-        await _runner_db(tmp_path, [(121, "bad", ["ALTER TABLE t ADD COLUMN w TEXT", _rewrite_then_fail])], fresh=False)
+        await _runner_db(tmp_path, [(4, "bad", ["ALTER TABLE t ADD COLUMN w TEXT", _rewrite_then_fail])], fresh=False)
     eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
     async with eng.connect() as c:
         assert (await c.exec_driver_sql("SELECT v FROM t")).scalar() == "old"
         cols = [r[1] for r in (await c.exec_driver_sql("PRAGMA table_info(t)")).all()]
         versions = [r[0] for r in (await c.exec_driver_sql("SELECT version FROM schema_migrations")).all()]
     await eng.dispose()
-    assert cols == ["id", "v"] and 121 not in versions
+    assert cols == ["id", "v"] and 4 not in versions
 
 
 @pytest.mark.asyncio
-async def test_no_backup_on_fresh_db_or_below_threshold(tmp_path):
-    eng = await _runner_db(tmp_path, [(119, "small", [_rewrite]), (120, "big", [_rewrite])], fresh=True)
+async def test_no_backup_on_fresh_db_or_without_pending_migrations(tmp_path):
+    eng = await _runner_db(tmp_path, [(1, "a", [_rewrite]), (2, "b", [_rewrite])], fresh=True)
     await eng.dispose()
     assert not (tmp_path / "backups").exists()
     (tmp_path / "m.db").unlink()
-    eng = await _runner_db(tmp_path, [(119, "small", [_rewrite])], fresh=False)
+    eng = await _runner_db(tmp_path, [], fresh=False)
     await eng.dispose()
     assert not (tmp_path / "backups").exists()
 
@@ -384,11 +378,11 @@ async def test_only_newest_backups_are_kept(tmp_path):
     backups = tmp_path / "backups"
     backups.mkdir()
     for i in range(4):
-        old = backups / f"m-pre-v120-2020010100000{i}.db"
+        old = backups / f"m-pre-v5-2020010100000{i}.db"
         old.write_bytes(b"")
         os.utime(old, (1_000_000 + i, 1_000_000 + i))
-    eng = await _runner_db(tmp_path, [(120, "rewrite", [_rewrite])], fresh=False)
+    eng = await _runner_db(tmp_path, [(5, "rewrite", [_rewrite])], fresh=False)
     await eng.dispose()
     kept = sorted(p.name for p in backups.iterdir())
     assert len(kept) == runner.BACKUPS_KEPT
-    assert "m-pre-v120-20200101000000.db" not in kept and "m-pre-v120-20200101000001.db" not in kept
+    assert "m-pre-v5-20200101000000.db" not in kept and "m-pre-v5-20200101000001.db" not in kept

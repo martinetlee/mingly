@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { authenticatedMediaUrl } from '../api/session'
+import { personUrl } from '../lib/routes'
 
 const AVATAR_COLORS = [
   'bg-rose-600',
@@ -13,41 +14,50 @@ const AVATAR_COLORS = [
   'bg-orange-600',
 ]
 
-// Module-level set of ids whose photos failed to load (avoids repeated 404s)
-const failedPhotos = new Set<number>()
+// Module-level set of photo URLs that failed to load (avoids repeated 404s)
+const failedPhotos = new Set<string>()
+
+function hashSeed(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  return h
+}
 
 interface SenderAvatarProps {
-  /** Telegram id of a user — or of a chat (profile photos share one store) */
-  senderId: number | null
-  senderName: string | null
+  /** Served avatar (person / identity / conversation avatar_url); null → initial only */
+  avatarUrl: string | null | undefined
+  name: string | null
+  /** Person the avatar links to (and seeds the fallback colour) */
+  personId?: number | null
+  /** Fallback-colour seed when there is no person (e.g. a conversation id) */
+  colorSeed?: number | null
   size?: number
   onContextMenu?: (e: React.MouseEvent) => void
-  /** Wrap in a link to the profile (default true; false for chat avatars) */
+  /** Wrap in a link to the person's page (default true; needs personId) */
   link?: boolean
 }
 
-function SenderAvatar({ senderId, senderName, size = 28, onContextMenu, link = true }: SenderAvatarProps) {
-  const [imgFailed, setImgFailed] = useState(false)
+function SenderAvatar({ avatarUrl, name, personId = null, colorSeed = null, size = 28, onContextMenu, link = true }: SenderAvatarProps) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
 
-  const initial = (senderName || '?')[0].toUpperCase()
-  const colorIndex = senderId != null ? Math.abs(senderId) % AVATAR_COLORS.length : 0
-  const bgColor = AVATAR_COLORS[colorIndex]
+  const initial = (name || '?')[0].toUpperCase()
+  const seed = personId ?? colorSeed ?? hashSeed(name ?? '')
+  const bgColor = AVATAR_COLORS[Math.abs(seed) % AVATAR_COLORS.length]
 
-  const hasPhoto = senderId != null && !failedPhotos.has(senderId) && !imgFailed
-  const photoUrl = senderId != null
-    ? authenticatedMediaUrl(`/api/media/profile_photos/${senderId}.jpg`)
-    : null
+  const hasPhoto = !!avatarUrl && !failedPhotos.has(avatarUrl) && failedUrl !== avatarUrl
+  const photoUrl = avatarUrl ? authenticatedMediaUrl(avatarUrl) : null
 
   const handleError = () => {
-    if (senderId != null) failedPhotos.add(senderId)
-    setImgFailed(true)
+    if (!avatarUrl) return
+    failedPhotos.add(avatarUrl)
+    setFailedUrl(avatarUrl)
   }
 
   const avatar = (
     <div
       className="relative flex-shrink-0"
       style={{ width: size, height: size }}
-      onContextMenu={link ? undefined : onContextMenu}
+      onContextMenu={link && personId != null ? undefined : onContextMenu}
     >
       {/* Fallback initial — always rendered underneath */}
       <div
@@ -70,9 +80,9 @@ function SenderAvatar({ senderId, senderName, size = 28, onContextMenu, link = t
     </div>
   )
 
-  if (link && senderId != null) {
+  if (link && personId != null) {
     return (
-      <Link to={`/profile/${senderId}`} className="flex-shrink-0" onContextMenu={onContextMenu} aria-label={senderName ?? undefined}>
+      <Link to={personUrl(personId)} className="flex-shrink-0" onContextMenu={onContextMenu} aria-label={name ?? undefined}>
         {avatar}
       </Link>
     )

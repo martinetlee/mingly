@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { chatUrl } from '../lib/routes'
+import { conversationTitle } from '../lib/conversation'
+import ChannelIcon from '../components/ChannelIcon'
+import ConversationAvatar from '../components/ConversationAvatar'
 import { ChevronLeft, ChevronRight, List, MoreVertical, Plus, Settings2, X } from 'lucide-react'
-import type { BoardData, Chat } from '../api/types'
+import type { BoardData, Conversation } from '../api/types'
 import {
   addBoardColumn,
   addWorkspaceBoard,
   deleteBoardColumn,
   deleteWorkspaceBoard,
   getBoard,
-  moveBoardChat,
+  moveBoardConversation,
   reorderBoardColumns,
   updateBoardColumn,
   updateWorkspaceBoard,
@@ -20,11 +24,6 @@ import { useConfirm } from '../components/ui'
 import { errorMessage, reportError } from '../lib/toast'
 import { ageDays as serverAgeDays } from '../utils/time'
 import WorkspaceDialog from '../components/WorkspaceDialog'
-
-const AVATAR_COLORS = [
-  'bg-rose-600', 'bg-amber-600', 'bg-emerald-600', 'bg-sky-600',
-  'bg-violet-600', 'bg-pink-600', 'bg-teal-600', 'bg-orange-600',
-]
 
 const COLUMN_ACCENTS: Record<string, string> = {
   indigo: 'border-indigo-500/40', emerald: 'border-emerald-500/40', rose: 'border-rose-500/40',
@@ -64,15 +63,15 @@ const storeBoardFor = (workspaceId: number, boardId: number | null) => {
 }
 
 /** Optimistically move a card: pluck it from wherever it is and place it. */
-export function applyMove(prev: BoardData, chatId: number, toTagId: number | null): BoardData {
-  let moved: Chat | undefined
-  const strip = (chats: Chat[]) => chats.filter((c) => {
-    if (c.telegram_id === chatId) { moved = c; return false }
+export function applyMove(prev: BoardData, conversationId: number, toTagId: number | null): BoardData {
+  let moved: Conversation | undefined
+  const strip = (chats: Conversation[]) => chats.filter((c) => {
+    if (c.id === conversationId) { moved = c; return false }
     return true
   })
   const next: BoardData = {
     ...prev,
-    columns: prev.columns.map((col) => ({ ...col, chats: strip(col.chats) })),
+    columns: prev.columns.map((col) => ({ ...col, conversations: strip(col.conversations) })),
     unallocated: strip(prev.unallocated),
     backlog: {
       active: strip(prev.backlog.active),
@@ -84,20 +83,14 @@ export function applyMove(prev: BoardData, chatId: number, toTagId: number | nul
     const card = moved
     if (toTagId === null) next.backlog.active = [card, ...next.backlog.active]
     else next.columns = next.columns.map((col) =>
-      col.tag_id === toTagId ? { ...col, chats: [card, ...col.chats] } : col,
+      col.tag_id === toTagId ? { ...col, conversations: [card, ...col.conversations] } : col,
     )
   }
   return next
 }
 
-function CardAvatar({ chat }: { chat: Chat }) {
-  const initial = (chat.name || '?')[0].toUpperCase()
-  const bg = AVATAR_COLORS[Math.abs(chat.telegram_id) % AVATAR_COLORS.length]
-  return (
-    <span className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white ${bg}`}>
-      {initial}
-    </span>
-  )
+function CardAvatar({ chat }: { chat: Conversation }) {
+  return <ConversationAvatar conversation={chat} size={24} />
 }
 
 function ChatCard({
@@ -106,7 +99,7 @@ function ChatCard({
   onDismiss,
   snippetHighlight,
 }: {
-  chat: Chat
+  chat: Conversation
   onOpen: () => void
   onDismiss?: () => void
   snippetHighlight?: boolean
@@ -116,7 +109,7 @@ function ChatCard({
     <div
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData('text/x-chat-id', String(chat.telegram_id))
+        e.dataTransfer.setData('text/x-chat-id', String(chat.id))
         e.dataTransfer.effectAllowed = 'move'
       }}
       onClick={onOpen}
@@ -126,7 +119,8 @@ function ChatCard({
     >
       <div className="flex items-center gap-2">
         <CardAvatar chat={chat} />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-200">{chat.name}</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-200">{conversationTitle(chat)}</span>
+        <ChannelIcon channel={chat.channel} />
         {(chat.unread_count ?? 0) > 0 && (
           <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-indigo-500 px-1 text-[9px] font-bold text-white">
             {chat.unread_count}
@@ -330,20 +324,20 @@ export default function Board() {
   // every 5s, with a trailing refresh so the last burst is never dropped
   const refreshSoon = useCoalescedRefetch(loadBoard, 5000)
   useWsEvent('new_message', refreshSoon)
-  useWsEvent('chats_synced', refreshSoon)
-  useWsEvent('chat_synced', refreshSoon)
+  useWsEvent('conversations_synced', refreshSoon)
+  useWsEvent('conversation_synced', refreshSoon)
   useWsEvent('resync', () => { loadBoard() })
 
-  const openChat = (chat: Chat) => navigate(`/chats?chatId=${chat.telegram_id}`)
+  const openChat = (chat: Conversation) => navigate(chatUrl(chat.id))
 
-  const move = async (chatId: number, toTagId: number | null) => {
+  const move = async (conversationId: number, toTagId: number | null) => {
     if (workspaceId == null || !board || board.board_id == null) return
     const wsId = workspaceId
     const boardId = board.board_id
     const ok = await mutate(
       'Move failed',
-      () => moveBoardChat(wsId, boardId, chatId, toTagId),
-      (prev) => applyMove(prev, chatId, toTagId),
+      () => moveBoardConversation(wsId, boardId, conversationId, toTagId),
+      (prev) => applyMove(prev, conversationId, toTagId),
     )
     if (ok) refreshWorkspaces()
   }
@@ -399,7 +393,7 @@ export default function Board() {
     setColumnMenu(null)
     const wsId = workspaceId
     const boardId = board.board_id
-    const n = col.chats.length
+    const n = col.conversations.length
     await confirm({
       title: `Delete column "${col.name}"?`,
       message: n > 0
@@ -493,15 +487,15 @@ export default function Board() {
   const backlogSections = useMemo(() => {
     if (!board) return []
     const q = backlogQuery.trim().toLowerCase()
-    const classified = new Set(board.classified_chat_ids)
-    const f = (chats: Chat[]) => {
+    const classified = new Set(board.classified_conversation_ids)
+    const f = (chats: Conversation[]) => {
       let out = chats
       // Unclassified triage view (only meaningful on unscoped boards —
       // scoped backlogs already contain a single stream)
       if (!activeBoardIsScoped && backlogFilter === 'unclassified') {
-        out = out.filter((c) => !classified.has(c.telegram_id))
+        out = out.filter((c) => !classified.has(c.id))
       }
-      return q ? out.filter((c) => c.name.toLowerCase().includes(q)) : out
+      return q ? out.filter((c) => conversationTitle(c).toLowerCase().includes(q)) : out
     }
     return [
       { label: 'Active', hint: '< 7 days', chats: f(board.backlog.active) },
@@ -715,17 +709,18 @@ export default function Board() {
                   <div className="flex flex-col gap-1">
                     {chats.map((chat) => (
                       <div
-                        key={chat.telegram_id}
+                        key={chat.id}
                         draggable
                         onDragStart={(e) => {
-                          e.dataTransfer.setData('text/x-chat-id', String(chat.telegram_id))
+                          e.dataTransfer.setData('text/x-chat-id', String(chat.id))
                           e.dataTransfer.effectAllowed = 'move'
                         }}
                         onClick={() => openChat(chat)}
                         className="flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-slate-700/50"
                       >
                         <CardAvatar chat={chat} />
-                        <span className="min-w-0 flex-1 truncate text-[11px] text-slate-300">{chat.name}</span>
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-slate-300">{conversationTitle(chat)}</span>
+                        <ChannelIcon channel={chat.channel} />
                         <span className="text-[9px] text-slate-600">{relativeAge(chat.last_activity_at)}</span>
                       </div>
                     ))}
@@ -745,7 +740,7 @@ export default function Board() {
               {(() => {
                 const meta = board.boards.find((b) => b.id === board.board_id)
                 const empty = board.unallocated.length === 0 &&
-                  board.columns.every((c) => c.chats.length === 0) &&
+                  board.columns.every((c) => c.conversations.length === 0) &&
                   Object.values(board.backlog).every((s) => s.length === 0)
                 if (meta?.scope_tag_name && empty) {
                   return (
@@ -774,10 +769,10 @@ export default function Board() {
                   <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2.5 pb-2.5">
                     {board.unallocated.map((chat) => (
                       <ChatCard
-                        key={chat.telegram_id}
+                        key={chat.id}
                         chat={chat}
                         onOpen={() => openChat(chat)}
-                        onDismiss={() => move(chat.telegram_id, null)}
+                        onDismiss={() => move(chat.id, null)}
                         snippetHighlight
                       />
                     ))}
@@ -810,7 +805,7 @@ export default function Board() {
                     ) : (
                       <span className="text-xs font-semibold text-gray-200">{col.name}</span>
                     )}
-                    <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-400">{col.chats.length}</span>
+                    <span className="rounded-full bg-slate-700 px-1.5 text-[10px] text-slate-400">{col.conversations.length}</span>
                     <div className="flex-1" />
                     <button
                       onClick={() => setColumnMenu((v) => (v === col.tag_id ? null : col.tag_id))}
@@ -850,10 +845,10 @@ export default function Board() {
                     )}
                   </div>
                   <div className="flex flex-1 flex-col gap-2 overflow-y-auto px-2.5 pb-2.5">
-                    {col.chats.map((chat) => (
-                      <ChatCard key={chat.telegram_id} chat={chat} onOpen={() => openChat(chat)} />
+                    {col.conversations.map((chat) => (
+                      <ChatCard key={chat.id} chat={chat} onOpen={() => openChat(chat)} />
                     ))}
-                    {col.chats.length === 0 && (
+                    {col.conversations.length === 0 && (
                       <p className="px-1 py-4 text-center text-[11px] text-slate-600">Drop chats here</p>
                     )}
                   </div>

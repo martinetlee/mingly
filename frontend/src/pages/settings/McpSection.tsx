@@ -78,7 +78,7 @@ export default function McpSection() {
   return (
     <Section
       title="MCP Server"
-      description="Let external AI tools (Claude Code, other MCP clients) read your chats (including hidden and archived ones; deactivated groups excluded), messages, tags, contacts, and organizations — and, if you allow it, record notes about people. Local-only, and active only while Mingly is running and unlocked. Nothing ever sends Telegram messages."
+      description="Let external AI tools (Claude Code, other MCP clients) read your chats (including hidden and archived ones; deactivated groups excluded), messages, tags, contacts, and organizations — and, if you allow it, record notes about people. Local-only, and active only while Mingly is running and unlocked. Nothing ever sends messages."
     >
       <Card>
         <div className="flex items-center justify-between gap-3">
@@ -96,7 +96,7 @@ export default function McpSection() {
               Read tools are always available to a connected client. Write tools are opt-in and off by default: adding
               and updating its own person notes, setting important / relationship status / Twitter / LinkedIn (never
               your own contact notes), adding positions, tagging chats, and marking DMs reviewed. Agent notes appear on
-              each person's Profile, where you can edit or delete them. Telegram itself is never modified.
+              each person's Profile, where you can edit or delete them. Your messaging accounts are never modified.
             </p>
           </div>
           <Switch

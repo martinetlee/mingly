@@ -1,6 +1,10 @@
 import logging
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-from sqlalchemy import event, inspect
+from sqlalchemy import event, insert, inspect
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -20,6 +24,7 @@ def _set_sqlite_pragmas(dbapi_conn, _record):
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 
@@ -32,23 +37,61 @@ async def get_db():
         yield session
 
 
+def _schema_generation(path: Path) -> Optional[str]:
+    """The generation stamped in an existing DB file: None = no tables at
+    all (new file), "1" = a pre-v2 database, else the stamped value."""
+    with sqlite3.connect(str(path)) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not tables:
+            return None
+        if "schema_meta" not in tables:
+            return "1"
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_generation'").fetchone()
+        return row[0] if row else "1"
+
+
+async def _retire_old_database(path: Path) -> Optional[Path]:
+    """A database from an older schema generation can't be upgraded in place
+    (v2 re-keyed every table): back it up next to the DB and start fresh.
+    Returns the backup path, or None when the DB is current or new."""
+    from backend.db.models import SCHEMA_GENERATION
+
+    if not path.exists() or _schema_generation(path) in (None, SCHEMA_GENERATION):
+        return None
+    backups = path.parent / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    dest = backups / f"{path.stem}-pre-v{SCHEMA_GENERATION}-{datetime.utcnow():%Y%m%d%H%M%S}.db"
+    with sqlite3.connect(str(path)) as source, sqlite3.connect(str(dest)) as target:
+        source.backup(target)
+    await engine.dispose()  # no pooled connection may keep the old file open
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+    logger.warning("Database was from an older schema; backed up to %s and starting fresh", dest)
+    return dest
+
+
 async def init_db():
     import importlib
 
-    importlib.import_module("backend.db.models")  # registers models with Base
+    models = importlib.import_module("backend.db.models")  # registers models with Base
     from backend.db.migrations.runner import run_migrations
 
+    if engine.url.database:
+        await _retire_old_database(Path(engine.url.database))
+
     async with engine.connect() as conn:
-        # A fresh DB gets the final schema from create_all, so historical
-        # migrations may legitimately reference columns that no longer exist.
-        fresh = not await conn.run_sync(lambda c: inspect(c).has_table("chats"))
-        # Create any tables that don't exist yet (safe, non-destructive).
+        fresh = not await conn.run_sync(lambda c: inspect(c).has_table("schema_meta"))
+        # A fresh DB gets the final schema from create_all; existing tables
+        # are left alone (later changes arrive as versioned migrations).
         await conn.run_sync(Base.metadata.create_all)
+        if fresh:
+            await conn.execute(
+                insert(models.SchemaMeta).values(key="schema_generation", value=models.SCHEMA_GENERATION)
+            )
         await conn.commit()
 
-        # Apply versioned migrations for columns/indexes added after the
-        # initial schema. Each migration commits atomically with its
-        # schema_migrations row; a failure rolls it back and aborts startup.
+        # Each migration commits atomically with its schema_migrations row; a
+        # failure rolls it back and aborts startup.
         await run_migrations(conn, fresh=fresh)
 
 

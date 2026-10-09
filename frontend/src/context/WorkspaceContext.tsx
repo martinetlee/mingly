@@ -62,12 +62,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     refreshWorkspaces()
   }, [refreshWorkspaces])
 
-  // Keep badge counts loosely fresh on chat activity: at most one refresh per
+  // Keep badge counts loosely fresh on conversation activity: at most one refresh per
   // window, with a trailing one so the last burst is never dropped
   const refreshSoon = useCoalescedRefetch(refreshWorkspaces, REFRESH_THROTTLE_MS)
   useWsEvent('new_message', refreshSoon)
-  useWsEvent('chats_synced', refreshSoon)
-  useWsEvent('chat_synced', refreshSoon)
+  useWsEvent('conversations_synced', refreshSoon)
+  useWsEvent('conversation_synced', refreshSoon)
   // Events may have been missed while disconnected
   useWsEvent('resync', () => { refreshWorkspaces() })
 

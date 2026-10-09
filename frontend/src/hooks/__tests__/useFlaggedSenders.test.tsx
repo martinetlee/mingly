@@ -20,7 +20,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-const flagsResponse = (ids: number[]) => ({ flags: [], flagged_sender_ids: ids, flagged_chat_ids: [] })
+const flagsResponse = (ids: number[]) => ({ flags: [], flagged_identity_ids: ids, flagged_conversation_ids: [] })
 
 function setup() {
   const client = new WebSocketClient({ url: () => null })
@@ -38,7 +38,7 @@ beforeEach(() => {
 })
 
 describe('useFlaggedSenders store', () => {
-  it('seeds from GET /flags flagged_sender_ids and is shared between consumers', async () => {
+  it('seeds from GET /flags flagged_identity_ids and is shared between consumers', async () => {
     getScamFlags.mockResolvedValue(flagsResponse([1, 2]))
     const { wrapper } = setup()
     const a = renderHook(() => useFlaggedSenders(), { wrapper })
@@ -58,12 +58,12 @@ describe('useFlaggedSenders store', () => {
     const { result } = renderHook(() => useFlaggedSenders(), { wrapper })
     await waitFor(() => expect(result.current.ids.has(1)).toBe(true))
 
-    act(() => client.dispatch({ type: 'scam_users_flagged', telegram_ids: [5, 6] }))
+    act(() => client.dispatch({ type: 'scam_users_flagged', identity_ids: [5, 6] }))
     expect([...result.current.ids].sort()).toEqual([1, 5, 6])
 
     act(() => client.dispatch({
       type: 'scam_verdict_changed', scope: 'sender', verdict: 'not_scam', count: 0, messages: [],
-      flags: [{ telegram_id: 5, status: 'dismissed' }, { telegram_id: 6, status: null }, { telegram_id: 9, status: 'active' }],
+      flags: [{ identity_id: 5, status: 'dismissed' }, { identity_id: 6, status: null }, { identity_id: 9, status: 'active' }],
     }))
     expect([...result.current.ids].sort()).toEqual([1, 9])
   })
@@ -85,7 +85,7 @@ describe('useFlaggedSenders store', () => {
     expect(result.current.loading).toBe(true)
 
     // Dismissed (from a verdict response) after the GET was issued
-    act(() => applyFlagChanges([{ telegram_id: 7, status: 'dismissed' }]))
+    act(() => applyFlagChanges([{ identity_id: 7, status: 'dismissed' }]))
     await act(async () => { slow.resolve(flagsResponse([7, 8])) })
     expect([...result.current.ids]).toEqual([8])
     expect(result.current.loading).toBe(false)

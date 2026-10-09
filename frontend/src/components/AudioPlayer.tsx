@@ -6,8 +6,7 @@ import { useMediaPlayback } from '../hooks/useMediaPlayback'
 import { formatDuration } from '../utils/time'
 
 interface Props {
-  chatTelegramId: number
-  msgTelegramId: number
+  attachmentId: number
   /** Pre-existing media URL if already downloaded */
   mediaUrl: string | null
   /** 'voice' for voice messages, 'audio' for audio files */
@@ -18,7 +17,7 @@ interface Props {
 /** Number of bars in the waveform visualization */
 const WAVEFORM_BARS = 32
 
-/** Generate pseudo-random waveform heights from a seed (message ID) */
+/** Generate pseudo-random waveform heights from a seed (attachment ID) */
 function generateWaveform(seed: number): number[] {
   const bars: number[] = []
   let hash = seed
@@ -30,12 +29,12 @@ function generateWaveform(seed: number): number[] {
   return bars
 }
 
-export default function AudioPlayer({ chatTelegramId, msgTelegramId, mediaUrl, mediaType, isOut }: Props) {
+export default function AudioPlayer({ attachmentId, mediaUrl, mediaType, isOut }: Props) {
   // Click-to-load (shared download pipeline: dedupe, bounded retries, abort on unmount)
-  const media = useMediaDownload(chatTelegramId, msgTelegramId, { initialUrl: mediaUrl })
+  const media = useMediaDownload(attachmentId, { initialUrl: mediaUrl })
   const [wantPlay, setWantPlay] = useState(false)
   const p = useMediaPlayback<HTMLAudioElement>()
-  const waveform = useRef(generateWaveform(msgTelegramId)).current
+  const waveform = useRef(generateWaveform(attachmentId)).current
 
   // Play once a click-to-load download completes
   useEffect(() => {

@@ -7,7 +7,7 @@ import { useAsyncAction } from '../hooks/useAsyncAction'
 import { reportError, errorMessage } from '../lib/toast'
 
 interface ForumTopicsPanelProps {
-  telegramId: number
+  conversationId: number
   /** null = all messages */
   onSelectTopic: (topic: { id: number; title: string } | null) => void
   selectedTopicId: number | null
@@ -22,15 +22,15 @@ export function withGeneral(topics: ForumTopic[]): ForumTopic[] {
   return topics.some((t) => t.id === 1) ? topics : [GENERAL_TOPIC, ...topics]
 }
 
-export default function ForumTopicsPanel({ telegramId, onSelectTopic, selectedTopicId }: ForumTopicsPanelProps) {
-  // Keyed by chat: a slow list for the previous forum can never render here
-  const { data, loading, error, refetch, setData } = useLatestQuery(['topics', telegramId], () => getForumTopics(telegramId))
+export default function ForumTopicsPanel({ conversationId, onSelectTopic, selectedTopicId }: ForumTopicsPanelProps) {
+  // Keyed by conversation: a slow list for the previous forum can never render here
+  const { data, loading, error, refetch, setData } = useLatestQuery(['topics', conversationId], () => getForumTopics(conversationId))
   const topics = withGeneral(data ?? [])
   const [showCreate, setShowCreate] = useState(false)
   const [newTitle, setNewTitle] = useState('')
 
   const create = useAsyncAction(async (title: string) => {
-    await createForumTopic(telegramId, title)
+    await createForumTopic(conversationId, title)
     setNewTitle('')
     setShowCreate(false)
     await refetch()
@@ -38,7 +38,7 @@ export default function ForumTopicsPanel({ telegramId, onSelectTopic, selectedTo
 
   const handleToggleState = async (topic: ForumTopic) => {
     try {
-      await setTopicState(telegramId, topic.id, !topic.is_closed)
+      await setTopicState(conversationId, topic.id, !topic.is_closed)
       setData((prev) => prev?.map((t) => (t.id === topic.id ? { ...t, is_closed: !t.is_closed } : t)))
     } catch (e) {
       reportError(e, topic.is_closed ? 'Couldn’t reopen topic' : 'Couldn’t close topic')

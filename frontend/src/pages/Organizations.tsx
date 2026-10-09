@@ -502,13 +502,13 @@ export default function Organizations() {
                 Members ({selected.members.length})
               </h3>
               {selected.members.length === 0 ? (
-                <p className="text-xs text-slate-600 italic">No members. Add positions to contacts referencing this organization.</p>
+                <p className="text-xs text-slate-600 italic">No members. Add positions to people referencing this organization.</p>
               ) : (
                 <div className="flex flex-col gap-1">
                   {selected.members.map((m) => (
                     <PersonCard
-                      key={m.telegram_id}
-                      telegramId={m.telegram_id}
+                      key={m.person_id}
+                      personId={m.person_id}
                       name={m.name}
                       username={m.username}
                       extraBadge={
@@ -545,8 +545,8 @@ export default function Organizations() {
                   <div className="flex flex-col gap-1 mt-3">
                     {selected.former_members.map((m) => (
                       <PersonCard
-                        key={m.telegram_id}
-                        telegramId={m.telegram_id}
+                        key={m.person_id}
+                        personId={m.person_id}
                         name={m.name}
                         username={m.username}
                         muted
@@ -572,19 +572,19 @@ export default function Organizations() {
             )}
 
             {/* Related chats */}
-            {selected.related_chats.length > 0 && (
+            {selected.related_conversations.length > 0 && (
               <div className="rounded-xl bg-slate-800 border border-slate-700/50 p-4">
                 <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500 flex items-center gap-1.5 mb-3">
                   <MessageSquare size={11} />
-                  Related Groups ({selected.related_chats.length})
+                  Related Groups ({selected.related_conversations.length})
                 </h3>
                 <div className="flex flex-col gap-2">
-                  {selected.related_chats.map((rc) => (
-                    <div key={rc.chat_id} className="rounded-lg bg-slate-700/30 border border-slate-700 p-3">
+                  {selected.related_conversations.map((rc) => (
+                    <div key={rc.conversation_id} className="rounded-lg bg-slate-700/30 border border-slate-700 p-3">
                       <div className="flex items-center gap-2 mb-1">
                         <MessageSquare size={12} className="text-slate-500" />
-                        <span className="text-sm font-medium text-gray-200">{rc.chat_name}</span>
-                        <span className="text-[10px] text-slate-500 rounded bg-slate-700 px-1">{rc.chat_type}</span>
+                        <span className="text-sm font-medium text-gray-200">{rc.conversation_title}</span>
+                        <span className="text-[10px] text-slate-500 rounded bg-slate-700 px-1">{rc.conversation_kind.replace('_', ' ')}</span>
                       </div>
                       {rc.last_message ? (
                         <div className="ml-5">

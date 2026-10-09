@@ -28,6 +28,9 @@ import { useWsEvent } from '../hooks/useWebSocket'
 import { reportError, toast } from '../lib/toast'
 import { fmtRelative, parseServerDate } from '../utils/time'
 import Markdown from './Markdown'
+import ChannelIcon from './ChannelIcon'
+import { chatUrl } from '../lib/routes'
+import { conversationTitle } from '../lib/conversation'
 
 const RELATIONSHIP_STATUSES: { value: RelationshipStatus; label: string; color: string }[] = [
   { value: 'active', label: 'Active', color: 'bg-emerald-500/20 text-emerald-400' },
@@ -65,13 +68,13 @@ const isActiveTriage = (t: CatchUpItem | null, now: Date): boolean => {
 
 /** Move a chat between needs_reply / recently_handled after a triage change. */
 export function applyTriageUpdate(data: DashboardData, triage: CatchUpItem, now: Date = new Date()): DashboardData {
-  const chatId = triage.chat_telegram_id
+  const conversationId = triage.conversation_id
   const all = [...data.needs_reply, ...(data.recently_handled ?? [])]
-  const existing = all.find((it) => it.chat.telegram_id === chatId)
+  const existing = all.find((it) => it.conversation.id === conversationId)
   if (!existing) return data
   const updated: DashboardNeedsReply = { ...existing, triage }
-  const needs = data.needs_reply.filter((it) => it.chat.telegram_id !== chatId)
-  const handled = (data.recently_handled ?? []).filter((it) => it.chat.telegram_id !== chatId)
+  const needs = data.needs_reply.filter((it) => it.conversation.id !== conversationId)
+  const handled = (data.recently_handled ?? []).filter((it) => it.conversation.id !== conversationId)
   if (triage.status === 'handled') {
     handled.unshift(updated)
   } else if (isActiveTriage(triage, now)) {
@@ -154,12 +157,12 @@ export function NoteEditor({
 interface TriageCardProps {
   item: DashboardNeedsReply
   selected: boolean
-  onSnooze: (chatId: number, hours: number) => void
-  onHandled: (chatId: number) => void
-  onSaveNote: (chatId: number, note: string) => Promise<boolean>
-  onClearNote: (chatId: number) => Promise<boolean>
-  onRelationship: (chatId: number, status: string) => void
-  onReply: (chatId: number) => void
+  onSnooze: (conversationId: number, hours: number) => void
+  onHandled: (conversationId: number) => void
+  onSaveNote: (conversationId: number, note: string) => Promise<boolean>
+  onClearNote: (conversationId: number) => Promise<boolean>
+  onRelationship: (conversationId: number, status: string) => void
+  onReply: (conversationId: number) => void
 }
 
 export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, onClearNote, onRelationship, onReply }: TriageCardProps) {
@@ -167,7 +170,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
   const [panel, setPanel] = useState<'snooze' | 'relationship' | 'note' | null>(null)
   const togglePanel = (p: NonNullable<typeof panel>) => setPanel((cur) => (cur === p ? null : p))
 
-  const chatId = item.chat.telegram_id
+  const conversationId = item.conversation.id
   const note = item.triage?.note ?? null
   const context = item.context
 
@@ -191,13 +194,14 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
       >
         {expanded ? <ChevronDown size={14} className="shrink-0 text-slate-500" /> : <ChevronRight size={14} className="shrink-0 text-slate-500" />}
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-slate-300">
-          {item.chat.name.charAt(0).toUpperCase()}
+          {conversationTitle(item.conversation).charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <p className="truncate text-sm font-medium text-gray-200 flex items-center gap-1.5">
-              {item.chat.name}
-              {item.chat.type === 'group' && <Users size={12} className="shrink-0 text-slate-500" />}
+              {conversationTitle(item.conversation)}
+              {item.conversation.kind === 'group' && <Users size={12} className="shrink-0 text-slate-500" />}
+              <ChannelIcon channel={item.conversation.channel} />
             </p>
             <span className="flex-shrink-0 text-[10px] text-slate-500">{fmtRelative(item.last_message.date)}</span>
           </div>
@@ -248,7 +252,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
                       {m.date && <span className="shrink-0 text-[10px] text-slate-500">{fmtRelative(m.date)}</span>}
                     </div>
                     <p className="text-slate-400 line-clamp-2">
-                      {m.text || <span className="italic">{m.media_type ? `[${m.media_type}]` : '[no text]'}</span>}
+                      {m.text || <span className="italic">{m.attachments?.length ? `[${m.attachments[0].kind}]` : '[no text]'}</span>}
                     </p>
                   </div>
                 ))}
@@ -259,7 +263,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
           {/* Primary actions */}
           <div className="flex flex-wrap gap-1.5">
             <button
-              onClick={(e) => { e.stopPropagation(); onReply(chatId) }}
+              onClick={(e) => { e.stopPropagation(); onReply(conversationId) }}
               className="flex items-center gap-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 px-3 py-1.5 text-xs font-medium text-indigo-300 transition-colors"
             >
               <MessageSquare size={12} />
@@ -273,7 +277,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
               Remind later
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); onHandled(chatId) }}
+              onClick={(e) => { e.stopPropagation(); onHandled(conversationId) }}
               className="flex items-center gap-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-colors"
             >
               <CheckCircle2 size={12} />
@@ -286,7 +290,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
               <StickyNote size={12} />
               {note ? 'Edit note' : 'Add note'}
             </button>
-            {item.chat.type === 'private' && (
+            {item.conversation.kind === 'direct' && (
               <button
                 onClick={(e) => { e.stopPropagation(); togglePanel('relationship') }}
                 className="flex items-center gap-1.5 rounded-lg bg-violet-500/15 hover:bg-violet-500/25 px-3 py-1.5 text-xs font-medium text-violet-300 transition-colors"
@@ -303,7 +307,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
               {SNOOZE_OPTIONS.map((opt) => (
                 <button
                   key={opt.hours}
-                  onClick={(e) => { e.stopPropagation(); onSnooze(chatId, opt.hours); setPanel(null) }}
+                  onClick={(e) => { e.stopPropagation(); onSnooze(conversationId, opt.hours); setPanel(null) }}
                   className="rounded-md bg-slate-600/50 hover:bg-amber-500/20 hover:text-amber-300 px-2.5 py-1 text-[11px] text-slate-300 transition-colors"
                 >
                   {opt.label}
@@ -318,7 +322,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
               {RELATIONSHIP_STATUSES.map((s) => (
                 <button
                   key={s.value}
-                  onClick={(e) => { e.stopPropagation(); onRelationship(chatId, s.value); setPanel(null) }}
+                  onClick={(e) => { e.stopPropagation(); onRelationship(conversationId, s.value); setPanel(null) }}
                   className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${s.color} hover:opacity-80`}
                 >
                   {s.label}
@@ -331,8 +335,8 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
           {panel === 'note' && (
             <NoteEditor
               savedNote={note}
-              onSave={(text) => onSaveNote(chatId, text)}
-              onClear={() => onClearNote(chatId)}
+              onSave={(text) => onSaveNote(conversationId, text)}
+              onClear={() => onClearNote(conversationId)}
               onClose={() => setPanel(null)}
             />
           )}
@@ -345,7 +349,7 @@ export function TriageCard({ item, selected, onSnooze, onHandled, onSaveNote, on
           )}
 
           <button
-            onClick={(e) => { e.stopPropagation(); onReply(chatId) }}
+            onClick={(e) => { e.stopPropagation(); onReply(conversationId) }}
             className="w-full rounded-lg bg-slate-700 hover:bg-slate-600 px-3 py-1.5 text-xs text-slate-300 transition-colors flex items-center justify-center gap-1.5"
           >
             Open conversation <ArrowRight size={11} />
@@ -382,7 +386,7 @@ export default function CatchUpQueue({
 }: CatchUpQueueProps) {
   const navigate = useNavigate()
   const [selectedIdx, setSelectedIdx] = useState(0)
-  const [actionFeedback, setActionFeedback] = useState<{ chatId: number; msg: string } | null>(null)
+  const [actionFeedback, setActionFeedback] = useState<{ conversationId: number; msg: string } | null>(null)
   const [showHandled, setShowHandled] = useState(false)
   const selectedRef = useRef<HTMLDivElement | null>(null)
 
@@ -427,7 +431,7 @@ export default function CatchUpQueue({
   const handleGenerateSummaries = async () => {
     if (generating) return
     try {
-      const job = await triggerCatchUpSummaries(needsReply.map((item) => item.chat.telegram_id))
+      const job = await triggerCatchUpSummaries(needsReply.map((item) => item.conversation.id))
       if (job.started === false && job.status === 'running') toast.info('Summaries are already being generated')
       settleJob(job)
     } catch (e) {
@@ -449,17 +453,17 @@ export default function CatchUpQueue({
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current)
   }, [])
 
-  const showFeedback = (chatId: number, msg: string) => {
-    setActionFeedback({ chatId, msg })
+  const showFeedback = (conversationId: number, msg: string) => {
+    setActionFeedback({ conversationId, msg })
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current)
     feedbackTimerRef.current = setTimeout(() => setActionFeedback(null), 2000)
   }
 
   // ---- Actions
-  const triage = async (chatId: number, fn: () => Promise<CatchUpItem>, feedback: string, errorContext: string): Promise<boolean> => {
+  const triage = async (conversationId: number, fn: () => Promise<CatchUpItem>, feedback: string, errorContext: string): Promise<boolean> => {
     try {
       onTriageChange(await fn())
-      showFeedback(chatId, feedback)
+      showFeedback(conversationId, feedback)
       return true
     } catch (e) {
       reportError(e, errorContext)
@@ -467,28 +471,28 @@ export default function CatchUpQueue({
     }
   }
 
-  const handleSnooze = (chatId: number, hours: number) =>
-    triage(chatId, () => snoozeCatchUpItem(chatId, hours), `Snoozed for ${hours >= 24 ? `${hours / 24}d` : `${hours}h`}`, 'Snooze failed')
-  const handleHandled = (chatId: number) =>
-    triage(chatId, () => markCatchUpHandled(chatId), 'Marked as handled', 'Could not mark handled')
-  const handleReopen = (chatId: number) =>
-    triage(chatId, () => reopenCatchUpItem(chatId), 'Reopened', 'Could not reopen')
-  const handleSaveNote = (chatId: number, note: string) =>
-    triage(chatId, () => addCatchUpNote(chatId, note), 'Note saved', 'Could not save note')
-  const handleClearNote = (chatId: number) =>
-    triage(chatId, () => clearCatchUpNote(chatId), 'Note deleted', 'Could not delete note')
+  const handleSnooze = (conversationId: number, hours: number) =>
+    triage(conversationId, () => snoozeCatchUpItem(conversationId, hours), `Snoozed for ${hours >= 24 ? `${hours / 24}d` : `${hours}h`}`, 'Snooze failed')
+  const handleHandled = (conversationId: number) =>
+    triage(conversationId, () => markCatchUpHandled(conversationId), 'Marked as handled', 'Could not mark handled')
+  const handleReopen = (conversationId: number) =>
+    triage(conversationId, () => reopenCatchUpItem(conversationId), 'Reopened', 'Could not reopen')
+  const handleSaveNote = (conversationId: number, note: string) =>
+    triage(conversationId, () => addCatchUpNote(conversationId, note), 'Note saved', 'Could not save note')
+  const handleClearNote = (conversationId: number) =>
+    triage(conversationId, () => clearCatchUpNote(conversationId), 'Note deleted', 'Could not delete note')
 
-  const handleRelationship = async (chatId: number, status: string) => {
+  const handleRelationship = async (conversationId: number, status: string) => {
     try {
-      await updateCatchUpRelationship(chatId, status)
-      showFeedback(chatId, `Status: ${status}`)
+      await updateCatchUpRelationship(conversationId, status)
+      showFeedback(conversationId, `Status: ${status}`)
       onRefreshDashboard()
     } catch (e) {
       reportError(e, 'Could not update relationship')
     }
   }
 
-  const handleReply = (chatId: number) => navigate(`/chats?chatId=${chatId}`)
+  const handleReply = (conversationId: number) => navigate(`/chats?conversationId=${conversationId}`)
 
   const shortcuts = useMemo(() => ({
     j: () => setSelectedIdx((i) => Math.min(i + 1, needsReply.length - 1)),
@@ -498,12 +502,12 @@ export default function CatchUpQueue({
     r: () => {
       const cur = needsReply[selectedIdx]
       if (!cur) return false
-      handleReply(cur.chat.telegram_id)
+      handleReply(cur.conversation.id)
     },
     h: () => {
       const cur = needsReply[selectedIdx]
       if (!cur) return false
-      void handleHandled(cur.chat.telegram_id)
+      void handleHandled(cur.conversation.id)
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [needsReply, selectedIdx, navigate])
@@ -522,18 +526,18 @@ export default function CatchUpQueue({
       {showHandled && (
         <div className="mt-2 space-y-1">
           {recentlyHandled.map((item) => (
-            <div key={item.chat.telegram_id} className="flex items-center gap-3 rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2">
+            <div key={item.conversation.id} className="flex items-center gap-3 rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2">
               <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700/50 text-xs font-medium text-slate-400">
-                {item.chat.name.charAt(0).toUpperCase()}
+                {conversationTitle(item.conversation).charAt(0).toUpperCase()}
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm text-slate-400">{item.chat.name}</p>
+                <p className="truncate text-sm text-slate-400">{conversationTitle(item.conversation)}</p>
                 {item.triage?.handled_at && (
                   <p className="text-[10px] text-slate-600">Handled {fmtRelative(item.triage.handled_at)}</p>
                 )}
               </div>
               <button
-                onClick={() => void handleReopen(item.chat.telegram_id)}
+                onClick={() => void handleReopen(item.conversation.id)}
                 title="Reopen"
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-colors"
               >
@@ -595,7 +599,7 @@ export default function CatchUpQueue({
 
       <div className="space-y-2">
         {needsReply.map((item, i) => (
-          <div key={item.chat.telegram_id} ref={i === selectedIdx ? selectedRef : null} className="relative">
+          <div key={item.conversation.id} ref={i === selectedIdx ? selectedRef : null} className="relative">
             <TriageCard
               item={item}
               selected={i === selectedIdx}
@@ -606,7 +610,7 @@ export default function CatchUpQueue({
               onRelationship={handleRelationship}
               onReply={handleReply}
             />
-            {actionFeedback?.chatId === item.chat.telegram_id && (
+            {actionFeedback?.conversationId === item.conversation.id && (
               <div className="absolute top-2 right-2 rounded-md bg-emerald-500/20 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-medium text-emerald-400 animate-pulse z-10">
                 {actionFeedback.msg}
               </div>

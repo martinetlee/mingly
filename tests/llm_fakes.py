@@ -60,24 +60,28 @@ def patch_briefing_env(provider, *, prefs: Optional[dict] = None) -> ExitStack:
     return stack
 
 
-async def _no_presync(chat_ids, since):
+async def _no_presync(conversation_ids, since):
     return None
 
 
-async def seed_chat(db, telegram_id, name, **flags):
-    from backend.db.models import Chat
-    chat = Chat(telegram_id=telegram_id, name=name, type=flags.pop("type", "group"), **flags)
-    db.add(chat)
-    await db.commit()
-    return chat
+async def seed_chat(db, external_id, name, kind: str = "group", **flags):
+    """A conversation (``kind`` group by default; direct ones get a peer)."""
+    from tests import factories
+    return await factories.conversation(db, external_id, title=name, kind=kind, **flags)
 
 
-async def seed_msg(db, chat_id, tg_id, text, minutes_ago=5, **kw):
-    from backend.db.models import Message
-    msg = Message(
-        tg_message_id=tg_id, chat_id=chat_id, sender_name=kw.pop("sender_name", "Alice"), text=text,
-        date=datetime.utcnow() - timedelta(minutes=minutes_ago), **kw,
+async def seed_msg(db, conv, seq, text, minutes_ago=5, sender=None, sender_name="Alice", **kw):
+    """A message in ``conv`` with external id / seq ``seq``, sent
+    ``minutes_ago`` minutes ago (by identity ``sender`` when given)."""
+    from backend.db import crud
+    return await crud.save_message(
+        db,
+        conversation_id=conv.id,
+        external_id=str(seq),
+        seq=seq,
+        sender_identity_id=sender.id if sender is not None else None,
+        sender_name=sender_name,
+        text=text,
+        date=datetime.utcnow() - timedelta(minutes=minutes_ago),
+        **kw,
     )
-    db.add(msg)
-    await db.commit()
-    return msg

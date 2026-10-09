@@ -36,16 +36,16 @@ beforeEach(() => {
 
 describe('briefingReducer', () => {
   it('resets on begin (attach replays everything) and accumulates chat_done / chat_error', () => {
-    let s = briefingReducer({ ...initialBriefingState, live: [{ chat_id: 9 } as never] }, { type: 'begin', days: 3, attached: true })
+    let s = briefingReducer({ ...initialBriefingState, live: [{ conversation_id: 9 } as never] }, { type: 'begin', days: 3, attached: true })
     expect(s).toMatchObject({ running: true, attached: true, days: 3, live: [] })
     s = briefingReducer(s, { type: 'event', event: 'progress', data: { current: 0, total: 4, stage: 'syncing' } })
     expect(s.progress?.stage).toBe('syncing')
     s = briefingReducer(s, { type: 'event', event: 'start', data: { total: 2, days: 3, run_id: 11 } })
     expect(s.runId).toBe(11)
-    s = briefingReducer(s, { type: 'event', event: 'chat_done', data: { chat_id: 1, chat_name: 'A', category: 'tracked', summary: '**x** [1]', sources: [] } })
-    s = briefingReducer(s, { type: 'event', event: 'chat_error', data: { chat_id: 2, chat_name: 'B', message: 'timeout' } })
+    s = briefingReducer(s, { type: 'event', event: 'chat_done', data: { conversation_id: 1, conversation_title: 'A', category: 'tracked', summary: '**x** [1]', sources: [] } })
+    s = briefingReducer(s, { type: 'event', event: 'chat_error', data: { conversation_id: 2, conversation_title: 'B', message: 'timeout' } })
     expect(s.live).toHaveLength(1)
-    expect(s.failed).toEqual([{ chat_id: 2, chat_name: 'B', message: 'timeout' }])
+    expect(s.failed).toEqual([{ conversation_id: 2, conversation_title: 'B', message: 'timeout' }])
     s = briefingReducer(s, { type: 'end' })
     expect(s.running).toBe(false)
   })
@@ -205,7 +205,7 @@ describe('useRegenerateEntry', () => {
     expect(result.current.activeEntryId).toBe(20)
 
     await act(async () => {
-      streams[1].s.push('done', { entry: { id: 20, chat_id: 1, chat_name: 'X', category: 'tracked', summary: 'new', sources: [] } })
+      streams[1].s.push('done', { entry: { id: 20, conversation_id: 1, conversation_title: 'X', category: 'tracked', summary: 'new', sources: [] } })
       await second
     })
     expect(onUpdated).toHaveBeenCalledWith(1, expect.objectContaining({ id: 20, summary: 'new' }))

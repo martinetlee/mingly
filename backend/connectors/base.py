@@ -26,6 +26,8 @@ class Capability(str, enum.Enum):
     DELETE = "delete"
     REACT = "react"
     REPLY = "reply"
+    PIN = "pin"
+    FORWARD = "forward"
     MEDIA_SEND = "media_send"
     READ_RECEIPTS = "read_receipts"
     FORUM_TOPICS = "forum_topics"
@@ -113,6 +115,11 @@ class Connector(ABC):
     @abstractmethod
     async def logout(self) -> None:
         """Sign the account out and forget its stored session."""
+
+    def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:
+        """What can be done in one conversation (e.g. no sending in a
+        broadcast channel you don't admin). Defaults to the channel's."""
+        return self.capabilities
 
     def describe(self) -> dict[str, Any]:
         return {

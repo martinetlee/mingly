@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Mail, ArrowRight, FileText, AtSign, RefreshCw, ListChecks, Users, AlertCircle } from 'lucide-react'
-import type { CatchUpItem } from '../api/types'
+import { chatUrl, personUrl } from '../lib/routes'
+import { canStartConversation, NoConversationError, openDirectConversation } from '../lib/directConversation'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { Mail, MessageSquare, ArrowRight, FileText, AtSign, RefreshCw, ListChecks, Users, AlertCircle } from 'lucide-react'
+import type { CatchUpItem, Person } from '../api/types'
 import { getDashboard } from '../api/client'
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
@@ -17,7 +20,7 @@ import MentionCard, {
   type MentionFilter,
 } from '../components/MentionCard'
 import { BriefingEntryList } from '../components/BriefingEntryCard'
-import { errorMessage } from '../lib/toast'
+import { errorMessage, toast } from '../lib/toast'
 import { fmtRelative } from '../utils/time'
 
 function getGreeting(): string {
@@ -35,6 +38,16 @@ type ContactsSubTab = 'needs_checkin' | 'all'
 
 export default function Home() {
   const navigate = useNavigate()
+  // Same "message this person" rule as Contacts and the avatar menu (lib/directConversation)
+  const messagePerson = useAsyncAction(async (p: Person) => {
+    try {
+      const conv = await openDirectConversation(p.id, { canStart: canStartConversation(p.identities) })
+      navigate(chatUrl(conv.id))
+    } catch (e) {
+      if (e instanceof NoConversationError) { toast.info(`No conversation with ${p.name} yet`); return }
+      throw e
+    }
+  }, { errorContext: 'Couldn’t open a conversation' })
   const [activeTab, setActiveTab] = useState<HomeTab>('catchup')
   const [contactsSubTab, setContactsSubTab] = useState<ContactsSubTab>('needs_checkin')
 
@@ -52,7 +65,7 @@ export default function Home() {
   useWebSocket((evt) => {
     if (
       (evt.type === 'new_message' && !evt.is_outgoing) ||
-      evt.type === 'chats_synced' || evt.type === 'chat_synced' ||
+      evt.type === 'conversations_synced' || evt.type === 'conversation_synced' ||
       evt.type === 'bulk_sync_complete' || evt.type === 'resync'
     ) {
       refreshDashboard()
@@ -243,7 +256,7 @@ export default function Home() {
             >
               Needs Check-in
               {(() => {
-                const count = data.attention_contacts.filter(
+                const count = data.attention_people.filter(
                   (c) => c.relationship_status === 'needs_reply' || c.relationship_status === 'stalled'
                 ).length
                 return count > 0 ? (
@@ -263,17 +276,17 @@ export default function Home() {
             >
               All Contacts
               <span className="ml-1 rounded-full bg-slate-600/40 px-1.5 py-0.5 text-[9px] font-medium text-slate-400">
-                {data.attention_contacts.length}
+                {data.attention_people.length}
               </span>
             </button>
           </div>
 
           {(() => {
             const contactsToShow = contactsSubTab === 'needs_checkin'
-              ? data.attention_contacts.filter(
+              ? data.attention_people.filter(
                   (c) => c.relationship_status === 'needs_reply' || c.relationship_status === 'stalled'
                 )
-              : data.attention_contacts
+              : data.attention_people
 
             if (contactsToShow.length === 0) {
               return (
@@ -290,10 +303,13 @@ export default function Home() {
             return (
               <div className="flex flex-col gap-2">
                 {contactsToShow.map((c) => (
-                  <button
+                  <div
                     key={c.id}
-                    onClick={() => navigate(`/chats?chatId=${c.telegram_id}`)}
-                    className="rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 hover:bg-slate-700/50 transition-colors text-left w-full"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(personUrl(c.id))}
+                    onKeyDown={(e) => { if (e.key === 'Enter') navigate(personUrl(c.id)) }}
+                    className="cursor-pointer rounded-xl bg-slate-800 border border-slate-700/50 px-4 py-3 hover:bg-slate-700/50 transition-colors text-left w-full"
                   >
                     <div className="flex items-center gap-3">
                       <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-[10px] font-medium text-slate-300">
@@ -324,6 +340,16 @@ export default function Home() {
                           </p>
                         )}
                       </div>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); void messagePerson.run(c) }}
+                        disabled={messagePerson.pending}
+                        title="Message"
+                        aria-label={`Message ${c.name}`}
+                        className="flex-shrink-0 rounded-lg p-1.5 text-slate-500 hover:bg-slate-700 hover:text-indigo-300 transition-colors disabled:opacity-50"
+                      >
+                        <MessageSquare size={14} />
+                      </button>
                     </div>
                     {(c.attention_reason || c.status_explanation) && (
                       <div className="mt-2 ml-10 space-y-1">
@@ -338,7 +364,7 @@ export default function Home() {
                         )}
                       </div>
                     )}
-                  </button>
+                  </div>
                 ))}
               </div>
             )

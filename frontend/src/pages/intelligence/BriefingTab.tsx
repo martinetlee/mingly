@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, ChevronDown, ChevronRight, Loader2, Newspaper, RotateCcw, Trash2, X } from 'lucide-react'
 import {
   deleteBriefingRun,
-  getBriefingChats,
+  getBriefingConversations,
   getBriefingHistory,
   getBriefingPrompts,
   getPrefs,
@@ -10,7 +10,9 @@ import {
   setBriefingDay,
   setBriefingPrompts,
 } from '../../api/client'
-import type { BriefingHistoryEntry, BriefingRun, Chat, Prefs } from '../../api/types'
+import type { BriefingHistoryEntry, BriefingRun, Conversation, Prefs } from '../../api/types'
+import { conversationTitle } from '../../lib/conversation'
+import ChannelIcon from '../../components/ChannelIcon'
 import { BriefingEntryList, type RegenerateControls } from '../../components/BriefingEntryCard'
 import { useConfirm } from '../../components/ui'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
@@ -150,11 +152,11 @@ export default function BriefingTab() {
 
   // Sources (briefing chats)
   const [showSources, setShowSources] = useState(false)
-  const [briefingChats, setBriefingChats] = useState<Chat[]>([])
+  const [briefingChats, setBriefingChats] = useState<Conversation[]>([])
   const [sourceSearch, setSourceSearch] = useState('')
 
   useEffect(() => {
-    getBriefingChats().then(setBriefingChats).catch((e) => reportError(e, 'Could not load briefing sources'))
+    getBriefingConversations().then(setBriefingChats).catch((e) => reportError(e, 'Could not load briefing sources'))
     getPrefs().then(setPrefs).catch((e) => reportError(e, 'Could not load briefing schedule'))
     getBriefingPrompts().then(({ tracked, briefing }) => {
       setTrackedPromptDefault(tracked.default)
@@ -166,10 +168,10 @@ export default function BriefingTab() {
     }).catch((e) => reportError(e, 'Could not load briefing prompts'))
   }, [])
 
-  const handleRemoveSource = async (chat: Chat) => {
+  const handleRemoveSource = async (chat: Conversation) => {
     try {
-      await setBriefing(chat.telegram_id, false)
-      setBriefingChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
+      await setBriefing(chat.id, false)
+      setBriefingChats((prev) => prev.filter((c) => c.id !== chat.id))
     } catch (e) {
       reportError(e, 'Could not remove briefing source')
     }
@@ -205,7 +207,7 @@ export default function BriefingTab() {
     })
   }
 
-  const filteredSources = briefingChats.filter((c) => c.name.toLowerCase().includes(sourceSearch.toLowerCase()))
+  const filteredSources = briefingChats.filter((c) => conversationTitle(c).toLowerCase().includes(sourceSearch.toLowerCase()))
   // The run being generated is shown live above; hide its (partial) history row
   const visibleHistory = run.running && run.runId != null ? history.filter((r) => r.id !== run.runId) : history
   const liveDays = run.days ?? selectedDays
@@ -318,12 +320,13 @@ export default function BriefingTab() {
                 </p>
               ) : (
                 filteredSources.map((chat) => (
-                  <div key={chat.telegram_id} className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-slate-700/40">
+                  <div key={chat.id} className="group flex items-center gap-2 rounded px-2 py-1 hover:bg-slate-700/40">
                     <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-[9px] font-medium text-emerald-400">
-                      {chat.name.charAt(0).toUpperCase()}
+                      {conversationTitle(chat).charAt(0).toUpperCase()}
                     </div>
-                    <span className="flex-1 truncate text-[11px] text-slate-200" title={chat.name}>{chat.name}</span>
-                    <span className="text-[9px] text-slate-500">{chat.type}</span>
+                    <span className="flex-1 truncate text-[11px] text-slate-200" title={conversationTitle(chat)}>{conversationTitle(chat)}</span>
+                    <ChannelIcon channel={chat.channel} />
+                    <span className="text-[9px] text-slate-500">{chat.kind}</span>
                     <button
                       onClick={() => void handleRemoveSource(chat)}
                       title="Remove from briefing"
@@ -387,7 +390,7 @@ export default function BriefingTab() {
               {!run.progress ? (
                 run.attached ? 'Joining the briefing in progress…' : 'Starting briefing…'
               ) : run.progress.stage === 'syncing' ? (
-                'Syncing briefing chats from Telegram…'
+                'Syncing briefing chats…'
               ) : run.progress.chatName ? (
                 <>
                   Summarising <span className="text-slate-200 font-medium">{run.progress.chatName}</span>…
@@ -479,7 +482,7 @@ export default function BriefingTab() {
           <p className="font-medium">Skipped {run.failed.length} chat{run.failed.length === 1 ? '' : 's'}:</p>
           <ul className="mt-1 space-y-0.5 text-amber-300/80">
             {run.failed.map((f) => (
-              <li key={`${f.chat_id}-${f.chat_name}`}>{f.chat_name}: {f.message}</li>
+              <li key={`${f.conversation_id}-${f.conversation_title}`}>{f.conversation_title}: {f.message}</li>
             ))}
           </ul>
         </div>

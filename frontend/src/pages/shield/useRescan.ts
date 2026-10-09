@@ -9,8 +9,8 @@ const SPINNER_TIMEOUT_MS = 90_000
 
 /**
  * Per-message "Rescan" state. A spinner ends on the first terminal event
- * (scam_detected / scam_check_safe / scam_check_error) whose chat_id and
- * message_ids include the message, as the contract specifies.
+ * (scam_detected / scam_check_safe / scam_check_error) whose message_ids
+ * include the message, as the contract specifies.
  */
 export function useRescan() {
   const [running, setRunning] = useState<Set<string>>(() => new Set())
@@ -36,26 +36,26 @@ export function useRescan() {
     return () => { t.forEach(clearTimeout); t.clear() }
   }, [])
 
-  const onTerminal = useCallback((e: { chat_id: number; message_ids: number[] }) => {
-    finish(e.message_ids.map((id) => messageKey({ chat_id: e.chat_id, tg_message_id: id })))
+  const onTerminal = useCallback((e: { message_ids: number[] }) => {
+    finish(e.message_ids.map((id) => messageKey({ message_id: id })))
   }, [finish])
   useWsEvent('scam_detected', onTerminal)
   useWsEvent('scam_check_safe', onTerminal)
   useWsEvent('scam_check_error', (e) => {
     // Only report failures of scans the user started here (not background ones)
-    const mine = e.message_ids.some((id) => timers.current.has(messageKey({ chat_id: e.chat_id, tg_message_id: id })))
+    const mine = e.message_ids.some((id) => timers.current.has(messageKey({ message_id: id })))
     onTerminal(e)
     if (mine) toast.error(`Scan failed: ${e.error}`)
   })
 
-  const rescan = useCallback(async (chatId: number, tgMessageId: number) => {
-    const key = messageKey({ chat_id: chatId, tg_message_id: tgMessageId })
+  const rescan = useCallback(async (conversationId: number, messageId: number) => {
+    const key = messageKey({ message_id: messageId })
     if (timers.current.has(key)) return
     setRunning((prev) => new Set(prev).add(key))
     timers.current.set(key, setTimeout(() => finish([key]), SPINNER_TIMEOUT_MS))
     try {
-      const r = await checkMessagesForScam(chatId, [tgMessageId])
-      if (r.missing_ids?.includes(tgMessageId)) {
+      const r = await checkMessagesForScam(conversationId, [messageId])
+      if (r.missing_ids?.includes(messageId)) {
         finish([key])
         toast.error('That message is no longer stored locally')
       }

@@ -4,8 +4,7 @@ import { authenticatedMediaUrl } from '../api/session'
 import { useMediaDownload } from '../hooks/useMediaDownload'
 
 interface Props {
-  chatTelegramId: number
-  msgTelegramId: number
+  attachmentId: number
   filename: string | null
   fileSize: number | null
   mediaUrl: string | null
@@ -26,9 +25,9 @@ function fileExtension(filename: string | null): string {
   return parts.length > 1 ? parts[parts.length - 1].toUpperCase() : ''
 }
 
-export default function DocumentCard({ chatTelegramId, msgTelegramId, filename, fileSize, mediaUrl, isOut }: Props) {
+export default function DocumentCard({ attachmentId, filename, fileSize, mediaUrl, isOut }: Props) {
   // Click-to-download; opens once the file is available
-  const media = useMediaDownload(chatTelegramId, msgTelegramId, { initialUrl: mediaUrl })
+  const media = useMediaDownload(attachmentId, { initialUrl: mediaUrl })
   const [wantOpen, setWantOpen] = useState(false)
   const ext = fileExtension(filename)
   const sizeStr = formatFileSize(fileSize)

@@ -1,11 +1,11 @@
 DEFAULT_TRACKED_CHAT_PROMPT = """
-You are a Telegram group chat summarizer. Summarize the conversation concisely in at most 5 bullet points.
+You are a group chat summarizer. Summarize the conversation concisely in at most 5 bullet points.
 When mentioning people, we should make it clear which organization they belong to in this way: "John(AAA Corp) informs..." 
 """.strip()
 
 
 DEFAULT_BRIEFING_CHAT_PROMPT = """
-You are a Telegram group chat summarizer. We only care about messages about technical, fund raising, news, events. we do not care about personal requests or chit chats.
+You are a group chat summarizer. We only care about messages about technical, fund raising, news, events. we do not care about personal requests or chit chats.
 Identify key themes in the chat. Summarize the conversation concisely in bullet points, categorized by the themes identified.
 should be in format of :
 **Theme**
@@ -15,7 +15,7 @@ should be in format of :
 
 
 DEFAULT_IMPORTANT_CONTACT_PROMPT = """
-You are summarizing a 1-on-1 Telegram conversation.
+You are summarizing a 1-on-1 conversation.
 
 Message format:
   ChatName: text

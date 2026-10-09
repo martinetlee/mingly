@@ -13,7 +13,7 @@ vi.mock('../../api/client', async (orig) => ({
 }))
 
 const msg = (over: Record<string, unknown> = {}) => ({
-  type: 'new_message' as const, chat_id: 1, message_id: 2, chat_name: 'Acme', sender_name: 'Bob', text: 'hi', is_tracked: false, is_outgoing: false, ...over,
+  type: 'new_message' as const, conversation_id: 1, message_id: 2, conversation_title: 'Acme', sender_name: 'Bob', text: 'hi', is_tracked: false, is_outgoing: false, ...over,
 })
 
 describe('notification policy', () => {
@@ -27,7 +27,7 @@ describe('notification policy', () => {
 
   it('formats title/body like the old Chats.tsx block', () => {
     expect(notificationContent(msg())).toEqual({ title: 'Acme', body: 'Bob: hi' })
-    expect(notificationContent(msg({ chat_name: undefined, sender_name: null }))).toEqual({ title: 'New message', body: 'hi' })
+    expect(notificationContent(msg({ conversation_title: undefined, sender_name: null }))).toEqual({ title: 'New message', body: 'hi' })
   })
 })
 

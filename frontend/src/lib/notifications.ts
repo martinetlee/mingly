@@ -32,7 +32,7 @@ export function shouldNotify(event: NewMessageEvent, pref: NotifPref = cachedPre
 }
 
 export function notificationContent(event: NewMessageEvent): { title: string; body: string } {
-  const title = event.chat_name ?? 'New message'
+  const title = event.conversation_title ?? 'New message'
   const body = event.sender_name ? event.sender_name + ': ' + (event.text ?? '') : (event.text ?? '')
   return { title, body }
 }
@@ -46,16 +46,16 @@ function webNotificationsAvailable(): boolean {
 
 /**
  * Show a web notification for a new_message event if policy allows.
- * `onClick` receives the chat id (used to navigate to the chat).
+ * `onClick` receives the conversation id (used to navigate to it).
  */
-export function notifyNewMessage(event: NewMessageEvent, onClick?: (chatId: number) => void): boolean {
+export function notifyNewMessage(event: NewMessageEvent, onClick?: (conversationId: number) => void): boolean {
   if (!shouldNotify(event) || !webNotificationsAvailable()) return false
   const { title, body } = notificationContent(event)
   const n = new Notification(title, { body, silent: false })
   if (onClick) {
     n.onclick = () => {
       window.focus()
-      onClick(event.chat_id)
+      onClick(event.conversation_id)
       n.close()
     }
   }

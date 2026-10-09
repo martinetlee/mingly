@@ -1,35 +1,31 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, act, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import type { Contact, PersonDetail } from '../../api/types'
+import type { ContactPosition, Person as PersonT } from '../../api/types'
+import { makePerson } from '../chats/__tests__/fixtures'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import { ConfirmProvider } from '../../components/ui'
 
 vi.mock('../../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/client')>()),
-  getProfile: vi.fn(),
+  getTelegramProfile: vi.fn(),
   getPerson: vi.fn(),
   getPositions: vi.fn(),
   getPersonNotes: vi.fn(),
   getOrganizations: vi.fn(async () => []),
 }))
 
-import { getProfile, getPerson, getPositions, getPersonNotes } from '../../api/client'
-import Profile from '../Profile'
+import { getTelegramProfile, getPerson, getPositions, getPersonNotes } from '../../api/client'
+import Person from '../Person'
 
-const person = (positions: PersonDetail['positions'], contact: Contact | null = null): PersonDetail => ({ telegram_id: 42, name: 'Alice', contact, positions })
-const contact = (over: Partial<Contact> = {}): Contact => ({
-  id: 7, telegram_id: 42, first_name: 'Alice', last_name: null, name: 'Alice', username: null, phone: null,
-  twitter_handle: 'alice_old', linkedin_url: null, notes: null, is_important: false, relationship_status: null,
-  relationship_status_manual: false, last_interaction_at: null, last_outgoing_at: null, last_incoming_at: null,
-  synced_at: null, positions: [], ...over,
-})
-const pos = (id: number, organization: string) => ({ id, telegram_id: 42, organization, organization_id: id, title: 'CEO', is_active: true } as unknown as PersonDetail['positions'][number])
+const person = (positions: ContactPosition[], over: Partial<PersonT> = {}): PersonT =>
+  makePerson(42, 'Alice', { is_contact: false, positions, ...over })
+const pos = (id: number, organization: string): ContactPosition => ({ id, person_id: 42, organization, organization_id: id, title: 'CEO', is_active: true, ended_at: null })
 
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(getProfile).mockRejectedValue(new Error('offline'))
+  vi.mocked(getTelegramProfile).mockRejectedValue(new Error('offline'))
   vi.mocked(getPersonNotes).mockResolvedValue([])
 })
 afterEach(() => cleanup())
@@ -39,8 +35,8 @@ function setup() {
   render(
     <WebSocketProvider client={client}>
       <ConfirmProvider>
-        <MemoryRouter initialEntries={['/profile/42']}>
-          <Routes><Route path="/profile/:userId" element={<Profile />} /></Routes>
+        <MemoryRouter initialEntries={['/people/42']}>
+          <Routes><Route path="/people/:personId" element={<Person />} /></Routes>
         </MemoryRouter>
       </ConfirmProvider>
     </WebSocketProvider>,
@@ -48,7 +44,7 @@ function setup() {
   return client
 }
 
-describe('Profile', () => {
+describe('Person page', () => {
   it('shows the notes timeline for a non-contact person', async () => {
     vi.mocked(getPerson).mockResolvedValue(person([]))
     vi.mocked(getPositions).mockResolvedValue([])
@@ -58,6 +54,17 @@ describe('Profile', () => {
     await waitFor(() => expect(getPersonNotes).toHaveBeenCalledWith(42, expect.anything()))
   })
 
+  it('lists every identity and keeps local data when the live Telegram profile is offline', async () => {
+    vi.mocked(getPerson).mockResolvedValue(person([], { twitter_handle: 'alice_old' }))
+    vi.mocked(getPositions).mockResolvedValue([])
+    setup()
+    expect(await screen.findByText('alice_old')).toBeTruthy()
+    expect(screen.getAllByTestId('identity')).toHaveLength(1)
+    // Live profile is fetched for the Telegram identity (makePerson: id + 1000)
+    await waitFor(() => expect(getTelegramProfile).toHaveBeenCalledWith(1042, expect.anything()))
+    expect(await screen.findByText(/Telegram offline/)).toBeTruthy()
+  })
+
   it('reloads local data and positions when an agent changes this person', async () => {
     vi.mocked(getPerson).mockResolvedValue(person([]))
     vi.mocked(getPositions).mockResolvedValue([])
@@ -65,18 +72,18 @@ describe('Profile', () => {
     await screen.findByTestId('person-notes')
     const personCalls = vi.mocked(getPerson).mock.calls.length
 
-    act(() => client.dispatch({ type: 'person_changed', telegram_id: 99 }))
+    act(() => client.dispatch({ type: 'person_changed', person_id: 99 }))
     expect(vi.mocked(getPerson).mock.calls.length).toBe(personCalls)
 
     vi.mocked(getPerson).mockResolvedValue(person([pos(1, 'Acme')]))
     vi.mocked(getPositions).mockResolvedValue([pos(1, 'Acme')])
-    act(() => client.dispatch({ type: 'person_changed', telegram_id: 42 }))
+    act(() => client.dispatch({ type: 'person_changed', person_id: 42 }))
     await waitFor(() => expect(vi.mocked(getPerson).mock.calls.length).toBeGreaterThan(personCalls))
     expect((await screen.findAllByText(/Acme/)).length).toBeGreaterThan(0)
   })
 
   it('an open field edit survives an agent change; the new value shows once the edit closes', async () => {
-    vi.mocked(getPerson).mockResolvedValue(person([], contact()))
+    vi.mocked(getPerson).mockResolvedValue(person([], { twitter_handle: 'alice_old' }))
     vi.mocked(getPositions).mockResolvedValue([])
     const client = setup()
     expect(await screen.findByText('alice_old')).toBeTruthy()
@@ -85,8 +92,8 @@ describe('Profile', () => {
     const input = screen.getByLabelText('Twitter') as HTMLInputElement
     fireEvent.change(input, { target: { value: 'my_draft' } })
 
-    vi.mocked(getPerson).mockResolvedValue(person([], contact({ twitter_handle: 'agent_set' })))
-    await act(async () => { client.dispatch({ type: 'person_changed', telegram_id: 42 }) })
+    vi.mocked(getPerson).mockResolvedValue(person([], { twitter_handle: 'agent_set' }))
+    await act(async () => { client.dispatch({ type: 'person_changed', person_id: 42 }) })
     await waitFor(() => expect(vi.mocked(getPerson).mock.calls.length).toBeGreaterThan(1))
     // Same input element, draft untouched (no remount)
     expect(screen.getByLabelText('Twitter')).toBe(input)
@@ -107,7 +114,7 @@ describe('Profile', () => {
 
     vi.mocked(getPositions).mockResolvedValue([pos(1, 'Acme')])
     vi.mocked(getPerson).mockResolvedValue(person([pos(1, 'Acme')]))
-    await act(async () => { client.dispatch({ type: 'person_changed', telegram_id: 42 }) })
+    await act(async () => { client.dispatch({ type: 'person_changed', person_id: 42 }) })
     expect((await screen.findAllByText(/Acme/)).length).toBeGreaterThan(0)
     expect(screen.getByPlaceholderText('Title (optional)...')).toBe(title)
     expect(title.value).toBe('CTO draft')

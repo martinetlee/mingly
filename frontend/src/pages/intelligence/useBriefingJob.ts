@@ -16,8 +16,8 @@ export interface BriefingProgress {
 }
 
 export interface BriefingChatError {
-  chat_id: number
-  chat_name: string
+  conversation_id: number
+  conversation_title: string
   message: string
 }
 
@@ -118,7 +118,7 @@ export function briefingReducer(state: BriefingJobState, action: BriefingAction)
             progress: { current: 0, total: Number(d.total ?? 0), chatName: '' },
           }
         case 'progress': {
-          const chatName = String(d.chat_name ?? '')
+          const chatName = String(d.conversation_title ?? '')
           if (d.stage === 'syncing') {
             return { ...state, progress: { current: 0, total: Number(d.total ?? 0), chatName: '', stage: 'syncing' } }
           }
@@ -129,7 +129,7 @@ export function briefingReducer(state: BriefingJobState, action: BriefingAction)
           }
         }
         case 'thinking': {
-          const chatName = String(d.chat_name ?? '')
+          const chatName = String(d.conversation_title ?? '')
           let next = state
           if (typeof d.tokens === 'number' && state.progress) {
             next = { ...next, progress: { ...state.progress, chatName, tokens: d.tokens } }
@@ -153,8 +153,8 @@ export function briefingReducer(state: BriefingJobState, action: BriefingAction)
           return {
             ...state,
             failed: [...state.failed, {
-              chat_id: Number(d.chat_id ?? 0),
-              chat_name: String(d.chat_name ?? ''),
+              conversation_id: Number(d.conversation_id ?? 0),
+              conversation_title: String(d.conversation_title ?? ''),
               message: String(d.message ?? 'Failed'),
             }],
           }

@@ -45,10 +45,10 @@ def test_invalid_time_never_raises(bad):
 
 
 async def _seed(db):
-    await seed_chat(db, -1001, "Tracked", is_tracked=True)
-    await seed_chat(db, -1002, "Briefing", is_briefing=True)
-    await seed_msg(db, -1001, 1, "hello tracked")
-    await seed_msg(db, -1002, 2, "hello briefing")
+    tracked = await seed_chat(db, -1001, "Tracked", is_tracked=True)
+    briefing = await seed_chat(db, -1002, "Briefing", is_briefing=True)
+    await seed_msg(db, tracked, 1, "hello tracked")
+    await seed_msg(db, briefing, 2, "hello briefing")
 
 
 @pytest.mark.asyncio
@@ -62,7 +62,7 @@ async def test_scheduler_tick_runs_and_records_success(db):
         assert "briefing_last_run" in env.prefs
         assert sched._failures == 0
     entries = (await db.execute(select(BriefingEntry))).scalars().all()
-    assert sorted(e.chat_name for e in entries) == ["Briefing", "Tracked"]
+    assert sorted(e.conversation_title for e in entries) == ["Briefing", "Tracked"]
 
 
 @pytest.mark.asyncio

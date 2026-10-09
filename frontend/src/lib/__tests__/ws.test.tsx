@@ -40,14 +40,14 @@ describe('WebSocketClient', () => {
     const c = makeClient()
     const typed = vi.fn()
     const all = vi.fn()
-    c.subscribe('chat_synced', typed)
+    c.subscribe('conversation_synced', typed)
     c.subscribe('*', all)
     c.start()
     FakeWebSocket.instances[0].open()
-    FakeWebSocket.instances[0].receive({ type: 'chat_synced', chat_id: 5 })
+    FakeWebSocket.instances[0].receive({ type: 'conversation_synced', conversation_id: 5 })
     FakeWebSocket.instances[0].receive({ type: 'bulk_sync_complete', synced: 1 })
     expect(typed).toHaveBeenCalledTimes(1)
-    expect(typed).toHaveBeenCalledWith({ type: 'chat_synced', chat_id: 5 })
+    expect(typed).toHaveBeenCalledWith({ type: 'conversation_synced', conversation_id: 5 })
     expect(all).toHaveBeenCalledTimes(2)
   })
 
@@ -61,7 +61,7 @@ describe('WebSocketClient', () => {
     const ws = FakeWebSocket.instances[0]
     ws.open()
     ws.onmessage?.(new MessageEvent('message', { data: '{not json' }))
-    ws.receive({ type: 'chat_synced', chat_id: 1 })
+    ws.receive({ type: 'conversation_synced', conversation_id: 1 })
     expect(good).toHaveBeenCalledTimes(1)
     spy.mockRestore()
   })
@@ -183,7 +183,7 @@ describe('WebSocketClient', () => {
   it('removes handlers on unsubscribe', () => {
     const c = makeClient()
     const off1 = c.subscribe('*', () => {})
-    const off2 = c.subscribe('chat_synced', () => {})
+    const off2 = c.subscribe('conversation_synced', () => {})
     expect(c.handlerCount).toBe(2)
     off1()
     off2()
@@ -228,7 +228,7 @@ describe('WebSocketProvider + useWebSocket (leak regression)', () => {
 
     // Events after unmount reach no dead handler
     FakeWebSocket.live()[0].open()
-    FakeWebSocket.live()[0].receive({ type: 'chat_synced', chat_id: 1 })
+    FakeWebSocket.live()[0].receive({ type: 'conversation_synced', conversation_id: 1 })
     expect(handler).not.toHaveBeenCalled()
   })
 
@@ -248,7 +248,7 @@ describe('WebSocketProvider + useWebSocket (leak regression)', () => {
     )
     expect(client.handlerCount).toBe(1)
     FakeWebSocket.instances[0].open()
-    FakeWebSocket.instances[0].receive({ type: 'chat_synced', chat_id: 2 })
+    FakeWebSocket.instances[0].receive({ type: 'conversation_synced', conversation_id: 2 })
     expect(first).not.toHaveBeenCalled()
     expect(second).toHaveBeenCalledTimes(1)
 
@@ -264,12 +264,12 @@ describe('WebSocketProvider + useWebSocket (leak regression)', () => {
     const synced = vi.fn()
     function C() {
       useWsEvent('resync', resync)
-      useWsEvent('chat_synced', (e) => synced(e.chat_id))
+      useWsEvent('conversation_synced', (e) => synced(e.conversation_id))
       return null
     }
     render(<WebSocketProvider client={client}><C /></WebSocketProvider>)
     FakeWebSocket.instances[0].open()
-    FakeWebSocket.instances[0].receive({ type: 'chat_synced', chat_id: 9 })
+    FakeWebSocket.instances[0].receive({ type: 'conversation_synced', conversation_id: 9 })
     FakeWebSocket.instances[0].drop()
     act(() => { vi.advanceTimersByTime(1000) })
     FakeWebSocket.instances[1].open()

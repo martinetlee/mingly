@@ -1,7 +1,7 @@
 """The briefing pipeline, shared by the manual endpoint, entry regeneration
 and the background scheduler.
 
-    load_targets()  → which chats / important contacts to brief
+    load_targets()  → which conversations / important people to brief
     load_lines()    → newest messages of a target in [since, until]
     build_transcript(lines, char_budget) → newest lines that fit, numbered
     summarize()     → typed SummaryResult (ok | empty | llm_unavailable |
@@ -33,6 +33,7 @@ from backend.llm.briefing_prompts import (
 from backend.llm.resolve import error_kind, error_message, get_provider
 from backend.org_context import OrgDirectory
 from backend.serialization import iso_utc
+from backend.serializers import channel_of
 
 logger = logging.getLogger(__name__)
 
@@ -101,41 +102,59 @@ class BriefingSettings:
 @dataclass
 class Target:
     category: str  # 'tracked' | 'briefing' | 'important_contact'
-    chat_id: int  # chat telegram_id, or the contact's telegram_id for important_contact
+    conversation_id: Optional[int]  # tracked / briefing
+    person_id: Optional[int]  # important_contact
     name: str
+    channel: Optional[str] = None  # the conversation's channel (tracked / briefing)
+    kind: Optional[str] = None  # the conversation's kind (tracked / briefing)
 
 
 @dataclass
 class Line:
-    chat_id: int
-    tg_message_id: int
+    conversation_id: int
+    message_id: int
     sender: str
     text: str  # formatted transcript text without the reference prefix
 
 
-def _contact_name(contact) -> str:
-    return (
-        f"{contact.first_name or ''} {contact.last_name or ''}".strip()
-        or contact.username
-        or str(contact.telegram_id)
+def _person_name(person) -> str:
+    return person.name or f"Person {person.id}"
+
+
+def conversation_target(category: str, conv, name: Optional[str] = None) -> Target:
+    return Target(
+        category, conv.id, None, name or conv.title or f"Conversation {conv.id}",
+        channel_of(conv), conv.kind,
     )
 
 
 async def load_targets(db) -> list[Target]:
-    tracked = await crud.get_tracked_chat_models(db)
-    briefing = await crud.get_briefing_chats(db)
-    contacts = await crud.get_important_contacts(db)
+    tracked = await crud.get_tracked_conversations(db)
+    briefing = await crud.get_briefing_conversations(db)
+    people = await crud.get_important_people(db)
     targets: list[Target] = []
     seen: set[int] = set()
-    for category, chats in (("tracked", tracked), ("briefing", briefing)):
-        for c in chats:
-            if c.telegram_id in seen or getattr(c, "is_deactivated", False):
+    for category, convs in (("tracked", tracked), ("briefing", briefing)):
+        for c in convs:
+            if c.id in seen or c.is_deactivated:
                 continue
-            seen.add(c.telegram_id)
-            targets.append(Target(category, c.telegram_id, c.name or str(c.telegram_id)))
-    for contact in contacts:
-        targets.append(Target("important_contact", contact.telegram_id, _contact_name(contact)))
+            seen.add(c.id)
+            targets.append(conversation_target(category, c))
+    for person in people:
+        targets.append(Target("important_contact", None, person.id, _person_name(person)))
     return targets
+
+
+async def target_for_entry(db, entry) -> Optional[Target]:
+    """The target a stored entry was generated for (None if it is gone)."""
+    if entry.category == "important_contact":
+        if entry.person_id is None:
+            return None
+        return Target("important_contact", None, entry.person_id, entry.conversation_title)
+    conv = await crud.get_conversation(db, entry.conversation_id) if entry.conversation_id is not None else None
+    if conv is None:
+        return None
+    return conversation_target(entry.category, conv, entry.conversation_title)
 
 
 def _clip(text: str, n: int) -> str:
@@ -146,23 +165,27 @@ def _clip(text: str, n: int) -> str:
 async def load_lines(db, target: Target, since: datetime, until: Optional[datetime]) -> list[Line]:
     lines: list[Line] = []
     if target.category == "important_contact":
+        identity_ids = await crud.identity_ids_for_person(db, target.person_id)
         rows = await crud.get_messages_from_sender_since(
-            db, target.chat_id, since, limit=CONTACT_MESSAGE_LIMIT, until=until
+            db, identity_ids, since, limit=CONTACT_MESSAGE_LIMIT, until=until
         )
-        for msg, chat, reply_sender, reply_text in rows:
+        for msg, conv, _reply_id, reply_sender, reply_text, _reply_kind in rows:
             if not msg.text:
                 continue
-            label = chat.name or str(chat.telegram_id)
+            label = conv.title or f"Conversation {conv.id}"
+            channel = channel_of(conv)
+            if channel:
+                label = f"{label} · {channel}"
             body = _clip(msg.text, MAX_LINE_CHARS)
             if reply_sender and reply_text:
                 text = f'({label}) [↩ {reply_sender}: "{_clip(reply_text, 60)}"]: {body}'
             else:
                 text = f"({label}) {body}"
-            lines.append(Line(chat.telegram_id, msg.tg_message_id, target.name, text))
+            lines.append(Line(conv.id, msg.id, target.name, text))
         return lines
 
-    rows = await crud.get_messages_since(db, target.chat_id, since, limit=CHAT_MESSAGE_LIMIT, until=until)
-    for m, reply_sender, reply_text in rows:
+    rows = await crud.get_messages_since(db, target.conversation_id, since, limit=CHAT_MESSAGE_LIMIT, until=until)
+    for m, _reply_id, reply_sender, reply_text, _reply_kind in rows:
         if not m.text:
             continue
         sender = "You" if m.is_outgoing else (m.sender_name or "Unknown")
@@ -171,7 +194,7 @@ async def load_lines(db, target: Target, since: datetime, until: Optional[dateti
             text = f'{sender} [↩ {reply_sender}: "{_clip(reply_text, 60)}"]: {body}'
         else:
             text = f"{sender}: {body}"
-        lines.append(Line(m.chat_id, m.tg_message_id, sender, text))
+        lines.append(Line(m.conversation_id, m.id, sender, text))
     return lines
 
 
@@ -232,12 +255,12 @@ def finalize_summary(raw: str, refs: dict[int, Line]) -> tuple[str, list[dict]]:
     renumber them 1..k in order of first appearance. Markdown is preserved
     (the frontend renders it without raw HTML)."""
     text = _unwrap_json(_THINK_RE.sub("", raw)).strip()
-    by_tg = {line.tg_message_id: line for line in refs.values()}
+    by_message_id = {line.message_id: line for line in refs.values()}
     order: dict[tuple[int, int], int] = {}
     sources: list[dict] = []
 
     def resolve(n: int) -> Optional[Line]:
-        return refs.get(n) or by_tg.get(n)
+        return refs.get(n) or by_message_id.get(n)
 
     def repl(m: re.Match) -> str:
         out = []
@@ -248,10 +271,10 @@ def finalize_summary(raw: str, refs: dict[int, Line]) -> tuple[str, list[dict]]:
             line = resolve(int(part))
             if line is None:
                 continue
-            key = (line.chat_id, line.tg_message_id)
+            key = (line.conversation_id, line.message_id)
             if key not in order:
                 order[key] = len(order) + 1
-                sources.append({"chat_id": line.chat_id, "telegram_id": line.tg_message_id})
+                sources.append({"conversation_id": line.conversation_id, "message_id": line.message_id})
             out.append(f"[{order[key]}]")
         return "".join(dict.fromkeys(out))
 
@@ -290,7 +313,11 @@ async def summarize(
 ) -> SummaryResult:
     if not lines:
         return SummaryResult("empty", NO_TEXT_MESSAGES)
-    header = f"Person: {target.name}" if target.category == "important_contact" else f"Chat: {target.name}"
+    if target.category == "important_contact":
+        header = f"Person: {target.name}"
+    else:
+        about = ", ".join(x for x in (target.channel, target.kind) if x)
+        header = f"Chat: {target.name}" + (f" ({about})" if about else "")
     preamble = header + "\n\n"
     if org_context:
         preamble += org_context + "\n\n"
@@ -310,18 +337,18 @@ async def summarize(
     try:
         async for delta in provider.stream(messages, max_tokens=settings.max_tokens, temperature=0.3):
             if delta.reasoning and on_delta:
-                on_delta("thinking", {"chat_name": target.name, "reasoning": delta.reasoning})
+                on_delta("thinking", {"conversation_title": target.name, "reasoning": delta.reasoning})
             if delta.content:
                 content += delta.content
                 chunks += 1
                 if on_delta and chunks % 10 == 0:
-                    on_delta("thinking", {"chat_name": target.name, "tokens": chunks})
+                    on_delta("thinking", {"conversation_title": target.name, "tokens": chunks})
             if _time.monotonic() > deadline:
                 return SummaryResult("timeout", error="The AI model took too long for this chat.")
     except LLMError as exc:
         return SummaryResult(error_kind(exc), error=error_message(exc))
     if on_delta and chunks:
-        on_delta("thinking", {"chat_name": target.name, "tokens": chunks})
+        on_delta("thinking", {"conversation_title": target.name, "tokens": chunks})
 
     summary, sources = finalize_summary(content, refs)
     if not summary:
@@ -348,7 +375,7 @@ async def summarize_target(
         has_any = await _has_messages(target, since, until)
         return SummaryResult("empty", NO_TEXT_MESSAGES if has_any else NO_MESSAGES)
     if target.category == "important_contact":
-        org_ctx = orgs.for_contact(target.name)
+        org_ctx = orgs.for_person(target.name)
     else:
         org_ctx = orgs.for_senders([ln.sender for ln in lines if ln.sender not in ("You", "Unknown")])
     return await summarize(provider, target, lines, settings, org_ctx, on_delta)
@@ -357,11 +384,14 @@ async def summarize_target(
 async def _has_messages(target: Target, since: datetime, until: Optional[datetime]) -> bool:
     from sqlalchemy import func, select
     from backend.db.models import Message
-    col = Message.sender_id if target.category == "important_contact" else Message.chat_id
-    q = select(func.count()).select_from(Message).where(col == target.chat_id, Message.date >= since)
-    if until is not None:
-        q = q.where(Message.date <= until)
     async with AsyncSessionLocal() as db:
+        if target.category == "important_contact":
+            scope = Message.sender_identity_id.in_(await crud.identity_ids_for_person(db, target.person_id))
+        else:
+            scope = Message.conversation_id == target.conversation_id
+        q = select(func.count()).select_from(Message).where(scope, Message.date >= since)
+        if until is not None:
+            q = q.where(Message.date <= until)
         return bool((await db.execute(q)).scalar())
 
 
@@ -383,17 +413,16 @@ class BriefingOutcome:
         return self.status in ("done", "partial", "empty")
 
 
-async def presync(chat_ids: list[int], since: datetime) -> None:
-    """Pull fresh history for briefing chats first (they are excluded from the
-    automatic syncs). Best-effort: no Telegram connection is not an error."""
-    if not chat_ids:
+async def presync(conversation_ids: list[int], since: datetime) -> None:
+    """Pull fresh history for briefing conversations first (they are excluded
+    from the automatic syncs). Best-effort: no connection is not an error, and
+    conversations the sync engine doesn't own (non-Telegram, reported as
+    "not_found") simply have nothing to sync."""
+    if not conversation_ids:
         return
+    from backend.telegram.sync import sync_conversations_since
     try:
-        from backend.telegram.sync import sync_chats_since  # provided by the sync engine
-    except (ImportError, AttributeError):
-        return
-    try:
-        await asyncio.wait_for(sync_chats_since(chat_ids, since), timeout=PRESYNC_TIMEOUT_S)
+        await asyncio.wait_for(sync_conversations_since(conversation_ids, since), timeout=PRESYNC_TIMEOUT_S)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # not connected, FloodWait, timeout...
@@ -428,8 +457,8 @@ async def run_briefing(job, days: int, *, sync_first: bool = True) -> BriefingOu
     provider = get_provider(LLM_ROLE)  # LLMUnavailable → error event via the job runner
 
     if sync_first:
-        emit("progress", {"current": 0, "total": len(targets), "chat_name": "", "stage": "syncing"})
-        await presync([t.chat_id for t in targets if t.category != "important_contact"], since)
+        emit("progress", {"current": 0, "total": len(targets), "conversation_title": "", "stage": "syncing"})
+        await presync([t.conversation_id for t in targets if t.conversation_id is not None], since)
 
     async with AsyncSessionLocal() as db:
         run = await crud.create_briefing_run(db, days=days, status="running")
@@ -440,26 +469,27 @@ async def run_briefing(job, days: int, *, sync_first: bool = True) -> BriefingOu
     abort: Optional[SummaryResult] = None
     try:
         for idx, target in enumerate(targets):
-            emit("progress", {"current": idx + 1, "total": len(targets), "chat_name": target.name})
+            emit("progress", {"current": idx + 1, "total": len(targets), "conversation_title": target.name})
             result = await summarize_target(provider, target, since, until, settings, orgs, emit)
             if result.persistable:
                 async with AsyncSessionLocal() as db:
                     entry = await crud.add_briefing_entry(
-                        db, run_id=run_id, chat_id=target.chat_id, chat_name=target.name,
-                        category=target.category, summary=result.summary,
+                        db, run_id, conversation_id=target.conversation_id, person_id=target.person_id,
+                        conversation_title=target.name, category=target.category, summary=result.summary,
                         sources_json=json.dumps(result.sources) if result.sources else None,
                     )
                 persisted += 1
                 ok += result.kind == "ok"
                 emit("chat_done", {
-                    "entry_id": entry.id, "run_id": run_id, "chat_id": target.chat_id,
-                    "chat_name": target.name, "category": target.category,
-                    "summary": result.summary, "sources": result.sources,
+                    "entry_id": entry.id, "run_id": run_id, "conversation_id": target.conversation_id,
+                    "person_id": target.person_id, "conversation_title": target.name,
+                    "category": target.category, "summary": result.summary, "sources": result.sources,
                 })
                 continue
             failed += 1
             emit("chat_error", {
-                "chat_id": target.chat_id, "chat_name": target.name, "category": target.category,
+                "conversation_id": target.conversation_id, "person_id": target.person_id,
+                "conversation_title": target.name, "category": target.category,
                 "kind": result.kind, "message": result.error,
             })
             if result.aborts_run:
@@ -543,19 +573,18 @@ async def cleanup_stale_runs() -> None:
 # ---------------------------------------------------------------------------
 
 async def regenerate_entry(job, run_id: int, entry_id: int) -> Optional[dict]:
-    from sqlalchemy import select
-    from backend.db.models import BriefingEntry, BriefingRun
-
     async with AsyncSessionLocal() as db:
-        run = (await db.execute(select(BriefingRun).where(BriefingRun.id == run_id))).scalar_one_or_none()
-        entry = (await db.execute(
-            select(BriefingEntry).where(BriefingEntry.id == entry_id, BriefingEntry.run_id == run_id)
-        )).scalar_one_or_none()
+        run = await crud.get_briefing_run(db, run_id)
+        entry = await crud.get_briefing_entry(db, entry_id, run_id=run_id)
+        target = await target_for_entry(db, entry) if entry is not None else None
     if run is None or entry is None:
         job.emit("error", {"message": "Briefing entry not found", "kind": "not_found"})
         return None
     if entry.category not in ("tracked", "briefing", "important_contact"):
         job.emit("error", {"message": f"Unsupported category: {entry.category}", "kind": "invalid"})
+        return None
+    if target is None:
+        job.emit("error", {"message": "This entry's conversation or person no longer exists", "kind": "not_found"})
         return None
 
     provider = get_provider(LLM_ROLE)
@@ -564,8 +593,10 @@ async def regenerate_entry(job, run_id: int, entry_id: int) -> Optional[dict]:
     # summarize last week.
     until = run.generated_at
     since = until - timedelta(days=run.days or 1)
-    target = Target(entry.category, entry.chat_id, entry.chat_name)
-    job.emit("start", {"entry_id": entry.id, "run_id": run_id, "chat_name": entry.chat_name, "category": entry.category})
+    job.emit("start", {
+        "entry_id": entry.id, "run_id": run_id, "conversation_title": entry.conversation_title,
+        "category": entry.category,
+    })
 
     def on_delta(event: str, data: dict) -> None:
         job.emit(event, {**data, "entry_id": entry.id})
@@ -576,13 +607,14 @@ async def regenerate_entry(job, run_id: int, entry_id: int) -> Optional[dict]:
         return None
 
     async with AsyncSessionLocal() as db:
-        fresh = (await db.execute(select(BriefingEntry).where(BriefingEntry.id == entry_id))).scalar_one_or_none()
+        fresh = await crud.get_briefing_entry(db, entry_id)
         if fresh is not None:
             fresh.summary = result.summary
             fresh.sources_json = json.dumps(result.sources) if result.sources else None
             await db.commit()
     payload = {
-        "id": entry.id, "run_id": run_id, "chat_id": entry.chat_id, "chat_name": entry.chat_name,
+        "id": entry.id, "run_id": run_id, "conversation_id": entry.conversation_id,
+        "person_id": entry.person_id, "conversation_title": entry.conversation_title,
         "category": entry.category, "summary": result.summary, "sources": result.sources,
     }
     job.emit("done", {"entry": payload})
@@ -607,8 +639,9 @@ def start_regenerate_job(run_id: int, entry_id: int):
 def entry_dict(e) -> dict:
     return {
         "id": e.id,
-        "chat_id": e.chat_id,
-        "chat_name": e.chat_name,
+        "conversation_id": e.conversation_id,
+        "person_id": e.person_id,
+        "conversation_title": e.conversation_title,
         "category": e.category,
         "summary": e.summary,
         "sources": json.loads(e.sources_json) if e.sources_json else [],

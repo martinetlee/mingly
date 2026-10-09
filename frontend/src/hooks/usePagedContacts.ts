@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Contact } from '../api/types'
-import { getContactsPage, isAbortError } from '../api/client'
+import type { Person } from '../api/types'
+import { getPeoplePage, isAbortError } from '../api/client'
 import { serializeKey } from './useLatestQuery'
 
 interface PageState {
   key: string
-  items: Contact[]
+  items: Person[]
   total: number
   statusCounts: Record<string, number>
   importantCount: number | null
@@ -19,7 +19,7 @@ const initial = (key: string): PageState => ({
 })
 
 /**
- * Contacts filtered and paged on the server. Results are bound to
+ * Contacts (people in any channel's address book) filtered and paged on the server. Results are bound to
  * (search, status): a page for an older filter is dropped, and `loadMore`
  * only appends pages fetched for the filter that's still current.
  */
@@ -37,7 +37,7 @@ export function usePagedContacts(search: string, status: string, pageSize = 100,
     ctrlRef.current = ctrl
     if (!keepItems) setState(initial(k))
     try {
-      const page = await getContactsPage({ search, status, important, limit: pageSize, offset: 0 }, ctrl.signal)
+      const page = await getPeoplePage({ search, status, important, contactsOnly: true, limit: pageSize, offset: 0 }, ctrl.signal)
       if (keyRef.current !== k || ctrl.signal.aborted) return
       setState({
         key: k, items: page.items, total: page.total, statusCounts: page.status_counts,
@@ -64,7 +64,7 @@ export function usePagedContacts(search: string, status: string, pageSize = 100,
     if (s.key !== k || s.loading || s.loadingMore || s.items.length >= s.total) return
     setState((prev) => ({ ...prev, loadingMore: true }))
     try {
-      const page = await getContactsPage({ search, status, important, limit: pageSize, offset: s.items.length })
+      const page = await getPeoplePage({ search, status, important, contactsOnly: true, limit: pageSize, offset: s.items.length })
       if (keyRef.current !== k) return
       setState((prev) => {
         const seen = new Set(prev.items.map((c) => c.id))
@@ -85,8 +85,8 @@ export function usePagedContacts(search: string, status: string, pageSize = 100,
   /** Re-read the first page (after a sync); keeps the list on screen meanwhile. */
   const reload = useCallback(() => loadFirst(keyRef.current, true), [loadFirst])
 
-  /** Replace one contact in place (after an edit). */
-  const updateItem = useCallback((updated: Contact) => {
+  /** Replace one person in place (after an edit). */
+  const updateItem = useCallback((updated: Person) => {
     setState((prev) => ({ ...prev, items: prev.items.map((c) => (c.id === updated.id ? updated : c)) }))
   }, [])
 

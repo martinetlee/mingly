@@ -64,7 +64,7 @@ async def test_protected_route_rejects_without_token(app):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
-        resp = await client.get("/api/chats")
+        resp = await client.get("/api/conversations")
         assert resp.status_code == 401
 
 
@@ -76,7 +76,7 @@ async def test_protected_route_rejects_wrong_token(app):
         transport=ASGITransport(app=app), base_url="http://127.0.0.1"
     ) as client:
         resp = await client.get(
-            "/api/chats",
+            "/api/conversations",
             headers={"X-Session-Token": "wrong-token"},
         )
         assert resp.status_code == 401

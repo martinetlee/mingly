@@ -14,7 +14,7 @@ import { ConfirmProvider } from '../../components/ui'
 import { __resetFlaggedSendersForTests } from '../../hooks/useFlaggedSenders'
 
 const row = (id: number, over: Partial<ScannedMessage> = {}): ScannedMessage => ({
-  tg_message_id: id, chat_id: -100, chat_name: 'Group', sender_id: 500 + id, sender_name: `User ${id}`,
+  message_id: id, conversation_id: 100, conversation_title: 'Group', sender_identity_id: 500 + id, sender_name: `User ${id}`,
   text: `message ${id}`, date: '2026-10-06T09:00:00Z',
   scam_score: 0.2, scam_reason: null, scam_category: null, scam_manual_verdict: null,
   scam_status: 'completed', scam_error: null, effective_is_scam: false,
@@ -102,7 +102,7 @@ beforeEach(() => {
       row(3, { scam_score: 0.9, effective_is_scam: false, scam_manual_verdict: 'not_scam' }),
     ],
   }))
-  api.getScamFlags.mockResolvedValue({ flags: [], flagged_sender_ids: [], flagged_chat_ids: [] })
+  api.getScamFlags.mockResolvedValue({ flags: [], flagged_identity_ids: [], flagged_person_ids: [], flagged_conversation_ids: [] })
   api.getSyncHistory.mockResolvedValue(history())
 })
 
@@ -126,7 +126,7 @@ describe('Shield mutations', () => {
   it('bulk "Mark as not scam" sends exactly the selected rows, then refetches scanned + flags', async () => {
     const resp: ScamVerdictResponse = {
       status: 'updated', scope: 'message', verdict: 'not_scam', count: 2,
-      messages: [], flags: [{ telegram_id: 501, status: 'dismissed' }],
+      messages: [], flags: [{ identity_id: 501, status: 'dismissed' }],
     }
     api.setMessageVerdict.mockResolvedValue(resp)
     renderShield()
@@ -143,7 +143,7 @@ describe('Shield mutations', () => {
 
     await waitFor(() => expect(api.setMessageVerdict).toHaveBeenCalledTimes(1))
     expect(api.setMessageVerdict.mock.calls[0]).toEqual([
-      [{ chat_id: -100, tg_message_id: 1 }, { chat_id: -100, tg_message_id: 2 }, { chat_id: -100, tg_message_id: 3 }],
+      [1, 2, 3].map((id) => ({ message_id: id, conversation_id: 100 })),
       'not_scam',
     ])
     await waitFor(() => expect(api.getScannedMessages.mock.calls.length).toBeGreaterThan(scannedBefore))
@@ -158,7 +158,7 @@ describe('Shield mutations', () => {
     await waitFor(() => expect(scannedCalls().some((c) => c.filters?.verdict_filter === 'failed')).toBe(true))
     const before = api.getScannedMessages.mock.calls.length
 
-    const ev = { request_id: 'r', source: 'realtime' as const, chat_id: -100, message_ids: [9], sender_ids: [], messages: [], error: 'x' }
+    const ev = { request_id: 'r', source: 'realtime' as const, conversation_id: 100, message_ids: [9], identity_ids: [], messages: [], error: 'x' }
     act(() => {
       client.dispatch({ type: 'scam_check_error', ...ev })
       client.dispatch({ type: 'scam_check_error', ...ev })
@@ -174,8 +174,8 @@ describe('Shield mutations', () => {
     const { client } = renderShield()
     await openScanned()
     act(() => client.dispatch({
-      type: 'scam_check_error', request_id: 'r', source: 'manual', chat_id: -100, message_ids: [1], sender_ids: [501], error: 'boom',
-      messages: [{ chat_id: -100, tg_message_id: 1, sender_id: 501, scam_score: null, scam_reason: null, scam_category: null,
+      type: 'scam_check_error', request_id: 'r', source: 'manual', conversation_id: 100, message_ids: [1], identity_ids: [501], error: 'boom',
+      messages: [{ conversation_id: 100, message_id: 1, identity_id: 501, scam_score: null, scam_reason: null, scam_category: null,
         scam_manual_verdict: null, scam_status: 'failed', scam_error: 'boom', effective_is_scam: false }],
     }))
     const r1 = screen.getByText('message 1').closest('tr')!

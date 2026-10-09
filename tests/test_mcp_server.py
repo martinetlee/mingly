@@ -1,41 +1,17 @@
 """Tests for the MCP endpoint: gating, auth, protocol handshake, and tools."""
 
-from datetime import datetime
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from backend.config import API_PORT
 from backend.api import mcp as mcp_module
+from tests import factories
 
 BASE_URL = f"http://127.0.0.1:{API_PORT}"
 KEY = "test-mcp-key"
 AUTH = {"Authorization": f"Bearer {KEY}"}
-
-
-def _fake_chat(**overrides):
-    defaults = dict(
-        id=1,
-        telegram_id=111,
-        name="Test Group",
-        type="group",
-        username=None,
-        is_hidden=False,
-        is_deactivated=False,
-        is_pinned=False,
-        is_archived=False,
-        is_muted=False,
-        unread_count=0,
-        members_count=5,
-        last_activity_at=None,
-        last_message_text="hello",
-        last_message_sender="Alice",
-        last_message_date=datetime(2026, 1, 1),
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
 
 
 @pytest.fixture(autouse=True)
@@ -271,13 +247,12 @@ async def test_tools_list(app):
         tools = resp.json()["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
-            "get_archive_status", "list_dms", "list_chats", "search_chats", "get_chat",
-            "get_messages", "search_messages", "list_tags", "get_chats_by_tag",
-            "search_contacts", "get_contact", "get_person", "fetch_history",
-            "list_organizations",
+            "get_archive_status", "list_dms", "list_conversations", "search_conversations",
+            "get_conversation", "get_messages", "search_messages", "list_tags", "get_conversations_by_tag",
+            "search_people", "get_person", "fetch_history", "list_organizations",
             # write tools (gated by the mcp_write_enabled pref)
             "add_person_note", "update_person_note", "set_person_fields",
-            "add_position", "tag_chat", "mark_reviewed",
+            "add_position", "tag_conversation", "mark_reviewed",
         }
         assert all("inputSchema" in t and "description" in t and "annotations" in t for t in tools)
         by_name = {t["name"]: t for t in tools}
@@ -287,61 +262,70 @@ async def test_tools_list(app):
 
 
 @pytest.mark.asyncio
-async def test_list_chats_happy_path(app, db):
-    from backend.db.models import Chat
-
-    db.add(Chat(telegram_id=111, name="Test Group", type="group", last_message_text="hello",
-                last_message_sender="Alice", last_message_date=datetime(2026, 1, 1)))
-    await db.commit()
+async def test_list_conversations_happy_path(app, db):
+    await factories.conversation(db, 111, title="Test Group", kind="group")
+    await factories.conversation(db, "t-1", title="Mail Thread", kind="email_thread", channel="gmail")
     async with _client(app) as client:
         sid = (await _initialize(client)).headers["mcp-session-id"]
         resp = await client.post(
             "/mcp",
             headers={**AUTH, "Mcp-Session-Id": sid},
-            json=_rpc("tools/call", params={"name": "list_chats", "arguments": {"limit": 5}}),
+            json=_rpc("tools/call", params={"name": "list_conversations", "arguments": {"limit": 5}}),
         )
         result = resp.json()["result"]
         assert result["isError"] is False
         text = result["content"][0]["text"]
-        assert "Test Group" in text
+        assert "Test Group" in text and "Mail Thread" in text
         assert "scam_llm" not in text
         assert "scam_trace" not in text
+        resp = await client.post(
+            "/mcp",
+            headers={**AUTH, "Mcp-Session-Id": sid},
+            json=_rpc("tools/call", params={
+                "name": "list_conversations", "arguments": {"channel": "telegram"},
+            }),
+        )
+        text = resp.json()["result"]["content"][0]["text"]
+        assert "Test Group" in text and "Mail Thread" not in text
 
 
 @pytest.mark.asyncio
-async def test_get_chat_deactivated_is_not_found(app):
-    dead = _fake_chat(is_deactivated=True)
-    with patch("backend.db.crud.get_chat_by_telegram_id", new=AsyncMock(return_value=dead)):
-        async with _client(app) as client:
-            sid = (await _initialize(client)).headers["mcp-session-id"]
-            resp = await client.post(
-                "/mcp",
-                headers={**AUTH, "Mcp-Session-Id": sid},
-                json=_rpc("tools/call", params={"name": "get_chat", "arguments": {"chat_id": 111}}),
-            )
-            result = resp.json()["result"]
-            assert result["isError"] is True
-            assert "not found" in result["content"][0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_get_chat_hidden_is_visible_and_flagged(app, db):
-    """Hidden only declutters the app's chat list; an agent covering every DM
-    must still see the chat, flagged."""
-    import json as _json
-    from backend.db.models import Chat
-
-    db.add(Chat(telegram_id=111, name="Hidden Friend", type="private", is_hidden=True))
-    await db.commit()
+async def test_get_conversation_deactivated_is_not_found(app, db):
+    dead = await factories.conversation(db, 111, title="Old Group", kind="group", is_deactivated=True)
     async with _client(app) as client:
         sid = (await _initialize(client)).headers["mcp-session-id"]
         resp = await client.post(
             "/mcp",
             headers={**AUTH, "Mcp-Session-Id": sid},
-            json=_rpc("tools/call", params={"name": "get_chat", "arguments": {"chat_id": 111}}),
+            json=_rpc("tools/call", params={
+                "name": "get_conversation", "arguments": {"conversation_id": dead.id},
+            }),
+        )
+        result = resp.json()["result"]
+        assert result["isError"] is True
+        assert "not found" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_get_conversation_hidden_is_visible_and_flagged(app, db):
+    """Hidden only declutters the app's inbox; an agent covering every DM
+    must still see the conversation, flagged."""
+    import json as _json
+
+    conv = await factories.conversation(db, 111, title="Hidden Friend", is_hidden=True)
+    async with _client(app) as client:
+        sid = (await _initialize(client)).headers["mcp-session-id"]
+        resp = await client.post(
+            "/mcp",
+            headers={**AUTH, "Mcp-Session-Id": sid},
+            json=_rpc("tools/call", params={
+                "name": "get_conversation", "arguments": {"conversation_id": conv.id},
+            }),
         )
         result = resp.json()["result"]
         assert result["isError"] is False
         data = _json.loads(result["content"][0]["text"])
+        assert data["conversation_id"] == conv.id and data["channel"] == "telegram"
         assert data["is_hidden"] is True
+        assert data["peer"]["person_id"] == conv.peer_identity.person_id
         assert data["coverage"]["history_complete"] is False

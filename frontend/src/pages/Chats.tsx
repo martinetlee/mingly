@@ -1,23 +1,27 @@
 /**
- * Chats page: owns chat selection. Every way of opening a chat — list click,
- * j/k/arrow keys, ?chatId= URL (mentions, palette, notifications), Telegram
- * search result, message search result, avatar "Send message", new chat —
- * goes through the single selectChat(chat, {anchorMsgId, topic}) below, so
- * they all behave the same (mark read, unread separator, reset panes).
+ * Chats page: owns conversation selection. Every way of opening a
+ * conversation — list click, j/k/arrow keys, ?conversationId= URL (mentions,
+ * palette, notifications), directory search result, message search result,
+ * avatar "Send message", new chat — goes through the single
+ * selectChat(conversation, {anchorMessageId, topic}) below, so they all behave
+ * the same (mark read, unread separator, reset panes).
  *
- * Message state lives in ChatPane (keyed per chat) / useChatMessages; per-chat
- * transient UI (draft, reply, edit, upload progress, topic) in chatUiStore.
+ * Message state lives in ChatPane (keyed per conversation) / useChatMessages;
+ * per-conversation transient UI (draft, reply, edit, upload progress, topic)
+ * in chatUiStore.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import type { VirtuosoHandle } from 'react-virtuoso'
-import type { Chat, Tag } from '../api/types'
+import type { Conversation, Tag, TelegramDirectoryResult } from '../api/types'
 import type { MessageSearchResult } from '../api/client'
 import {
-  ensureChat, getChatsByIds, getFolders, getScamFlags, markChatRead, searchChatsTelegram, searchMessagesGlobal,
+  ensureTelegramConversation, getConversation, getConversationsByIds, getTelegramFolders, getScamFlags, markConversationRead,
+  searchTelegramDirectory, searchMessagesGlobal,
   setArchived, setBriefing, setHidden, setMarkedUnread, setMuted, setPinned, setTracked,
 } from '../api/client'
+import { conversationTitle, isDirectoryHit } from '../lib/conversation'
 import { useFeatures } from '../context/FeaturesContext'
 import { useWorkspaces } from '../context/WorkspaceContext'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
@@ -39,7 +43,9 @@ export const READ_ACK_MS = 1500
 
 export interface SelectOptions {
   /** Open centred on this message (and highlight it) */
-  anchorMsgId?: number | null
+  anchorMessageId?: number | null
+  /** Open centred on a message known only by the channel's id (e.g. a Telegram search hit not stored yet) */
+  anchorExternalId?: string | null
   /** Forum topic; undefined keeps the current one when re-selecting the same chat */
   topic?: { id: number; title: string } | null
   /** Keyboard navigation: keep focus in the chat list (don't focus the compose box) */
@@ -47,9 +53,10 @@ export interface SelectOptions {
 }
 
 interface Selection {
-  chat: Chat
+  chat: Conversation
   viaKeyboard: boolean
-  anchorTgId: number | null
+  anchorMessageId: number | null
+  anchorExternalId: string | null
   unreadCount: number
   nonce: number
 }
@@ -58,17 +65,25 @@ function isWindowFocused(): boolean {
   return document.visibilityState !== 'hidden' && document.hasFocus()
 }
 
-function parseNav(search: string): { chatId: number; msgId: number | null } | null {
+interface NavTarget { conversationId: number; messageId: number | null }
+
+/** ?conversationId=&messageId= (built by lib/routes chatUrl) */
+function parseNav(search: string): NavTarget | null {
   const params = new URLSearchParams(search)
-  const chatId = parseInt(params.get('chatId') ?? '', 10)
-  if (isNaN(chatId)) return null
-  const msgId = parseInt(params.get('msgId') ?? '', 10)
-  return { chatId, msgId: isNaN(msgId) || msgId === 0 ? null : msgId }
+  const conversationId = parseInt(params.get('conversationId') ?? '', 10)
+  if (isNaN(conversationId)) return null
+  const messageId = parseInt(params.get('messageId') ?? '', 10)
+  return { conversationId, messageId: isNaN(messageId) || messageId === 0 ? null : messageId }
 }
 
-/** Move a chat to the top of the unpinned section with a new preview (mirrors the server's "recent" sort). */
-function bumpChat(prev: Chat[], chatId: number, patch: Partial<Chat>): Chat[] {
-  const idx = prev.findIndex((c) => c.telegram_id === chatId)
+/** A conversation that isn't in the loaded list pages (internal ids always exist server-side) */
+async function fetchConversation(conversationId: number): Promise<Conversation> {
+  return getConversation(conversationId)
+}
+
+/** Move a conversation to the top of the unpinned section with a new preview (mirrors the server's "recent" sort). */
+function bumpChat(prev: Conversation[], conversationId: number, patch: Partial<Conversation>): Conversation[] {
+  const idx = prev.findIndex((c) => c.id === conversationId)
   if (idx === -1) return prev
   const updated = { ...prev[idx], ...patch }
   if (updated.is_pinned) {
@@ -97,19 +112,20 @@ export default function Chats() {
   const chatsRef = useRef(list.chats)
   chatsRef.current = list.chats
 
-  const folders = useLatestQuery(['folders'], () => getFolders())
+  // Telegram chat folders (Telegram-only)
+  const folders = useLatestQuery(['folders'], () => getTelegramFolders())
   const folder = selectedFolder == null ? null : (folders.data ?? []).find((f) => f.id === selectedFolder) ?? null
   // Folder members can live beyond the loaded pages: fetched by id, kept apart from the list
   const folderMembers = useLatestQuery(
-    ['folder-members', folder?.id ?? null, folder?.chat_ids ?? []],
-    () => getChatsByIds(folder!.chat_ids),
-    { enabled: !!folder && folder.chat_ids.length > 0 },
+    ['folder-members', folder?.id ?? null, folder?.conversation_ids ?? []],
+    () => getConversationsByIds(folder!.conversation_ids),
+    { enabled: !!folder && folder.conversation_ids.length > 0 },
   )
 
   const { shield } = useFeatures()
   const flaggedChats = useLatestQuery(
     ['scam-flagged-chats', shield],
-    () => getScamFlags().then((r) => new Set(r.flagged_chat_ids)),
+    () => getScamFlags().then((r) => new Set(r.flagged_conversation_ids)),
     { enabled: shield },
   )
   const refreshFlaggedChats = useCoalescedRefetch(flaggedChats.refetch, 3000)
@@ -126,39 +142,39 @@ export default function Chats() {
   const [showInfo, setShowInfo] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
   const [showNewChat, setShowNewChat] = useState(false)
-  const [pendingNav, setPendingNav] = useState<{ chatId: number; msgId: number | null } | null>(null)
-  const selectedId = sel?.chat.telegram_id ?? null
+  const [pendingNav, setPendingNav] = useState<NavTarget | null>(null)
+  const selectedId = sel?.chat.id ?? null
   const topic = useChatUiSelect(selectedId, (u) => u.topic)
 
-  const patchChat = useCallback((chatId: number, patch: Partial<Chat>) => {
-    list.setChats((prev) => prev.map((c) => (c.telegram_id === chatId ? { ...c, ...patch } : c)))
-    setSel((s) => (s && s.chat.telegram_id === chatId ? { ...s, chat: { ...s.chat, ...patch } } : s))
+  const patchChat = useCallback((conversationId: number, patch: Partial<Conversation>) => {
+    list.setChats((prev) => prev.map((c) => (c.id === conversationId ? { ...c, ...patch } : c)))
+    setSel((s) => (s && s.chat.id === conversationId ? { ...s, chat: { ...s.chat, ...patch } } : s))
   }, [list.setChats]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const markRead = useCallback((chat: Chat) => {
-    const current = chatsRef.current.find((c) => c.telegram_id === chat.telegram_id) ?? chat
+  const markRead = useCallback((chat: Conversation) => {
+    const current = chatsRef.current.find((c) => c.id === chat.id) ?? chat
     if ((current.unread_count ?? 0) === 0 && !current.is_marked_unread) return
-    patchChat(chat.telegram_id, { unread_count: 0, is_marked_unread: false })
-    markChatRead(chat.telegram_id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
+    patchChat(chat.id, { unread_count: 0, is_marked_unread: false })
+    markConversationRead(chat.id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
     if (current.is_marked_unread) {
-      setMarkedUnread(chat.telegram_id, false).catch((e) => reportError(e, 'Couldn’t clear unread mark'))
+      setMarkedUnread(chat.id, false).catch((e) => reportError(e, 'Couldn’t clear unread mark'))
     }
   }, [patchChat])
 
-  const selectChat = useCallback((chat: Chat, opts: SelectOptions = {}) => {
+  const selectChat = useCallback((chat: Conversation, opts: SelectOptions = {}) => {
     selGenRef.current++
     setPendingNav(null)
     const prev = selRef.current
-    const sameChat = prev?.chat.telegram_id === chat.telegram_id
-    if (sameChat && opts.anchorMsgId == null && opts.topic === undefined) {
+    const sameChat = prev?.chat.id === chat.id
+    if (sameChat && opts.anchorMessageId == null && opts.anchorExternalId == null && opts.topic === undefined) {
       markRead(chat)
       return
     }
-    const topicNext = opts.topic !== undefined ? opts.topic : sameChat ? getChatUi(chat.telegram_id).topic : null
-    updateChatUi(chat.telegram_id, { topic: topicNext })
-    const current = chatsRef.current.find((c) => c.telegram_id === chat.telegram_id)
+    const topicNext = opts.topic !== undefined ? opts.topic : sameChat ? getChatUi(chat.id).topic : null
+    updateChatUi(chat.id, { topic: topicNext })
+    const current = chatsRef.current.find((c) => c.id === chat.id)
     const unread = sameChat ? 0 : ((current ?? chat).unread_count ?? 0)
-    setSel({ chat: current ?? chat, viaKeyboard: !!opts.viaKeyboard, anchorTgId: opts.anchorMsgId ?? null, unreadCount: unread, nonce: ++nonceRef.current })
+    setSel({ chat: current ?? chat, viaKeyboard: !!opts.viaKeyboard, anchorMessageId: opts.anchorMessageId ?? null, anchorExternalId: opts.anchorExternalId ?? null, unreadCount: unread, nonce: ++nonceRef.current })
     if (!sameChat) {
       setShowInfo(false)
       setShowSearch(false)
@@ -166,8 +182,8 @@ export default function Chats() {
     markRead(chat)
   }, [markRead])
 
-  const deselect = useCallback((chatId: number) => {
-    setSel((s) => (s && s.chat.telegram_id === chatId ? null : s))
+  const deselect = useCallback((conversationId: number) => {
+    setSel((s) => (s && s.chat.id === conversationId ? null : s))
   }, [])
 
   // Switching workspace closes the open chat (only an explicit switch — list
@@ -181,14 +197,14 @@ export default function Chats() {
   // The freshest copy of the selected chat (list deltas update badges, flags, previews)
   const selectedChat = useMemo(() => {
     if (!sel) return null
-    return list.chats.find((c) => c.telegram_id === sel.chat.telegram_id) ?? sel.chat
+    return list.chats.find((c) => c.id === sel.chat.id) ?? sel.chat
   }, [sel, list.chats])
   const selection = useMemo(
-    () => (sel ? { anchorTgId: sel.anchorTgId, unreadCount: sel.unreadCount, nonce: sel.nonce, viaKeyboard: sel.viaKeyboard } : null),
+    () => (sel ? { anchorMessageId: sel.anchorMessageId, anchorExternalId: sel.anchorExternalId, unreadCount: sel.unreadCount, nonce: sel.nonce, viaKeyboard: sel.viaKeyboard } : null),
     [sel],
   )
 
-  // ── ?chatId=&msgId= navigation (mentions, palette, notifications) ─────────
+  // ── ?conversationId=&messageId= navigation (mentions, palette, notifications) ─
   useEffect(() => {
     const nav = parseNav(location.search)
     if (!nav) return
@@ -200,62 +216,65 @@ export default function Chats() {
   useEffect(() => {
     if (!pendingNav) return
     const nav = pendingNav
-    const found = chatsRef.current.find((c) => c.telegram_id === nav.chatId)
-      ?? (selRef.current?.chat.telegram_id === nav.chatId ? selRef.current.chat : undefined)
+    const found = chatsRef.current.find((c) => c.id === nav.conversationId)
+      ?? (selRef.current?.chat.id === nav.conversationId ? selRef.current.chat : undefined)
     if (found) {
-      selectChat(found, { anchorMsgId: nav.msgId })
+      selectChat(found, { anchorMessageId: nav.messageId })
       return
     }
     if (list.loading) return // wait for the first page before asking the server
     const gen = selGenRef.current
     let cancelled = false
-    ensureChat(nav.chatId)
+    fetchConversation(nav.conversationId)
       .then((chat) => {
         if (cancelled || gen !== selGenRef.current) return
-        list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
-        selectChat(chat, { anchorMsgId: nav.msgId })
+        list.setChats((prev) => (prev.some((c) => c.id === chat.id) ? prev : [chat, ...prev]))
+        selectChat(chat, { anchorMessageId: nav.messageId })
       })
       .catch((e) => {
         if (cancelled || gen !== selGenRef.current) return
         setPendingNav(null)
-        reportError(e, 'Couldn’t open this chat from Telegram')
+        reportError(e, 'Couldn’t open this chat')
       })
     return () => { cancelled = true }
   }, [pendingNav, list.loading]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Open a chat that may not be in the loaded list yet (search results, avatar menu) */
-  const openRemote = useCallback(async (telegramId: number, opts: SelectOptions = {}) => {
+  /** Open a conversation that may not be in the loaded list yet (search results) */
+  const openRemote = useCallback(async (load: () => Promise<Conversation>, opts: SelectOptions = {}, errorContext = 'Couldn’t open this chat') => {
     const gen = selGenRef.current
     try {
-      const chat = chatsRef.current.find((c) => c.telegram_id === telegramId) ?? await ensureChat(telegramId)
+      const chat = await load()
       if (gen !== selGenRef.current) return
-      list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
+      list.setChats((prev) => (prev.some((c) => c.id === chat.id) ? prev : [chat, ...prev]))
       selectChat(chat, opts)
     } catch (e) {
-      if (gen === selGenRef.current) reportError(e, 'Couldn’t open this chat from Telegram')
+      if (gen === selGenRef.current) reportError(e, errorContext)
     }
   }, [selectChat]) // eslint-disable-line react-hooks/exhaustive-deps
+  const openById = useCallback((conversationId: number, opts: SelectOptions = {}) => openRemote(
+    async () => chatsRef.current.find((c) => c.id === conversationId) ?? fetchConversation(conversationId), opts,
+  ), [openRemote])
 
   // ── Read acknowledgement while the chat is open and the window focused ────
   const pendingAckRef = useRef<number | null>(null)
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const scheduleAck = useCallback((chatId: number) => {
-    pendingAckRef.current = chatId
+  const scheduleAck = useCallback((conversationId: number) => {
+    pendingAckRef.current = conversationId
     if (!isWindowFocused()) return // acknowledged when the window regains focus
     if (ackTimerRef.current) clearTimeout(ackTimerRef.current)
     ackTimerRef.current = setTimeout(() => {
       ackTimerRef.current = null
       const id = pendingAckRef.current
-      if (id == null || selRef.current?.chat.telegram_id !== id || !isWindowFocused()) return
+      if (id == null || selRef.current?.chat.id !== id || !isWindowFocused()) return
       pendingAckRef.current = null
       patchChat(id, { unread_count: 0 })
-      markChatRead(id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
+      markConversationRead(id).catch((e) => reportError(e, 'Couldn’t mark chat as read'))
     }, READ_ACK_MS)
   }, [patchChat])
   useEffect(() => {
     const onFocus = () => {
       const id = pendingAckRef.current
-      if (id != null && selRef.current?.chat.telegram_id === id) scheduleAck(id)
+      if (id != null && selRef.current?.chat.id === id) scheduleAck(id)
     }
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onFocus)
@@ -269,8 +288,8 @@ export default function Chats() {
   // ── Live list updates ──────────────────────────────────────────────────────
   const reloadSoon = useCoalescedRefetch(list.reload, 2000)
   useWsEvent('new_message', (e) => {
-    const viewing = selRef.current?.chat.telegram_id === e.chat_id
-    const known = chatsRef.current.some((c) => c.telegram_id === e.chat_id)
+    const viewing = selRef.current?.chat.id === e.conversation_id
+    const known = chatsRef.current.some((c) => c.id === e.conversation_id)
     if (!known) {
       // A chat outside the loaded pages (or brand new): one coalesced refetch
       reloadSoon()
@@ -281,17 +300,17 @@ export default function Chats() {
     const incoming = !e.is_outgoing
     const countAsUnread = incoming && !(viewing && isWindowFocused())
     list.setChats((prev) => {
-      const cur = prev.find((c) => c.telegram_id === e.chat_id)
-      return bumpChat(prev, e.chat_id, {
+      const cur = prev.find((c) => c.id === e.conversation_id)
+      return bumpChat(prev, e.conversation_id, {
         last_message: { text: e.text ?? msg?.text ?? '', sender_name: e.sender_name ?? null, date },
         last_activity_at: date,
         unread_count: countAsUnread ? (cur?.unread_count ?? 0) + 1 : cur?.unread_count,
       })
     })
-    if (viewing && incoming) scheduleAck(e.chat_id)
+    if (viewing && incoming) scheduleAck(e.conversation_id)
   })
-  useWsEvent('chats_synced', reloadSoon)
-  useWsEvent('chat_synced', reloadSoon)
+  useWsEvent('conversations_synced', reloadSoon)
+  useWsEvent('conversation_synced', reloadSoon)
   useWsEvent('bulk_sync_complete', reloadSoon)
   useWsEvent('resync', () => {
     reloadSoon()
@@ -299,14 +318,14 @@ export default function Chats() {
     if (shield) void flaggedChats.refetch()
   })
 
-  const onChatActivity = useCallback((chatId: number, preview: { text: string; date: string }) => {
-    list.setChats((prev) => bumpChat(prev, chatId, {
+  const onChatActivity = useCallback((conversationId: number, preview: { text: string; date: string }) => {
+    list.setChats((prev) => bumpChat(prev, conversationId, {
       last_message: { text: preview.text, sender_name: null, date: preview.date },
       last_activity_at: preview.date,
     }))
   }, [list.setChats]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Chat actions (context menu / row buttons) ─────────────────────────────
+  // ── Conversation actions (context menu / row buttons) ─────────────────────────────
   const act = useCallback(async (label: string, fn: () => Promise<unknown>): Promise<boolean> => {
     try {
       await fn()
@@ -318,45 +337,45 @@ export default function Chats() {
   }, [])
   const actions: ChatActions = useMemo(() => ({
     toggleTrack: (chat) => act('Couldn’t change tracking', async () => {
-      const r = await setTracked(chat.telegram_id, !chat.is_tracked)
-      patchChat(chat.telegram_id, { is_tracked: r.is_tracked })
+      const r = await setTracked(chat.id, !chat.is_tracked)
+      patchChat(chat.id, { is_tracked: r.is_tracked })
     }),
     hide: (chat) => act('Couldn’t hide chat', async () => {
-      await setHidden(chat.telegram_id, true)
-      list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-      deselect(chat.telegram_id)
+      await setHidden(chat.id, true)
+      list.setChats((prev) => prev.filter((c) => c.id !== chat.id))
+      deselect(chat.id)
     }),
     unhide: (chat) => act('Couldn’t unhide chat', async () => {
-      await setHidden(chat.telegram_id, false)
+      await setHidden(chat.id, false)
       void list.reload()
     }),
     briefing: (chat) => act('Couldn’t add to briefing', async () => {
-      await setBriefing(chat.telegram_id, true)
-      list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-      deselect(chat.telegram_id)
+      await setBriefing(chat.id, true)
+      list.setChats((prev) => prev.filter((c) => c.id !== chat.id))
+      deselect(chat.id)
     }),
     pin: (chat) => act(chat.is_pinned ? 'Couldn’t unpin chat' : 'Couldn’t pin chat', async () => {
-      const r = await setPinned(chat.telegram_id, !chat.is_pinned)
-      patchChat(chat.telegram_id, { is_pinned: r.is_pinned })
+      const r = await setPinned(chat.id, !chat.is_pinned)
+      patchChat(chat.id, { is_pinned: r.is_pinned })
     }),
     archive: (chat) => act(chat.is_archived ? 'Couldn’t unarchive chat' : 'Couldn’t archive chat', async () => {
       const archived = !chat.is_archived
-      await setArchived(chat.telegram_id, archived)
+      await setArchived(chat.id, archived)
       if (archived) {
-        list.setChats((prev) => prev.filter((c) => c.telegram_id !== chat.telegram_id))
-        deselect(chat.telegram_id)
+        list.setChats((prev) => prev.filter((c) => c.id !== chat.id))
+        deselect(chat.id)
       } else {
         void list.reload()
       }
     }),
     mute: (chat, duration) => act('Couldn’t change mute', async () => {
       const muted = !chat.is_muted || !!duration
-      const r = await setMuted(chat.telegram_id, muted, duration)
-      patchChat(chat.telegram_id, { is_muted: r.is_muted, muted_until: r.muted_until })
+      const r = await setMuted(chat.id, muted, duration)
+      patchChat(chat.id, { is_muted: r.is_muted, muted_until: r.muted_until })
     }),
     markUnread: (chat) => act('Couldn’t change unread mark', async () => {
-      const r = await setMarkedUnread(chat.telegram_id, !chat.is_marked_unread)
-      patchChat(chat.telegram_id, { is_marked_unread: r.is_marked_unread })
+      const r = await setMarkedUnread(chat.id, !chat.is_marked_unread)
+      patchChat(chat.id, { is_marked_unread: r.is_marked_unread })
     }),
   }), [act, patchChat, deselect, list.setChats, list.reload]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -366,15 +385,15 @@ export default function Chats() {
     if (folder) {
       // Union loaded chats with separately fetched folder members (prefer the
       // list copy: it carries fresher unread/last-message data)
-      const loadedIds = new Set(pool.map((c) => c.telegram_id))
-      pool = [...pool, ...(folderMembers.data ?? []).filter((m) => !loadedIds.has(m.telegram_id))]
-        .filter((c) => folder.chat_ids.includes(c.telegram_id)
-          || (folder.include_groups && c.type === 'group')
-          || (folder.include_channels && c.type === 'channel')
-          || (folder.include_contacts && c.type === 'private'))
+      const loadedIds = new Set(pool.map((c) => c.id))
+      pool = [...pool, ...(folderMembers.data ?? []).filter((m) => !loadedIds.has(m.id))]
+        .filter((c) => folder.conversation_ids.includes(c.id)
+          || (folder.include_groups && c.kind === 'group')
+          || (folder.include_channels && c.kind === 'channel')
+          || (folder.include_contacts && c.kind === 'direct'))
     }
     const q = search.trim().toLowerCase()
-    if (q) pool = pool.filter((c) => c.name.toLowerCase().includes(q) || (c.username ?? '').toLowerCase().includes(q))
+    if (q) pool = pool.filter((c) => conversationTitle(c).toLowerCase().includes(q) || (c.username ?? '').toLowerCase().includes(q))
     return [...pool].sort((a, b) => {
       if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1
       const da = a.last_activity_at ?? ''
@@ -383,18 +402,18 @@ export default function Chats() {
         const d = (b.unread_count ?? 0) - (a.unread_count ?? 0)
         return d !== 0 ? d : db.localeCompare(da)
       }
-      if (sortBy === 'alpha') return a.name.localeCompare(b.name)
-      return da !== db ? db.localeCompare(da) : a.name.localeCompare(b.name)
+      if (sortBy === 'alpha') return conversationTitle(a).localeCompare(conversationTitle(b))
+      return da !== db ? db.localeCompare(da) : conversationTitle(a).localeCompare(conversationTitle(b))
     })
   }, [list.chats, folder, folderMembers.data, search, sortBy])
   const visibleRef = useRef(visible)
   visibleRef.current = visible
 
-  // ── Search: Telegram directory + message content ──────────────────────────
-  const tgSearch = useDebouncedQuery(search, (q, signal) => searchChatsTelegram(q, signal), { delayMs: 300 })
+  // ── Search: Telegram directory (Telegram-only) + message content ──────────
+  const tgSearch = useDebouncedQuery(search, (q, signal) => searchTelegramDirectory(q, signal), { delayMs: 300 })
   const telegramResults = useMemo(() => {
-    const shown = new Set(visible.map((c) => c.telegram_id))
-    return (tgSearch.data ?? []).filter((c) => !shown.has(c.telegram_id))
+    const shown = new Set(visible.map((c) => c.id))
+    return (tgSearch.data ?? []).filter((r) => isDirectoryHit(r) || !shown.has(r.id))
   }, [tgSearch.data, visible])
   // Latest-only: a new query aborts the one in flight (never silently ignored)
   const [messageResults, setMessageResults] = useState<{ q: string; results: MessageSearchResult[] } | null>(null)
@@ -426,14 +445,14 @@ export default function Chats() {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const moveSelection = (delta: 1 | -1) => {
     const items = visibleRef.current
-    const cur = selRef.current?.chat.telegram_id
-    const idx = cur == null ? -1 : items.findIndex((c) => c.telegram_id === cur)
+    const cur = selRef.current?.chat.id
+    const idx = cur == null ? -1 : items.findIndex((c) => c.id === cur)
     const next = idx === -1 ? (delta > 0 ? items[0] : undefined) : items[idx + delta]
     if (!next) return
     // Focus follows the selection in the list, so the next j/k/arrow keeps
     // navigating. The list is virtualized: bring the row into view first.
     chatListVirtuosoRef.current?.scrollIntoView({ index: items.indexOf(next) })
-    const findRow = () => chatListRef.current?.querySelector<HTMLElement>(`[data-chat-id="${next.telegram_id}"] [data-chat-row]`)
+    const findRow = () => chatListRef.current?.querySelector<HTMLElement>(`[data-chat-id="${next.id}"] [data-chat-row]`)
     const row = findRow()
     if (row) row.focus()
     else requestAnimationFrame(() => findRow()?.focus())
@@ -475,16 +494,18 @@ export default function Chats() {
   }, [selectChat])
   const onToggleInfo = useCallback(() => setShowInfo((v) => !v), [])
   const onSearchMessages = useCallback(() => { const q = search.trim(); if (q) void runMessageSearch(q) }, [search, runMessageSearch])
-  const onOpenSearchResult = useCallback((chat: Chat) => {
+  const onOpenSearchResult = useCallback((r: TelegramDirectoryResult) => {
     setSearch('')
-    void openRemote(chat.telegram_id)
-  }, [openRemote])
+    if (isDirectoryHit(r)) void openRemote(() => ensureTelegramConversation(r.peer_id), {}, 'Couldn’t open this chat from Telegram')
+    else void openRemote(async () => chatsRef.current.find((c) => c.id === r.id) ?? r)
+  }, [openById, openRemote])
   const onOpenMessageResult = useCallback((r: MessageSearchResult) => {
-    void openRemote(r.telegram_id, { anchorMsgId: r.messages[0]?.tg_message_id ?? null })
-  }, [openRemote])
-  const handleChatCreated = useCallback((chat: Chat) => {
+    // Hits may not be stored yet: open by the channel's message id (fetched via around_external_id)
+    void openById(r.conversation_id, { anchorExternalId: r.messages[0]?.external_id ?? null })
+  }, [openById])
+  const handleChatCreated = useCallback((chat: Conversation) => {
     setShowNewChat(false)
-    list.setChats((prev) => (prev.some((c) => c.telegram_id === chat.telegram_id) ? prev : [chat, ...prev]))
+    list.setChats((prev) => (prev.some((c) => c.id === chat.id) ? prev : [chat, ...prev]))
     selectChat(chat)
   }, [selectChat]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -529,7 +550,7 @@ export default function Chats() {
       <div className="flex flex-1 overflow-hidden">
         {selectedChat && selection ? (
           <ChatPane
-            key={selectedChat.telegram_id}
+            key={selectedChat.id}
             chat={selectedChat}
             topic={topic}
             selection={selection}
@@ -555,7 +576,7 @@ export default function Chats() {
         )}
 
         {showInfo && selectedChat && (
-          <ChatInfoPanel key={selectedChat.telegram_id} chat={selectedChat} onClose={onToggleInfo} />
+          <ChatInfoPanel key={selectedChat.id} chat={selectedChat} onClose={onToggleInfo} />
         )}
       </div>
 

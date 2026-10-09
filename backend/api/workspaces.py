@@ -6,9 +6,10 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.database import get_db
 from backend.db import crud
+from backend.db.database import get_db
 from backend.db.models import Workspace
+from backend.serializers import conversation_out
 
 router = APIRouter()
 
@@ -38,10 +39,6 @@ def _ws_dict(ws, tag_ids: list[int], member_count: int, unallocated_count: int) 
     }
 
 
-def _board_chat_dict(c) -> dict:
-    from backend.api.chats import _chat_dict
-    return _chat_dict(c, c.last_message_text, c.last_message_sender, c.last_message_date)
-
 
 async def _board_payload(db: AsyncSession, workspace_id: int, board_id: Optional[int]) -> dict:
     board = await crud.get_board(db, workspace_id, board_id)
@@ -54,15 +51,15 @@ async def _board_payload(db: AsyncSession, workspace_id: int, board_id: Optional
         "boards": board["boards"],
         "board_id": board["board_id"],
         "columns": [
-            {**col, "chats": [_board_chat_dict(c) for c in col["chats"]]}
+            {**col, "conversations": [conversation_out(c) for c in col["conversations"]]}
             for col in board["columns"]
         ],
-        "unallocated": [_board_chat_dict(c) for c in board["unallocated"]],
+        "unallocated": [conversation_out(c) for c in board["unallocated"]],
         "backlog": {
-            section: [_board_chat_dict(c) for c in chats]
-            for section, chats in board["backlog"].items()
+            section: [conversation_out(c) for c in convs]
+            for section, convs in board["backlog"].items()
         },
-        "classified_chat_ids": board["classified_chat_ids"],
+        "classified_conversation_ids": board["classified_conversation_ids"],
     }
 
 
@@ -117,7 +114,7 @@ class BoardUpdate(BaseModel):
 
 class MoveRequest(BaseModel):
     board_id: int
-    chat_id: int
+    conversation_id: int
     to_tag_id: Optional[int] = None  # None = back to backlog / dismiss triage
 
 
@@ -211,9 +208,9 @@ async def update_board(workspace_id: int, board_id: int, req: BoardUpdate, db: A
 
 
 @router.delete("/{workspace_id}/boards/{board_id}")
-async def delete_board(workspace_id: int, board_id: int, remove_tags: bool = True, db: AsyncSession = Depends(get_db)):
-    # remove_tags is ignored: a board's columns and their stage tags always go together
-    if not await crud.delete_workspace_board(db, workspace_id, board_id, remove_tags=remove_tags):
+async def delete_board(workspace_id: int, board_id: int, db: AsyncSession = Depends(get_db)):
+    """Deletes the board with its columns and their stage tags."""
+    if not await crud.delete_workspace_board(db, workspace_id, board_id):
         raise HTTPException(status_code=404, detail="Board not found")
     return {"status": "ok"}
 
@@ -267,20 +264,20 @@ async def update_column(
 
 @router.delete("/{workspace_id}/boards/{board_id}/columns/{tag_id}")
 async def delete_column(
-    workspace_id: int, board_id: int, tag_id: int, remove_tags: bool = True, db: AsyncSession = Depends(get_db)
+    workspace_id: int, board_id: int, tag_id: int, db: AsyncSession = Depends(get_db)
 ):
-    # remove_tags is ignored: the column's stage tag is deleted with it
-    if not await crud.delete_board_column(db, workspace_id, board_id, tag_id, remove_tags=remove_tags):
+    """The column's stage tag is deleted with it (cards return to backlog)."""
+    if not await crud.delete_board_column(db, workspace_id, board_id, tag_id):
         raise HTTPException(status_code=404, detail="Column not found")
     return {"status": "ok"}
 
 
 @router.post("/{workspace_id}/move")
-async def move_chat(workspace_id: int, req: MoveRequest, db: AsyncSession = Depends(get_db)):
+async def move_conversation(workspace_id: int, req: MoveRequest, db: AsyncSession = Depends(get_db)):
     """Move a card; returns the updated board (same shape as GET /board) so the
     client can replace its optimistic state with the committed one."""
     with _conflicts_as_409():
-        moved = await crud.move_board_chat(db, workspace_id, req.board_id, req.chat_id, req.to_tag_id)
+        moved = await crud.move_board_conversation(db, workspace_id, req.board_id, req.conversation_id, req.to_tag_id)
     if not moved:
-        raise HTTPException(status_code=400, detail="Target column does not belong to this board")
+        raise HTTPException(status_code=400, detail="Unknown board or conversation, or the column is not on this board")
     return await _board_payload(db, workspace_id, req.board_id)

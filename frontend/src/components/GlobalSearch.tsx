@@ -1,8 +1,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, MessageSquare, Users, Building2, FileText, Globe, X, Loader2, AlertTriangle } from 'lucide-react'
-import type { GlobalSearchResults, TelegramSearchResult } from '../api/types'
-import { globalSearch, telegramSearch, ensureChat } from '../api/client'
+import type { ChannelName, GlobalSearchResults, TelegramDirectoryResult } from '../api/types'
+import { globalSearch, searchTelegramDirectory, ensureTelegramConversation } from '../api/client'
+import { chatUrl, personUrl } from '../lib/routes'
+import { conversationTitle, isDirectoryHit, kindLabel } from '../lib/conversation'
+import ChannelIcon from './ChannelIcon'
 import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
 import { errorMessage } from '../lib/toast'
 import { fmtRelative } from '../utils/time'
@@ -11,15 +14,15 @@ import { Modal } from './ui'
 // Telegram directory searches cost two RPCs and repeat queries are common —
 // cache results briefly so re-searching the same term renders instantly.
 const TELEGRAM_CACHE_TTL_MS = 3 * 60 * 1000
-const telegramCache = new Map<string, { ts: number; results: TelegramSearchResult[] }>()
+const telegramCache = new Map<string, { ts: number; results: TelegramDirectoryResult[] }>()
 
-async function cachedTelegramSearch(query: string, signal?: AbortSignal): Promise<TelegramSearchResult[]> {
+async function cachedTelegramSearch(query: string, signal?: AbortSignal): Promise<TelegramDirectoryResult[]> {
   const key = query.trim().toLowerCase()
   const hit = telegramCache.get(key)
   if (hit && Date.now() - hit.ts < TELEGRAM_CACHE_TTL_MS) return hit.results
-  const data = await telegramSearch(query, 20, signal)
-  telegramCache.set(key, { ts: Date.now(), results: data.telegram_dialogs })
-  return data.telegram_dialogs
+  const results = await searchTelegramDirectory(query, signal)
+  telegramCache.set(key, { ts: Date.now(), results })
+  return results
 }
 
 interface ResultItem {
@@ -28,32 +31,38 @@ interface ResultItem {
   label: string
   sublabel?: string
   icon: 'chat' | 'contact' | 'org' | 'message' | 'telegram'
-  navigateTo: string
-  telegramId?: number
+  /** In-app route; null for a directory hit that must be stored first (ensure by peerId) */
+  navigateTo: string | null
+  /** Telegram directory hit not stored yet */
+  peerId?: number
+  /** Channel of a conversation result (shown subtly) */
+  channel?: ChannelName | null
 }
 
 function flattenResults(results: GlobalSearchResults): ResultItem[] {
   const items: ResultItem[] = []
 
-  for (const c of results.chats) {
+  for (const c of results.conversations) {
     items.push({
       type: 'chat',
-      id: `chat-${c.telegram_id}`,
-      label: c.name,
-      sublabel: c.type,
+      id: `chat-${c.id}`,
+      label: conversationTitle(c),
+      sublabel: c.kind === 'direct' ? 'direct' : c.kind.replace('_', ' '),
       icon: 'chat',
-      navigateTo: `/chats?chatId=${c.telegram_id}`,
+      navigateTo: chatUrl(c.id),
+      channel: c.channel,
     })
   }
 
-  for (const c of results.contacts) {
+  for (const c of results.people) {
+    const username = c.identities.find((i) => i.username)?.username
     items.push({
       type: 'contact',
       id: `contact-${c.id}`,
       label: c.name,
-      sublabel: c.username ? `@${c.username}` : undefined,
+      sublabel: username ? `@${username}` : undefined,
       icon: 'contact',
-      navigateTo: `/profile/${c.telegram_id}`,
+      navigateTo: personUrl(c.id),
     })
   }
 
@@ -71,27 +80,31 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
   for (const m of results.messages) {
     items.push({
       type: 'message',
-      id: `msg-${m.chat_id}-${m.tg_message_id}`,
-      label: m.text,
-      sublabel: `${m.chat_name}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtRelative(m.date)}`,
+      id: `msg-${m.message_id}`,
+      label: m.subject ? `${m.subject} — ${m.text}` : m.text,
+      sublabel: `${m.conversation_title}${m.sender_name ? ` — ${m.sender_name}` : ''} · ${fmtRelative(m.date)}`,
       icon: 'message',
-      navigateTo: `/chats?chatId=${m.chat_id}&msgId=${m.tg_message_id}`,
+      navigateTo: chatUrl(m.conversation_id, m.message_id),
     })
   }
 
   return items
 }
 
-function telegramResultsToItems(results: TelegramSearchResult[]): ResultItem[] {
-  return results.map((t) => ({
-    type: 'telegram' as const,
-    id: `tg-${t.telegram_id}`,
-    label: t.name,
-    sublabel: t.username ? `@${t.username}` : t.type,
-    icon: 'telegram' as const,
-    navigateTo: `/chats?chatId=${t.telegram_id}`,
-    telegramId: t.telegram_id,
-  }))
+function telegramResultsToItems(results: TelegramDirectoryResult[]): ResultItem[] {
+  return results.map((t) => {
+    const hit = isDirectoryHit(t)
+    return {
+      type: 'telegram' as const,
+      id: hit ? `tg-${t.peer_id}` : `tgc-${t.id}`,
+      label: t.title || kindLabel(t.kind),
+      sublabel: t.username ? `@${t.username}` : kindLabel(t.kind),
+      icon: 'telegram' as const,
+      navigateTo: hit ? null : chatUrl(t.id),
+      peerId: hit ? t.peer_id : undefined,
+      channel: 'telegram',
+    }
+  })
 }
 
 const ICON_MAP = {
@@ -134,7 +147,7 @@ function GlobalSearchPanel({ onClose }: { onClose: () => void }) {
     delayMs: 300, minLength: 2, keepPreviousData: false,
   })
   const results: GlobalSearchResults | null = local.data ?? null
-  const telegramResults: TelegramSearchResult[] = tg.data ?? []
+  const telegramResults: TelegramDirectoryResult[] = tg.data ?? []
   const loading = local.pending
   const telegramLoading = tg.pending
   const localError = local.error != null ? errorMessage(local.error) : null
@@ -145,23 +158,23 @@ function GlobalSearchPanel({ onClose }: { onClose: () => void }) {
   // Build unified items list: local results + Telegram results (deduped)
   const localItems = results ? flattenResults(results) : []
   const tgItems = telegramResultsToItems(telegramResults)
-  // Deduplicate: skip Telegram results whose telegram_id already appears in local chats/contacts
-  const localTgIds = new Set<number>()
-  if (results) {
-    for (const c of results.chats) localTgIds.add(c.telegram_id)
-    for (const c of results.contacts) localTgIds.add(c.telegram_id)
-  }
-  const dedupedTgItems = tgItems.filter((t) => !t.telegramId || !localTgIds.has(t.telegramId))
+  // Deduplicate: skip directory hits whose conversation already appears in local chats
+  const localConversationIds = new Set<number>(results ? results.conversations.map((c) => c.id) : [])
+  const dedupedTgItems = tgItems.filter((_t, i) => {
+    const r = telegramResults[i]
+    return !r || isDirectoryHit(r) || !localConversationIds.has(r.id)
+  })
   const items = [...localItems, ...dedupedTgItems]
 
   const handleSelect = useCallback(
     async (item: ResultItem) => {
-      if (item.type === 'telegram' && item.telegramId) {
-        // Ensure the chat exists locally before navigating
+      let to = item.navigateTo
+      if (to == null && item.peerId != null) {
+        // Store the conversation locally before navigating
         setEnsuring(true)
         setEnsureError(null)
         try {
-          await ensureChat(item.telegramId)
+          to = chatUrl((await ensureTelegramConversation(item.peerId)).id)
         } catch {
           // Navigating anyway would land on a blank chat pane — surface the error instead
           setEnsureError(`Couldn't open "${item.label}" from Telegram`)
@@ -170,8 +183,9 @@ function GlobalSearchPanel({ onClose }: { onClose: () => void }) {
           setEnsuring(false)
         }
       }
+      if (to == null) return
       onClose()
-      navigate(item.navigateTo)
+      navigate(to)
     },
     [navigate, onClose],
   )
@@ -301,7 +315,10 @@ function GlobalSearchPanel({ onClose }: { onClose: () => void }) {
                       >
                         <Icon size={14} className={`flex-shrink-0 ${item.type === 'telegram' ? 'text-indigo-400' : 'text-slate-500'}`} />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm text-gray-200">{item.label}</p>
+                          <p className="flex items-center gap-1.5 truncate text-sm text-gray-200">
+                            <span className="truncate">{item.label}</span>
+                            {item.type === 'chat' && <ChannelIcon channel={item.channel} />}
+                          </p>
                           {item.sublabel && (
                             <p className="truncate text-[11px] text-slate-500">{item.sublabel}</p>
                           )}

@@ -1,21 +1,21 @@
 /**
- * One download pipeline for every message media item (photo, video, audio,
- * voice, album item, document, gif).
+ * One download pipeline for every message attachment (photo, video, audio,
+ * voice, album item, document, gif), keyed by attachment id.
  *
- * - In-flight dedupe: all components showing the same (chat, message) share
- *   one request and one state.
+ * - In-flight dedupe: all components showing the same attachment share one
+ *   request and one state.
  * - Global concurrency limit: at most MAX_CONCURRENT downloads run at once;
  *   the rest queue.
  * - Bounded retries with backoff for transient failures (network, 5xx, 429);
- *   404/400/503 and exhausted retries are terminal for the session — no hot
- *   loop when Telegram is disconnected. `retry()` (user action) resets that.
+ *   404/400/409/503 and exhausted retries are terminal for the session — no
+ *   hot loop when the channel is disconnected. `retry()` (user action) resets that.
  * - Abort: when the last subscriber unmounts, a queued item is dropped and an
  *   in-flight request is aborted.
- * - `media_ready` WS events / a message that already has `media_url` mark the
+ * - `media_ready` WS events / an attachment that already has a `url` mark the
  *   item ready without a request (`setMediaReady` / `initialUrl`).
  */
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
-import { ApiError, downloadMedia, isAbortError } from '../api/client'
+import { ApiError, downloadAttachment, isAbortError } from '../api/client'
 import { errorMessage } from '../lib/toast'
 
 export type MediaStatus = 'idle' | 'queued' | 'loading' | 'ready' | 'error'
@@ -40,72 +40,64 @@ interface Entry {
   retryTimer: ReturnType<typeof setTimeout> | null
 }
 
-const entries = new Map<string, Entry>()
-const listeners = new Map<string, Set<() => void>>()
-const queue: string[] = []
+const entries = new Map<number, Entry>()
+const listeners = new Map<number, Set<() => void>>()
+const queue: number[] = []
 let running = 0
 
-export const mediaKey = (chatId: number, msgId: number) => `${chatId}:${msgId}`
-
-function entry(key: string): Entry {
-  let e = entries.get(key)
+function entry(id: number): Entry {
+  let e = entries.get(id)
   if (!e) {
     e = { state: IDLE, subscribers: 0, ctl: null, retryTimer: null }
-    entries.set(key, e)
+    entries.set(id, e)
   }
   return e
 }
 
-function set(key: string, patch: Partial<MediaState>) {
-  const e = entry(key)
+function set(id: number, patch: Partial<MediaState>) {
+  const e = entry(id)
   e.state = { ...e.state, ...patch }
-  listeners.get(key)?.forEach((l) => l())
+  listeners.get(id)?.forEach((l) => l())
 }
 
 function isTerminal(e: unknown): boolean {
   if (e instanceof ApiError) {
-    if (e.status === 404 || e.status === 400 || e.status === 503 || e.status === 401) return true
+    if (e.status === 404 || e.status === 400 || e.status === 409 || e.status === 503 || e.status === 401) return true
     if (e.code === 'session_expired') return true
   }
   return false
 }
 
-function parseKey(key: string): [number, number] {
-  const [c, m] = key.split(':')
-  return [Number(c), Number(m)]
-}
-
 function pump() {
   while (running < MAX_CONCURRENT && queue.length > 0) {
-    const key = queue.shift()!
-    const e = entries.get(key)
+    const id = queue.shift()!
+    const e = entries.get(id)
     if (!e || e.state.status !== 'queued') continue
-    void run(key, e)
+    void run(id, e)
   }
 }
 
-async function run(key: string, e: Entry) {
+async function run(id: number, e: Entry) {
   running++
   const ctl = new AbortController()
   e.ctl = ctl
-  set(key, { status: 'loading', attempts: e.state.attempts + 1 })
-  const [chatId, msgId] = parseKey(key)
+  set(id, { status: 'loading', attempts: e.state.attempts + 1 })
   try {
-    const res = await downloadMedia(chatId, msgId, ctl.signal)
-    set(key, { status: 'ready', url: res.media_url, error: null })
+    const res = await downloadAttachment(id, ctl.signal)
+    set(id, { status: 'ready', url: res.url, error: null })
   } catch (err) {
     if (isAbortError(err)) {
-      set(key, { status: 'idle' })
-    } else if (!isTerminal(err) && entry(key).state.attempts < MAX_ATTEMPTS) {
-      const delay = BACKOFF_MS[Math.min(entry(key).state.attempts - 1, BACKOFF_MS.length - 1)]
-      set(key, { status: 'queued', error: errorMessage(err) })
+      set(id, { status: 'idle' })
+    } else if (!isTerminal(err) && entry(id).state.attempts < MAX_ATTEMPTS) {
+      const delay = BACKOFF_MS[Math.min(entry(id).state.attempts - 1, BACKOFF_MS.length - 1)]
+      set(id, { status: 'queued', error: errorMessage(err) })
       e.retryTimer = setTimeout(() => {
         e.retryTimer = null
-        if (e.subscribers > 0 && e.state.status === 'queued') { queue.push(key); pump() }
-        else if (e.state.status === 'queued') set(key, { status: 'idle' })
+        if (e.subscribers > 0 && e.state.status === 'queued') { queue.push(id); pump() }
+        else if (e.state.status === 'queued') set(id, { status: 'idle' })
       }, delay)
     } else {
-      set(key, { status: 'error', error: errorMessage(err) })
+      set(id, { status: 'error', error: errorMessage(err) })
     }
   } finally {
     e.ctl = null
@@ -115,41 +107,39 @@ async function run(key: string, e: Entry) {
 }
 
 /** Request a download (no-op if ready/in flight/terminally failed). */
-export function startMediaDownload(chatId: number, msgId: number, opts: { force?: boolean } = {}): void {
-  const key = mediaKey(chatId, msgId)
-  const e = entry(key)
+export function startMediaDownload(attachmentId: number, opts: { force?: boolean } = {}): void {
+  const e = entry(attachmentId)
   const st = e.state.status
   if (st === 'ready' || st === 'loading' || st === 'queued') return
   if (st === 'error' && !opts.force) return
-  set(key, { status: 'queued', error: null, attempts: opts.force ? 0 : e.state.attempts })
-  queue.push(key)
+  set(attachmentId, { status: 'queued', error: null, attempts: opts.force ? 0 : e.state.attempts })
+  queue.push(attachmentId)
   pump()
 }
 
-/** A WS `media_ready` or a payload that carries media_url. */
-export function setMediaReady(chatId: number, msgId: number, url: string): void {
-  const key = mediaKey(chatId, msgId)
-  const e = entry(key)
+/** A WS `media_ready` or a payload whose attachment carries a url. */
+export function setMediaReady(attachmentId: number, url: string): void {
+  const e = entry(attachmentId)
   if (e.state.status === 'ready' && e.state.url === url) return
   e.ctl?.abort()
-  set(key, { status: 'ready', url, error: null })
+  set(attachmentId, { status: 'ready', url, error: null })
 }
 
-export function getMediaState(chatId: number, msgId: number): MediaState {
-  return entries.get(mediaKey(chatId, msgId))?.state ?? IDLE
+export function getMediaState(attachmentId: number): MediaState {
+  return entries.get(attachmentId)?.state ?? IDLE
 }
 
-function retain(key: string): () => void {
-  const e = entry(key)
+function retain(id: number): () => void {
+  const e = entry(id)
   e.subscribers++
   return () => {
     e.subscribers--
     if (e.subscribers > 0) return
     if (e.state.status === 'queued') {
-      const i = queue.indexOf(key)
+      const i = queue.indexOf(id)
       if (i !== -1) queue.splice(i, 1)
       if (e.retryTimer) { clearTimeout(e.retryTimer); e.retryTimer = null }
-      set(key, { status: 'idle' })
+      set(id, { status: 'idle' })
     } else if (e.state.status === 'loading') {
       e.ctl?.abort()
     }
@@ -167,36 +157,34 @@ export interface UseMediaDownload extends MediaState {
  * Click-to-load media (video, audio, documents) pass auto=false and call start().
  */
 export function useMediaDownload(
-  chatId: number,
-  msgId: number,
+  attachmentId: number,
   opts: { auto?: boolean; initialUrl?: string | null } = {},
 ): UseMediaDownload {
-  const key = mediaKey(chatId, msgId)
   const { auto = false, initialUrl = null } = opts
 
   const subscribe = useCallback((l: () => void) => {
-    let s = listeners.get(key)
-    if (!s) { s = new Set(); listeners.set(key, s) }
+    let s = listeners.get(attachmentId)
+    if (!s) { s = new Set(); listeners.set(attachmentId, s) }
     s.add(l)
-    const release = retain(key)
+    const release = retain(attachmentId)
     return () => { s!.delete(l); release() }
-  }, [key])
-  const get = useCallback(() => entries.get(key)?.state ?? IDLE, [key])
+  }, [attachmentId])
+  const get = useCallback(() => entries.get(attachmentId)?.state ?? IDLE, [attachmentId])
   const state = useSyncExternalStore(subscribe, get, get)
 
   useEffect(() => {
-    if (initialUrl) setMediaReady(chatId, msgId, initialUrl)
-  }, [chatId, msgId, initialUrl])
+    if (initialUrl) setMediaReady(attachmentId, initialUrl)
+  }, [attachmentId, initialUrl])
 
   useEffect(() => {
-    if (auto && !initialUrl) startMediaDownload(chatId, msgId)
-  }, [auto, initialUrl, chatId, msgId])
+    if (auto && !initialUrl) startMediaDownload(attachmentId)
+  }, [auto, initialUrl, attachmentId])
 
   const start = useCallback(() => {
-    const st = getMediaState(chatId, msgId).status
-    startMediaDownload(chatId, msgId, { force: st === 'error' })
-  }, [chatId, msgId])
-  const retry = useCallback(() => startMediaDownload(chatId, msgId, { force: true }), [chatId, msgId])
+    const st = getMediaState(attachmentId).status
+    startMediaDownload(attachmentId, { force: st === 'error' })
+  }, [attachmentId])
+  const retry = useCallback(() => startMediaDownload(attachmentId, { force: true }), [attachmentId])
 
   const url = initialUrl ?? state.url
   return { ...state, url, status: url ? 'ready' : state.status, start, retry }

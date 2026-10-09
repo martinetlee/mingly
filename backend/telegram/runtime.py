@@ -8,7 +8,7 @@ sync loops, so a second unlock can never stack a client or a handler set.
 
 ``ensure_started`` only does the fast part inline (connect, authorize,
 register handlers); catch-up and the initial syncs run as supervised
-background tasks that report progress over WebSocket (``telegram_status``).
+background tasks that report progress over WebSocket (``connector_status``).
 """
 
 import asyncio
@@ -46,7 +46,6 @@ class TelegramRuntime:
     async def _set_state(self, state: str, error: Optional[str] = None) -> None:
         self.state = state
         self.last_error = error
-        await ws_manager.broadcast({"type": "telegram_status", "state": state, "error": error})
         await ws_manager.broadcast({
             "type": "connector_status", "channel": "telegram", "account_key": "telegram:default",
             "state": state, "error": error,
@@ -192,24 +191,43 @@ class TelegramRuntime:
 
     async def _startup_sequence(self, client) -> None:
         from backend.telegram.sync import (
-            bulk_sync, repair_garbled_text, resolve_numeric_names, sync_dialogs, sync_global_mentions,
+            bulk_sync, resolve_numeric_names, sync_dialogs, sync_global_mentions,
         )
 
+        await self._step("account", self._record_account(client))
         # Handlers are registered, so catch-up updates are processed by them.
         await self._step("catch_up", client.catch_up())
         await self._step("dialogs", sync_dialogs(limit=200))
-        await self._step("bulk_sync", bulk_sync(n_chats=50, messages_per_chat=30))
+        await self._step("bulk_sync", bulk_sync(n_conversations=50, messages_per_conversation=30))
         await self._set_state("ready")
         await self._step("all_dialogs", sync_dialogs(include_archived=True))
         await self._step("mentions", sync_global_mentions(days=30))
         await self._step("numeric_names", resolve_numeric_names())
         await self._step("unscanned_scan", self._scan_unscanned())
-        await self._step("text_repair", repair_garbled_text())
         # Full DM history archive: its own single-flight job, so it never
         # blocks unlock or this sequence (its first step reuses the dialog
         # enumeration done above).
         from backend.telegram import archive
         archive.auto_start()
+
+    async def _record_account(self, client) -> None:
+        """Record the signed-in user as the Telegram account's owner (and as
+        the person who is "me")."""
+        from backend.db import crud
+        from backend.db.database import AsyncSessionLocal
+        from backend.telegram import ids
+        from backend.telegram.entities import user_full_name
+
+        me = await client.get_me()
+        if me is None:
+            return
+        async with AsyncSessionLocal() as db:
+            account = await ids.account(db)
+            identity = await ids.ensure_user_identity(db, me, is_self=True, commit=True)
+            label = f"@{me.username}" if me.username else (user_full_name(me) or me.phone)
+            await crud.set_account_owner(
+                db, account.id, external_id=str(me.id), label=label, self_identity_id=identity.id,
+            )
 
     async def _scan_unscanned(self) -> None:
         try:

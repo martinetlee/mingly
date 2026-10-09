@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { archiveChat, getArchiveStatus, pauseArchive, startArchive, setArchived } from '../client'
+import { archiveConversation, getArchiveStatus, pauseArchive, startArchive, setArchived } from '../client'
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 
@@ -13,19 +13,19 @@ function stubFetch(body: unknown = {}) {
 
 describe('archive routes', () => {
   it('"Archive full history" posts to /archive-history, never the archive-folder toggle', async () => {
-    const coverage = { history_complete: false, message_count: 3, oldest_tg_id: 1, newest_contiguous_tg_id: null }
+    const coverage = { history_complete: false, message_count: 3, oldest_seq: 1, newest_contiguous_seq: null }
     const fetchMock = stubFetch({ queued: true, coverage })
-    await expect(archiveChat(-1001234)).resolves.toEqual({ queued: true, coverage })
+    await expect(archiveConversation(42)).resolves.toEqual({ queued: true, coverage })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('/api/chats/-1001234/archive-history')
+    expect(url).toBe('/api/conversations/42/archive-history')
     expect(init.method).toBe('POST')
   })
 
-  it('the Telegram archive-folder toggle keeps its own /archive route', async () => {
-    const fetchMock = stubFetch({ telegram_id: 5, is_archived: true })
+  it('the archive-folder toggle keeps its own /archive route', async () => {
+    const fetchMock = stubFetch({ conversation_id: 5, is_archived: true })
     await setArchived(5, true)
-    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe('/api/chats/5/archive')
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe('/api/conversations/5/archive')
   })
 
   it('DM archive status/start/pause routes', async () => {

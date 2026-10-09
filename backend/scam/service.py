@@ -26,6 +26,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import SCAM_SUCCESS_STATUSES, Message, ScamCheckRequest, ScamFlag
+from backend.scam.channel_ids import telegram_user_ids
 from backend.scam.client import FollowUpRequest, ScamAPIClient, ScamCheckResult, ScanRequest
 from backend.scam.verdict import FLAG_ACTIVE, ws_message_entry
 from backend.ws.manager import ws_manager
@@ -82,9 +83,12 @@ class ScamDetectionService:
     # Sender lookups
     # ------------------------------------------------------------------
 
-    async def check_flagged_users(self, telegram_ids: list[int]) -> None:
-        """Check a batch of telegram IDs against the flagged scams database."""
-        if not telegram_ids:
+    async def check_flagged_users(self, identity_ids: list[int]) -> None:
+        """Check a batch of senders against the flagged scams database. The
+        lookup is keyed by Telegram user id, so only Telegram identities are
+        checked; a batch with none of them completes with no flags."""
+        identity_ids = list(dict.fromkeys(int(i) for i in identity_ids if i))
+        if not identity_ids:
             return
 
         request_id = str(uuid.uuid4())
@@ -94,19 +98,27 @@ class ScamDetectionService:
                 request_id=request_id,
                 request_type="are_flagged_scams",
                 status="pending",
-                payload_json=json.dumps({"telegram_ids": telegram_ids}),
-                related_telegram_ids_json=json.dumps(telegram_ids),
+                payload_json=json.dumps({"identity_ids": identity_ids}),
+                related_identity_ids_json=json.dumps(identity_ids),
                 created_at=now,
                 updated_at=now,
             ))
             await db.commit()
+            tg_users = await telegram_user_ids(db, identity_ids)
 
         try:
-            results = await self._client.are_flagged_scams(telegram_ids)
+            results = await self._are_flagged(tg_users) if tg_users else {}
             await self._apply_user_flags(request_id, results)
         except Exception as e:
             logger.error("areFlaggedScams failed: %s", e)
             await self._mark_request(request_id, "failed")
+
+    async def _are_flagged(self, tg_users: dict[int, int]) -> dict[int, ScamCheckResult]:
+        """``are_flagged_scams`` for {identity_id: Telegram user id}; results
+        keyed back by identity_id."""
+        by_user = {uid: iid for iid, uid in tg_users.items()}
+        results = await self._client.are_flagged_scams(list(by_user))
+        return {by_user[uid]: r for uid, r in results.items() if uid in by_user}
 
     # ------------------------------------------------------------------
     # Message checks
@@ -127,14 +139,14 @@ class ScamDetectionService:
                 # Compact: the request is rebuilt from the DB on resume, so the
                 # message texts/profiles are not duplicated here.
                 payload_json=json.dumps({
-                    "chat_id": req.chat_id,
+                    "conversation_id": req.conversation_id,
                     "target_ids": req.target_ids,
                     "context_ids": [m["message_id"] for m in req.context],
                     "source": source,
                 }),
-                related_chat_id=req.chat_id,
+                related_conversation_id=req.conversation_id,
                 related_message_ids_json=json.dumps(req.target_ids),
-                related_telegram_ids_json=json.dumps(req.target_sender_ids),
+                related_identity_ids_json=json.dumps(req.target_identity_ids),
                 created_at=now,
                 updated_at=now,
             ))
@@ -143,7 +155,7 @@ class ScamDetectionService:
         try:
             result = await self._client.is_this_scam(request_id, req)
         except Exception as e:
-            logger.error("isThisScam failed for chat %s: %s", req.chat_id, e)
+            logger.error("isThisScam failed for conversation %s: %s", req.conversation_id, e)
             result = ScamCheckResult(is_scam=False, confidence=0.0, reason="",
                                      error=f"Scam detection failed: {e or type(e).__name__}")
         await self._apply_result(request_id, req, result, source=source)
@@ -158,7 +170,7 @@ class ScamDetectionService:
 
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(
-                select(Message).where(Message.chat_id == req.chat_id, Message.tg_message_id.in_(target_ids))
+                select(Message).where(Message.conversation_id == req.conversation_id, Message.id.in_(target_ids))
             )).scalars().all()
 
             if failed:
@@ -195,13 +207,13 @@ class ScamDetectionService:
                 # Flag only target senders whose target message is (effectively)
                 # scam. A sender with any existing record — active, or dismissed
                 # by the user — is left as is.
-                for sid in req.target_sender_ids:
-                    trigger = next((m for m in rows if m.sender_id == sid and m.effective_is_scam), None)
+                for sid in req.target_identity_ids:
+                    trigger = next((m for m in rows if m.sender_identity_id == sid and m.effective_is_scam), None)
                     if trigger is None:
                         continue
                     inserted = await db.execute(
                         sqlite_insert(ScamFlag.__table__).values(
-                            telegram_id=sid,
+                            identity_id=sid,
                             source="local",
                             status=FLAG_ACTIVE,
                             confidence=result.confidence,
@@ -209,12 +221,12 @@ class ScamDetectionService:
                             category=result.category,
                             request_id=request_id,
                             flagged_message_text=(trigger.text or "")[:500],
-                            flagged_message_chat_id=trigger.chat_id,
-                            flagged_message_id=trigger.tg_message_id,
+                            flagged_conversation_id=trigger.conversation_id,
+                            flagged_message_id=trigger.id,
                             flagged_at=now,
                             updated_at=now,
                             synced_to_cloud=False,
-                        ).on_conflict_do_nothing(index_elements=["telegram_id"])
+                        ).on_conflict_do_nothing(index_elements=["identity_id"])
                     )
                     if affected_rows(inserted):
                         new_flags.append(sid)
@@ -236,8 +248,8 @@ class ScamDetectionService:
             entries = [ws_message_entry(m) for m in rows]
 
         logger.info(
-            "Scam check %s chat=%s targets=%s source=%s -> %s",
-            request_id, req.chat_id, target_ids, source,
+            "Scam check %s conversation=%s targets=%s source=%s -> %s",
+            request_id, req.conversation_id, target_ids, source,
             f"error: {result.error}" if failed else f"is_scam={result.is_scam} conf={result.confidence}",
         )
 
@@ -245,9 +257,9 @@ class ScamDetectionService:
         event = {
             "request_id": request_id,
             "source": source,
-            "chat_id": req.chat_id,
+            "conversation_id": req.conversation_id,
             "message_ids": target_ids,
-            "sender_ids": req.target_sender_ids,
+            "identity_ids": req.target_identity_ids,
             "messages": entries,
         }
         if failed:
@@ -263,14 +275,17 @@ class ScamDetectionService:
             )
         await ws_manager.broadcast(event)
         if new_flags:
-            await ws_manager.broadcast({"type": "scam_users_flagged", "telegram_ids": new_flags})
+            await ws_manager.broadcast({"type": "scam_users_flagged", "identity_ids": new_flags})
 
-        await self._record_scan_analytics(result, req.chat_metadata.get("type"))
+        await self._record_scan_analytics(result, req.conversation_kind)
 
-        # Check if flagged senders are also known scammers upstream
-        if not failed and result.is_scam and req.target_sender_ids:
+        # Check if flagged senders are also known scammers upstream (a
+        # Telegram-user-id lookup, so Telegram senders only)
+        tg_users = {m["identity_id"]: m["telegram_user_id"] for m in req.targets
+                    if m.get("identity_id") and m.get("telegram_user_id")}
+        if not failed and result.is_scam and tg_users:
             try:
-                flagged = await self._client.are_flagged_scams(req.target_sender_ids)
+                flagged = await self._are_flagged(tg_users)
                 if flagged:
                     await self._apply_user_flags(request_id, flagged, mark_request=False)
             except Exception as e:
@@ -279,20 +294,21 @@ class ScamDetectionService:
     async def _apply_user_flags(
         self, request_id: str, results: dict[int, ScamCheckResult], mark_request: bool = True
     ) -> None:
-        """Create scam flags for flagged users (never overriding an existing
-        record, including a user dismissal)."""
+        """Create scam flags for flagged senders ({identity_id: result}),
+        never overriding an existing record, including a user dismissal."""
         now = datetime.utcnow()
         flagged_ids: list[int] = []
         async with AsyncSessionLocal() as db:
-            for tid, result in results.items():
+            for iid, result in results.items():
                 if not result.is_scam:
                     continue
                 trigger = (await db.execute(
-                    select(Message).where(Message.sender_id == tid).order_by(Message.date.desc()).limit(1)
+                    select(Message).where(Message.sender_identity_id == iid)
+                    .order_by(Message.date.desc(), Message.id.desc()).limit(1)
                 )).scalars().first()
                 inserted = await db.execute(
                     sqlite_insert(ScamFlag.__table__).values(
-                        telegram_id=tid,
+                        identity_id=iid,
                         source="cloud",
                         status=FLAG_ACTIVE,
                         confidence=result.confidence,
@@ -300,21 +316,21 @@ class ScamDetectionService:
                         category=result.category,
                         request_id=request_id,
                         flagged_message_text=(trigger.text or "")[:500] if trigger else None,
-                        flagged_message_chat_id=trigger.chat_id if trigger else None,
-                        flagged_message_id=trigger.tg_message_id if trigger else None,
+                        flagged_conversation_id=trigger.conversation_id if trigger else None,
+                        flagged_message_id=trigger.id if trigger else None,
                         flagged_at=now,
                         updated_at=now,
                         synced_to_cloud=False,
-                    ).on_conflict_do_nothing(index_elements=["telegram_id"])
+                    ).on_conflict_do_nothing(index_elements=["identity_id"])
                 )
                 if affected_rows(inserted):
-                    flagged_ids.append(tid)
+                    flagged_ids.append(iid)
             await db.commit()
 
         if mark_request:
             await self._mark_request(request_id, "completed")
         if flagged_ids:
-            await ws_manager.broadcast({"type": "scam_users_flagged", "telegram_ids": flagged_ids})
+            await ws_manager.broadcast({"type": "scam_users_flagged", "identity_ids": flagged_ids})
 
     # ------------------------------------------------------------------
     # External API callbacks / follow-ups
@@ -324,9 +340,9 @@ class ScamDetectionService:
         from backend.scam.queue import build_scan_request
 
         target_ids = json.loads(req.related_message_ids_json or "[]")
-        if req.related_chat_id is None or not target_ids:
+        if req.related_conversation_id is None or not target_ids:
             return None
-        return await build_scan_request(req.related_chat_id, target_ids)
+        return await build_scan_request(req.related_conversation_id, target_ids)
 
     def _source_of(self, req: ScamCheckRequest) -> str:
         try:
@@ -359,8 +375,8 @@ class ScamDetectionService:
             raw_response=response,
         )
         if req.request_type == "are_flagged_scams":
-            tg_ids = json.loads(req.related_telegram_ids_json or "[]")
-            flagged = {tid: check_result for tid in tg_ids} if check_result.is_scam else {}
+            identity_ids = json.loads(req.related_identity_ids_json or "[]")
+            flagged = {iid: check_result for iid in identity_ids} if check_result.is_scam else {}
             await self._apply_user_flags(request_id, flagged)
             return
         scan_req = await self._request_from_row(req)
@@ -414,11 +430,12 @@ class ScamDetectionService:
                 if req.request_type == "are_flagged_scams":
                     await self._mark_request(req.request_id, "superseded")
                     payload = json.loads(req.payload_json or "{}")
-                    await self.check_flagged_users(payload.get("telegram_ids") or [])
-                elif req.related_chat_id is not None:
+                    await self.check_flagged_users(payload.get("identity_ids") or [])
+                elif req.related_conversation_id is not None:
                     await self._mark_request(req.request_id, "superseded")
                     await enqueue_targets(
-                        req.related_chat_id, json.loads(req.related_message_ids_json or "[]"), source="resume",
+                        req.related_conversation_id, json.loads(req.related_message_ids_json or "[]"),
+                        source="resume",
                     )
             except Exception as e:
                 logger.error("Failed to resume scam check %s: %s", req.request_id, e)
@@ -430,16 +447,18 @@ class ScamDetectionService:
         params = followup.get("params", {})
 
         gathered_data = None
-        if data_type == "chat_history" and req.related_chat_id:
+        if data_type == "chat_history" and req.related_conversation_id:
             async with AsyncSessionLocal() as db:
                 msgs = (await db.execute(
                     select(Message)
-                    .where(Message.chat_id == req.related_chat_id)
-                    .order_by(Message.date.desc())
+                    .where(Message.conversation_id == req.related_conversation_id)
+                    .order_by(Message.date.desc(), Message.id.desc())
                     .limit(min(int(params.get("limit", 100)), 500))
                 )).scalars().all()
+                # The external API's v1 contract: senders are Telegram user ids
+                tg_users = await telegram_user_ids(db, {m.sender_identity_id for m in msgs})
                 gathered_data = [
-                    {"message_id": m.tg_message_id, "sender_id": m.sender_id,
+                    {"message_id": m.id, "sender_id": tg_users.get(m.sender_identity_id),
                      "sender_name": m.sender_name, "text": m.text, "date": str(m.date)}
                     for m in msgs
                 ]
@@ -474,7 +493,7 @@ class ScamDetectionService:
     # Analytics / bookkeeping
     # ------------------------------------------------------------------
 
-    async def _record_scan_analytics(self, result: ScamCheckResult, chat_type: Optional[str] = None):
+    async def _record_scan_analytics(self, result: ScamCheckResult, conversation_kind: Optional[str] = None):
         try:
             from backend.scam.analytics import get_analytics_tracker
             tracker = get_analytics_tracker()
@@ -507,7 +526,7 @@ class ScamDetectionService:
                 is_scam=result.is_scam,
                 category=result.category,
                 duration_ms=int(trace.get("duration_ms") or 0),
-                chat_type=chat_type,
+                conversation_kind=conversation_kind,
                 trace_status=trace.get("status", "completed"),
                 ml_verdict=ml_verdict,
             )

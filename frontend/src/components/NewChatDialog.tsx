@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { X, MessageSquare, Users, Radio, Link, Search, Loader2, Plus } from 'lucide-react'
-import type { Chat, Contact } from '../api/types'
-import { getContacts, telegramSearch, startPrivateChat, createGroup, createChannel, joinViaInviteLink } from '../api/client'
+import type { Conversation, Person } from '../api/types'
+import { getPeople, searchTelegramDirectory, ensureTelegramConversation, createGroup, createChannel, joinViaInviteLink } from '../api/client'
 import { Modal } from './ui'
+import { conversationTitle, isDirectoryHit } from '../lib/conversation'
+import { openDirectConversation } from '../lib/directConversation'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { useDebouncedQuery } from '../hooks/useDebouncedQuery'
 import { errorMessage } from '../lib/toast'
@@ -10,30 +12,44 @@ import SenderAvatar from './SenderAvatar'
 
 type Tab = 'private' | 'group' | 'channel' | 'join'
 
+/** Creating/joining conversations is a Telegram operation: people are reachable through their Telegram identity */
+function telegramIdentityOf(p: Person) {
+  return p.identities.find((i) => i.channel === 'telegram') ?? null
+}
+
+/** People with a Telegram identity matching `q` */
+async function searchTelegramPeople(q: string, limit: number) {
+  const people = await getPeople(q, limit)
+  return people.flatMap((p) => {
+    const identity = telegramIdentityOf(p)
+    return identity ? [{ person: p, identity }] : []
+  })
+}
+
 interface NewChatDialogProps {
   open: boolean
   onClose: () => void
-  onChatCreated: (chat: Chat) => void
+  onChatCreated: (chat: Conversation) => void
 }
 
 /** One create/join action shared by every tab: single-flight, error shown inline. */
-type CreateFn = (make: () => Promise<Chat>) => void
+type CreateFn = (make: () => Promise<Conversation>) => void
 
 const inputCls = 'w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30'
 const primaryCls = 'mt-1 w-full rounded-lg bg-indigo-600 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2'
 
 export default function NewChatDialog({ open, onClose, onChatCreated }: NewChatDialogProps) {
   return (
-    <Modal open={open} onClose={onClose} title="New Conversation" size="lg">
+    <Modal open={open} onClose={onClose} title="New Telegram Conversation" size="lg">
       {/* Body mounts per open: every field and error starts fresh */}
       {open && <NewChatBody onChatCreated={onChatCreated} />}
     </Modal>
   )
 }
 
-function NewChatBody({ onChatCreated }: { onChatCreated: (chat: Chat) => void }) {
+function NewChatBody({ onChatCreated }: { onChatCreated: (chat: Conversation) => void }) {
   const [tab, setTab] = useState<Tab>('private')
-  const action = useAsyncAction((make: () => Promise<Chat>) => make())
+  const action = useAsyncAction((make: () => Promise<Conversation>) => make())
   const create: CreateFn = (make) => {
     void action.run(make).then((chat) => { if (chat) onChatCreated(chat) })
   }
@@ -78,8 +94,8 @@ function NewChatBody({ onChatCreated }: { onChatCreated: (chat: Chat) => void })
   )
 }
 
-function PersonRow({ id, name, username, busy, onClick, trailing }: {
-  id: number; name: string; username?: string | null; busy: boolean; onClick: () => void; trailing?: React.ReactNode
+function PersonRow({ seed, avatarUrl, name, username, busy, onClick, trailing }: {
+  seed: number; avatarUrl?: string | null; name: string; username?: string | null; busy: boolean; onClick: () => void; trailing?: React.ReactNode
 }) {
   return (
     <button
@@ -87,7 +103,7 @@ function PersonRow({ id, name, username, busy, onClick, trailing }: {
       onClick={onClick}
       className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-slate-700/50 transition-colors disabled:opacity-50"
     >
-      <SenderAvatar senderId={id} senderName={name} size={32} link={false} />
+      <SenderAvatar avatarUrl={avatarUrl} name={name} colorSeed={seed} size={32} link={false} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm text-gray-200">{name}</p>
         {username && <p className="truncate text-xs text-slate-500">@{username}</p>}
@@ -98,23 +114,23 @@ function PersonRow({ id, name, username, busy, onClick, trailing }: {
 }
 
 // ---------------------------------------------------------------------------
-// Private Chat Tab — search contacts or Telegram directory
+// Private Chat Tab — search people or the Telegram directory
 // ---------------------------------------------------------------------------
 
 function PrivateChatTab({ busy, create }: { busy: boolean; create: CreateFn }) {
   const [query, setQuery] = useState('')
   // Latest-only typeahead: an older response can never overwrite a newer one
   const results = useDebouncedQuery(query, async (q, signal) => {
-    const [contacts, tg] = await Promise.all([getContacts(q, 10), telegramSearch(q, 10, signal)])
-    const contactIds = new Set(contacts.map((c) => c.telegram_id))
+    const [contacts, tg] = await Promise.all([searchTelegramPeople(q, 10), searchTelegramDirectory(q, signal)])
+    const knownPeople = new Set(contacts.map((c) => c.person.id))
     return {
       contacts,
-      telegram: tg.telegram_dialogs.filter((r) => r.type === 'private' && !contactIds.has(r.telegram_id)),
+      // Stored direct conversations with someone already listed above are dropped
+      telegram: tg.filter((r) => r.kind === 'direct' && (isDirectoryHit(r) || r.peer == null || !knownPeople.has(r.peer.person_id))),
     }
   }, { delayMs: 300 })
   const contacts = results.data?.contacts ?? []
   const telegram = results.data?.telegram ?? []
-  const open = (telegramId: number) => create(() => startPrivateChat(telegramId))
 
   return (
     <div className="flex flex-col gap-3">
@@ -123,7 +139,7 @@ function PrivateChatTab({ busy, create }: { busy: boolean; create: CreateFn }) {
         <input
           autoFocus
           type="text"
-          placeholder="Search contacts or Telegram users…"
+          placeholder="Search people or Telegram users…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className={`${inputCls} pl-9`}
@@ -142,17 +158,28 @@ function PrivateChatTab({ busy, create }: { busy: boolean; create: CreateFn }) {
         )}
         {query.trim() && contacts.length > 0 && (
           <div className="mb-2">
-            <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">Contacts</p>
-            {contacts.map((c) => (
-              <PersonRow key={c.telegram_id} id={c.telegram_id} name={c.name} username={c.username} busy={busy} onClick={() => open(c.telegram_id)} />
+            <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">People</p>
+            {contacts.map(({ person, identity }) => (
+              <PersonRow
+                key={person.id} seed={person.id} avatarUrl={person.avatar_url} name={person.name} username={identity.username}
+                busy={busy} onClick={() => create(() => openDirectConversation(person.id, { canStart: true }))}
+              />
             ))}
           </div>
         )}
         {query.trim() && telegram.length > 0 && (
           <div>
             <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">Telegram</p>
-            {telegram.map((r) => (
-              <PersonRow key={r.telegram_id} id={r.telegram_id} name={r.name} username={r.username} busy={busy} onClick={() => open(r.telegram_id)} />
+            {telegram.map((r) => isDirectoryHit(r) ? (
+              <PersonRow
+                key={`tg-${r.peer_id}`} seed={r.peer_id} name={r.title ?? 'Telegram user'} username={r.username}
+                busy={busy} onClick={() => create(() => ensureTelegramConversation(r.peer_id))}
+              />
+            ) : (
+              <PersonRow
+                key={`c-${r.id}`} seed={r.id} avatarUrl={r.avatar_url} name={conversationTitle(r)} username={r.username}
+                busy={busy} onClick={() => create(async () => r)}
+              />
             ))}
           </div>
         )}
@@ -176,11 +203,12 @@ function GroupTab({ busy, create }: { busy: boolean; create: CreateFn }) {
   const [groupName, setGroupName] = useState('')
   const [memberQuery, setMemberQuery] = useState('')
   const [selectedMembers, setSelectedMembers] = useState<{ id: number; name: string }[]>([])
-  const search = useDebouncedQuery(memberQuery, (q) => getContacts(q, 10), { delayMs: 300 })
+  // Members are people (id = person id) with a Telegram identity
+  const search = useDebouncedQuery(memberQuery, (q) => searchTelegramPeople(q, 10), { delayMs: 300 })
   const results = memberQuery.trim() ? (search.data ?? []) : []
 
-  const addMember = (contact: Contact) => {
-    setSelectedMembers((prev) => prev.some((m) => m.id === contact.telegram_id) ? prev : [...prev, { id: contact.telegram_id, name: contact.name }])
+  const addMember = (person: Person) => {
+    setSelectedMembers((prev) => prev.some((m) => m.id === person.id) ? prev : [...prev, { id: person.id, name: person.name }])
     setMemberQuery('')
   }
 
@@ -204,7 +232,7 @@ function GroupTab({ busy, create }: { busy: boolean; create: CreateFn }) {
 
       <div className="relative">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-        <input type="text" placeholder="Search contacts to add…" value={memberQuery} onChange={(e) => setMemberQuery(e.target.value)} className={`${inputCls} pl-9`} />
+        <input type="text" placeholder="Search people to add…" value={memberQuery} onChange={(e) => setMemberQuery(e.target.value)} className={`${inputCls} pl-9`} />
       </div>
 
       <div className="max-h-32 overflow-y-auto">
@@ -214,9 +242,9 @@ function GroupTab({ busy, create }: { busy: boolean; create: CreateFn }) {
           </div>
         )}
         {results
-          .filter((c) => !selectedMembers.some((m) => m.id === c.telegram_id))
-          .map((c) => (
-            <PersonRow key={c.telegram_id} id={c.telegram_id} name={c.name} busy={false} onClick={() => addMember(c)} trailing={<Plus size={14} className="text-slate-500" />} />
+          .filter(({ person }) => !selectedMembers.some((m) => m.id === person.id))
+          .map(({ person }) => (
+            <PersonRow key={person.id} seed={person.id} avatarUrl={person.avatar_url} name={person.name} busy={false} onClick={() => addMember(person)} trailing={<Plus size={14} className="text-slate-500" />} />
           ))}
       </div>
 

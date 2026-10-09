@@ -1,142 +1,71 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, desc, func, and_, or_
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.catchup import contexts_for, item_dict
-from backend.api.chats import _chat_dict
+from backend.api.people import people_payload
 from backend.briefing.pipeline import entry_dict
+from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Chat, Message, Contact, ContactPosition, BriefingRun, BriefingEntry
-from backend.db.crud import explain_relationship_status, compute_relationship_status, get_needs_reply
+from backend.db.models import BriefingEntry, BriefingRun, Conversation, Identity, Message, Person
 from backend.serialization import iso_utc
+from backend.serializers import conversation_out
 
 router = APIRouter()
 
 
 def _needs_reply_item(row, contexts: dict) -> dict:
-    chat, sender_name, text, date, item = row
+    conv, sender_name, text, date, item = row
     return {
-        "chat": _chat_dict(chat),
+        "conversation": conversation_out(conv),
         "last_message": {
             "sender_name": sender_name,
             "text": text,
             "date": iso_utc(date),
         },
         "triage": item_dict(item) if item is not None else None,
-        "context": contexts.get(chat.telegram_id),
+        "context": contexts.get(conv.id),
     }
 
 
 @router.get("")
 async def get_dashboard(db: AsyncSession = Depends(get_db)):
-    # Get important contact telegram_ids for filtering
-    important_tids_q = select(Contact.telegram_id).where(Contact.is_important == True)  # noqa: E712
-    important_tids = set(
-        (await db.execute(important_tids_q)).scalars().all()
-    )
-
     # --- Stats ---
-    # Unread today: count of unread messages from today in tracked chats or
-    # private chats with important contacts
+    # Unread today: incoming messages of the last 24h in tracked conversations
+    # or direct conversations with important people
     cutoff_24h = datetime.utcnow() - timedelta(hours=24)
-
-    # Build filter for "relevant" chats: tracked OR private chat with important contact
-    relevant_chat_filter = or_(
-        Chat.is_tracked == True,  # noqa: E712
-        and_(
-            Chat.type == "private",
-            Chat.telegram_id.in_(important_tids) if important_tids else False,
-        ),
+    important_peers = (
+        select(Identity.id).join(Person, Person.id == Identity.person_id)
+        .where(Person.is_important == True)  # noqa: E712
     )
-
+    relevant = or_(
+        Conversation.is_tracked == True,  # noqa: E712
+        and_(crud.one_to_one_filter(), Conversation.peer_identity_id.in_(important_peers)),
+    )
     unread_today = (await db.execute(
         select(func.count()).select_from(Message)
-        .join(Chat, Chat.telegram_id == Message.chat_id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
         .where(
             Message.date >= cutoff_24h,
             Message.is_outgoing == False,  # noqa: E712
             Message.kind == "message",
-            Chat.is_hidden == False,  # noqa: E712
-            Chat.is_deactivated == False,  # noqa: E712
-            relevant_chat_filter,
+            Conversation.is_hidden == False,  # noqa: E712
+            Conversation.is_deactivated == False,  # noqa: E712
+            relevant,
         )
     )).scalar() or 0
 
-    stats = {
-        "unread_today": unread_today,
-    }
-
     # --- Needs Reply ---
     # Triage (handled / snoozed) is applied server-side before the limit, so
-    # the queue can't empty out while chats are still waiting.
-    active_rows, handled_rows = await get_needs_reply(db, limit=10)
-    contexts = await contexts_for(db, [r[0].telegram_id for r in active_rows + handled_rows])
-    needs_reply = [_needs_reply_item(r, contexts) for r in active_rows]
-    recently_handled = [_needs_reply_item(r, contexts) for r in handled_rows]
+    # the queue can't empty out while conversations are still waiting.
+    active_rows, handled_rows = await crud.get_needs_reply(db, limit=10)
+    contexts = await contexts_for(db, [r[0].id for r in active_rows + handled_rows])
 
-    # --- Attention Contacts ---
-    # Important contacts
-    important_contacts_q = (
-        select(Contact)
-        .where(Contact.is_important == True)  # noqa: E712
-        .order_by(Contact.first_name, Contact.last_name)
-        .limit(10)
-    )
-    important_contacts = (await db.execute(important_contacts_q)).scalars().all()
-
-    # Batch-load positions by telegram_id
-    pos_map = {}
-    if important_contacts:
-        telegram_ids = [c.telegram_id for c in important_contacts]
-        pos_result = await db.execute(
-            select(ContactPosition).where(ContactPosition.telegram_id.in_(telegram_ids))
-        )
-        for p in pos_result.scalars().all():
-            pos_map.setdefault(p.telegram_id, []).append(p)
-
-    attention_contacts = []
-    for c in important_contacts:
-        positions = pos_map.get(c.telegram_id, [])
-        active_pos = [p for p in positions if p.is_active]
-        primary = None
-        if active_pos:
-            primary = {"title": active_pos[0].title, "organization": active_pos[0].organization}
-
-        # Recompute relationship status live to avoid stale needs_reply
-        is_manual = getattr(c, "relationship_status_manual", False)
-        if is_manual:
-            live_status = getattr(c, "relationship_status", None)
-            live_last_interaction = getattr(c, "last_interaction_at", None)
-            live_last_outgoing = getattr(c, "last_outgoing_at", None)
-            live_last_incoming = getattr(c, "last_incoming_at", None)
-        else:
-            live_status, live_last_interaction, live_last_outgoing, live_last_incoming = (
-                await compute_relationship_status(db, c)
-            )
-
-        status_info = explain_relationship_status(
-            status=live_status,
-            is_manual=is_manual,
-            last_interaction=live_last_interaction,
-            last_outgoing=live_last_outgoing,
-            last_incoming=live_last_incoming,
-            is_important=c.is_important,
-        )
-        contact_data = {
-            "id": c.id,
-            "telegram_id": c.telegram_id,
-            "name": f"{c.first_name or ''} {c.last_name or ''}".strip() or str(c.telegram_id),
-            "username": c.username,
-            "is_important": c.is_important,
-            "relationship_status": live_status,
-            "relationship_status_manual": is_manual,
-            "last_interaction_at": iso_utc(live_last_interaction),
-            "primary_position": primary,
-        }
-        contact_data.update(status_info)
-        attention_contacts.append(contact_data)
+    # --- Attention people: important people, statuses recomputed live so a
+    # stale stored needs_reply never shows ---
+    attention_people = await people_payload(db, await crud.get_important_people(db, limit=10), live_status=True)
 
     # --- Latest Briefing ---
     latest_run = (await db.execute(
@@ -144,7 +73,6 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         .where(BriefingRun.status.in_(("done", "partial")))
         .order_by(desc(BriefingRun.generated_at)).limit(1)
     )).scalar_one_or_none()
-
     latest_briefing = None
     if latest_run:
         entries = (await db.execute(
@@ -161,9 +89,9 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         }
 
     return {
-        "stats": stats,
-        "needs_reply": needs_reply,
-        "recently_handled": recently_handled,
-        "attention_contacts": attention_contacts,
+        "stats": {"unread_today": unread_today},
+        "needs_reply": [_needs_reply_item(r, contexts) for r in active_rows],
+        "recently_handled": [_needs_reply_item(r, contexts) for r in handled_rows],
+        "attention_people": attention_people,
         "latest_briefing": latest_briefing,
     }

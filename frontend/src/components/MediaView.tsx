@@ -1,11 +1,11 @@
 /**
- * One dispatch for every message media type. Single messages and album items
- * both render through here, so each type behaves the same everywhere
+ * One dispatch for every attachment kind. Single attachments and album items
+ * both render through here, so each kind behaves the same everywhere
  * (download pipeline, retry, lightbox).
  */
 import { memo, useState } from 'react'
 import { Image as ImageIcon, Loader2, RotateCcw } from 'lucide-react'
-import type { Message } from '../api/types'
+import type { Attachment } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import { useMediaDownload } from '../hooks/useMediaDownload'
 import ImageLightbox from './ImageLightbox'
@@ -14,10 +14,8 @@ import AudioPlayer from './AudioPlayer'
 import DocumentCard from './DocumentCard'
 import GifPlayer from './GifPlayer'
 
-type MediaMessage = Pick<Message, 'chat_id' | 'tg_message_id' | 'media_type' | 'media_url' | 'media_filename' | 'media_size'>
-
 interface Props {
-  message: MediaMessage
+  attachment: Attachment
   isOut: boolean
   /** Album cell: fill the grid cell */
   compact?: boolean
@@ -25,11 +23,14 @@ interface Props {
   onOpen?: (src: string) => void
 }
 
-/** Media types MediaView renders (anything else is shown as a "[type]" label) */
+/** Attachment kinds MediaView renders (anything else is shown as a "[kind]" label) */
 export const RENDERED_MEDIA = new Set(['photo', 'video', 'video_note', 'voice', 'audio', 'gif', 'document'])
 
-export function PhotoView({ message, isOut, compact, onOpen }: Props) {
-  const media = useMediaDownload(message.chat_id, message.tg_message_id, { auto: true, initialUrl: message.media_url })
+/** Kinds shown in an album grid cell (the rest render as their own cards below it) */
+export const VISUAL_MEDIA = new Set(['photo', 'video', 'gif'])
+
+export function PhotoView({ attachment, isOut, compact, onOpen }: Props) {
+  const media = useMediaDownload(attachment.id, { auto: true, initialUrl: attachment.url })
   const [lightbox, setLightbox] = useState(false)
   const tone = isOut ? 'text-indigo-300' : 'text-slate-400'
 
@@ -55,7 +56,7 @@ export function PhotoView({ message, isOut, compact, onOpen }: Props) {
     <>
       <img
         src={src}
-        alt="photo"
+        alt={attachment.filename ?? 'photo'}
         className={compact
           ? 'block h-full w-full cursor-pointer object-cover hover:opacity-90 transition-opacity'
           : `block cursor-pointer object-cover ${isOut ? 'ml-auto' : 'mr-auto'} hover:opacity-90 transition-opacity`}
@@ -67,21 +68,21 @@ export function PhotoView({ message, isOut, compact, onOpen }: Props) {
   )
 }
 
-function MediaView({ message, isOut, compact, onOpen }: Props) {
-  const common = { chatTelegramId: message.chat_id, msgTelegramId: message.tg_message_id, mediaUrl: message.media_url ?? null, isOut }
-  switch (message.media_type) {
+function MediaView({ attachment, isOut, compact, onOpen }: Props) {
+  const common = { attachmentId: attachment.id, mediaUrl: attachment.url ?? null, isOut }
+  switch (attachment.kind) {
     case 'photo':
-      return <PhotoView message={message} isOut={isOut} compact={compact} onOpen={onOpen} />
+      return <PhotoView attachment={attachment} isOut={isOut} compact={compact} onOpen={onOpen} />
     case 'video':
     case 'video_note':
-      return <VideoPlayer {...common} isVideoNote={message.media_type === 'video_note' && !compact} compact={compact} />
+      return <VideoPlayer {...common} isVideoNote={attachment.kind === 'video_note' && !compact} compact={compact} />
     case 'voice':
     case 'audio':
-      return <AudioPlayer {...common} mediaType={message.media_type} />
+      return <AudioPlayer {...common} mediaType={attachment.kind} />
     case 'gif':
       return <GifPlayer {...common} />
     case 'document':
-      return <DocumentCard {...common} filename={message.media_filename ?? null} fileSize={message.media_size ?? null} />
+      return <DocumentCard {...common} filename={attachment.filename ?? null} fileSize={attachment.size ?? null} />
     default:
       return null
   }

@@ -1,5 +1,5 @@
 /**
- * Per-chat transient UI state, keyed by chat telegram_id.
+ * Per-conversation transient UI state, keyed by conversation id.
  *
  * Reply target, edit buffer, compose draft, upload progress, manual-sync
  * spinner and selected forum topic all live in the slot of the chat they
@@ -47,6 +47,7 @@ export const EMPTY_CHAT_UI: ChatUi = Object.freeze({
   topic: null,
 }) as ChatUi
 
+/** Keyed by conversation id */
 const slots = new Map<number, ChatUi>()
 const listeners = new Map<number, Set<() => void>>()
 

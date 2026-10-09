@@ -1,7 +1,7 @@
 """
 Background scheduler that periodically generates catch-up summaries for the
-chats that need a reply (the same server-side needs-reply source the dashboard
-uses), storing results in the DB so the frontend can read them instantly.
+conversations that need a reply (the same server-side needs-reply source the
+dashboard uses), storing results in the DB so the frontend can read them instantly.
 
 Generation runs as a single-flight job (``catchup-summaries``): the 30-minute
 scheduler and the manual "generate" endpoint never run concurrently.
@@ -23,10 +23,11 @@ from backend import jobs
 from backend.api.settings import _load_prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, CatchUpSummary, Message
+from backend.db.models import CatchUpSummary, Message
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMModelMissing, LLMUnavailable, get_provider
 from backend.serialization import iso_utc
+from backend.serializers import attachment_out, channel_of
 from backend.tasks import spawn
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,8 @@ _scheduler_task: asyncio.Task | None = None
 
 JOB_KEY = "catchup-summaries"
 DEFAULT_INTERVAL_MINUTES = 30
-# Needs-reply chats summarized per scheduled pass.
-SCHEDULED_CHAT_LIMIT = 30
+# Needs-reply conversations summarized per scheduled pass.
+SCHEDULED_CONVERSATION_LIMIT = 30
 # Post-anchor messages considered (newest kept): a group last answered months
 # ago must not turn into a thousands-of-messages prompt.
 POST_ANCHOR_LIMIT = 60
@@ -52,7 +53,7 @@ _CHITCHAT_WORDS = {
 
 CATCHUP_SUMMARY_PROMPT = """\
 You are a concise assistant that summarizes chat conversations for a busy professional.
-Given the chat name and recent messages since the user's last activity, write a brief
+Given the conversation name and recent messages since the user's last activity, write a brief
 1-3 sentence summary that captures what happened and whether any action is needed.
 
 Focus on:
@@ -65,7 +66,7 @@ Be direct. No filler. Write from a second-person perspective (e.g. "They asked y
 "The team discussed..."). Do not start with "Summary:" or similar labels."""
 
 
-def _format_prompt(chat_name: str, messages: list[dict], org_context: str | None) -> Optional[str]:
+def _format_prompt(title: str, channel: Optional[str], messages: list[dict], org_context: str | None) -> Optional[str]:
     context_lines, new_lines = [], []
     for m in messages:
         line = f"  {m.get('sender_name') or 'Unknown'}: {m.get('text') or '(media)'}"
@@ -81,7 +82,7 @@ def _format_prompt(chat_name: str, messages: list[dict], org_context: str | None
         kept.append(line)
         used += len(line)
     kept.reverse()
-    parts = [f"Chat: {chat_name}\n"]
+    parts = [f"Conversation: {title}" + (f" ({channel})" if channel else "") + "\n"]
     if org_context:
         parts.append(org_context)
     if context_lines:
@@ -91,10 +92,12 @@ def _format_prompt(chat_name: str, messages: list[dict], org_context: str | None
     return "\n\n".join(parts)
 
 
-async def _llm_summarize(chat_name: str, messages: list[dict], org_context: str | None = None) -> str | None:
+async def _llm_summarize(
+    title: str, channel: Optional[str], messages: list[dict], org_context: str | None = None,
+) -> str | None:
     """Summary text, or None on an ordinary model failure. Raises
     LLMUnavailable / LLMModelMissing so a batch stops calling a dead model."""
-    user_msg = _format_prompt(chat_name, messages, org_context)
+    user_msg = _format_prompt(title, channel, messages, org_context)
     if user_msg is None:
         return None
     provider = get_provider("catchup")
@@ -110,7 +113,7 @@ async def _llm_summarize(chat_name: str, messages: list[dict], org_context: str 
     except (LLMUnavailable, LLMModelMissing):
         raise
     except LLMError as e:
-        logger.warning("LLM summarization failed for chat %s: %s", chat_name, e)
+        logger.warning("LLM summarization failed for conversation %s: %s", title, e)
         return None
     summary = (response.content or "").strip()
     return summary or None
@@ -129,11 +132,12 @@ def _is_chitchat(text: str | None) -> bool:
 
 def _msg_dict(msg: Message) -> dict:
     return {
+        "message_id": msg.id,
         "sender_name": msg.sender_name,
-        "text": (msg.text[:200] if msg.text else None),
+        "text": ((msg.text or msg.subject or "")[:200] or None),
         "date": iso_utc(msg.date),
         "is_outgoing": msg.is_outgoing,
-        "media_type": msg.media_type,
+        "attachments": [attachment_out(a) for a in msg.attachments],
     }
 
 
@@ -146,20 +150,20 @@ def get_summary_interval_minutes() -> int:
         return DEFAULT_INTERVAL_MINUTES
 
 
-async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = True, orgs=None) -> dict:
-    """Compute catch-up context for a single chat. Returns a dict with
+async def generate_summary_for_conversation(db, conversation_id: int, use_llm: bool = True, orgs=None) -> dict:
+    """Compute catch-up context for a single conversation. Returns a dict with
     summary, summary_messages, recent_messages, last_activity_at, and
     total_messages count. Raises LLMUnavailable / LLMModelMissing."""
 
     # 1. Anchor: latest of last outgoing message or last reaction to someone else's message
     last_outgoing = (await db.execute(
         select(func.max(Message.date)).where(
-            Message.chat_id == chat_telegram_id, Message.is_outgoing == True,  # noqa: E712
+            Message.conversation_id == conversation_id, Message.is_outgoing == True,  # noqa: E712
         )
     )).scalar()
     last_reaction = (await db.execute(
         select(func.max(Message.date)).where(
-            Message.chat_id == chat_telegram_id,
+            Message.conversation_id == conversation_id,
             Message.is_outgoing == False,  # noqa: E712
             Message.my_reaction != None,  # noqa: E711
         )
@@ -172,7 +176,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
     if anchor_date:
         before_msgs = (await db.execute(
             select(Message)
-            .where(Message.chat_id == chat_telegram_id, Message.date <= anchor_date)
+            .where(Message.conversation_id == conversation_id, Message.date <= anchor_date)
             .order_by(desc(Message.date)).limit(3)
         )).scalars().all()
         for m in reversed(before_msgs):
@@ -182,7 +186,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
         after_msgs = (await db.execute(
             select(Message)
             .where(
-                Message.chat_id == chat_telegram_id,
+                Message.conversation_id == conversation_id,
                 Message.date > anchor_date,
                 Message.is_outgoing == False,  # noqa: E712
                 Message.kind == "message",
@@ -195,21 +199,21 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
     else:
         recent_incoming = (await db.execute(
             select(Message)
-            .where(Message.chat_id == chat_telegram_id, Message.is_outgoing == False, Message.kind == "message")  # noqa: E712
+            .where(Message.conversation_id == conversation_id, Message.is_outgoing == False, Message.kind == "message")  # noqa: E712
             .order_by(desc(Message.date)).limit(5)
         )).scalars().all()
         for m in reversed(recent_incoming):
             if not _is_chitchat(m.text):
                 summary_messages.append(_msg_dict(m))
 
-    # 3. Count total messages in this chat (for tracking new messages later)
+    # 3. Count total messages in this conversation (for tracking new messages later)
     total_messages = (await db.execute(
-        select(func.count(Message.id)).where(Message.chat_id == chat_telegram_id)
+        select(func.count(Message.id)).where(Message.conversation_id == conversation_id)
     )).scalar_one()
 
-    chat_name = (await db.execute(
-        select(Chat.name).where(Chat.telegram_id == chat_telegram_id)
-    )).scalar_one_or_none() or f"Chat {chat_telegram_id}"
+    conv = await crud.get_conversation(db, conversation_id)
+    title = (conv.title if conv is not None else None) or f"Conversation {conversation_id}"
+    channel = channel_of(conv) if conv is not None else None
 
     from backend.org_context import OrgDirectory
     if orgs is None:
@@ -225,7 +229,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
     degraded = False
     if summary_messages:
         if use_llm:
-            summary_text = await _llm_summarize(chat_name, summary_messages, org_context=org_context)
+            summary_text = await _llm_summarize(title, channel, summary_messages, org_context=org_context)
         # Needed the model but didn't get a summary from it → basic fallback.
         degraded = summary_text is None
 
@@ -253,7 +257,7 @@ async def generate_summary_for_chat(db, chat_telegram_id: int, use_llm: bool = T
     }
 
 
-async def _upsert_summary(db, chat_id: int, result: dict) -> None:
+async def _upsert_summary(db, conversation_id: int, result: dict) -> None:
     values = {
         "summary": result["summary"],
         "summary_messages_json": json.dumps(result["summary_messages"]),
@@ -263,75 +267,75 @@ async def _upsert_summary(db, chat_id: int, result: dict) -> None:
         "generated_at": datetime.utcnow(),
         "is_degraded": bool(result.get("degraded")),
     }
-    stmt = sqlite_insert(CatchUpSummary).values(chat_telegram_id=chat_id, **values)
-    stmt = stmt.on_conflict_do_update(index_elements=["chat_telegram_id"], set_=values)
+    stmt = sqlite_insert(CatchUpSummary).values(conversation_id=conversation_id, **values)
+    stmt = stmt.on_conflict_do_update(index_elements=["conversation_id"], set_=values)
     await db.execute(stmt)
     await db.commit()
 
 
-async def _is_fresh(db, chat_id: int, llm_available: bool = True) -> bool:
+async def _is_fresh(db, conversation_id: int, llm_available: bool = True) -> bool:
     """A stored summary is fresh if no message arrived since it was generated.
     A degraded (rule-based fallback) summary is stale whenever the LLM may be
     available again, so it gets replaced by a real one."""
     row = (await db.execute(
         select(CatchUpSummary.total_messages_at_generation, CatchUpSummary.is_degraded)
-        .where(CatchUpSummary.chat_telegram_id == chat_id)
+        .where(CatchUpSummary.conversation_id == conversation_id)
     )).one_or_none()
     if row is None:
         return False
     generated_total, degraded = row
     if degraded and llm_available:
         return False
-    total = (await db.execute(select(func.count(Message.id)).where(Message.chat_id == chat_id))).scalar_one()
+    total = await crud.count_messages(db, conversation_id)
     return total == generated_total
 
 
-async def needs_reply_chat_ids(limit: int = SCHEDULED_CHAT_LIMIT) -> list[int]:
+async def needs_reply_conversation_ids(limit: int = SCHEDULED_CONVERSATION_LIMIT) -> list[int]:
     async with AsyncSessionLocal() as db:
         active, _ = await crud.get_needs_reply(db, limit=limit, handled_limit=0)
-    return [row[0].telegram_id for row in active]
+    return [row[0].id for row in active]
 
 
 async def generate_all_summaries(
-    chat_ids: Optional[List[int]] = None,
+    conversation_ids: Optional[List[int]] = None,
     *,
     force: bool = False,
     progress: Optional[dict] = None,
 ) -> int:
-    """Generate and store summaries for ``chat_ids``, or for the chats that
-    currently need a reply. Unchanged chats are skipped unless ``force``.
-    Returns the number of summaries written."""
-    if chat_ids is None:
-        chat_ids = await needs_reply_chat_ids()
+    """Generate and store summaries for ``conversation_ids``, or for the
+    conversations that currently need a reply. Unchanged ones are skipped
+    unless ``force``. Returns the number of summaries written."""
+    if conversation_ids is None:
+        conversation_ids = await needs_reply_conversation_ids()
     if progress is not None:
-        progress.update(total=len(chat_ids), done=0)
+        progress.update(total=len(conversation_ids), done=0)
 
     from backend.org_context import OrgDirectory
     async with AsyncSessionLocal() as db:
-        orgs = await OrgDirectory.load(db)  # once per batch, not per chat
+        orgs = await OrgDirectory.load(db)  # once per batch, not per conversation
 
     count = 0
     use_llm = True
-    for chat_id in chat_ids:
-        # One fresh session per chat: a failure can only poison its own session.
+    for conversation_id in conversation_ids:
+        # One fresh session per conversation: a failure can only poison its own session.
         async with AsyncSessionLocal() as db:
             try:
-                if not force and await _is_fresh(db, chat_id, llm_available=use_llm):
+                if not force and await _is_fresh(db, conversation_id, llm_available=use_llm):
                     continue
                 try:
-                    result = await generate_summary_for_chat(db, chat_id, use_llm=use_llm, orgs=orgs)
+                    result = await generate_summary_for_conversation(db, conversation_id, use_llm=use_llm, orgs=orgs)
                 except (LLMUnavailable, LLMModelMissing) as exc:
-                    # Model is down: don't hammer it for every chat; fall back to rule-based.
+                    # Model is down: don't hammer it for every conversation; fall back to rule-based.
                     logger.warning("Catch-up summaries: LLM unavailable (%s); using rule-based summaries.", exc)
                     use_llm = False
                     if progress is not None:
                         progress["llm_error"] = str(exc)
                     await db.rollback()
-                    result = await generate_summary_for_chat(db, chat_id, use_llm=False, orgs=orgs)
-                await _upsert_summary(db, chat_id, result)
+                    result = await generate_summary_for_conversation(db, conversation_id, use_llm=False, orgs=orgs)
+                await _upsert_summary(db, conversation_id, result)
                 count += 1
             except Exception:
-                logger.exception("Failed to generate summary for chat %d", chat_id)
+                logger.exception("Failed to generate summary for conversation %d", conversation_id)
             finally:
                 if progress is not None:
                     progress["done"] = progress.get("done", 0) + 1
@@ -349,7 +353,7 @@ def get_job_status() -> dict:
     return dict(_last_job) if _last_job else {"status": "idle"}
 
 
-def start_generation(chat_ids: Optional[List[int]] = None, *, force: bool = False) -> tuple[dict, bool]:
+def start_generation(conversation_ids: Optional[List[int]] = None, *, force: bool = False) -> tuple[dict, bool]:
     """Start the summary job, or report the one already running.
     Returns (status_dict, started)."""
     global _last_job
@@ -359,8 +363,8 @@ def start_generation(chat_ids: Optional[List[int]] = None, *, force: bool = Fals
     state = {
         "job_id": uuid.uuid4().hex[:12],
         "status": "running",
-        "chat_ids": chat_ids,
-        "total": len(chat_ids) if chat_ids is not None else None,
+        "conversation_ids": conversation_ids,
+        "total": len(conversation_ids) if conversation_ids is not None else None,
         "done": 0,
         "summaries_generated": 0,
         "started_at": time.time(),
@@ -372,7 +376,7 @@ def start_generation(chat_ids: Optional[List[int]] = None, *, force: bool = Fals
 
     async def body():
         try:
-            n = await generate_all_summaries(chat_ids, force=force, progress=state)
+            n = await generate_all_summaries(conversation_ids, force=force, progress=state)
             state.update(status="done", summaries_generated=n)
         except Exception as exc:
             state.update(status="error", error=str(exc))

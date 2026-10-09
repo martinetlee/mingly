@@ -7,7 +7,7 @@ import { toast } from '../../lib/toast'
 import { useConfirm } from '../../components/ui'
 import { invalidateShieldData } from './invalidate'
 
-type MessageRef = { chat_id: number; tg_message_id: number }
+type MessageRef = { message_id: number; conversation_id?: number }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -28,7 +28,7 @@ export function useVerdictActions(onRows?: (r: ScamVerdictResponse) => void) {
 
   const messageAction = useAsyncAction(async (msgs: MessageRef[], verdict: ScamManualVerdict) => {
     if (!msgs.length) return
-    const r = await setMessageVerdict(msgs.map(({ chat_id, tg_message_id }) => ({ chat_id, tg_message_id })), verdict)
+    const r = await setMessageVerdict(msgs.map((m) => ({ message_id: m.message_id, conversation_id: m.conversation_id })), verdict)
     settle(r)
     const what = plural(r.count, 'message')
     toast.success(
@@ -41,22 +41,22 @@ export function useVerdictActions(onRows?: (r: ScamVerdictResponse) => void) {
     return r
   }, { errorContext: "Couldn't update verdict" })
 
-  const senderAction = useAsyncAction(async (telegramId: number, verdict: ScamManualVerdict) => {
-    const r = await setSenderVerdict(telegramId, verdict)
+  const senderAction = useAsyncAction(async (identityId: number, verdict: ScamManualVerdict) => {
+    const r = await setSenderVerdict(identityId, verdict)
     settle(r)
     return r
   }, { errorContext: "Couldn't update sender" })
 
   /** "Unflag user" / "Dismiss sender": the same sender-scope not_scam verdict everywhere. */
-  const dismissSender = useCallback(async (telegramId: number, name?: string | null) => {
+  const dismissSender = useCallback(async (identityId: number, name?: string | null) => {
     const out: { r?: ScamVerdictResponse } = {}
     const ok = await confirm({
-      title: `Unflag ${name || `user ${telegramId}`}?`,
+      title: `Unflag ${name || `sender ${identityId}`}?`,
       message: 'Their unmarked flagged messages will be marked not scam, and automatic scans will not flag them again. Messages you marked yourself keep your verdict.',
       confirmLabel: 'Unflag',
       // Runs inside the dialog: spinner, single-flight, inline error + retry
       onConfirm: async () => {
-        out.r = await setSenderVerdict(telegramId, 'not_scam')
+        out.r = await setSenderVerdict(identityId, 'not_scam')
         settle(out.r)
       },
     })
@@ -65,8 +65,8 @@ export function useVerdictActions(onRows?: (r: ScamVerdictResponse) => void) {
   }, [confirm, settle])
 
   const runSender = senderAction.run
-  const flagSender = useCallback(async (telegramId: number) => {
-    const r = await runSender(telegramId, 'scam')
+  const flagSender = useCallback(async (identityId: number) => {
+    const r = await runSender(identityId, 'scam')
     if (r) toast.success('Sender flagged as scammer')
   }, [runSender])
 

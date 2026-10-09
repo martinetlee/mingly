@@ -4,7 +4,9 @@ Every write path (history sync, live NewMessage/MessageEdited handlers,
 mention sync, compose) builds its row with ``message_to_row`` so the stored
 text/HTML/reactions/topic are identical no matter which path saw the message
 first. Only Telegram-owned columns are produced here; local-only columns
-(scam_*, my_reaction, importance, media_path) are never part of the row.
+(scam_*, my_reaction, importance, attachment local paths) are never part of
+the row. Resolving the conversation and sender identity is the caller's job
+(``backend.telegram.ids``).
 """
 
 import json
@@ -119,7 +121,7 @@ def extract_reactions(msg) -> Optional[str]:
 
 
 def topic_and_reply(msg, forum: bool) -> Tuple[Optional[int], Optional[int]]:
-    """Return (topic_id, reply_to_tg_message_id).
+    """Return (topic_id, Telegram id of the replied-to message).
 
     In a forum, a plain message inside topic T has ``reply_to_msg_id == T`` and
     no ``reply_to_top_id`` — that is topic membership, not a reply. A real reply
@@ -421,16 +423,31 @@ def forward_info(msg) -> Tuple[Optional[str], Optional[dict]]:
     return name, meta
 
 
+def attachments_of(msg) -> list[dict]:
+    """The message's file as an attachment list (Telegram: zero or one)."""
+    kind = media_type(msg)
+    if kind is None:
+        return []
+    doc = getattr(msg, "document", None)
+    return [{
+        "kind": kind,
+        "filename": media_filename(msg),
+        "mime_type": getattr(doc, "mime_type", None) if doc is not None else ("image/jpeg" if kind == "photo" else None),
+        "size": media_size(msg),
+        "external_ref": None,  # refetched by message id
+    }]
+
+
 def message_to_row(
     msg,
-    chat_id: Optional[int] = None,
+    conversation_id: int,
+    sender_identity_id: Optional[int] = None,
     sender=None,
     *,
     forum: Optional[bool] = None,
 ) -> dict:
-    """Build the Telegram-owned columns of a ``messages`` row."""
-    if chat_id is None:
-        chat_id = msg.chat_id
+    """Build the Telegram-owned columns of a ``messages`` row (plus its
+    ``attachments``) for a message of ``conversation_id``."""
     if forum is None:
         forum = _entity_is_forum(getattr(msg, "chat", None))
     if sender is None:
@@ -438,10 +455,6 @@ def message_to_row(
     text = raw_text(msg)
     text_html = entities_to_html(text, getattr(msg, "entities", None))
     topic_id, reply_to_id = topic_and_reply(msg, forum)
-    from_id = getattr(msg, "from_id", None)
-    sender_id = getattr(msg, "sender_id", None)
-    if sender_id is None and from_id is not None:
-        sender_id = getattr(from_id, "user_id", None)
 
     meta: dict = {}
     kind = "message"
@@ -458,9 +471,10 @@ def message_to_row(
     if fwd_meta is not None:
         meta["forward"] = fwd_meta
     return {
-        "tg_message_id": msg.id,
-        "chat_id": chat_id,
-        "sender_id": sender_id,
+        "conversation_id": conversation_id,
+        "external_id": str(msg.id),
+        "seq": msg.id,
+        "sender_identity_id": sender_identity_id,
         "sender_name": _sender_name(sender),
         "text": text,
         "text_html": text_html,
@@ -470,14 +484,22 @@ def message_to_row(
         "reactions_json": extract_reactions(msg),
         "date": _naive_utc(msg.date) or datetime.utcnow(),
         "is_outgoing": bool(getattr(msg, "out", False)),
-        "media_type": media_type(msg),
-        "media_filename": media_filename(msg),
-        "media_size": media_size(msg),
         "grouped_id": getattr(msg, "grouped_id", None),
-        "reply_to_tg_message_id": reply_to_id,
+        "reply_to_external_id": str(reply_to_id) if reply_to_id is not None else None,
         "topic_id": topic_id,
         "is_pinned": bool(getattr(msg, "pinned", False)),
         "is_edited": bool(getattr(msg, "edit_date", None)),
         # Anything that reached us from Telegram is already delivered.
         "delivery_state": "sent",
+        "attachments": attachments_of(msg),
     }
+
+
+async def rows_for(db, conversation_id: int, msgs, *, forum: bool) -> list[dict]:
+    """Rows for a batch of storable messages of one conversation, with each
+    sender's identity resolved (created on first sight)."""
+    from backend.telegram.ids import sender_identity_ids
+
+    msgs = [m for m in msgs if is_storable(m)]
+    senders = await sender_identity_ids(db, msgs)
+    return [message_to_row(m, conversation_id, senders.get(m.id), forum=forum) for m in msgs]

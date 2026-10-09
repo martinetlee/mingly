@@ -1,12 +1,11 @@
-"""Shield analytics counters, the analytics/status migrations, cloud sync
-(URL/manifest/bundle safety, single-flight, change tracking) and the ML
-ensemble's per-model thresholds."""
+"""Shield analytics counters, cloud sync (URL/manifest/bundle safety,
+single-flight, change tracking, Telegram ids for the current cloud contract)
+and the ML ensemble's per-model thresholds."""
 
 import asyncio
 import hashlib
 import io
 import json
-import sqlite3
 import zipfile
 from datetime import datetime, timedelta
 
@@ -18,6 +17,7 @@ from backend.db import database
 from backend.db.models import Message, ScamAnalytics, ScamFlag
 from backend.scam import cloud_sync
 from backend.scam.analytics import AnalyticsTracker
+from tests import factories as f
 
 
 # ---------------------------------------------------------------------------
@@ -42,62 +42,14 @@ async def test_only_closed_days_are_uploaded(db_engine):
     await tracker.increment(total_scanned=3)
     yesterday = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     async with database.AsyncSessionLocal() as s:
-        s.add(ScamAnalytics(period_start=yesterday, total_scanned=5))
+        s.add(ScamAnalytics(period_start=yesterday, total_scanned=5, scans_direct=2, scans_group=3))
         await s.commit()
     periods = await tracker.get_pending_periods()
     assert [p["detection"]["total_scanned"] for p in periods] == [5]
+    # current cloud contract: "chat_types" with private = direct
+    assert periods[0]["chat_types"] == {"private": 2, "group": 3, "channel": 0}
     await tracker.mark_synced([p["period_start"] for p in periods])
     assert await tracker.get_pending_periods() == []
-
-
-def test_analytics_merge_migration_on_duplicates(tmp_path):
-    from backend.db.migrations.areas.scam import MIGRATIONS
-
-    path = tmp_path / "dup.db"
-    conn = sqlite3.connect(path)
-    cols = ["total_scanned", "scam_detected", "safe_detected", "short_circuited_ml", "short_circuited_signatures",
-            "pipeline_errors", "total_pipeline_ms", "ml_safe", "ml_borderline", "ml_auto_scam", "ml_unavailable",
-            "flags_dismissed", "messages_unflagged", "reports_submitted", "manual_checks", "rescans",
-            "scans_private", "scans_group", "scans_channel"]
-    conn.execute("CREATE TABLE scam_analytics (id INTEGER PRIMARY KEY, period_start DATETIME NOT NULL, period_end DATETIME, "
-                 "synced_at DATETIME, categories_json TEXT, tool_calls_json TEXT, scenarios_matched_json TEXT, "
-                 "safe_patterns_matched_json TEXT, system_info_json TEXT, "
-                 + ", ".join(f"{c} INTEGER NOT NULL DEFAULT 0" for c in cols) + ")")
-    day = "2026-10-01 00:00:00.000000"
-    conn.execute("INSERT INTO scam_analytics (period_start, total_scanned, categories_json) VALUES (?, 2, ?)",
-                 (day, '{"phishing": 1}'))
-    conn.execute("INSERT INTO scam_analytics (period_start, total_scanned, categories_json) VALUES (?, 3, ?)",
-                 (day, '{"phishing": 2, "other": 1}'))
-    conn.execute("INSERT INTO scam_analytics (period_start, total_scanned) VALUES ('2026-10-02 00:00:00.000000', 7)")
-    for stmt in next(m for m in MIGRATIONS if m[0] == 62)[2]:
-        conn.execute(stmt)
-    rows = conn.execute("SELECT period_start, total_scanned, categories_json FROM scam_analytics ORDER BY period_start").fetchall()
-    assert [(r[0], r[1]) for r in rows] == [(day, 5), ("2026-10-02 00:00:00.000000", 7)]
-    assert json.loads(rows[0][2]) == {"phishing": 3, "other": 1}
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("INSERT INTO scam_analytics (period_start) VALUES (?)", (day,))
-
-
-def test_status_backfill_migration(tmp_path):
-    from backend.db.migrations.areas.scam import MIGRATIONS
-
-    conn = sqlite3.connect(tmp_path / "m.db")
-    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, scam_score FLOAT, scam_reason TEXT, scam_trace_json TEXT, "
-                 "scam_manual_verdict TEXT, scam_synced_to_cloud BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME, date DATETIME)")
-    conn.executemany("INSERT INTO messages (id, scam_score, scam_reason, scam_trace_json, created_at) VALUES (?,?,?,?,'2026-01-01')", [
-        (1, 0.5, "Node 'classify' failed: boom", json.dumps({"status": "failed", "steps": []})),
-        (2, 0.975, "Known domain", json.dumps({"status": "short_circuited"})),
-        (3, 0.1, "fine", json.dumps({"status": "completed"})),
-        (4, None, None, None),
-        (5, 0.9, "legacy", "not json"),
-    ])
-    for stmt in next(m for m in MIGRATIONS if m[0] == 60)[2]:
-        conn.execute(stmt)
-    got = {r[0]: r[1:] for r in conn.execute("SELECT id, scam_status, scam_score, scam_reason, scam_error FROM messages")}
-    assert got[1] == ("failed", None, None, "Node 'classify' failed: boom")
-    assert got[2][0] == "short_circuited" and got[3][0] == "completed"
-    assert got[4] == (None, None, None, None)
-    assert got[5][0] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -233,22 +185,25 @@ async def test_scan_upload_change_tracking(db_engine, monkeypatch):
         # A re-score lands while the POST is in flight
         if len(posted) == 1:
             async with database.AsyncSessionLocal() as s:
-                m = (await s.execute(select(Message).where(Message.tg_message_id == 2))).scalars().one()
+                m = (await s.execute(select(Message).where(Message.seq == 2))).scalars().one()
                 m.scam_score, m.scam_updated_at = 0.95, datetime.utcnow()
                 await s.commit()
 
     monkeypatch.setattr(mgr, "_post", fake_post)
     async with database.AsyncSessionLocal() as s:
-        for tg, status, score, manual in [(1, "completed", 0.9, None), (2, "completed", 0.8, None),
-                                          (3, "completed", 0.1, None), (4, "failed", None, None)]:
-            s.add(Message(tg_message_id=tg, chat_id=1, text="t", date=t0, scam_status=status,
-                          scam_score=score, scam_manual_verdict=manual, scam_updated_at=t0))
-        await s.commit()
+        conv = await f.conversation(s, "-1001", title="G", kind="group")
+        sender = await f.identity(s, 77)
+        for seq, status, score, manual in [(1, "completed", 0.9, None), (2, "completed", 0.8, None),
+                                           (3, "completed", 0.1, None), (4, "failed", None, None)]:
+            await f.message(s, conv, seq, "t", sender=sender, date=t0, scam_status=status,
+                            scam_score=score, scam_manual_verdict=manual, scam_updated_at=t0)
+        first = (await s.execute(select(Message.id).where(Message.seq == 1))).scalar_one()
 
     # 1, 2 (scam) + 4 (failed); 3 is safe and never uploaded. Row 2 changed
     # mid-POST, so it is not marked synced and goes up again (new score).
     assert await mgr._upload_scan_results() == 4
     assert {r["tg_message_id"] for r in posted[0]["scan_results"]} == {1, 2, 4}
+    assert {(r["chat_id"], r["sender_id"]) for r in posted[0]["scan_results"]} == {(-1001, 77)}  # Telegram ids
     assert [(r["tg_message_id"], r["scam_score"]) for r in posted[1]["scan_results"]] == [(2, 0.95)]
     assert await mgr._upload_scan_results() == 0
 
@@ -260,7 +215,7 @@ async def test_scan_upload_change_tracking(db_engine, monkeypatch):
         return None
 
     monkeypatch.setattr(ws_manager, "broadcast", _quiet)
-    await set_verdict(scope="message", verdict="not_scam", messages=[(1, 1)])
+    await set_verdict(scope="message", verdict="not_scam", messages=[first])
     assert await mgr._upload_scan_results() == 1
     sent = posted[-1]["scan_results"][0]
     assert sent["manual_verdict"] == "not_scam" and sent["effective_is_scam"] is False
@@ -278,9 +233,12 @@ async def test_flag_status_changes_are_reuploaded(db_engine, monkeypatch):
 
     monkeypatch.setattr(mgr, "_post", fake_post)
     async with database.AsyncSessionLocal() as s:
-        s.add(ScamFlag(telegram_id=5, source="local", flagged_at=datetime.utcnow(), updated_at=datetime.utcnow()))
+        sender = await f.identity(s, 5)
+        s.add(ScamFlag(identity_id=sender.id, source="local", flagged_at=datetime.utcnow(),
+                       updated_at=datetime.utcnow()))
         await s.commit()
     assert await mgr._upload_unsent_flags() == 1
+    assert posted[-1]["flags"][0]["telegram_id"] == 5
     assert await mgr._upload_unsent_flags() == 0
 
     from backend.scam.verdict import set_verdict
@@ -290,7 +248,7 @@ async def test_flag_status_changes_are_reuploaded(db_engine, monkeypatch):
         return None
 
     monkeypatch.setattr(ws_manager, "broadcast", _quiet)
-    await set_verdict(scope="sender", verdict="not_scam", telegram_id=5)
+    await set_verdict(scope="sender", verdict="not_scam", identity_id=sender.id)
     assert await mgr._upload_unsent_flags() == 1
     assert posted[-1]["flags"][0]["status"] == "dismissed"
 
@@ -378,9 +336,9 @@ async def test_manual_verdict_on_never_scanned_row_is_uploaded(db_engine, monkey
 
     monkeypatch.setattr(mgr, "_post", fake_post)
     async with database.AsyncSessionLocal() as s:
-        s.add(Message(tg_message_id=1, chat_id=1, text="t", date=datetime.utcnow()))  # scam_status NULL
-        await s.commit()
-    await set_verdict(scope="message", verdict="scam", messages=[(1, 1)])
+        conv = await f.conversation(s, "1", title="A")
+        msg = await f.message(s, conv, 1, "t", date=datetime.utcnow())  # scam_status NULL
+    await set_verdict(scope="message", verdict="scam", messages=[msg.id])
     assert await mgr._upload_scan_results() == 1
     sent = posted[0]["scan_results"][0]
     assert sent["scan_status"] == "unknown" and sent["manual_verdict"] == "scam" and sent["effective_is_scam"]
@@ -427,3 +385,93 @@ def test_verify_artifact_is_the_single_gate():
     cloud_sync.verify_artifact(data, {"sha256": hashlib.sha256(data).hexdigest().upper()}, "x")
     with pytest.raises(ValueError):
         cloud_sync.verify_artifact(data, {"sha256": "00"}, "x")
+
+
+# ---------------------------------------------------------------------------
+# Current cloud contract: Telegram ids, other channels skipped
+# ---------------------------------------------------------------------------
+
+def _recording_manager(monkeypatch):
+    mgr = cloud_sync.CloudSyncManager(key_provider=lambda: "k")
+    mgr.configure("https://cloud.test", "k")
+    posted = []
+
+    async def fake_post(path, payload):
+        posted.append((path, payload))
+
+    monkeypatch.setattr(mgr, "_post", fake_post)
+    return mgr, posted
+
+
+@pytest.mark.asyncio
+async def test_non_telegram_rows_are_not_uploaded(db, monkeypatch):
+    mgr, posted = _recording_manager(monkeypatch)
+    mail = await f.conversation(db, "thread-1", title="Mail", kind="email_thread", channel="gmail")
+    eve = await f.identity(db, "eve@example.com", channel="gmail")
+    await f.message(db, mail, 1, "wire money", sender=eve, scam_status="completed", scam_score=0.9,
+                    scam_updated_at=datetime.utcnow())
+    db.add(ScamFlag(identity_id=eve.id, source="local", flagged_at=datetime.utcnow()))
+    await db.commit()
+
+    assert await mgr._upload_scan_results() == 0
+    assert await mgr._upload_unsent_flags() == 0
+    assert posted == []
+    async with database.AsyncSessionLocal() as s:
+        flag = (await s.execute(select(ScamFlag))).scalars().one()
+    assert flag.synced_to_cloud is False  # waits for cloud contract v2
+
+
+@pytest.mark.asyncio
+async def test_report_dismissal_and_feedback_payloads_carry_telegram_ids(api, db, monkeypatch):
+    from backend.scam.verdict import set_verdict
+    from backend.ws.manager import ws_manager
+    import backend.scam.verdict as verdict_mod
+
+    async def _quiet(e):
+        return None
+
+    monkeypatch.setattr(ws_manager, "broadcast", _quiet)
+    monkeypatch.setattr(verdict_mod, "get_pref", lambda k, d=None: True if k == "shield_sync_dismissals" else d)
+    mgr, posted = _recording_manager(monkeypatch)
+    monkeypatch.setattr(cloud_sync, "get_cloud_sync_manager", lambda: mgr)
+
+    conv = await f.conversation(db, "-100900", title="G", kind="group")
+    scammer = await f.identity(db, 4242, display_name="Mal")
+    m1 = await f.message(db, conv, 31, "send btc", sender=scammer, scam_status="completed", scam_score=0.9)
+    m2 = await f.message(db, conv, 32, "now", sender=scammer)
+
+    r = await api.post("/api/scam/reports", json={
+        "reported_identity_id": scammer.id, "reported_in_conversation_id": conv.id,
+        "included_message_ids": [m1.id, m2.id],
+    })
+    assert r.status_code == 200, r.text
+    assert await mgr._upload_pending_reports() == 1
+    report = posted[-1][1]["reports"][0]
+    assert report["reported_telegram_id"] == 4242 and report["reported_in_chat_id"] == -100900
+    assert report["chat_type"] == "group"
+    assert {m["telegram_id"] for m in json.loads(report["messages_json"])} == {4242}
+    assert [sc["tg_message_id"] for sc in json.loads(report["local_detection_json"])["scores"]] == [31]
+
+    await set_verdict(scope="message", verdict="not_scam", messages=[m1.id])
+    await set_verdict(scope="sender", verdict="scam", identity_id=scammer.id)
+    await set_verdict(scope="sender", verdict="not_scam", identity_id=scammer.id)
+    assert await mgr._upload_pending_dismissals() == 2
+    by_path = {path: payload for path, payload in posted[-2:]}
+    assert by_path["/sync/dismissals"]["dismissals"][0]["telegram_id"] == 4242
+    assert "identity_id" not in by_path["/sync/dismissals"]["dismissals"][0]
+    scan = by_path["/sync/scan-results"]["scan_results"][0]
+    assert (scan["chat_id"], scan["tg_message_id"], scan["sender_id"]) == (-100900, 31, 4242)
+
+    r = await api.post("/api/scam/feedback", json={
+        "feedback_type": "false_positive", "message": "fine", "related_conversation_id": conv.id,
+        "related_message_id": m1.id, "related_flag_identity_id": scammer.id,
+    })
+    assert r.json()["status"] == "synced"
+    fb = posted[-1][1]["feedback"][0]
+    assert (fb["related_chat_id"], fb["related_message_id"], fb["related_flag_telegram_id"]) == (-100900, 31, 4242)
+
+    # Feedback about another channel's conversation stays local
+    mail = await f.conversation(db, "thread-2", title="Mail", kind="email_thread", channel="gmail")
+    r = await api.post("/api/scam/feedback", json={"feedback_type": "bug", "message": "x",
+                                                   "related_conversation_id": mail.id})
+    assert r.json()["status"] == "saved_locally"

@@ -7,11 +7,11 @@
  *   previous filter can't append to the new one.
  * - Offset consistency: reload refetches as many rows as are loaded (so the
  *   pages the user scrolled through don't vanish), and load-more continues
- *   from the number of rows actually held; merges dedupe by telegram_id.
+ *   from the number of rows actually held; merges dedupe by conversation id.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Chat } from '../../api/types'
-import { getChats, isAbortError } from '../../api/client'
+import type { Conversation } from '../../api/types'
+import { getConversations, isAbortError } from '../../api/client'
 import { reportError } from '../../lib/toast'
 
 export const CHAT_PAGE = 50
@@ -26,16 +26,16 @@ export interface ChatListKey {
 
 export interface ChatListState {
   key: string
-  chats: Chat[]
+  chats: Conversation[]
   hasMore: boolean
   /** First page for this key not loaded yet */
   loading: boolean
   loadingMore: boolean
 }
 
-export function dedupeChats(chats: Chat[]): Chat[] {
+export function dedupeChats(chats: Conversation[]): Conversation[] {
   const seen = new Set<number>()
-  return chats.filter((c) => (seen.has(c.telegram_id) ? false : (seen.add(c.telegram_id), true)))
+  return chats.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
 }
 
 export function useChatList(listKey: ChatListKey) {
@@ -52,7 +52,7 @@ export function useChatList(listKey: ChatListKey) {
 
   const fetchPage = useCallback((limit: number, offset: number, signal?: AbortSignal) => {
     const p = paramsRef.current
-    return getChats(limit, offset, p.sortBy, p.tagId ?? undefined, p.workspaceId ?? undefined, signal)
+    return getConversations(limit, offset, p.sortBy, p.tagId ?? undefined, p.workspaceId ?? undefined, signal)
   }, [])
 
   const replace = useCallback(async (limit: number) => {
@@ -112,7 +112,7 @@ export function useChatList(listKey: ChatListKey) {
   }, [fetchPage])
 
   /** Local delta (WS new_message, optimistic flag changes) */
-  const setChats = useCallback((fn: (prev: Chat[]) => Chat[]) => {
+  const setChats = useCallback((fn: (prev: Conversation[]) => Conversation[]) => {
     setState((s) => {
       const chats = fn(s.chats)
       return chats === s.chats ? s : { ...s, chats }

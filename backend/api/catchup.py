@@ -11,7 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.database import get_db
-from backend.db.models import CatchUpItem, CatchUpSummary, Contact, Message
+from backend.db.models import CatchUpItem, CatchUpSummary, Message
 from backend.db import crud
 from backend.serialization import iso_utc
 
@@ -44,8 +44,8 @@ class RelationshipStatusRequest(BaseModel):
 def item_dict(item: CatchUpItem) -> dict:
     return {
         "id": item.id,
-        "chat_telegram_id": item.chat_telegram_id,
-        "contact_id": item.contact_id,
+        "conversation_id": item.conversation_id,
+        "person_id": item.person_id,
         "status": item.status,
         "note": item.note,
         "snoozed_until": iso_utc(item.snoozed_until),
@@ -55,20 +55,31 @@ def item_dict(item: CatchUpItem) -> dict:
     }
 
 
-async def _get_or_create_item(
-    db: AsyncSession, chat_telegram_id: int,
-) -> CatchUpItem:
-    # INSERT OR IGNORE: two concurrent first actions on a chat can't collide
-    # on the unique chat_telegram_id.
+async def _peer_person_id(db: AsyncSession, conversation_id: int) -> Optional[int]:
+    """The person on the other side of a direct conversation (404 if the
+    conversation does not exist)."""
+    conv = await crud.get_conversation(db, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv.peer_identity.person_id if conv.peer_identity is not None else None
+
+
+async def _get_or_create_item(db: AsyncSession, conversation_id: int) -> CatchUpItem:
+    person_id = await _peer_person_id(db, conversation_id)
+    # INSERT OR IGNORE: two concurrent first actions on a conversation can't
+    # collide on the unique conversation_id.
     now = datetime.utcnow()
     await db.execute(
         sqlite_insert(CatchUpItem)
-        .values(chat_telegram_id=chat_telegram_id, status="pending", created_at=now, updated_at=now)
-        .on_conflict_do_nothing(index_elements=["chat_telegram_id"])
+        .values(conversation_id=conversation_id, person_id=person_id, status="pending",
+                created_at=now, updated_at=now)
+        .on_conflict_do_nothing(index_elements=["conversation_id"])
     )
-    return (await db.execute(
-        select(CatchUpItem).where(CatchUpItem.chat_telegram_id == chat_telegram_id)
+    item = (await db.execute(
+        select(CatchUpItem).where(CatchUpItem.conversation_id == conversation_id)
     )).scalar_one()
+    item.person_id = person_id  # the peer may have been linked to another person since
+    return item
 
 
 async def _save(db: AsyncSession, item: CatchUpItem) -> dict:
@@ -78,23 +89,23 @@ async def _save(db: AsyncSession, item: CatchUpItem) -> dict:
     return item_dict(item)
 
 
-async def contexts_for(db: AsyncSession, chat_ids: list[int]) -> dict[int, dict]:
-    """Stored catch-up context for many chats in two queries."""
-    if not chat_ids:
+async def contexts_for(db: AsyncSession, conversation_ids: list[int]) -> dict[int, dict]:
+    """Stored catch-up context for many conversations in two queries."""
+    if not conversation_ids:
         return {}
     summaries = {
-        s.chat_telegram_id: s
+        s.conversation_id: s
         for s in (await db.execute(
-            select(CatchUpSummary).where(CatchUpSummary.chat_telegram_id.in_(chat_ids))
+            select(CatchUpSummary).where(CatchUpSummary.conversation_id.in_(conversation_ids))
         )).scalars().all()
     }
     totals = dict((await db.execute(
-        select(Message.chat_id, func.count(Message.id))
-        .where(Message.chat_id.in_(list(summaries)))
-        .group_by(Message.chat_id)
+        select(Message.conversation_id, func.count(Message.id))
+        .where(Message.conversation_id.in_(list(summaries)))
+        .group_by(Message.conversation_id)
     )).all()) if summaries else {}
     out: dict[int, dict] = {}
-    for cid in chat_ids:
+    for cid in conversation_ids:
         s = summaries.get(cid)
         if s is None:
             out[cid] = {
@@ -153,34 +164,34 @@ async def list_all_catchup_items(db: AsyncSession = Depends(get_db)):
 
 @router.get("/contexts")
 async def get_catchup_contexts(
-    chat_ids: str = Query("", description="Comma-separated chat telegram ids"),
+    conversation_ids: str = Query("", description="Comma-separated conversation ids"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bulk version of /{chat_telegram_id}/context: {chat_id: context}.
-    ``summary`` is null for chats with no generated summary yet."""
+    """Bulk version of /{conversation_id}/context: {conversation_id: context}.
+    ``summary`` is null for conversations with no generated summary yet."""
     try:
-        ids = [int(x) for x in chat_ids.split(",") if x.strip()]
+        ids = [int(x) for x in conversation_ids.split(",") if x.strip()]
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_ids must be comma-separated integers")
+        raise HTTPException(status_code=400, detail="conversation_ids must be comma-separated integers")
     ctx = await contexts_for(db, ids[:200])
     return {str(k): v for k, v in ctx.items()}
 
 
 class GenerateSummariesRequest(BaseModel):
-    chat_ids: Optional[List[int]] = None
+    conversation_ids: Optional[List[int]] = None
 
 
 @router.post("/generate-summaries", status_code=202)
 async def trigger_generate_summaries(req: GenerateSummariesRequest = GenerateSummariesRequest()):
     """Start catch-up summary generation in the background (single-flight with
-    the scheduler). Explicit ``chat_ids`` are regenerated even if unchanged;
-    otherwise the current needs-reply chats are refreshed.
+    the scheduler). Explicit ``conversation_ids`` are regenerated even if
+    unchanged; otherwise the current needs-reply conversations are refreshed.
 
     Returns the job status immediately; poll GET /generate-summaries/status
     or listen for the ``catchup_summaries_updated`` WebSocket event."""
     from backend.catchup_summary_scheduler import start_generation
 
-    state, started = start_generation(req.chat_ids, force=req.chat_ids is not None)
+    state, started = start_generation(req.conversation_ids, force=req.conversation_ids is not None)
     return {**state, "started": started}
 
 
@@ -190,48 +201,48 @@ async def generate_summaries_status():
     return get_job_status()
 
 
-@router.post("/{chat_telegram_id}/snooze")
+@router.post("/{conversation_id}/snooze")
 async def snooze_item(
-    chat_telegram_id: int,
+    conversation_id: int,
     req: SnoozeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    item = await _get_or_create_item(db, chat_telegram_id)
+    item = await _get_or_create_item(db, conversation_id)
     item.status = "snoozed"
     item.snoozed_until = datetime.utcnow() + timedelta(hours=req.hours)
     return await _save(db, item)
 
 
-@router.post("/{chat_telegram_id}/handled")
+@router.post("/{conversation_id}/handled")
 async def mark_handled(
-    chat_telegram_id: int,
+    conversation_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    item = await _get_or_create_item(db, chat_telegram_id)
+    item = await _get_or_create_item(db, conversation_id)
     item.status = "handled"
     item.handled_at = datetime.utcnow()
     return await _save(db, item)
 
 
-@router.post("/{chat_telegram_id}/reopen")
+@router.post("/{conversation_id}/reopen")
 async def reopen_item(
-    chat_telegram_id: int,
+    conversation_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    item = await _get_or_create_item(db, chat_telegram_id)
+    item = await _get_or_create_item(db, conversation_id)
     item.status = "pending"
     item.snoozed_until = None
     item.handled_at = None
     return await _save(db, item)
 
 
-@router.post("/{chat_telegram_id}/note")
+@router.post("/{conversation_id}/note")
 async def add_note(
-    chat_telegram_id: int,
+    conversation_id: int,
     req: NoteRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    item = await _get_or_create_item(db, chat_telegram_id)
+    item = await _get_or_create_item(db, conversation_id)
     text = (req.note or "").strip()
     if req.clear or ("note" in req.model_fields_set and req.note is None):
         item.note = None
@@ -243,9 +254,9 @@ async def add_note(
     return await _save(db, item)
 
 
-@router.post("/{chat_telegram_id}/relationship-status")
+@router.post("/{conversation_id}/relationship-status")
 async def update_relationship_from_catchup(
-    chat_telegram_id: int,
+    conversation_id: int,
     req: RelationshipStatusRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -254,30 +265,28 @@ async def update_relationship_from_catchup(
             status_code=400,
             detail=f"Invalid status. Must be one of: {', '.join(sorted(crud.VALID_STATUSES))}",
         )
-    contact = (await db.execute(
-        select(Contact).where(Contact.telegram_id == chat_telegram_id)
-    )).scalar_one_or_none()
-    if not contact:
-        raise HTTPException(status_code=404, detail="Contact not found for this chat")
-    contact.relationship_status = req.status
-    contact.relationship_status_manual = True
+    person_id = await _peer_person_id(db, conversation_id)
+    person = await crud.get_person(db, person_id) if person_id is not None else None
+    if person is None:
+        raise HTTPException(status_code=404, detail="No person for this conversation")
+    crud.set_manual_relationship_status(person, req.status)
     await db.commit()
-    await db.refresh(contact)
+    await db.refresh(person)
     return {
-        "contact_id": contact.id,
-        "relationship_status": contact.relationship_status,
+        "person_id": person.id,
+        "relationship_status": person.relationship_status,
     }
 
 
-@router.get("/{chat_telegram_id}/context")
+@router.get("/{conversation_id}/context")
 async def get_catchup_context(
-    chat_telegram_id: int,
+    conversation_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return stored catch-up context for a chat. If a pre-computed summary
+    """Return stored catch-up context for a conversation. If a pre-computed summary
     exists, serve it along with the count of new messages since the summary
     was generated. Falls back to a minimal response if no summary exists yet."""
-    ctx = (await contexts_for(db, [chat_telegram_id]))[chat_telegram_id]
+    ctx = (await contexts_for(db, [conversation_id]))[conversation_id]
     if ctx["summary"] is None:
         ctx["summary"] = "Summary not yet generated. Click refresh to generate now."
     return ctx

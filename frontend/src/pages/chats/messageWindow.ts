@@ -1,10 +1,10 @@
 /**
  * Pure helpers for the keyset message window (see useChatMessages).
  *
- * A window is a contiguous, ordered slice of one chat's (or one forum
- * topic's) history: oldest → newest by (date, tg_message_id), with flags for
- * whether more exists on either side. Every merge dedupes by tg_message_id —
- * tg ids are unique within a chat, and a window never mixes chats.
+ * A window is a contiguous, ordered slice of one conversation's (or one
+ * forum topic's) history: oldest → newest by (date, seq, id), with flags for
+ * whether more exists on either side. Every merge dedupes by message id
+ * (internal ids are globally unique), and a window never mixes conversations.
  */
 import type { Message, MessageWindow } from '../../api/types'
 import { parseServerDate } from '../../utils/time'
@@ -18,27 +18,29 @@ export interface WindowSlice {
 /** Upper bound on messages held in one window; the far end is trimmed past it. */
 export const MAX_WINDOW = 500
 
-/** Cursor format of the window API: "<date as returned>~<tg_message_id>". */
-export function cursorOf(m: Message): string {
-  return `${m.date}~${m.tg_message_id}`
+/** The window API pages from a message id (`before=` / `after=`). */
+export function cursorOf(m: Message): number {
+  return m.id
 }
 
 function ts(m: Message): number {
   return parseServerDate(m.date)?.getTime() ?? 0
 }
 
-/** Window order: (date, tg_message_id) ascending. */
+/** Window order: (date, seq, id) ascending — seq is the channel-native order within a conversation. */
 export function compareMessages(a: Message, b: Message): number {
   const d = ts(a) - ts(b)
-  return d !== 0 ? d : a.tg_message_id - b.tg_message_id
+  if (d !== 0) return d
+  const s = a.seq - b.seq
+  return s !== 0 ? s : a.id - b.id
 }
 
-/** Union by tg_message_id (incoming wins), sorted. */
+/** Union by message id (incoming wins), sorted. */
 export function mergeMessages(base: Message[], incoming: Message[]): Message[] {
   if (incoming.length === 0) return base
   const byId = new Map<number, Message>()
-  for (const m of base) byId.set(m.tg_message_id, m)
-  for (const m of incoming) byId.set(m.tg_message_id, m)
+  for (const m of base) byId.set(m.id, m)
+  for (const m of incoming) byId.set(m.id, m)
   return [...byId.values()].sort(compareMessages)
 }
 
@@ -94,7 +96,7 @@ export function mergeLatest(w: WindowSlice, page: MessageWindow): WindowSlice {
  * window would fake a contiguous history.
  */
 export function applyLive(w: WindowSlice, msg: Message): WindowSlice {
-  const idx = w.messages.findIndex((m) => m.tg_message_id === msg.tg_message_id)
+  const idx = w.messages.findIndex((m) => m.id === msg.id)
   if (idx !== -1) {
     const messages = [...w.messages]
     messages[idx] = msg
@@ -105,14 +107,14 @@ export function applyLive(w: WindowSlice, msg: Message): WindowSlice {
 }
 
 export interface ViewScope {
-  chatId: number
-  /** null = whole chat; 1 = General (includes legacy rows with no topic) */
+  conversationId: number
+  /** null = whole conversation; 1 = General (includes legacy rows with no topic) */
   topicId: number | null
 }
 
 /** Does `msg` belong in a window scoped to `scope`? */
-export function inScope(msg: Pick<Message, 'chat_id' | 'topic_id'>, scope: ViewScope): boolean {
-  if (msg.chat_id !== scope.chatId) return false
+export function inScope(msg: Pick<Message, 'conversation_id' | 'topic_id'>, scope: ViewScope): boolean {
+  if (msg.conversation_id !== scope.conversationId) return false
   if (scope.topicId == null) return true
   const t = msg.topic_id ?? null
   if (scope.topicId === 1) return t == null || t === 1
@@ -120,16 +122,15 @@ export function inScope(msg: Pick<Message, 'chat_id' | 'topic_id'>, scope: ViewS
 }
 
 /**
- * Message ids in a `messages_deleted` event apply to this chat when the event
- * names it — or, for chat-less deletions, only in the shared private/basic
- * group id namespace (channels/supergroups have per-channel ids).
+ * A `messages_deleted` event applies to this conversation when it names it.
+ * Internal message ids are globally unique, so a conversation-less deletion
+ * can safely be applied by id anywhere.
  */
-export function deletionApplies(eventChatId: number | null, chatId: number): boolean {
-  if (eventChatId != null) return eventChatId === chatId
-  return chatId > -1000000000000
+export function deletionApplies(eventConversationId: number | null, conversationId: number): boolean {
+  return eventConversationId == null || eventConversationId === conversationId
 }
 
-/** First unread message given the chat's unread count at selection time. */
+/** First unread message given the conversation's unread count at selection time. */
 export function firstUnreadId(messages: Message[], unreadCount: number): number | null {
   if (unreadCount <= 0 || messages.length === 0) return null
   // Only incoming messages count as unread
@@ -137,9 +138,9 @@ export function firstUnreadId(messages: Message[], unreadCount: number): number 
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].is_outgoing) continue
     remaining--
-    if (remaining === 0) return messages[i].tg_message_id
+    if (remaining === 0) return messages[i].id
   }
   // More unread than loaded: the separator sits above the oldest loaded incoming message
   const firstIncoming = messages.find((m) => !m.is_outgoing)
-  return firstIncoming?.tg_message_id ?? null
+  return firstIncoming?.id ?? null
 }

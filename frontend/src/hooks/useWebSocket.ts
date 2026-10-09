@@ -32,7 +32,7 @@ export function useWebSocket(onEvent: Handler) {
 /**
  * Subscribe to one event type with a narrowed payload type:
  *
- *   useWsEvent('new_message', (e) => e.chat_id)
+ *   useWsEvent('new_message', (e) => e.conversation_id)
  *   useWsEvent('resync', () => refetch())
  */
 export function useWsEvent<T extends WSEventType>(

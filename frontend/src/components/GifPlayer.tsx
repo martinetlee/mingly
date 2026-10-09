@@ -5,15 +5,14 @@ import { useMediaDownload } from '../hooks/useMediaDownload'
 import ImageLightbox from './ImageLightbox'
 
 interface Props {
-  chatTelegramId: number
-  msgTelegramId: number
+  attachmentId: number
   mediaUrl: string | null
   isOut: boolean
 }
 
-export default function GifPlayer({ chatTelegramId, msgTelegramId, mediaUrl, isOut }: Props) {
+export default function GifPlayer({ attachmentId, mediaUrl, isOut }: Props) {
   // GIFs are small: download automatically (through the shared, rate-limited pipeline)
-  const media = useMediaDownload(chatTelegramId, msgTelegramId, { auto: true, initialUrl: mediaUrl })
+  const media = useMediaDownload(attachmentId, { auto: true, initialUrl: mediaUrl })
   const [playing, setPlaying] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
 

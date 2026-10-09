@@ -16,16 +16,16 @@ import {
   X,
 } from 'lucide-react'
 import {
-  createConversation,
-  deleteConversation,
-  getConversation,
+  createAiConversation,
+  deleteAiConversation,
+  getAiConversation,
   isAbortError,
-  listConversations,
+  listAiConversations,
   stream,
-  suggestConversationTitle,
-  updateConversationTitle,
+  suggestAiConversationTitle,
+  updateAiConversationTitle,
 } from '../../api/client'
-import type { ConversationDetail, ConversationSummary } from '../../api/types'
+import type { AiConversationDetail, AiConversationSummary } from '../../api/types'
 import Markdown from '../../components/Markdown'
 import { useConfirm } from '../../components/ui'
 import { errorMessage, reportError } from '../../lib/toast'
@@ -68,12 +68,12 @@ const TOOL_LABELS: Record<string, (args: Record<string, unknown>) => string> = {
   find_chats_by_member_count: (a) => `Finding chats with ${String(a.operator).replace('_', ' ')} ${a.count} members`,
 }
 
-const toMessages = (detail: ConversationDetail): ChatMessage[] =>
+const toMessages = (detail: AiConversationDetail): ChatMessage[] =>
   detail.messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
 
-const toSummary = (conv: ConversationDetail): ConversationSummary => ({
+const toSummary = (conv: AiConversationDetail): AiConversationSummary => ({
   id: conv.id,
   title: conv.title,
   created_at: conv.created_at,
@@ -166,7 +166,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
 }
 
 function ConvItem({ conv, active, onSelect, onDelete }: {
-  conv: ConversationSummary
+  conv: AiConversationSummary
   active: boolean
   onSelect: () => void
   onDelete: () => void
@@ -218,7 +218,7 @@ const SUGGESTIONS = [
 export default function ChatTab() {
   const confirm = useConfirm()
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [convList, setConvList] = useState<ConversationSummary[]>([])
+  const [convList, setConvList] = useState<AiConversationSummary[]>([])
   const [activeConvId, setActiveConvId] = useState<number | null>(null)
   const [loadingConvs, setLoadingConvs] = useState(true)
   const [loadingMessages, setLoadingMessages] = useState(false)
@@ -233,7 +233,7 @@ export default function ChatTab() {
 
   // Identity refs: async results apply only to the conversation they belong to
   const activeConvIdRef = useRef<number | null>(null)
-  const convListRef = useRef<ConversationSummary[]>([])
+  const convListRef = useRef<AiConversationSummary[]>([])
   convListRef.current = convList
   const streamRef = useRef<AbortController | null>(null)
   const loadRef = useRef<AbortController | null>(null)
@@ -252,7 +252,7 @@ export default function ChatTab() {
   /** Latest-only list refresh; keeps a locally applied title if the list predates it */
   const refreshConvList = useCallback(async () => {
     const seq = ++listSeqRef.current
-    const list = await listConversations()
+    const list = await listAiConversations()
     if (seq !== listSeqRef.current) return null
     setConvList((prev) => list.map((c) => {
       const local = prev.find((p) => p.id === c.id)
@@ -285,7 +285,7 @@ export default function ChatTab() {
     loadRef.current = ctrl
     setLoadingMessages(true)
     try {
-      const detail = await getConversation(id, ctrl.signal)
+      const detail = await getAiConversation(id, ctrl.signal)
       if (activeConvIdRef.current !== id || loadRef.current !== ctrl) return
       setMessages(toMessages(detail))
     } catch (e) {
@@ -305,7 +305,7 @@ export default function ChatTab() {
   }, [activate, loadMessages])
 
   const startNewConversation = useCallback(async () => {
-    const conv = await createConversation()
+    const conv = await createAiConversation()
     setConvList((prev) => [toSummary(conv), ...prev.filter((c) => c.id !== conv.id)])
     activate(conv.id)
   }, [activate])
@@ -348,14 +348,14 @@ export default function ChatTab() {
     }
   }
 
-  const deleteConv = async (conv: ConversationSummary) => {
+  const deleteConv = async (conv: AiConversationSummary) => {
     await confirm({
       title: 'Delete conversation?',
       message: `"${conv.title ?? 'New conversation'}" and its ${conv.message_count} message${conv.message_count === 1 ? '' : 's'} will be removed.`,
       destructive: true,
       confirmLabel: 'Delete',
       onConfirm: async () => {
-        await deleteConversation(conv.id)
+        await deleteAiConversation(conv.id)
         const next = convListRef.current.filter((c) => c.id !== conv.id)
         setConvList(next)
         if (conv.id !== activeConvIdRef.current) return
@@ -389,7 +389,7 @@ export default function ChatTab() {
     if (trimmed === previous) return
     setConvList((prev) => prev.map((c) => (c.id === convId ? { ...c, title: trimmed } : c)))
     try {
-      await updateConversationTitle(convId, trimmed)
+      await updateAiConversationTitle(convId, trimmed)
     } catch (e) {
       setConvList((prev) => prev.map((c) => (c.id === convId && c.title === trimmed ? { ...c, title: previous } : c)))
       reportError(e, 'Could not rename conversation')
@@ -406,7 +406,7 @@ export default function ChatTab() {
     const conv = convListRef.current.find((c) => c.id === convId)
     if (!conv || conv.title != null) return
     titleSuggestedRef.current.add(convId)
-    suggestConversationTitle(convId)
+    suggestAiConversationTitle(convId)
       .then(({ title }) => {
         if (!title) return
         setConvList((prev) => prev.map((c) => (c.id === convId && c.title == null ? { ...c, title } : c)))
@@ -444,7 +444,7 @@ export default function ChatTab() {
     try {
       const events = stream<Record<string, unknown>>('/api/intelligence/chat', {
         method: 'POST',
-        body: { conversation_id: convId, message: text },
+        body: { ai_conversation_id: convId, message: text },
         signal: ctrl.signal,
       })
       for await (const { event, data } of events) {

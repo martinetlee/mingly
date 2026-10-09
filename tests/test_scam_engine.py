@@ -199,9 +199,11 @@ def test_short_circuit_has_no_eval():
 # ---------------------------------------------------------------------------
 
 def _req(target_text="TARGET", n_context=5, ctx_len=400):
-    ctx = [{"message_id": i, "sender_id": 7, "sender_name": "S", "text": f"ctx{i} " + "x" * ctx_len} for i in range(n_context)]
-    return ScanRequest(chat_id=1, targets=[{"message_id": 99, "sender_id": 7, "sender_name": "S", "text": target_text}],
-                       context=ctx, chat_metadata={"name": "G", "type": "group"})
+    ctx = [{"message_id": i, "identity_id": 7, "sender_name": "S", "text": f"ctx{i} " + "x" * ctx_len}
+           for i in range(n_context)]
+    return ScanRequest(conversation_id=1, channel="telegram",
+                       targets=[{"message_id": 99, "identity_id": 7, "sender_name": "S", "text": target_text}],
+                       context=ctx, metadata={"title": "G", "kind": "group", "channel": "telegram"})
 
 
 def test_prompt_always_ends_with_untruncated_target():
@@ -210,6 +212,7 @@ def test_prompt_always_ends_with_untruncated_target():
     assert text.rstrip().endswith(long_target.strip())
     assert "Messages to analyze:" in text
     assert "ctx" not in text.split("Messages to analyze:")[1]
+    assert text.startswith("Conversation: G (group on telegram)")
 
 
 def test_context_fills_remaining_budget_newest_first():
@@ -223,9 +226,9 @@ async def test_signatures_only_match_targets(monkeypatch):
     cfg = _parse_pipeline({"version": "t", "system_prompt": "x",
                            "signatures": {"domains": ["evil.xyz"], "wallets": [], "patterns": [], "telegram_ids": []}})
     cfg.signatures.domains = ["evil.xyz"]
-    req = ScanRequest(chat_id=1,
-                      targets=[{"message_id": 2, "sender_id": 1, "sender_name": "A", "text": "hello"}],
-                      context=[{"message_id": 1, "sender_id": 1, "sender_name": "A", "text": "go to evil.xyz now"}])
+    req = ScanRequest(conversation_id=1, channel="telegram",
+                      targets=[{"message_id": 2, "identity_id": 1, "sender_name": "A", "text": "hello"}],
+                      context=[{"message_id": 1, "identity_id": 1, "sender_name": "A", "text": "go to evil.xyz now"}])
 
     _use_provider(monkeypatch, None)
     res = await engine.execute_pipeline(cfg, build_message_context(req), req.targets)
@@ -233,6 +236,43 @@ async def test_signatures_only_match_targets(monkeypatch):
     req.targets[0]["text"] = "see evil.xyz"
     res = await engine.execute_pipeline(cfg, build_message_context(req), req.targets)
     assert res.trace.status == "short_circuited" and res.scam_result.is_scam
+
+
+@pytest.mark.asyncio
+async def test_known_telegram_ids_match_only_telegram_senders(monkeypatch):
+    cfg = _parse_pipeline({"version": "t", "system_prompt": "x",
+                           "signatures": {"domains": [], "wallets": [], "patterns": [], "telegram_ids": [555]}})
+    cfg.signatures.telegram_ids = [555]
+    _use_provider(monkeypatch, None)
+    target = {"message_id": 3, "identity_id": 9, "telegram_user_id": 555, "sender_name": "M", "text": "hi"}
+    res = await engine.execute_pipeline(cfg, "ctx", [target], channel="telegram", conversation_kind="direct")
+    assert res.trace.status == "short_circuited" and res.trace.short_circuit["matched_value"] == "555"
+    assert res.trace.channel == "telegram" and res.trace.conversation_kind == "direct"
+    # The same number on another channel (or an internal identity id) is not a Telegram user
+    res = await engine.execute_pipeline(cfg, "ctx", [target], channel="gmail")
+    assert res.trace.status == "failed"
+    res = await engine.execute_pipeline(cfg, "ctx", [{"message_id": 3, "identity_id": 555, "text": "hi"}],
+                                        channel="telegram")
+    assert res.trace.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_local_client_passes_channel_and_kind_to_nodes(monkeypatch):
+    from backend.scam.client import LocalPipelineClient
+
+    seen = {}
+
+    async def fake_execute(cfg, ctx, targets, *, channel=None, conversation_kind=None):
+        seen.update(channel=channel, kind=conversation_kind)
+        return engine.EngineResult(scam_result=engine.ScamCheckResult(is_scam=False, confidence=0.1, reason=""),
+                                   trace=None)
+
+    monkeypatch.setattr(engine, "execute_pipeline", fake_execute)
+    cfg = _parse_pipeline({"version": "t", "system_prompt": "x"})
+    await LocalPipelineClient(cfg).is_this_scam("r", _req())
+    assert seen == {"channel": "telegram", "kind": "group"}
+    assert engine.substitute_placeholders("{{$channel}}/{{$conversation_kind}}",
+                                          {"$channel": "telegram", "$conversation_kind": "group"}) == "telegram/group"
 
 
 @pytest.mark.asyncio

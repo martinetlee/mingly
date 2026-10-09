@@ -12,9 +12,9 @@ Security model (see also backend/api/settings.py MCP section):
   or the feature is disabled the endpoint answers a bare 404.
 - Host/Origin validation against loopback to block DNS-rebinding.
 - Read tools query the local DB (fetch_history also asks the archive to pull a
-  chat's history from Telegram). Write tools (notes, person fields, tags,
+  conversation's history from Telegram). Write tools (notes, person fields, tags,
   review marks) only run while the user enables them (pref
-  mcp_write_enabled, default off); nothing ever sends Telegram messages.
+  mcp_write_enabled, default off); nothing ever sends messages.
 """
 import json
 import logging
@@ -56,27 +56,29 @@ REVIEW_PROCEDURE = (
     "wait (or call fetch_history on the DMs you need) — list_dms(filter='incomplete') shows which "
     "histories are not complete.\n"
     "2. list_dms(filter='unreviewed'), following next_cursor until it is null.\n"
-    "3. For each DM: if history_complete is false, fetch_history(chat_id) until it is (if it reports "
-    "telegram_connected: false, stop retrying and tell the user). Then read "
-    "get_messages(chat_id, order='asc') from the start (or after_tg_message_id = "
-    "review.reviewed_through_tg_id when re-reviewing), following next_cursor to the end.\n"
-    "4. Record what you learned with add_person_note (kind: context, due_diligence, risk, "
-    "relationship or todo), citing the messages ({chat_id, tg_message_id}) each claim rests on; "
-    "use get_person first to avoid repeating existing notes. Optionally set_person_fields / "
-    "add_position / tag_chat.\n"
-    "5. mark_reviewed(chat_id, through_tg_message_id = the newest tg_message_id you read; 0 for an "
-    "empty chat).\n"
+    "3. For each DM: if history_complete is false, fetch_history(conversation_id) until it is (if it "
+    "reports telegram_connected: false, stop retrying and tell the user). Then read "
+    "get_messages(conversation_id, order='asc') from the start (or after_message_id = "
+    "review.reviewed_through_message_id when re-reviewing), following next_cursor to the end.\n"
+    "4. Record what you learned about the DM's person (person.person_id) with add_person_note "
+    "(kind: context, due_diligence, risk, relationship or todo), citing the messages "
+    "({conversation_id, message_id}) each claim rests on; use get_person first to avoid repeating "
+    "existing notes (one person may have DMs on several channels). Optionally set_person_fields / "
+    "add_position / tag_conversation.\n"
+    "5. mark_reviewed(conversation_id, through_message_id = the newest message_id you read; omit it "
+    "for an empty conversation).\n"
     "6. Repeat from step 2 until list_dms(filter='unreviewed') returns no DMs. New messages "
     "put a DM back in that queue, so nothing is silently skipped."
 )
 
 SERVER_INSTRUCTIONS = (
-    "Access to Mingly's local Telegram archive: list and search chats and DMs, read full "
-    "message histories (including service events), look up people, contacts and "
-    "organizations, and ask the archive to fetch missing history. Write tools "
-    "(add_person_note, update_person_note, set_person_fields, add_position, tag_chat, "
-    "mark_reviewed) work only while the user allows agent writes in Mingly Settings › MCP. "
-    "No tool sends Telegram messages. Paged tools return next_cursor; pass it back unchanged.\n\n"
+    "Access to Mingly's local message archive (Telegram and any other connected channel): list and "
+    "search conversations and DMs, read full message histories (including service events), look up "
+    "people (one person merges their identities on every channel) and organizations, and ask the "
+    "archive to fetch missing Telegram history. Ids are Mingly's own conversation_id / message_id / "
+    "person_id. Write tools (add_person_note, update_person_note, set_person_fields, add_position, "
+    "tag_conversation, mark_reviewed) work only while the user allows agent writes in Mingly "
+    "Settings › MCP. No tool sends messages. Paged tools return next_cursor; pass it back unchanged.\n\n"
     "To review everyone the user has DMed (the review_dms prompt has the same steps):\n"
     + REVIEW_PROCEDURE + "\n\n" + KNOWN_LIMITS
 )

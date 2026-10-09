@@ -18,7 +18,7 @@ async def test_shield_endpoints_absent(api):
     for path in ("/api/scam/flags", "/api/scam/scanned-messages",
                  "/api/settings/prefs/scam-detection", "/api/settings/prefs/shield-cloud"):
         assert (await api.get(path)).status_code == 404, path
-    r = await api.post("/api/scam/check-messages", json={"chat_id": 1, "message_ids": [1]})
+    r = await api.post("/api/scam/check-messages", json={"conversation_id": 1, "message_ids": [1]})
     assert r.status_code == 404
 
 
@@ -27,8 +27,8 @@ async def test_queue_does_nothing(db):
     import backend.scam.queue as q
 
     with patch.object(q._scan_queue, "enqueue") as enqueue:
-        await q.enqueue_targets(-1001, [1, 2], source="realtime")
-        await q.enqueue_targets(-1001, [3], source="manual")
+        await q.enqueue_targets(1, [1, 2], source="realtime")
+        await q.enqueue_targets(1, [3], source="manual")
     enqueue.assert_not_called()
     assert await q.scan_unscanned_messages() == 0
 

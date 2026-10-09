@@ -16,6 +16,10 @@ Safety rules:
 * Uploads snapshot rows, close the DB session, POST, then mark rows synced
   only if they did not change meanwhile (``scam_updated_at <= snapshot``), so
   re-scores and manual corrections always reach the cloud.
+* The cloud contract is still Telegram-shaped (telegram_id, chat_id,
+  tg_message_id). Rows are stored with internal ids; uploads resolve the
+  Telegram ids through ``backend.scam.channel_ids`` and skip rows from other
+  channels (they stay unsynced until cloud contract v2).
 """
 
 import asyncio
@@ -38,10 +42,13 @@ from sqlalchemy import and_, or_, select, update
 
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Message, ScamDismissal, ScamFeedback, ScamFlag, ScamReport
+from backend.db.models import (
+    Account, Conversation, Identity, Message, ScamDismissal, ScamFeedback, ScamFlag, ScamReport,
+)
 from backend.fsutil import atomic_write_text
 from backend.jobs import await_single
 from backend.prefs import get_pref, update_prefs
+from backend.scam.channel_ids import TELEGRAM, telegram_message_id, telegram_peer_ids, telegram_user_ids
 from backend.scam.verdict import not_pending_condition
 
 logger = logging.getLogger(__name__)
@@ -113,6 +120,48 @@ def verify_artifact(data: bytes, file_info: dict, name: str) -> None:
         actual = hashlib.sha256(data).hexdigest()
         if actual.lower() != str(expected).strip().lower():
             raise ValueError(f"sha256 mismatch for {name}: expected {expected}, got {actual}")
+
+
+# ---------------------------------------------------------------------------
+# Telegram ids for the current cloud contract
+# ---------------------------------------------------------------------------
+
+def telegram_flag_condition():
+    """Flags the current cloud contract can carry (Telegram senders)."""
+    return ScamFlag.identity_id.in_(select(Identity.id).where(Identity.channel == TELEGRAM))
+
+
+def telegram_message_condition():
+    """Messages the current cloud contract can carry (Telegram conversations)."""
+    return Message.conversation_id.in_(
+        select(Conversation.id).join(Account, Account.id == Conversation.account_id)
+        .where(Account.channel == TELEGRAM)
+    )
+
+
+@dataclass
+class _TelegramRefs:
+    users: dict  # identity_id -> Telegram user id
+    peers: dict  # conversation_id -> Telegram peer id
+    messages: dict  # message_id -> Telegram message id
+
+
+async def _telegram_refs(db, *, identity_ids=(), conversation_ids=(), message_ids=()) -> _TelegramRefs:
+    """Telegram ids of the given rows; rows of other channels (or deleted
+    rows) are simply absent from the maps."""
+    mids = [m for m in set(message_ids) if m]
+    rows = (await db.execute(
+        select(Message.id, Message.conversation_id, Message.seq).where(Message.id.in_(mids))
+    )).all() if mids else []
+    peers = await telegram_peer_ids(db, set(conversation_ids) | {r.conversation_id for r in rows})
+    return _TelegramRefs(
+        users=await telegram_user_ids(db, identity_ids),
+        peers=peers,
+        messages={r.id: telegram_message_id(r) for r in rows if r.conversation_id in peers},
+    )
+
+
+_CLOUD_KIND = {"direct": "private"}  # cloud v1 chat types
 
 
 def _trace(trace_json: Optional[str]) -> dict:
@@ -480,14 +529,18 @@ class CloudSyncManager:
             if not reports:
                 break
             last_id = reports[-1].id
-            await self._post("/sync/reports", {"reports": [_report_payload(r) for r in reports]})
+            async with AsyncSessionLocal() as db:
+                payloads = await _report_payloads(db, reports)
+            if not payloads:
+                continue
+            await self._post("/sync/reports", {"reports": [p for _, p in payloads]})
             async with AsyncSessionLocal() as db:
                 await db.execute(
-                    update(ScamReport).where(ScamReport.id.in_([r.id for r in reports]))
+                    update(ScamReport).where(ScamReport.id.in_([r.id for r, _ in payloads]))
                     .values(synced_at=datetime.utcnow())
                 )
                 await db.commit()
-            total += len(reports)
+            total += len(payloads)
         return total
 
     async def upload_single_report(self, report_id: str) -> bool:
@@ -498,10 +551,11 @@ class CloudSyncManager:
             report = (await db.execute(
                 select(ScamReport).where(ScamReport.report_id == report_id)
             )).scalars().first()
-        if not report:
+            payloads = await _report_payloads(db, [report]) if report else []
+        if not payloads:
             return False
         try:
-            await self._post("/sync/reports", {"reports": [_report_payload(report)]})
+            await self._post("/sync/reports", {"reports": [payloads[0][1]]})
         except Exception as e:
             logger.warning("Failed to upload report %s: %s", report_id, e)
             return False
@@ -518,14 +572,21 @@ class CloudSyncManager:
         for _ in range(_MAX_BATCHES):
             async with AsyncSessionLocal() as db:
                 flags = (await db.execute(
-                    select(ScamFlag).where(ScamFlag.synced_to_cloud == False, ScamFlag.id > last_id)  # noqa: E712
-                    .order_by(ScamFlag.id).limit(_BATCH)
+                    select(ScamFlag).where(
+                        ScamFlag.synced_to_cloud == False,  # noqa: E712
+                        ScamFlag.id > last_id,
+                        telegram_flag_condition(),
+                    ).order_by(ScamFlag.id).limit(_BATCH)
                 )).scalars().all()
+                users = await telegram_user_ids(db, [f.identity_id for f in flags])
             if not flags:
                 break
             last_id = flags[-1].id
+            flags = [f for f in flags if f.identity_id in users]
+            if not flags:
+                continue
             payload = {"flags": [{
-                "telegram_id": f.telegram_id,
+                "telegram_id": users[f.identity_id],
                 "source": f.source,
                 "status": f.status,
                 "confidence": f.confidence,
@@ -557,6 +618,7 @@ class CloudSyncManager:
         cursor: Optional[tuple] = None
         for _ in range(_MAX_BATCHES):
             conditions = [
+                telegram_message_condition(),
                 Message.scam_updated_at.isnot(None),
                 not_pending_condition(),
                 or_(Message.scam_synced_at.is_(None), Message.scam_updated_at > Message.scam_synced_at),
@@ -577,6 +639,10 @@ class CloudSyncManager:
                     select(Message).where(*conditions)
                     .order_by(Message.scam_updated_at, Message.id).limit(_BATCH)
                 )).scalars().all()
+                refs = await _telegram_refs(
+                    db, identity_ids=[m.sender_identity_id for m in msgs],
+                    conversation_ids=[m.conversation_id for m in msgs],
+                )
             if not msgs:
                 break
             cursor = (msgs[-1].scam_updated_at, msgs[-1].id)
@@ -585,9 +651,9 @@ class CloudSyncManager:
             for m in msgs:
                 trace = _trace(m.scam_trace_json)
                 scan_results.append({
-                    "chat_id": m.chat_id,
-                    "tg_message_id": m.tg_message_id,
-                    "sender_id": m.sender_id,
+                    "chat_id": refs.peers.get(m.conversation_id),
+                    "tg_message_id": telegram_message_id(m),
+                    "sender_id": refs.users.get(m.sender_identity_id),
                     "scam_score": m.scam_score,
                     "scam_reason": m.scam_reason,
                     "scam_category": m.scam_category,
@@ -629,25 +695,46 @@ class CloudSyncManager:
                 break
             last_id = dismissals[-1].id
 
-            scammer_items, scan_items = [], []
+            parsed = []
             for d in dismissals:
                 try:
                     data = json.loads(d.payload_json)
                 except (ValueError, TypeError):
                     data = {}
-                (scammer_items if d.dismissal_type == "scammer" else scan_items).append((d, data))
+                parsed.append((d, data if isinstance(data, dict) else {}))
+            async with AsyncSessionLocal() as db:
+                refs = await _telegram_refs(
+                    db,
+                    identity_ids=[data.get("identity_id") for _, data in parsed],
+                    conversation_ids=[data.get("conversation_id") for _, data in parsed],
+                    message_ids=[data.get("message_id") for _, data in parsed],
+                )
+
+            # Telegram rows only: a sender flag needs its Telegram user, a scan
+            # its Telegram conversation.
+            scammer_items, scan_items = [], []
+            for d, data in parsed:
+                if d.dismissal_type == "scammer":
+                    if data.get("identity_id") in refs.users:
+                        scammer_items.append((d, data))
+                elif data.get("conversation_id") in refs.peers:
+                    scan_items.append((d, data))
 
             if scammer_items:
-                await self._post("/sync/dismissals", {"dismissals": [data for _, data in scammer_items]})
+                await self._post("/sync/dismissals", {"dismissals": [
+                    {**{k: v for k, v in data.items() if k != "identity_id"},
+                     "telegram_id": refs.users[data["identity_id"]]}
+                    for _, data in scammer_items
+                ]})
                 await self._mark_dismissals([d.id for d, _ in scammer_items])
             if scan_items:
                 scan_results = []
                 for _, data in scan_items:
                     trace = data.get("trace") or {}
                     scan_results.append({
-                        "chat_id": data.get("chat_id"),
-                        "tg_message_id": data.get("tg_message_id"),
-                        "sender_id": data.get("sender_id"),
+                        "chat_id": refs.peers.get(data.get("conversation_id")),
+                        "tg_message_id": refs.messages.get(data.get("message_id")),
+                        "sender_id": refs.users.get(data.get("identity_id")),
                         "scam_score": data.get("scam_score"),
                         "scam_reason": data.get("scam_reason"),
                         "scam_category": data.get("scam_category"),
@@ -662,7 +749,7 @@ class CloudSyncManager:
                     })
                 await self._post("/sync/scan-results", {"scan_results": scan_results})
                 await self._mark_dismissals([d.id for d, _ in scan_items])
-            total += len(dismissals)
+            total += len(scammer_items) + len(scan_items)
         return total
 
     async def _mark_dismissals(self, ids: list) -> None:
@@ -680,15 +767,24 @@ class CloudSyncManager:
             raise ValueError(self.url_error)
         async with AsyncSessionLocal() as db:
             fb = (await db.execute(select(ScamFeedback).where(ScamFeedback.id == feedback_id))).scalars().first()
-        if not fb:
+            if not fb:
+                return False
+            refs = await _telegram_refs(
+                db, identity_ids=[fb.related_flag_identity_id],
+                conversation_ids=[fb.related_conversation_id], message_ids=[fb.related_message_id],
+            )
+        # Feedback about another channel's rows waits for cloud contract v2
+        if ((fb.related_conversation_id and fb.related_conversation_id not in refs.peers)
+                or (fb.related_message_id and fb.related_message_id not in refs.messages)
+                or (fb.related_flag_identity_id and fb.related_flag_identity_id not in refs.users)):
             return False
         await self._post("/sync/feedback", {"feedback": [{
             "id": fb.id,
             "feedback_type": fb.feedback_type,
             "message": fb.message,
-            "related_chat_id": fb.related_chat_id,
-            "related_message_id": fb.related_message_id,
-            "related_flag_telegram_id": fb.related_flag_telegram_id,
+            "related_chat_id": refs.peers.get(fb.related_conversation_id),
+            "related_message_id": refs.messages.get(fb.related_message_id),
+            "related_flag_telegram_id": refs.users.get(fb.related_flag_identity_id),
             "created_at": fb.created_at.isoformat() if fb.created_at else None,
         }]})
         async with AsyncSessionLocal() as db:
@@ -737,19 +833,74 @@ class CloudSyncManager:
             return ""
 
 
-def _report_payload(r: ScamReport) -> dict:
-    return {
-        "report_id": r.report_id,
-        "reported_telegram_id": r.reported_telegram_id,
-        "reported_in_chat_id": r.reported_in_chat_id,
-        "chat_type": r.chat_type,
-        "reporter_verdict": r.reporter_verdict,
-        "scam_category": r.scam_category,
-        "custom_category": r.custom_category,
-        "messages_json": r.messages_json,
-        "local_detection_json": r.local_detection_json,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-    }
+async def _report_payloads(db, reports: list) -> list[tuple]:
+    """[(report, cloud payload)] for the Telegram reports among ``reports``.
+    Stored reports carry internal ids (``messages_json`` entries an
+    ``identity_id``, local detection scores a ``message_id``); the payload
+    gets the Telegram ids the current cloud contract expects."""
+    parsed = {r.id: (_json_list(r.messages_json), _json_obj(r.local_detection_json)) for r in reports}
+    identity_ids = {r.reported_identity_id for r in reports}
+    message_ids: set = set()
+    for msgs, detection in parsed.values():
+        identity_ids.update(m.get("identity_id") for m in msgs if isinstance(m, dict))
+        message_ids.update(s.get("message_id") for s in (detection or {}).get("scores") or [] if isinstance(s, dict))
+    refs = await _telegram_refs(
+        db, identity_ids=identity_ids, conversation_ids=[r.reported_in_conversation_id for r in reports],
+        message_ids=message_ids,
+    )
+
+    out = []
+    for r in reports:
+        if r.reported_in_conversation_id is not None:
+            is_telegram = r.reported_in_conversation_id in refs.peers
+        else:
+            is_telegram = r.reported_identity_id in refs.users
+        if not is_telegram:
+            continue
+        msgs, detection = parsed[r.id]
+        cloud_msgs = []
+        for m in msgs:
+            if isinstance(m, dict):
+                m = {**{k: v for k, v in m.items() if k != "identity_id"},
+                     "telegram_id": refs.users.get(m.get("identity_id"))}
+            cloud_msgs.append(m)
+        if detection is not None:
+            detection = {**detection, "scores": [
+                {**{k: v for k, v in sc.items() if k != "message_id"},
+                 "tg_message_id": refs.messages.get(sc.get("message_id"))}
+                for sc in detection.get("scores") or [] if isinstance(sc, dict)
+            ]}
+        out.append((r, {
+            "report_id": r.report_id,
+            "reported_telegram_id": refs.users.get(r.reported_identity_id),
+            "reported_in_chat_id": refs.peers.get(r.reported_in_conversation_id),
+            "chat_type": _CLOUD_KIND.get(r.chat_type, r.chat_type),
+            "reporter_verdict": r.reporter_verdict,
+            "scam_category": r.scam_category,
+            "custom_category": r.custom_category,
+            "messages_json": json.dumps(cloud_msgs, default=str),
+            "local_detection_json": json.dumps(detection, default=str) if detection is not None else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }))
+    return out
+
+
+def _json_list(raw: Optional[str]) -> list:
+    try:
+        data = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _json_obj(raw: Optional[str]) -> Optional[dict]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _install_bundle(content: bytes, domain: str, version: str) -> None:

@@ -19,7 +19,7 @@ import { getPersonNotes, createPersonNote, updatePersonNote, deletePersonNote } 
 import PersonNotes, { sortNotes } from '../PersonNotes'
 
 const note = (id: number, over: Partial<PersonNote> = {}): PersonNote => ({
-  id, telegram_id: 42, kind: 'context', title: `Note ${id}`, body: `Body **${id}**`, citations: [],
+  id, person_id: 42, kind: 'context', title: `Note ${id}`, body: `Body **${id}**`, citations: [],
   author: 'user', agent_label: null,
   created_at: `2026-10-0${id}T10:00:00`, updated_at: `2026-10-0${id}T10:00:00`, ...over,
 })
@@ -35,22 +35,22 @@ function LocationProbe() {
   return <div data-testid="location">{loc.pathname}{loc.search}</div>
 }
 
-function setup(telegramId = 42) {
+function setup(personId = 42) {
   const client = new WebSocketClient({ url: () => null })
-  const ui = (tid: number) => (
+  const ui = (pid: number) => (
     <WebSocketProvider client={client}>
       <ConfirmProvider>
-        <MemoryRouter initialEntries={['/profile/42']}>
+        <MemoryRouter initialEntries={['/people/42']}>
           <Routes>
-            <Route path="/profile/:id" element={<PersonNotes telegramId={tid} />} />
+            <Route path="/people/:id" element={<PersonNotes personId={pid} />} />
             <Route path="/chats" element={<LocationProbe />} />
           </Routes>
         </MemoryRouter>
       </ConfirmProvider>
     </WebSocketProvider>
   )
-  const r = render(ui(telegramId))
-  return { client, rerender: (tid: number) => r.rerender(ui(tid)) }
+  const r = render(ui(personId))
+  return { client, rerender: (pid: number) => r.rerender(ui(pid)) }
 }
 
 beforeEach(() => {
@@ -127,10 +127,10 @@ describe('PersonNotes', () => {
   })
 
   it('citation chips open the cited message in Chats', async () => {
-    vi.mocked(getPersonNotes).mockResolvedValue([note(1, { citations: [{ chat_id: 42, tg_message_id: 900 }] })])
+    vi.mocked(getPersonNotes).mockResolvedValue([note(1, { citations: [{ conversation_id: 42, message_id: 900 }] })])
     setup()
     fireEvent.click(await screen.findByRole('button', { name: /source 1/i }))
-    expect(screen.getByTestId('location').textContent).toBe('/chats?chatId=42&msgId=900')
+    expect(screen.getByTestId('location').textContent).toBe('/chats?conversationId=42&messageId=900')
   })
 
   it('refetches on person_notes_changed for this person only', async () => {
@@ -138,20 +138,20 @@ describe('PersonNotes', () => {
     const { client } = setup()
     await screen.findByText('Note 1')
     expect(getPersonNotes).toHaveBeenCalledTimes(1)
-    act(() => client.dispatch({ type: 'person_notes_changed', telegram_id: 99 }))
+    act(() => client.dispatch({ type: 'person_notes_changed', person_id: 99 }))
     expect(getPersonNotes).toHaveBeenCalledTimes(1)
     vi.mocked(getPersonNotes).mockResolvedValue([note(1), note(2, { author: 'agent', title: 'From agent' })])
-    act(() => client.dispatch({ type: 'person_notes_changed', telegram_id: 42 }))
+    act(() => client.dispatch({ type: 'person_notes_changed', person_id: 42 }))
     expect(await screen.findByText('From agent')).toBeTruthy()
   })
 
   it('switching person shows only the latest person’s notes, even if the old fetch resolves last', async () => {
     const first = deferred<PersonNote[]>()
     const second = deferred<PersonNote[]>()
-    vi.mocked(getPersonNotes).mockImplementation((tid) => (tid === 42 ? first.promise : second.promise))
+    vi.mocked(getPersonNotes).mockImplementation((pid) => (pid === 42 ? first.promise : second.promise))
     const { rerender } = setup(42)
     rerender(77)
-    await act(async () => { second.resolve([note(1, { telegram_id: 77, title: 'Bob note' })]) })
+    await act(async () => { second.resolve([note(1, { person_id: 77, title: 'Bob note' })]) })
     await act(async () => { first.resolve([note(1, { title: 'Alice note' })]) })
     expect(screen.getByText('Bob note')).toBeTruthy()
     expect(screen.queryByText('Alice note')).toBeNull()

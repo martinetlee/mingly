@@ -1,11 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { X, Sparkles, Plus, Tag as TagIcon, Users, Crown, Shield, Bot, UserPlus, Image, FileText, LinkIcon, Download, ExternalLink, ShieldPlus, ShieldMinus, Ban, UserCheck, Link2, Settings, ClipboardList, Copy, Trash2, ChevronDown, ChevronUp, History, CheckCircle2, Loader2 } from 'lucide-react'
-import type { Chat, ChatMember, Contact, SharedMediaItem, Tag, TagSuggestion, AdminPermissions, InviteLink, GroupSettings, AdminActionLog } from '../api/types'
-import { getTags, getChatTags, addTagToChat, removeTagFromChat, suggestTags, getChatMembers, getContactByTelegram, createContact, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError, archiveChat } from '../api/client'
+import type { Attachment, Conversation, ChatMember, Person, SharedMediaItem, Tag, TagSuggestion, AdminPermissions, InviteLink, GroupSettings, AdminActionLog } from '../api/types'
+import { getTags, getConversationTags, addTagToConversation, removeTagFromConversation, suggestTags, getConversationMembers, getPerson, getSharedMedia, promoteAdmin, demoteAdmin, banMember, approveMember, getInviteLinks, createInviteLink, revokeInviteLink, getGroupSettings, updateGroupSettings, getAdminActionLog, isAbortError, archiveConversation } from '../api/client'
 import { authenticatedMediaUrl } from '../api/session'
 import ContactInfoSection from './ContactInfoSection'
 import ModerationPanel from './ModerationPanel'
+import ChannelIcon from './ChannelIcon'
+import ConversationAvatar from './ConversationAvatar'
+import { can } from '../lib/capabilities'
+import { conversationTitle, kindLabel } from '../lib/conversation'
+import { personUrl } from '../lib/routes'
 import { useConfirm } from './ui'
 import { reportError, toast } from '../lib/toast'
 import { useAsyncAction } from '../hooks/useAsyncAction'
@@ -30,67 +35,47 @@ const COLOR_DOTS: Record<string, string> = {
   amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
 }
 
-function PrivateContactSection({ chat }: { chat: Chat }) {
-  const [contact, setContact] = useState<Contact | null>(null)
+/** CRM details of a direct conversation's peer (every person has a CRM record) */
+function PeerPersonSection({ personId }: { personId: number }) {
+  const [person, setPerson] = useState<Person | null>(null)
   const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
 
   useEffect(() => {
+    const ac = new AbortController()
     setLoading(true)
-    setContact(null)
-    getContactByTelegram(chat.telegram_id)
-      .then(setContact)
-      .catch(() => setContact(null))
-      .finally(() => setLoading(false))
-  }, [chat.telegram_id])
+    setPerson(null)
+    getPerson(personId, ac.signal)
+      .then(setPerson)
+      .catch((e) => { if (!isAbortError(e)) setPerson(null) })
+      .finally(() => { if (!ac.signal.aborted) setLoading(false) })
+    return () => ac.abort()
+  }, [personId])
 
-  const handleAddToContacts = async () => {
-    setCreating(true)
-    try {
-      const created = await createContact({
-        telegram_id: chat.telegram_id,
-        first_name: chat.name.split(' ')[0] || chat.name,
-        last_name: chat.name.split(' ').slice(1).join(' ') || undefined,
-        username: chat.username || undefined,
-      })
-      setContact(created)
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  const activePosition = contact?.positions?.filter((p) => p.is_active !== false)?.[0] ?? null
+  const activePosition = person?.positions?.filter((p) => p.is_active !== false)?.[0] ?? null
 
   return (
     <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-3">
       <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400 uppercase tracking-wider">
         <UserPlus size={11} />
-        Contact
+        Person
       </div>
 
       {loading ? (
         <p className="text-xs text-slate-500">Loading...</p>
-      ) : !contact ? (
-        <button
-          onClick={handleAddToContacts}
-          disabled={creating}
-          className="flex items-center gap-1.5 self-start rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 hover:text-white disabled:opacity-50 transition-colors"
-        >
-          <UserPlus size={12} />
-          {creating ? 'Adding...' : 'Add to Contacts'}
-        </button>
+      ) : !person ? (
+        <p className="text-xs text-slate-500">Couldn’t load this person</p>
       ) : (
         <>
           {/* Relationship status and recency */}
-          {(contact.relationship_status || contact.last_interaction_at) && (
+          {(person.relationship_status || person.last_interaction_at) && (
             <div className="flex items-center gap-2 text-xs">
-              {contact.relationship_status && (
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RELATIONSHIP_STATUS_COLORS[contact.relationship_status] ?? ''}`}>
-                  {RELATIONSHIP_STATUS_LABELS[contact.relationship_status] ?? contact.relationship_status}
+              {person.relationship_status && (
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${RELATIONSHIP_STATUS_COLORS[person.relationship_status] ?? ''}`}>
+                  {RELATIONSHIP_STATUS_LABELS[person.relationship_status] ?? person.relationship_status}
                 </span>
               )}
-              {contact.last_interaction_at && (
-                <span className="text-slate-500">Last: {fmtRelative(contact.last_interaction_at)}</span>
+              {person.last_interaction_at && (
+                <span className="text-slate-500">Last: {fmtRelative(person.last_interaction_at)}</span>
               )}
             </div>
           )}
@@ -103,12 +88,12 @@ function PrivateContactSection({ chat }: { chat: Chat }) {
           )}
 
           <Link
-            to={`/profile/${chat.telegram_id}`}
+            to={personUrl(person.id)}
             className="text-[10px] text-indigo-400 hover:text-indigo-300 transition-colors self-start"
           >
             View full profile
           </Link>
-          <ContactInfoSection contact={contact} onContactChange={setContact} compact />
+          <ContactInfoSection person={person} onPersonChange={setPerson} compact />
         </>
       )}
     </div>
@@ -124,13 +109,18 @@ function formatFileSize(bytes: number | null): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/** The item's shown attachment (shared-media rows are messages with ≥1 attachment) */
+function firstAttachment(item: SharedMediaItem): Attachment | null {
+  return item.attachments?.[0] ?? null
+}
+
 function extractUrls(text: string | null): string[] {
   if (!text) return []
   const matches = text.match(/https?:\/\/[^\s<>"]+/g)
   return matches ?? []
 }
 
-function SharedMediaSection({ chat }: { chat: Chat }) {
+function SharedMediaSection({ chat }: { chat: Conversation }) {
   const [activeTab, setActiveTab] = useState<SharedMediaTab>('media')
   const [items, setItems] = useState<SharedMediaItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -141,7 +131,7 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
     // Abort on tab/chat switch so a slower earlier response can't populate
     // the currently active tab with the wrong items
     const ac = new AbortController()
-    getSharedMedia(chat.telegram_id, activeTab, 50, 0, ac.signal)
+    getSharedMedia(chat.id, activeTab, 50, 0, ac.signal)
       .then((data) => {
         setItems(data)
         setLoading(false)
@@ -152,7 +142,7 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
         setLoading(false)
       })
     return () => ac.abort()
-  }, [chat.telegram_id, activeTab])
+  }, [chat.id, activeTab])
 
   const tabs: { key: SharedMediaTab; label: string; icon: React.ReactNode }[] = [
     { key: 'media', label: 'Media', icon: <Image size={11} /> },
@@ -189,11 +179,11 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
         </p>
       ) : activeTab === 'media' ? (
         <div className="grid grid-cols-3 gap-1 max-h-64 overflow-y-auto">
-          {items.map((item) => (
+          {items.map((item) => ({ item, media: firstAttachment(item) })).map(({ item, media }) => (
             <div key={item.id} className="relative aspect-square overflow-hidden rounded">
-              {item.media_url ? (
+              {media?.url && media.kind !== 'video' ? (
                 <img
-                  src={authenticatedMediaUrl(item.media_url)}
+                  src={authenticatedMediaUrl(media.url)}
                   alt=""
                   className="h-full w-full object-cover hover:opacity-80 transition-opacity cursor-pointer"
                 />
@@ -202,10 +192,10 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
                   <Image size={16} />
                 </div>
               )}
-              {item.media_type === 'gif' && (
+              {media?.kind === 'gif' && (
                 <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[8px] text-white">GIF</span>
               )}
-              {item.media_type === 'video' && (
+              {media?.kind === 'video' && (
                 <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[8px] text-white">VID</span>
               )}
             </div>
@@ -213,10 +203,10 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
         </div>
       ) : activeTab === 'files' ? (
         <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto">
-          {items.map((item) => (
+          {items.map((item) => ({ item, media: firstAttachment(item) })).map(({ item, media }) => (
             <a
               key={item.id}
-              href={item.media_url ? authenticatedMediaUrl(item.media_url) : '#'}
+              href={media?.url ? authenticatedMediaUrl(media.url) : '#'}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 rounded-lg bg-slate-700/50 px-2.5 py-2 hover:bg-slate-700 transition-colors"
@@ -224,10 +214,10 @@ function SharedMediaSection({ chat }: { chat: Chat }) {
               <FileText size={14} className="flex-shrink-0 text-slate-400" />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs text-slate-200">
-                  {item.media_filename || 'Document'}
+                  {media?.filename || 'Document'}
                 </p>
                 <p className="text-[10px] text-slate-500">
-                  {formatFileSize(item.media_size)}
+                  {formatFileSize(media?.size ?? null)}
                   {item.date && ` \u00b7 ${fmtShortDate(item.date)}`}
                 </p>
               </div>
@@ -279,7 +269,7 @@ const DEFAULT_PERMISSIONS: AdminPermissions = {
   add_admins: false,
 }
 
-function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: ChatMember; onAction: () => void }) {
+function MemberActionMenu({ chat, member, onAction }: { chat: Conversation; member: ChatMember; onAction: () => void }) {
   const [open, setOpen] = useState(false)
   const [showPromote, setShowPromote] = useState(false)
   const [perms, setPerms] = useState<AdminPermissions>({ ...DEFAULT_PERMISSIONS })
@@ -291,7 +281,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
   const handlePromote = async () => {
     setLoading(true)
     try {
-      await promoteAdmin(chat.telegram_id, member.id, perms)
+      await promoteAdmin(chat.id, member.identity_id, perms)
       setShowPromote(false)
       setOpen(false)
       onAction()
@@ -302,7 +292,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
   const handleDemote = async () => {
     setLoading(true)
     try {
-      await demoteAdmin(chat.telegram_id, member.id)
+      await demoteAdmin(chat.id, member.identity_id)
       setOpen(false)
       onAction()
     } catch (e) { reportError(e, 'Demote failed') }
@@ -311,12 +301,12 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
 
   const handleBan = async () => {
     // Target captured now: the confirm acts on this chat/member even if the panel changes
-    const chatId = chat.telegram_id
-    const memberId = member.id
+    const chatId = chat.id
+    const memberId = member.identity_id
     setOpen(false)
     const ok = await confirm({
       title: `Ban ${member.name}?`,
-      message: `They will be removed from ${chat.name} and can't rejoin.`,
+      message: `They will be removed from ${conversationTitle(chat)} and can't rejoin.`,
       destructive: true,
       confirmLabel: 'Ban',
       onConfirm: () => banMember(chatId, memberId),
@@ -327,7 +317,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
   const handleApprove = async () => {
     setLoading(true)
     try {
-      await approveMember(chat.telegram_id, member.id)
+      await approveMember(chat.id, member.identity_id)
       setOpen(false)
       onAction()
     } catch (e) { reportError(e, 'Remove restrictions failed') }
@@ -344,7 +334,7 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
     { key: 'add_admins', label: 'Add admins' },
   ]
 
-  if (chat.type === 'channel') {
+  if (chat.kind === 'channel') {
     permLabels.unshift(
       { key: 'post_messages', label: 'Post messages' },
       { key: 'edit_messages', label: 'Edit messages' },
@@ -411,16 +401,26 @@ function MemberActionMenu({ chat, member, onAction }: { chat: Chat; member: Chat
   )
 }
 
+function MemberBadges({ member: m }: { member: ChatMember }) {
+  return (
+    <div className="flex items-center gap-1">
+      {m.is_bot && <span title="Bot"><Bot size={10} className="text-violet-400" /></span>}
+      {m.role === 'creator' && <span title="Creator"><Crown size={10} className="text-amber-400" /></span>}
+      {m.role === 'admin' && <span title="Admin"><Shield size={10} className="text-sky-400" /></span>}
+    </div>
+  )
+}
+
 function MembersSection({ chat, members, loadingMembers, membersError, onMembersChange }: {
-  chat: Chat
+  chat: Conversation
   members: ChatMember[]
   loadingMembers: boolean
   membersError: string | null
   onMembersChange: (m: ChatMember[]) => void
 }) {
   const refreshMembers = useCallback(() => {
-    getChatMembers(chat.telegram_id).then(onMembersChange).catch((e) => reportError(e, 'Couldn’t refresh members'))
-  }, [chat.telegram_id, onMembersChange])
+    getConversationMembers(chat.id).then(onMembersChange).catch((e) => reportError(e, 'Couldn’t refresh members'))
+  }, [chat.id, onMembersChange])
 
   return (
     <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-2">
@@ -437,23 +437,24 @@ function MembersSection({ chat, members, loadingMembers, membersError, onMembers
       ) : (
         <div className="flex flex-col gap-0.5 max-h-64 overflow-y-auto">
           {members.map((m) => (
-            <div key={m.id} className="flex items-center gap-1">
+            <div key={m.identity_id} className="flex items-center gap-1">
               <div className="flex-1 min-w-0">
-                <PersonCard
-                  telegramId={m.id}
-                  name={m.name}
-                  username={m.username}
-                  showStatus={false}
-                  extraBadge={
-                    <div className="flex items-center gap-1">
-                      {m.is_bot && <span title="Bot"><Bot size={10} className="text-violet-400" /></span>}
-                      {m.role === 'creator' && <span title="Creator"><Crown size={10} className="text-amber-400" /></span>}
-                      {m.role === 'admin' && <span title="Admin"><Shield size={10} className="text-sky-400" /></span>}
-                    </div>
-                  }
-                />
+                {m.person_id != null ? (
+                  <PersonCard
+                    personId={m.person_id}
+                    name={m.name}
+                    username={m.username}
+                    showStatus={false}
+                    extraBadge={<MemberBadges member={m} />}
+                  />
+                ) : (
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-gray-200">
+                    <span className="truncate">{m.name}</span>
+                    <MemberBadges member={m} />
+                  </div>
+                )}
               </div>
-              {!m.is_bot && (
+              {!m.is_bot && can(chat, 'admin_moderation') && (
                 <MemberActionMenu chat={chat} member={m} onAction={refreshMembers} />
               )}
             </div>
@@ -464,7 +465,7 @@ function MembersSection({ chat, members, loadingMembers, membersError, onMembers
   )
 }
 
-function InviteLinksSection({ chat }: { chat: Chat }) {
+function InviteLinksSection({ chat }: { chat: Conversation }) {
   const [expanded, setExpanded] = useState(false)
   const [links, setLinks] = useState<InviteLink[]>([])
   const [loading, setLoading] = useState(false)
@@ -475,11 +476,11 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
 
   const loadLinks = useCallback(() => {
     setLoading(true)
-    getInviteLinks(chat.telegram_id)
+    getInviteLinks(chat.id)
       .then(setLinks)
       .catch(() => setLinks([]))
       .finally(() => setLoading(false))
-  }, [chat.telegram_id])
+  }, [chat.id])
 
   useEffect(() => {
     if (expanded) loadLinks()
@@ -488,7 +489,7 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
   const handleCreate = async () => {
     setCreating(true)
     try {
-      const link = await createInviteLink(chat.telegram_id, {
+      const link = await createInviteLink(chat.id, {
         title: newTitle || undefined,
         usage_limit: newLimit ? parseInt(newLimit, 10) : undefined,
       })
@@ -502,7 +503,7 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
 
   const handleRevoke = async (link: string) => {
     try {
-      await revokeInviteLink(chat.telegram_id, link)
+      await revokeInviteLink(chat.id, link)
       setLinks((prev) => prev.filter((l) => l.link !== link))
     } catch (e) { reportError(e, 'Revoke failed') }
   }
@@ -583,7 +584,7 @@ function InviteLinksSection({ chat }: { chat: Chat }) {
   )
 }
 
-function GroupSettingsSection({ chat }: { chat: Chat }) {
+function GroupSettingsSection({ chat }: { chat: Conversation }) {
   const [expanded, setExpanded] = useState(false)
   const [settings, setSettings] = useState<GroupSettings | null>(null)
   const [loading, setLoading] = useState(false)
@@ -595,7 +596,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
   useEffect(() => {
     if (expanded && !settings) {
       setLoading(true)
-      getGroupSettings(chat.telegram_id)
+      getGroupSettings(chat.id)
         .then((s) => {
           setSettings(s)
           setEditTitle(s.title)
@@ -604,7 +605,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
         .catch((e) => reportError(e, 'Couldn’t load group settings'))
         .finally(() => setLoading(false))
     }
-  }, [expanded, chat.telegram_id, settings])
+  }, [expanded, chat.id, settings])
 
   const handleSave = async () => {
     setSaving(true)
@@ -612,7 +613,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
       const updates: { title?: string; about?: string } = {}
       if (editTitle !== settings?.title) updates.title = editTitle
       if (editAbout !== settings?.about) updates.about = editAbout
-      await updateGroupSettings(chat.telegram_id, updates)
+      await updateGroupSettings(chat.id, updates)
       setSettings({ title: editTitle, about: editAbout })
       setDirty(false)
     } catch (e) { reportError(e, 'Save failed') }
@@ -662,7 +663,7 @@ function GroupSettingsSection({ chat }: { chat: Chat }) {
   )
 }
 
-function AdminActionLogSection({ chat }: { chat: Chat }) {
+function AdminActionLogSection({ chat }: { chat: Conversation }) {
   const [expanded, setExpanded] = useState(false)
   const [logs, setLogs] = useState<AdminActionLog[]>([])
   const [loading, setLoading] = useState(false)
@@ -670,12 +671,12 @@ function AdminActionLogSection({ chat }: { chat: Chat }) {
   useEffect(() => {
     if (expanded) {
       setLoading(true)
-      getAdminActionLog(chat.telegram_id)
+      getAdminActionLog(chat.id)
         .then(setLogs)
         .catch(() => setLogs([]))
         .finally(() => setLoading(false))
     }
-  }, [expanded, chat.telegram_id])
+  }, [expanded, chat.id])
 
   const actionLabel = (action: string) => {
     const labels: Record<string, string> = {
@@ -716,8 +717,10 @@ function AdminActionLogSection({ chat }: { chat: Chat }) {
             logs.map((log) => (
               <div key={log.id} className="rounded bg-slate-700/30 px-2 py-1.5 text-[11px] flex flex-col gap-0.5">
                 <span className={actionColor(log.action)}>{actionLabel(log.action)}</span>
-                {log.target_user_id && (
-                  <span className="text-slate-500">User ID: {log.target_user_id}</span>
+                {log.target_person_id != null ? (
+                  <Link to={personUrl(log.target_person_id)} className="text-slate-400 hover:text-indigo-300">View member</Link>
+                ) : log.target_identity_id != null && (
+                  <span className="text-slate-500">Member #{log.target_identity_id}</span>
                 )}
                 {log.details && (
                   <span className="text-slate-500 truncate">{log.details}</span>
@@ -735,18 +738,18 @@ function AdminActionLogSection({ chat }: { chat: Chat }) {
 }
 
 /**
- * "Archive full history": queues a complete walk of this chat's history
+ * "Archive full history": queues a complete walk of this conversation's history
  * (DMs are also covered by the background archive). Complete once every
  * message from the first one is stored locally.
  */
-export function ArchiveHistorySection({ chat }: { chat: Chat }) {
+export function ArchiveHistorySection({ chat }: { chat: Conversation }) {
   const [queued, setQueued] = useState(false)
   const [complete, setComplete] = useState(!!chat.history_complete)
   const [count, setCount] = useState<number | null>(null)
   useEffect(() => { if (chat.history_complete) setComplete(true) }, [chat.history_complete])
 
   const archive = useAsyncAction(async () => {
-    const res = await archiveChat(chat.telegram_id)
+    const res = await archiveConversation(chat.id)
     setCount(res.coverage.message_count)
     if (res.coverage.history_complete) {
       setComplete(true)
@@ -790,7 +793,9 @@ export function ArchiveHistorySection({ chat }: { chat: Chat }) {
   )
 }
 
-export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: () => void }) {
+export default function ChatInfoPanel({ chat, onClose }: { chat: Conversation; onClose: () => void }) {
+  // Member lists exist for groups and channels
+  const hasMembers = chat.kind === 'group' || chat.kind === 'channel'
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [chatTags, setChatTags] = useState<Tag[]>([])
   const [suggestions, setSuggestions] = useState<TagSuggestion[]>([])
@@ -805,19 +810,19 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
 
   useEffect(() => {
     getTags().then(setAllTags).catch((e) => reportError(e, 'Couldn’t load tags'))
-    getChatTags(chat.telegram_id).then(setChatTags).catch((e) => reportError(e, 'Couldn’t load chat tags'))
+    getConversationTags(chat.id).then(setChatTags).catch((e) => reportError(e, 'Couldn’t load chat tags'))
     setSuggestions([])
-    if (chat.type !== 'private') {
+    if (hasMembers) {
       setLoadingMembers(true)
       setMembersError(null)
-      getChatMembers(chat.telegram_id)
+      getConversationMembers(chat.id)
         .then(setMembers)
         .catch((e) => { setMembersError(e.message); setMembers([]) })
         .finally(() => setLoadingMembers(false))
     } else {
       setMembers([])
     }
-  }, [chat.telegram_id, chat.type])
+  }, [chat.id, hasMembers])
 
   const assignedIds = new Set(chatTags.map((t) => t.id))
   // Stage/stream tags are managed from kanban boards, not the general picker
@@ -829,7 +834,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
   const handleAdd = async (tag: Tag): Promise<boolean> => {
     if (assignedIds.has(tag.id)) return true
     try {
-      await addTagToChat(chat.telegram_id, tag.id)
+      await addTagToConversation(chat.id, tag.id)
     } catch (e) {
       toast.error(`Couldn’t add tag: ${tagErrorMessage(e, tag.name)}`)
       return false
@@ -856,7 +861,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
 
   const handleRemove = async (tag: Tag) => {
     try {
-      await removeTagFromChat(chat.telegram_id, tag.id)
+      await removeTagFromConversation(chat.id, tag.id)
       setChatTags((prev) => prev.filter((t) => t.id !== tag.id))
     } catch (e) {
       reportError(e, 'Remove tag failed')
@@ -877,7 +882,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
   const handleSuggest = async () => {
     setSuggesting(true)
     try {
-      const results = await suggestTags(chat.telegram_id)
+      const results = await suggestTags(chat.id)
       setSuggestions(results)
     } catch (e) {
       reportError(e, 'Tag suggestions failed')
@@ -894,27 +899,31 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
   }
 
   const typeColor = {
-    private: 'bg-indigo-500/20 text-indigo-400',
+    direct: 'bg-indigo-500/20 text-indigo-400',
     group: 'bg-purple-500/20 text-purple-400',
     channel: 'bg-amber-500/20 text-amber-400',
-  }[chat.type] ?? 'bg-slate-600 text-slate-400'
+    email_thread: 'bg-sky-500/20 text-sky-400',
+  }[chat.kind] ?? 'bg-slate-600 text-slate-400'
+  const peerPersonId = chat.kind === 'direct' ? chat.peer?.person_id ?? null : null
+  const title = conversationTitle(chat)
+  const isAdmin = can(chat, 'admin_moderation')
 
   return (
     <div className="flex w-72 flex-shrink-0 flex-col border-l border-slate-700/50 bg-slate-800 overflow-y-auto">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-slate-700/50 px-4 py-3">
-        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Chat Info</span>
+        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Conversation Info</span>
         <button onClick={onClose} className="rounded p-1 text-slate-500 hover:text-slate-300 transition-colors">
           <X size={14} />
         </button>
       </div>
 
-      {/* Chat identity -- PersonCard for private chats, simple display for groups/channels */}
-      {chat.type === 'private' ? (
+      {/* Identity -- PersonCard for a direct conversation's peer, simple display otherwise */}
+      {peerPersonId != null ? (
         <div className="px-4 py-5 border-b border-slate-700/50">
           <PersonCard
-            telegramId={chat.telegram_id}
-            name={chat.name}
+            personId={peerPersonId}
+            name={title}
             username={chat.username}
             mode="full"
             showStatus
@@ -922,11 +931,12 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
         </div>
       ) : (
         <div className="flex flex-col items-center gap-2 px-4 py-5 border-b border-slate-700/50">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300">
-            {chat.name.charAt(0).toUpperCase()}
-          </div>
-          <p className="text-sm font-semibold text-gray-100 text-center leading-snug">{chat.name}</p>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${typeColor}`}>{chat.type}</span>
+          <ConversationAvatar conversation={chat} size={56} />
+          <p className="text-sm font-semibold text-gray-100 text-center leading-snug">{title}</p>
+          <span className="flex items-center gap-1.5">
+            <ChannelIcon channel={chat.channel} />
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${typeColor}`}>{kindLabel(chat.kind)}</span>
+          </span>
         </div>
       )}
 
@@ -1108,30 +1118,30 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Chat; onClose: 
       </div>
 
       {/* Full-history archive: groups/channels on demand, DMs until complete */}
-      {(chat.type !== 'private' || !chat.history_complete) && (
-        <ArchiveHistorySection key={chat.telegram_id} chat={chat} />
+      {can(chat, 'history_backfill') && (chat.kind !== 'direct' || !chat.history_complete) && (
+        <ArchiveHistorySection key={chat.id} chat={chat} />
       )}
 
       {/* Shared media section */}
       <SharedMediaSection chat={chat} />
 
-      {/* Contact section (private chats only) */}
-      {chat.type === 'private' && (
-        <PrivateContactSection chat={chat} />
+      {/* The peer's CRM record (direct conversations) */}
+      {peerPersonId != null && (
+        <PeerPersonSection key={peerPersonId} personId={peerPersonId} />
       )}
 
-      {/* Moderation controls (groups/channels) */}
-      {chat.type !== 'private' && (
-        <ModerationPanel key={chat.telegram_id} chat={chat} />
+      {/* Moderation controls (capability 'admin_moderation') */}
+      {isAdmin && chat.kind !== 'direct' && (
+        <ModerationPanel key={chat.id} chat={chat} />
       )}
 
-      {/* Members section (groups/channels only) */}
-      {chat.type !== 'private' && (
+      {/* Members section (groups/channels) */}
+      {hasMembers && (
         <MembersSection chat={chat} members={members} loadingMembers={loadingMembers} membersError={membersError} onMembersChange={setMembers} />
       )}
 
-      {/* Admin sections (groups/channels only) */}
-      {chat.type !== 'private' && (
+      {/* Admin sections (capability 'admin_moderation') */}
+      {isAdmin && chat.kind !== 'direct' && (
         <>
           <InviteLinksSection chat={chat} />
           <GroupSettingsSection chat={chat} />

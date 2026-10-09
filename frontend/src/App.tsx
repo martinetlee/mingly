@@ -15,7 +15,8 @@ import Organizations from './pages/Organizations'
 import Settings from './pages/Settings'
 import Tracked from './pages/Tracked'
 import Intelligence from './pages/Intelligence'
-import Profile from './pages/Profile'
+import Person from './pages/Person'
+import Mention from './pages/Mention'
 import Shield from './pages/Shield'
 import LlmSetup from './pages/LlmSetup'
 import Board from './pages/Board'
@@ -208,7 +209,8 @@ function AppRoot() {
             <Route path="shield" element={<ShieldRoute />} />
             <Route path="briefing" element={<Navigate to="/intelligence?tab=briefing" replace />} />
             <Route path="intelligence" element={<Intelligence />} />
-            <Route path="profile/:userId" element={<Profile />} />
+            <Route path="people/:personId" element={<Person />} />
+            <Route path="mention/:channel/:externalId" element={<Mention />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

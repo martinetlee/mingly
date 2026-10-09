@@ -5,19 +5,20 @@ import type { CatchUpItem, DashboardData, DashboardNeedsReply } from '../../api/
 vi.mock('../../api/client', () => ({}))
 
 import { applyTriageUpdate, NoteEditor, TriageCard } from '../CatchUpQueue'
+import { makeConversation } from '../../pages/chats/__tests__/fixtures'
 
 const item = (id: number, date: string, triage: CatchUpItem | null = null): DashboardNeedsReply => ({
-  chat: { telegram_id: id, name: `Chat ${id}`, type: 'private' } as DashboardNeedsReply['chat'],
+  conversation: makeConversation(id, `Chat ${id}`, { kind: 'direct' }),
   last_message: { sender_name: 'X', text: 'hi', date },
   triage,
   context: null,
 })
 const triage = (id: number, status: CatchUpItem['status'], extra: Partial<CatchUpItem> = {}): CatchUpItem => ({
-  id, chat_telegram_id: id, contact_id: null, status, note: null, snoozed_until: null,
+  id, conversation_id: id, person_id: null, status, note: null, snoozed_until: null,
   handled_at: null, created_at: null, updated_at: null, ...extra,
 })
 const dash = (needs: DashboardNeedsReply[], handled: DashboardNeedsReply[] = []): DashboardData => ({
-  stats: { unread_today: 0 }, needs_reply: needs, recently_handled: handled, attention_contacts: [], latest_briefing: null,
+  stats: { unread_today: 0 }, needs_reply: needs, recently_handled: handled, attention_people: [], latest_briefing: null,
 })
 
 describe('applyTriageUpdate', () => {
@@ -26,11 +27,11 @@ describe('applyTriageUpdate', () => {
   it('moves a handled chat to recently_handled and back on reopen (ordered by last message)', () => {
     const d = dash([item(1, '2026-10-06T10:00:00Z'), item(2, '2026-10-06T11:00:00Z')])
     const handled = applyTriageUpdate(d, triage(1, 'handled'), now)
-    expect(handled.needs_reply.map((i) => i.chat.telegram_id)).toEqual([2])
-    expect(handled.recently_handled?.map((i) => i.chat.telegram_id)).toEqual([1])
+    expect(handled.needs_reply.map((i) => i.conversation.id)).toEqual([2])
+    expect(handled.recently_handled?.map((i) => i.conversation.id)).toEqual([1])
 
     const reopened = applyTriageUpdate(handled, triage(1, 'pending'), now)
-    expect(reopened.needs_reply.map((i) => i.chat.telegram_id)).toEqual([2, 1])
+    expect(reopened.needs_reply.map((i) => i.conversation.id)).toEqual([2, 1])
     expect(reopened.recently_handled).toEqual([])
   })
 

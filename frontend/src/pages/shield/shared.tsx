@@ -3,7 +3,7 @@ import { Cloud, CloudOff, ShieldAlert, ShieldCheck } from 'lucide-react'
 import type { ScamFields, ScannedMessage } from '../../api/types'
 
 /** Stable row id for a scanned message (selection, spinners, trace toggles). */
-export const messageKey = (m: { chat_id: number; tg_message_id: number }) => `${m.chat_id}-${m.tg_message_id}`
+export const messageKey = (m: { message_id: number }) => String(m.message_id)
 
 export function stripFormatting(text: string): string {
   return text

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { VirtuosoHandle } from 'react-virtuoso'
 import { ArrowDown, Loader2 } from 'lucide-react'
-import type { Message } from '../api/types'
+import type { ChannelName, Message, MessageSender } from '../api/types'
 import type { ScrollIntent } from '../hooks/useChatMessages'
 import { parseServerDate } from '../utils/time'
 import MessageBubble, { ServiceMessage } from './MessageBubble'
@@ -11,18 +11,21 @@ import type { ScamVerdictScope } from './MessageBubble'
 
 interface Props {
   messages: Message[]
-  chatType: string
+  /** Group / channel / email thread: show sender names and avatars */
+  multiParty: boolean
+  channel?: ChannelName | null
   /** Visual highlight only (scrolling is driven by `scrollIntent`) */
-  highlightTelegramId?: number | null
+  highlightMessageId?: number | null
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
   onEdit?: (msg: Message) => void
   onDelete?: (msg: Message, album?: Message[]) => void
   onForward?: (msg: Message, album?: Message[]) => void
   onPin?: (msg: Message) => void
-  onJumpToMessage?: (tgId: number) => void
+  onJumpToMessage?: (messageId: number) => void
+  onJumpToExternal?: (externalId: string) => void
   /** The unread separator is drawn above this message */
-  firstUnreadTgId?: number | null
+  firstUnreadMessageId?: number | null
   /**
    * One-shot scroll request: each intent id is performed once, then ignored
    * (re-renders and new messages never re-centre the view). Without it the
@@ -39,15 +42,15 @@ interface Props {
   /** The window isn't at the newest message (show "Jump to latest") */
   hasNewer?: boolean
   onJumpToLatest?: () => void
-  /** Set of telegram IDs flagged as scammers */
+  /** Identity ids flagged as scammers */
   flaggedSenderIds?: Set<number>
   onReportScam?: (msg: Message) => void
   onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void
   /** Avatar context menu callbacks */
-  onOpenProfile?: (senderId: number) => void
-  onSendMessage?: (senderId: number) => void
-  onMention?: (senderId: number, senderName: string) => void
-  onRestrict?: (senderId: number, chatId: number) => void
+  onOpenProfile?: (sender: MessageSender) => void
+  onSendMessage?: (sender: MessageSender) => void
+  onMention?: (sender: MessageSender) => void
+  onRestrict?: (sender: MessageSender, conversationId: number) => void
 }
 
 export interface Item {
@@ -64,7 +67,7 @@ export interface Item {
 }
 
 /** Group consecutive messages sharing a grouped_id into album items, with sender/day separators. */
-export function buildItems(messages: Message[], isGroup: boolean): Item[] {
+export function buildItems(messages: Message[], multiParty: boolean): Item[] {
   const result: Item[] = []
   const thisYear = new Date().getFullYear()
   let prevMsg: Message | undefined
@@ -84,13 +87,13 @@ export function buildItems(messages: Message[], isGroup: boolean): Item[] {
     const prevDate = prevMsg ? parseServerDate(prevMsg.date) : null
     result.push({
       type: isService ? 'service' : isAlbum ? 'album' : 'single',
-      key: isAlbum ? `a${msg.grouped_id}` : `m${msg.tg_message_id}`,
+      key: isAlbum ? `a${msg.grouped_id}` : `m${msg.id}`,
       message: primary,
       album: isAlbum ? group : undefined,
-      ids: group.map((m) => m.tg_message_id),
+      ids: group.map((m) => m.id),
       // A bubble after a service line starts a new sender run
-      showSender: !isService && isGroup && !primary.is_outgoing
-        && (prevMsg?.kind === 'service' || primary.sender_name !== prevMsg?.sender_name),
+      showSender: !isService && multiParty && !primary.is_outgoing
+        && (prevMsg?.kind === 'service' || primary.sender?.name !== prevMsg?.sender?.name),
       dateLabel: date && (!prevDate || date.toDateString() !== prevDate.toDateString())
         ? date.toLocaleDateString([], { day: 'numeric', month: 'long', year: date.getFullYear() !== thisYear ? 'numeric' : undefined })
         : null,
@@ -154,11 +157,11 @@ const ListFooter = ({ context }: { context?: ListContext }) => (
 const COMPONENTS = { Header: ListHeader, Footer: ListFooter }
 
 export default function MessageList({
-  messages, chatType, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
-  firstUnreadTgId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header,
+  messages, multiParty, channel, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
+  onJumpToExternal, firstUnreadMessageId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header,
   hasNewer, onJumpToLatest, flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict,
 }: Props) {
-  const isGroup = chatType === 'group' || chatType === 'channel'
+  const isGroup = multiParty
   const items = useMemo(() => buildItems(messages, isGroup), [messages, isGroup])
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [atBottom, setAtBottom] = useState(true)
@@ -201,7 +204,7 @@ export default function MessageList({
   }, [])
   const consumedIntentRef = useRef<number | null>(null)
 
-  const indexOfTg = useCallback((tgId: number) => items.findIndex((it) => it.ids.includes(tgId)), [items])
+  const indexOfMessage = useCallback((messageId: number) => items.findIndex((it) => it.ids.includes(messageId)), [items])
 
   // firstItemIndex bookkeeping, recomputed in the same render as the data. A
   // new (non-overlapping) window bumps `generation`, remounting Virtuoso at
@@ -217,7 +220,7 @@ export default function MessageList({
     let { initialTop, initialIntentId } = prev
     if (replaced) {
       const pending = scrollIntent && consumedIntentRef.current !== scrollIntent.id ? scrollIntent : null
-      const idx = pending?.kind === 'message' ? items.findIndex((it) => it.ids.includes(pending.tgId)) : -1
+      const idx = pending?.kind === 'message' ? items.findIndex((it) => it.ids.includes(pending.messageId)) : -1
       // Bottom: overshoot past the footer — the browser clamps to the true end
       initialTop = idx >= 0
         ? { index: idx, align: 'center', offset: 0 }
@@ -246,11 +249,11 @@ export default function MessageList({
       consumedIntentRef.current = scrollIntent.id
       return
     }
-    const idx = indexOfTg(scrollIntent.tgId)
+    const idx = indexOfMessage(scrollIntent.messageId)
     if (idx < 0) return // not in the window (yet)
     virtuosoRef.current?.scrollToIndex({ index: idx, align: 'center' })
     consumedIntentRef.current = scrollIntent.id
-  }, [scrollIntent, items.length, indexOfTg, pinBottom])
+  }, [scrollIntent, items.length, indexOfMessage, pinBottom])
 
   const onHeightChanged = useCallback(() => {
     if (hasNewer) return
@@ -273,18 +276,19 @@ export default function MessageList({
   const itemContent = useCallback((_index: number, item: Item) => {
     const msg = item.message
     return (
-      <div data-tg-ids={item.ids.join(' ')} className="px-4">
+      <div data-message-ids={item.ids.join(' ')} className="px-4">
         {item.dateLabel && (
           <div className="flex items-center justify-center py-2 my-1">
             <span className="text-[11px] font-medium text-slate-500">{item.dateLabel}</span>
           </div>
         )}
-        {firstUnreadTgId != null && item.ids.includes(firstUnreadTgId) && <UnreadSeparator />}
+        {firstUnreadMessageId != null && item.ids.includes(firstUnreadMessageId) && <UnreadSeparator />}
         {item.type === 'service' ? (
           <ServiceMessage
             message={msg}
-            highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
+            highlighted={highlightMessageId != null && item.ids.includes(highlightMessageId)}
             onJumpToMessage={onJumpToMessage}
+            onJumpToExternal={onJumpToExternal}
           />
         ) : (
           <MessageBubble
@@ -293,7 +297,8 @@ export default function MessageList({
             showSender={item.showSender}
             showAvatar={item.showSender}
             isGroupChat={isGroup}
-            highlighted={highlightTelegramId != null && item.ids.includes(highlightTelegramId)}
+            highlighted={highlightMessageId != null && item.ids.includes(highlightMessageId)}
+            channel={channel}
             onReply={onReply}
             onReact={onReact}
             onEdit={onEdit}
@@ -301,7 +306,8 @@ export default function MessageList({
             onForward={onForward}
             onPin={onPin}
             onJumpToMessage={onJumpToMessage}
-            isFlaggedSender={msg.sender_id != null && !!flaggedSenderIds?.has(msg.sender_id)}
+            onJumpToExternal={onJumpToExternal}
+            isFlaggedSender={msg.sender?.identity_id != null && !!flaggedSenderIds?.has(msg.sender.identity_id)}
             onReportScam={onReportScam}
             onScamVerdict={onScamVerdict}
             onOpenProfile={onOpenProfile}
@@ -312,7 +318,7 @@ export default function MessageList({
         )}
       </div>
     )
-  }, [firstUnreadTgId, isGroup, highlightTelegramId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
+  }, [firstUnreadMessageId, isGroup, channel, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage, onJumpToExternal,
     flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict])
 
   if (items.length === 0) {

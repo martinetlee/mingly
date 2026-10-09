@@ -1,20 +1,20 @@
 /**
- * Message pane state for one view scope {chatId, topicId} on the keyset
+ * Message pane state for one view scope {conversationId, topicId} on the keyset
  * window API (GET /api/chats/{id}/messages/window).
  *
  * Every async result is applied only if it still belongs to the current
  * scope *and* window generation: a scope change or a jump bumps the
- * generation and aborts everything in flight, so a slow page for chat A can
- * never land in chat B, and an older-page load can't splice into a window
+ * generation and aborts everything in flight, so a slow page for conversation A
+ * can never land in conversation B, and an older-page load can't splice into a window
  * that a jump has since replaced.
  *
  * The window tracks {hasOlder, hasNewer}; WS messages are appended only while
  * it is at latest. When local history runs out, older history is backfilled
- * from Telegram (POST /backfill) until it reports `exhausted`.
+ * from the channel (POST /backfill) until it reports `exhausted`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AnchorReason, Message, MessageWindow, ScamMsgState } from '../api/types'
-import { backfillChat, getMessageWindow, isAbortError } from '../api/client'
+import { backfillConversation, getMessageWindow, isAbortError } from '../api/client'
 import type { MessageWindowParams } from '../api/client'
 import { useWsEvent } from './useWebSocket'
 import { errorMessage } from '../lib/toast'
@@ -29,23 +29,31 @@ export const PAGE_SIZE = 50
 export const HIGHLIGHT_MS = 3000
 
 export interface ChatMessagesScope {
-  chatId: number | null
+  conversationId: number | null
   topicId: number | null
   /** Open the scope centred on this message (search hit, mention, notification) */
-  anchorTgId?: number | null
-  /** Unread count when the chat was selected — places the unread separator */
+  anchorMessageId?: number | null
+  /** …or on a message known only by the channel's id (fetched via around_external_id) */
+  anchorExternalId?: string | null
+  /** Unread count when the conversation was selected — places the unread separator */
   unreadCount?: number
   /** Bumped by every selectChat(): re-opening the same scope reloads it */
   nonce: number
+  /** The conversation can fetch older history from its channel (capability 'history_backfill'; default true) */
+  canBackfill?: boolean
 }
 
 export type ScrollIntent =
   | { id: number; kind: 'bottom' }
-  | { id: number; kind: 'message'; tgId: number }
+  | { id: number; kind: 'message'; messageId: number }
 
 export type BackfillState = 'idle' | 'loading' | 'exhausted' | 'retry'
 
-export type JumpTarget = { kind: 'message'; tgId: number } | { kind: 'date'; date: string }
+export type JumpTarget =
+  | { kind: 'message'; messageId: number }
+  /** A message not stored locally (e.g. a reply target), fetched from the channel by its own id */
+  | { kind: 'external'; externalId: string }
+  | { kind: 'date'; date: string }
 
 /** A jump whose target couldn't be shown (shown inline; the window is left as it was) */
 export interface JumpNotice {
@@ -57,11 +65,11 @@ export interface JumpNotice {
 }
 
 export interface ChatMessagesState extends WindowSlice {
-  /** Scope the state belongs to ("chatId|topicId"); null when nothing is open */
+  /** Scope the state belongs to ("conversationId|topicId"); null when nothing is open */
   scopeKey: string | null
   /** The initial window for this scope hasn't arrived yet */
   loading: boolean
-  /** A jump/date window is replacing the current one (may be fetching from Telegram: ~1 s) */
+  /** A jump/date window is replacing the current one (may be fetching from the channel: ~1 s) */
   replacing: boolean
   /** What the in-flight replacement is jumping to */
   jumpingTo: JumpTarget | null
@@ -71,15 +79,15 @@ export interface ChatMessagesState extends WindowSlice {
   loadingNewer: boolean
   backfill: BackfillState
   backfillError: string | null
-  /** The server reported a Telegram sync of this chat in flight */
+  /** The server reported a channel sync of this conversation in flight */
   syncing: boolean
   /** Auto-sync gave up (chat_sync_failed) */
   syncFailed: { status: string; error: string | null } | null
   /** A completed fetch found no retrievable history (chat_sync_empty) */
   syncEmpty: boolean
-  firstUnreadTgId: number | null
+  firstUnreadMessageId: number | null
   /** Visual highlight (cleared after HIGHLIGHT_MS) */
-  highlightTgId: number | null
+  highlightMessageId: number | null
   /** One-shot scroll request for MessageList (consumed by id) */
   scrollIntent: ScrollIntent | null
 }
@@ -88,39 +96,41 @@ const EMPTY: ChatMessagesState = {
   scopeKey: null, messages: [], hasOlder: false, hasNewer: false,
   loading: false, replacing: false, jumpingTo: null, jumpNotice: null, error: null, loadingOlder: false, loadingNewer: false,
   backfill: 'idle', backfillError: null, syncing: false, syncFailed: null, syncEmpty: false,
-  firstUnreadTgId: null, highlightTgId: null, scrollIntent: null,
+  firstUnreadMessageId: null, highlightMessageId: null, scrollIntent: null,
 }
 
-export function scopeKeyOf(chatId: number | null, topicId: number | null): string | null {
-  return chatId == null ? null : `${chatId}|${topicId ?? ''}`
+export function scopeKeyOf(conversationId: number | null, topicId: number | null): string | null {
+  return conversationId == null ? null : `${conversationId}|${topicId ?? ''}`
 }
 
 let intentSeq = 0
 let noticeSeq = 0
-const nextIntent = (i: { kind: 'bottom' } | { kind: 'message'; tgId: number }): ScrollIntent => ({ id: ++intentSeq, ...i })
+const nextIntent = (i: { kind: 'bottom' } | { kind: 'message'; messageId: number }): ScrollIntent => ({ id: ++intentSeq, ...i })
 
 export interface ChatMessages extends ChatMessagesState {
   atLatest: boolean
   loadOlder: () => Promise<void>
   loadNewer: () => Promise<void>
-  /** Fetch older history from Telegram (also triggered by loadOlder when local history is exhausted) */
-  fetchOlderFromTelegram: () => Promise<void>
-  jumpTo: (tgId: number) => Promise<void>
+  /** Fetch older history from the channel (also triggered by loadOlder when local history is exhausted) */
+  fetchOlderFromChannel: () => Promise<void>
+  jumpTo: (messageId: number) => Promise<void>
+  /** Jump to a message by the channel's id (fetched from the channel when not stored) */
+  jumpToExternal: (externalId: string) => Promise<void>
   jumpToDate: (isoDate: string) => Promise<void>
   jumpToLatest: () => Promise<void>
   /** Re-read the newest page and merge it (after a sync/reconnect) */
   refresh: () => Promise<void>
-  /** A message for this chat (own send / WS); ignored when it's out of scope */
+  /** A message for this conversation (own send / WS); ignored when it's out of scope */
   applyMessage: (msg: Message) => void
-  patchMessage: (tgId: number, patch: Partial<Message> | ((m: Message) => Message)) => void
-  removeMessages: (tgIds: number[]) => void
+  patchMessage: (messageId: number, patch: Partial<Message> | ((m: Message) => Message)) => void
+  removeMessages: (messageIds: number[]) => void
   clearHighlight: () => void
   dismissJumpNotice: () => void
 }
 
 export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
-  const { chatId, topicId, nonce } = scope
-  const key = scopeKeyOf(chatId, topicId)
+  const { conversationId, topicId, nonce } = scope
+  const key = scopeKeyOf(conversationId, topicId)
   const [state, setState] = useState<ChatMessagesState>(EMPTY)
   const stateRef = useRef(state)
   stateRef.current = state
@@ -153,11 +163,11 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     setState((s) => (s.scopeKey === forKey ? fn(s) : s))
   }, [])
 
-  const highlight = useCallback((forKey: string | null, tgId: number) => {
+  const highlight = useCallback((forKey: string | null, messageId: number) => {
     if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
-    update(forKey, (s) => ({ ...s, highlightTgId: tgId }))
+    update(forKey, (s) => ({ ...s, highlightMessageId: messageId }))
     highlightTimerRef.current = setTimeout(() => {
-      update(forKey, (s) => (s.highlightTgId === tgId ? { ...s, highlightTgId: null } : s))
+      update(forKey, (s) => (s.highlightMessageId === messageId ? { ...s, highlightMessageId: null } : s))
     }, HIGHLIGHT_MS)
   }, [update])
 
@@ -172,7 +182,7 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     },
   ) => {
     const forKey = keyRef.current
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     if (forKey == null || id == null) return
     const gen = ++genRef.current
     abortAll()
@@ -203,7 +213,7 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
         jumpNotice: notice,
         syncing: page.syncing,
         backfill: page.has_older ? 'idle' : s.backfill === 'exhausted' ? 'exhausted' : 'idle',
-        firstUnreadTgId: opts.initial ? firstUnreadId(page.messages, scopeRef.current.unreadCount ?? 0) : s.firstUnreadTgId,
+        firstUnreadMessageId: opts.initial ? firstUnreadId(page.messages, scopeRef.current.unreadCount ?? 0) : s.firstUnreadMessageId,
         scrollIntent: intent,
       }))
       if (highlightId != null) highlight(forKey, highlightId)
@@ -226,16 +236,27 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     initial: true,
     pick: (page) => {
       const unread = firstUnreadId(page.messages, scopeRef.current.unreadCount ?? 0)
-      return { intent: unread != null ? nextIntent({ kind: 'message', tgId: unread }) : nextIntent({ kind: 'bottom' }) }
+      return { intent: unread != null ? nextIntent({ kind: 'message', messageId: unread }) : nextIntent({ kind: 'bottom' }) }
     },
   }), [loadWindow])
 
-  const loadAnchor = useCallback((tgId: number, initial: boolean) => loadWindow({ anchor: tgId }, {
+  const loadAnchor = useCallback((messageId: number, initial: boolean) => loadWindow({ anchor: messageId }, {
     initial,
-    target: { kind: 'message', tgId },
+    target: { kind: 'message', messageId },
     pick: (page) => page.anchor_found
-      ? { intent: nextIntent({ kind: 'message', tgId }), highlightId: tgId }
+      ? { intent: nextIntent({ kind: 'message', messageId }), highlightId: messageId }
       : { intent: nextIntent({ kind: 'bottom' }), notFound: true },
+  }), [loadWindow])
+
+  const loadExternal = useCallback((externalId: string, initial: boolean) => loadWindow({ aroundExternalId: externalId }, {
+    initial,
+    target: { kind: 'external', externalId },
+    pick: (page) => {
+      const target = page.anchor_found ? page.messages.find((m) => m.external_id === externalId) : undefined
+      return target
+        ? { intent: nextIntent({ kind: 'message', messageId: target.id }), highlightId: target.id }
+        : { intent: nextIntent({ kind: 'bottom' }), notFound: true }
+    },
   }), [loadWindow])
 
   // Scope change (or re-selection): reset and load the first window
@@ -247,8 +268,9 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
     setState({ ...EMPTY, scopeKey: key, loading: key != null })
     if (key == null) return
-    const anchor = scopeRef.current.anchorTgId
+    const { anchorMessageId: anchor, anchorExternalId: external } = scopeRef.current
     if (anchor != null) void loadAnchor(anchor, true)
+    else if (external) void loadExternal(external, true)
     else void loadLatestInitial()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, nonce])
@@ -258,16 +280,16 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
   }, [abortAll])
 
-  const fetchOlderFromTelegram = useCallback(async () => {
+  const fetchOlderFromChannel = useCallback(async () => {
     const forKey = keyRef.current
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     if (forKey == null || id == null || backfillInFlight.current) return
     backfillInFlight.current = true
     const gen = genRef.current
     const ctl = newCtl()
     update(forKey, (s) => ({ ...s, backfill: 'loading', backfillError: null }))
     try {
-      const res = await backfillChat(id, { limit: 100, topicId: scopeRef.current.topicId }, ctl.signal)
+      const res = await backfillConversation(id, { limit: 100, topicId: scopeRef.current.topicId }, ctl.signal)
       if (gen !== genRef.current) return
       if (res.added > 0) {
         const s = stateRef.current
@@ -297,11 +319,11 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
 
   const loadOlder = useCallback(async () => {
     const forKey = keyRef.current
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     const s = stateRef.current
     if (forKey == null || id == null || s.loading || s.replacing || olderInFlight.current) return
     if (!s.hasOlder) {
-      if (s.backfill === 'idle' && s.messages.length > 0) await fetchOlderFromTelegram()
+      if (s.backfill === 'idle' && s.messages.length > 0 && scopeRef.current.canBackfill !== false) await fetchOlderFromChannel()
       return
     }
     const oldest = s.messages[0]
@@ -321,11 +343,11 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
       ctlsRef.current.delete(ctl)
       if (gen === genRef.current) olderInFlight.current = false
     }
-  }, [fetchOlderFromTelegram, newCtl, update])
+  }, [fetchOlderFromChannel, newCtl, update])
 
   const loadNewer = useCallback(async () => {
     const forKey = keyRef.current
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     const s = stateRef.current
     if (forKey == null || id == null || !s.hasNewer || s.loading || s.replacing || newerInFlight.current) return
     const newest = s.messages[s.messages.length - 1]
@@ -347,15 +369,15 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     }
   }, [newCtl, update])
 
-  const jumpTo = useCallback(async (tgId: number) => {
+  const jumpTo = useCallback(async (messageId: number) => {
     const forKey = keyRef.current
     if (forKey == null) return
-    if (stateRef.current.messages.some((m) => m.tg_message_id === tgId)) {
-      update(forKey, (s) => ({ ...s, scrollIntent: nextIntent({ kind: 'message', tgId }) }))
-      highlight(forKey, tgId)
+    if (stateRef.current.messages.some((m) => m.id === messageId)) {
+      update(forKey, (s) => ({ ...s, scrollIntent: nextIntent({ kind: 'message', messageId }) }))
+      highlight(forKey, messageId)
       return
     }
-    await loadAnchor(tgId, false)
+    await loadAnchor(messageId, false)
   }, [highlight, loadAnchor, update])
 
   const jumpToDate = useCallback((isoDate: string) => loadWindow({ date: isoDate }, {
@@ -364,10 +386,18 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
     pick: (page) => {
       const target = page.messages.find((m) => m.date >= isoDate) ?? page.messages[page.messages.length - 1]
       return target && page.anchor_found
-        ? { intent: nextIntent({ kind: 'message', tgId: target.tg_message_id }), highlightId: target.tg_message_id }
+        ? { intent: nextIntent({ kind: 'message', messageId: target.id }), highlightId: target.id }
         : { intent: nextIntent({ kind: 'bottom' }), notFound: true }
     },
   }), [loadWindow])
+
+  const jumpToExternal = useCallback(async (externalId: string) => {
+    const forKey = keyRef.current
+    if (forKey == null) return
+    const local = stateRef.current.messages.find((m) => m.external_id === externalId)
+    if (local) { await jumpTo(local.id); return }
+    await loadExternal(externalId, false)
+  }, [jumpTo, loadExternal])
 
   const dismissJumpNotice = useCallback(() => {
     update(keyRef.current, (s) => ({ ...s, jumpNotice: null }))
@@ -385,7 +415,7 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
 
   const refresh = useCallback(async () => {
     const forKey = keyRef.current
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     if (forKey == null || id == null) return
     const s = stateRef.current
     if (s.loading || s.replacing) return
@@ -421,16 +451,16 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
   const applyMessage = useCallback((msg: Message) => {
     const forKey = keyRef.current
     const sc = scopeRef.current
-    if (forKey == null || sc.chatId == null || !inScope(msg, { chatId: sc.chatId, topicId: sc.topicId })) return
+    if (forKey == null || sc.conversationId == null || !inScope(msg, { conversationId: sc.conversationId, topicId: sc.topicId })) return
     update(forKey, (s) => {
       const next = applyLive(s, msg)
       return next === s ? s : { ...s, ...next, syncEmpty: false }
     })
   }, [update])
 
-  const patchMessage = useCallback((tgId: number, patch: Partial<Message> | ((m: Message) => Message)) => {
+  const patchMessage = useCallback((messageId: number, patch: Partial<Message> | ((m: Message) => Message)) => {
     update(keyRef.current, (s) => {
-      const idx = s.messages.findIndex((m) => m.tg_message_id === tgId)
+      const idx = s.messages.findIndex((m) => m.id === messageId)
       if (idx === -1) return s
       const messages = [...s.messages]
       messages[idx] = typeof patch === 'function' ? patch(messages[idx]) : { ...messages[idx], ...patch }
@@ -439,25 +469,25 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
   }, [update])
 
   const replaceIfPresent = useCallback((msg: Message) => {
-    patchMessage(msg.tg_message_id, () => msg)
+    patchMessage(msg.id, () => msg)
   }, [patchMessage])
 
-  const removeMessages = useCallback((tgIds: number[]) => {
-    const ids = new Set(tgIds)
+  const removeMessages = useCallback((messageIds: number[]) => {
+    const ids = new Set(messageIds)
     update(keyRef.current, (s) => {
-      const messages = s.messages.filter((m) => !ids.has(m.tg_message_id))
+      const messages = s.messages.filter((m) => !ids.has(m.id))
       return messages.length === s.messages.length ? s : { ...s, messages }
     })
   }, [update])
 
-  const applyScamStates = useCallback((eventChatId: number, entries: ScamMsgState[] | undefined) => {
-    if (!entries?.length || eventChatId !== scopeRef.current.chatId) return
-    const byId = new Map(entries.filter((e) => e.chat_id === eventChatId).map((e) => [e.tg_message_id, e]))
+  const applyScamStates = useCallback((eventConversationId: number, entries: ScamMsgState[] | undefined) => {
+    if (!entries?.length || eventConversationId !== scopeRef.current.conversationId) return
+    const byId = new Map(entries.filter((e) => e.conversation_id === eventConversationId).map((e) => [e.message_id, e]))
     if (byId.size === 0) return
     update(keyRef.current, (s) => {
       let changed = false
       const messages = s.messages.map((m) => {
-        const e = byId.get(m.tg_message_id)
+        const e = byId.get(m.id)
         if (!e) return m
         changed = true
         return { ...m, ...e }
@@ -468,50 +498,54 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
 
   const clearHighlight = useCallback(() => {
     if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
-    update(keyRef.current, (s) => ({ ...s, highlightTgId: null }))
+    update(keyRef.current, (s) => ({ ...s, highlightMessageId: null }))
   }, [update])
 
-  const isMine = (eventChatId: number | null | undefined) =>
-    eventChatId != null && eventChatId === scopeRef.current.chatId
+  const isMine = (eventConversationId: number | null | undefined) =>
+    eventConversationId != null && eventConversationId === scopeRef.current.conversationId
 
   // ── Live updates ─────────────────────────────────────────────────────────
   useWsEvent('new_message', (e) => {
-    if (!isMine(e.chat_id)) return
+    if (!isMine(e.conversation_id)) return
     if (e.message) applyMessage(e.message)
     else void refresh()
   })
-  useWsEvent('message_edited', (e) => { if (isMine(e.chat_id)) replaceIfPresent(e.message) })
+  useWsEvent('message_edited', (e) => { if (isMine(e.conversation_id)) replaceIfPresent(e.message) })
   useWsEvent('messages_deleted', (e) => {
-    const id = scopeRef.current.chatId
-    if (id != null && deletionApplies(e.chat_id, id)) removeMessages(e.message_ids)
+    const id = scopeRef.current.conversationId
+    if (id != null && deletionApplies(e.conversation_id, id)) removeMessages(e.message_ids)
   })
   useWsEvent('messages_pinned', (e) => {
-    if (!isMine(e.chat_id)) return
-    for (const tgId of e.message_ids) patchMessage(tgId, { is_pinned: e.pinned })
+    if (!isMine(e.conversation_id)) return
+    for (const messageId of e.message_ids) patchMessage(messageId, { is_pinned: e.pinned })
   })
   useWsEvent('media_ready', (e) => {
-    if (isMine(e.chat_id)) patchMessage(e.tg_message_id, { media_url: e.media_url })
+    if (!isMine(e.conversation_id)) return
+    patchMessage(e.message_id, (m) => ({
+      ...m,
+      attachments: m.attachments.map((a) => (a.id === e.attachment_id ? { ...a, url: e.url } : a)),
+    }))
   })
-  useWsEvent('chat_synced', (e) => {
-    if (!isMine(e.chat_id)) return
+  useWsEvent('conversation_synced', (e) => {
+    if (!isMine(e.conversation_id)) return
     update(keyRef.current, (s) => ({ ...s, syncFailed: null, syncEmpty: false }))
     void refresh()
   })
-  useWsEvent('chats_synced', (e) => {
-    if (scopeRef.current.chatId != null && e.chat_ids.includes(scopeRef.current.chatId)) void refresh()
+  useWsEvent('conversations_synced', (e) => {
+    if (scopeRef.current.conversationId != null && e.conversation_ids.includes(scopeRef.current.conversationId)) void refresh()
   })
-  useWsEvent('chat_sync_failed', (e) => {
-    if (isMine(e.chat_id)) update(keyRef.current, (s) => ({ ...s, syncing: false, syncFailed: { status: e.status, error: e.error } }))
+  useWsEvent('conversation_sync_failed', (e) => {
+    if (isMine(e.conversation_id)) update(keyRef.current, (s) => ({ ...s, syncing: false, syncFailed: { status: e.status, error: e.error } }))
   })
-  useWsEvent('chat_sync_empty', (e) => {
-    if (isMine(e.chat_id)) update(keyRef.current, (s) => ({ ...s, syncing: false, syncEmpty: true }))
+  useWsEvent('conversation_sync_empty', (e) => {
+    if (isMine(e.conversation_id)) update(keyRef.current, (s) => ({ ...s, syncing: false, syncEmpty: true }))
   })
   useWsEvent('resync', () => { void refresh() })
-  useWsEvent('scam_detected', (e) => applyScamStates(e.chat_id, e.messages))
-  useWsEvent('scam_check_safe', (e) => applyScamStates(e.chat_id, e.messages))
-  useWsEvent('scam_check_error', (e) => applyScamStates(e.chat_id, e.messages))
+  useWsEvent('scam_detected', (e) => applyScamStates(e.conversation_id, e.messages))
+  useWsEvent('scam_check_safe', (e) => applyScamStates(e.conversation_id, e.messages))
+  useWsEvent('scam_check_error', (e) => applyScamStates(e.conversation_id, e.messages))
   useWsEvent('scam_verdict_changed', (e) => {
-    const id = scopeRef.current.chatId
+    const id = scopeRef.current.conversationId
     if (id != null) applyScamStates(id, e.messages)
   })
 
@@ -519,8 +553,8 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
   return useMemo(() => ({
     ...state,
     atLatest,
-    loadOlder, loadNewer, fetchOlderFromTelegram, jumpTo, jumpToDate, jumpToLatest, refresh,
+    loadOlder, loadNewer, fetchOlderFromChannel, jumpTo, jumpToExternal, jumpToDate, jumpToLatest, refresh,
     applyMessage, patchMessage, removeMessages, clearHighlight, dismissJumpNotice,
-  }), [state, atLatest, dismissJumpNotice, loadOlder, loadNewer, fetchOlderFromTelegram, jumpTo, jumpToDate, jumpToLatest, refresh,
+  }), [state, atLatest, dismissJumpNotice, loadOlder, loadNewer, fetchOlderFromChannel, jumpTo, jumpToExternal, jumpToDate, jumpToLatest, refresh,
     applyMessage, patchMessage, removeMessages, clearHighlight])
 }

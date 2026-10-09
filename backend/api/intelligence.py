@@ -4,7 +4,7 @@ mentions, and the briefing endpoints (backed by backend.briefing.pipeline).
 """
 import json
 import logging
-from typing import Any, Optional, Tuple
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -24,7 +24,7 @@ from backend.db.database import AsyncSessionLocal, get_db
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.budget import clip_to_tokens, estimate_tokens, prompt_budget_tokens
 from backend.llm.resolve import LLMUnavailable, error_kind, error_message, get_provider
-from backend.serialization import iso_utc
+from backend.serializers import conversation_out, message_out
 
 logger = logging.getLogger(__name__)
 
@@ -39,33 +39,6 @@ MAX_TOOL_ROUNDS = 8
 AGENT_MAX_TOKENS = 2048
 
 # ---------------------------------------------------------------------------
-# Cached Telegram me() for mentions
-# ---------------------------------------------------------------------------
-
-_cached_me: Optional[Tuple[Optional[str], Optional[int]]] = None
-
-
-async def _get_cached_me() -> Tuple[Optional[str], Optional[int]]:
-    """Return (username, user_id) from Telegram, cached after first success."""
-    global _cached_me
-    if _cached_me is not None:
-        return _cached_me
-
-    from backend.telegram.runtime import runtime
-    client = await runtime.client(require=False)
-    if client is None:
-        return None, None
-    try:
-        me = await client.get_me()
-        if me:
-            _cached_me = (me.username, me.id)
-            return _cached_me
-    except Exception:
-        pass
-    return None, None
-
-
-# ---------------------------------------------------------------------------
 # Tool definitions (OpenAI function-calling schema)
 # ---------------------------------------------------------------------------
 
@@ -75,7 +48,7 @@ TOOLS = [
         "function": {
             "name": "get_chat_messages",
             "description": (
-                "Retrieve recent messages from a specific Telegram chat. "
+                "Retrieve recent messages from a specific chat (any channel). "
                 "Use this to understand what is being discussed in a particular chat."
             ),
             "parameters": {
@@ -213,8 +186,8 @@ TOOLS = [
         "function": {
             "name": "sync_tagged_chats",
             "description": (
-                "Download message history from Telegram for all chats carrying a tag that have "
-                "never been synced. Runs in the background and can take several minutes. Use this "
+                "Download message history from Telegram for all Telegram chats carrying a tag "
+                "that have never been synced. Runs in the background and can take several minutes. Use this "
                 "when a search reports that many tagged chats have no synced messages."
             ),
             "parameters": {
@@ -308,8 +281,9 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are an intelligent assistant for Common Defense, a personal Telegram relationship manager. "
-    "You have access to tools that let you search the user's Telegram chats and messages. "
+    "You are an intelligent assistant for Common Defense, a personal relationship manager. "
+    "You have access to tools that let you search the user's chats and messages (Telegram and "
+    "other channels). "
     "Use your tools to answer questions accurately — look up information before responding. "
     "Be concise, helpful, and specific. When listing chats or messages, keep it brief and relevant. "
     "When asked to tag many or all chats matching a name, use the tag_chats_matching tool once "
@@ -321,6 +295,10 @@ SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
+
+def _channel(conv) -> str:
+    return (conv.account.channel if conv.account is not None else None) or "unknown"
+
 
 def _qname(name, fallback: str = "") -> str:
     """Wrap a chat/tag name in backticks so LLMs preserve angle-bracket chars verbatim."""
@@ -338,19 +316,20 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         if name == "get_chat_messages":
             chat_name = args.get("chat_name", "")
             limit = min(int(args.get("limit", 30)), 100)
-            chat = await crud.get_chat_by_name(db, chat_name)
-            if not chat:
+            conv = await crud.get_conversation_by_title(db, chat_name)
+            if not conv:
                 return f"No chat found matching '{chat_name}'."
-            rows = await crud.get_messages(db, chat.telegram_id, limit=limit)
+            rows = (await crud.get_message_window(db, conv.id, limit=limit))["rows"]
             if not rows:
-                return f"No messages found in {_qname(chat.name)}."
+                return f"No messages found in {_qname(conv.title)}."
             # Newest lines that fit the budget, each text clipped.
             lines: list[str] = []
             used = 0
-            for m, *_ in rows:  # newest-first
-                if not m.text:
+            for m, *_ in reversed(rows):  # newest-first
+                body = m.text or m.subject
+                if not body:
                     continue
-                text = " ".join(m.text.split())
+                text = " ".join(body.split())
                 if len(text) > TOOL_MSG_CHARS:
                     text = text[:TOOL_MSG_CHARS - 1] + "…"
                 line = f"[{m.date.strftime('%Y-%m-%d %H:%M')}] {m.sender_name or 'Unknown'}: {text}"
@@ -359,14 +338,14 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 lines.append(line)
                 used += len(line) + 1
             lines.reverse()
-            return f"Last {len(lines)} messages in {_qname(chat.name)}:\n" + "\n".join(lines)
+            return f"Last {len(lines)} messages in {_qname(conv.title)} ({_channel(conv)}):\n" + "\n".join(lines)
 
         elif name == "find_chats_by_tag":
             tag_name = args.get("tag_name", "")
-            chats = await crud.get_chats_by_tag_name(db, tag_name)
-            if not chats:
+            convs = await crud.get_conversations_by_tag_name(db, tag_name)
+            if not convs:
                 return f"No chats found with tag matching '{tag_name}'."
-            names = [_qname(c.name, str(c.telegram_id)) for c in chats]
+            names = [_qname(c.title, str(c.id)) for c in convs]
             return f"Chats tagged '{tag_name}':\n" + "\n".join(f"- {n}" for n in names)
 
         elif name == "search_messages":
@@ -376,11 +355,12 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             if not rows:
                 return f"No messages found containing '{keyword}'."
             lines = []
-            for msg, chat in rows:
-                if msg.text:
+            for msg, conv in rows:
+                body = msg.text or msg.subject
+                if body:
                     ts = msg.date.strftime("%Y-%m-%d %H:%M")
                     sender = msg.sender_name or "Unknown"
-                    lines.append(f"[{ts}] {_qname(chat.name, str(chat.telegram_id))} — {sender}: {msg.text[:200]}")
+                    lines.append(f"[{ts}] {_qname(conv.title, str(conv.id))} — {sender}: {body[:200]}")
             header = f"Found {total} messages containing '{keyword}'"
             if total > len(rows):
                 header += (
@@ -391,10 +371,10 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
 
         elif name == "search_chats_by_title":
             keyword = args.get("keyword", "")
-            chats, total = await crud.search_chats_by_title(db, keyword, limit=50)
+            chats, total = await crud.search_conversations_by_title(db, keyword, limit=50)
             if not chats:
                 return f"No chats found with title containing '{keyword}'."
-            lines = [f"{_qname(c.name)} ({c.type})" for c in chats]
+            lines = [f"{_qname(c.title)} ({c.kind}, {_channel(c)})" for c in chats]
             header = f"Found {total} chats matching '{keyword}'"
             if total > len(chats):
                 header += (
@@ -408,17 +388,17 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             tag_name = args.get("tag_name", "")
             # Use a fresh session for writes to avoid streaming session lifecycle issues
             async with AsyncSessionLocal() as write_db:
-                chat = await crud.get_chat_by_name(write_db, chat_name)
-                if not chat:
+                conv = await crud.get_conversation_by_title(write_db, chat_name)
+                if not conv:
                     return f"No chat found matching '{chat_name}'."
                 tag, err = await _find_or_create_tag(write_db, tag_name)
                 if tag is None:
                     return err
-                existing = await crud.get_tags_for_chat(write_db, chat.telegram_id)
+                existing = await crud.get_tags_for_conversation(write_db, conv.id)
                 if any(t.id == tag.id for t in existing):
-                    return f"{_qname(chat.name)} already has the tag '{tag.name}'."
-                await crud.add_tag_to_chat(write_db, chat.telegram_id, tag.id)
-                return f"Tagged {_qname(chat.name)} with '{tag.name}'."
+                    return f"{_qname(conv.title)} already has the tag '{tag.name}'."
+                await crud.add_tag_to_conversation(write_db, conv.id, tag.id)
+                return f"Tagged {_qname(conv.title)} with '{tag.name}'."
 
         elif name == "search_messages_in_tagged_chats":
             tag_name = args.get("tag_name", "")
@@ -428,7 +408,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             total_tagged, _with_msgs, unsynced_ids = await crud.get_tag_sync_coverage(db, tag_name)
             if total_tagged == 0:
                 return f"No chats carry a tag matching '{tag_name}'."
-            rows = await crud.search_messages_in_tagged_chats(db, tag_name, keyword)
+            rows = await crud.search_messages_in_tagged_conversations(db, tag_name, keyword)
             total_matches = sum(r.match_count for r in rows)
             if not rows:
                 out = f"Among {total_tagged} chats tagged '{tag_name}', none mention '{keyword}'."
@@ -438,7 +418,7 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 for r in shown:
                     date_str = r.latest_date.strftime("%Y-%m-%d") if r.latest_date else "?"
                     snippet = (r.latest_snippet or "").replace("\n", " ")[:100]
-                    lines.append(f"- {_qname(r.name)} — {r.match_count} matches; latest ({date_str}): \"{snippet}\"")
+                    lines.append(f"- {_qname(r.title)} — {r.match_count} matches; latest ({date_str}): \"{snippet}\"")
                 out = (
                     f"Among {total_tagged} chats tagged '{tag_name}', {len(rows)} mention "
                     f"'{keyword}' ({total_matches} matching messages)"
@@ -504,9 +484,9 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             # Use a fresh session for writes to avoid streaming session lifecycle issues
             async with AsyncSessionLocal() as write_db:
                 from sqlalchemy import select as sa_select
-                from backend.db.models import Chat as ChatModel
+                from backend.db.models import Conversation
                 result = await write_db.execute(
-                    sa_select(ChatModel).where(crud._title_match(keyword)).order_by(ChatModel.name)
+                    sa_select(Conversation).where(crud.title_match(keyword)).order_by(Conversation.title)
                 )
                 chats = list(result.scalars().all())
                 if not chats:
@@ -514,8 +494,8 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 tag, err = await _find_or_create_tag(write_db, tag_name)
                 if tag is None:
                     return err
-                newly = await crud.add_tag_to_chats(write_db, [c.telegram_id for c in chats], tag.id)
-                examples = ", ".join(_qname(c.name) for c in chats[:5])
+                newly = await crud.add_tag_to_conversations(write_db, [c.id for c in chats], tag.id)
+                examples = ", ".join(_qname(c.title) for c in chats[:5])
                 summary = (
                     f"Tagged {newly} chats matching '{keyword}' with '{tag.name}' "
                     f"({len(chats) - newly} already had it; {len(chats)} match in total)."
@@ -525,25 +505,25 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
         elif name == "find_chats_by_category":
             category = args.get("category", "")
             if category == "tracked":
-                chats = await crud.get_tracked_chat_models(db)
+                chats = await crud.get_tracked_conversations(db)
             elif category == "briefing":
-                chats = await crud.get_briefing_chats(db)
+                chats = await crud.get_briefing_conversations(db)
             else:
                 return f"Unknown category '{category}'. Use 'tracked' or 'briefing'."
             if not chats:
                 return f"No chats in category '{category}'."
-            names = [_qname(c.name, str(c.telegram_id)) for c in chats]
+            names = [_qname(c.title, str(c.id)) for c in chats]
             return f"Chats in '{category}':\n" + "\n".join(f"- {n}" for n in names)
 
         elif name == "find_chats_by_member_count":
             count = int(args.get("count", 0))
             operator = args.get("operator", "more_than")
-            chats = await crud.find_chats_by_member_count(db, count=count, operator=operator)
+            chats = await crud.find_conversations_by_member_count(db, count=count, operator=operator)
             if not chats:
                 op_label = {"more_than": "more than", "exactly": "exactly", "less_than": "less than"}.get(operator, operator)
                 return f"No chats found with {op_label} {count} members."
             op_label = {"more_than": "more than", "exactly": "exactly", "less_than": "fewer than"}.get(operator, operator)
-            lines = [f"- {_qname(c.name, str(c.telegram_id))} ({c.members_count} members)" for c in chats]
+            lines = [f"- {_qname(c.title, str(c.id))} ({c.members_count} members)" for c in chats]
             return f"Chats with {op_label} {count} members:\n" + "\n".join(lines)
 
         return f"Unknown tool: {name}"
@@ -561,10 +541,10 @@ class IntelligenceMessage(BaseModel):
 
 
 class IntelligenceChatRequest(BaseModel):
-    # Preferred: send conversation_id + the new user message text only. The
+    # Preferred: send ai_conversation_id + the new user message text only. The
     # backend persists the user message, loads the (windowed) history, and
     # persists the assistant reply + tool trace when the turn completes.
-    conversation_id: Optional[int] = None
+    ai_conversation_id: Optional[int] = None
     message: Optional[str] = None
     # Legacy fallback: explicit messages list (not persisted)
     messages: Optional[list[IntelligenceMessage]] = None
@@ -602,27 +582,27 @@ def _window_history(rows: list) -> list[ChatMessage]:
     return out
 
 
-async def _persist_user_message(conversation_id: int, text: str) -> Optional[int]:
+async def _persist_user_message(ai_conversation_id: int, text: str) -> Optional[int]:
     """Persist the user's turn. Skips an identical, just-written user message
     (clients that still append it themselves) so it is never doubled."""
     from datetime import datetime, timedelta
     async with AsyncSessionLocal() as db:
-        last = await crud.get_conversation_messages(db, conversation_id, limit=1)
+        last = await crud.get_ai_conversation_messages(db, ai_conversation_id, limit=1)
         if last and last[-1].role == "user" and last[-1].content == text \
                 and last[-1].created_at and datetime.utcnow() - last[-1].created_at < timedelta(minutes=2):
             return last[-1].id
-        msg = await crud.add_conversation_message(db, conversation_id, "user", text)
+        msg = await crud.add_ai_conversation_message(db, ai_conversation_id, "user", text)
         return msg.id
 
 
-async def _persist_turn(conversation_id: Optional[int], trace: list[str], text: str) -> Optional[int]:
+async def _persist_turn(ai_conversation_id: Optional[int], trace: list[str], text: str) -> Optional[int]:
     """Persist tool trace (so follow-ups keep the evidence) then the assistant reply."""
-    if not conversation_id:
+    if not ai_conversation_id:
         return None
     async with AsyncSessionLocal() as db:
         if trace:
-            await crud.add_conversation_message(db, conversation_id, "tool", "\n".join(trace))
-        msg = await crud.add_conversation_message(db, conversation_id, "assistant", text)
+            await crud.add_ai_conversation_message(db, ai_conversation_id, "tool", "\n".join(trace))
+        msg = await crud.add_ai_conversation_message(db, ai_conversation_id, "assistant", text)
         return msg.id
 
 
@@ -677,7 +657,7 @@ def _fit_to_budget(messages: list[ChatMessage], turn_start: int, budget: int) ->
     return msgs, turn_start
 
 
-async def _run_agent(history: list[ChatMessage], conversation_id: Optional[int] = None, user_message_id=None):
+async def _run_agent(history: list[ChatMessage], ai_conversation_id: Optional[int] = None, user_message_id=None):
     """
     Agentic loop through the provider abstraction:
       1. provider.complete(tools=TOOLS)
@@ -765,11 +745,11 @@ async def _run_agent(history: list[ChatMessage], conversation_id: Optional[int] 
         yield sse("text", {"content": chunk})
     assistant_id = None
     try:
-        assistant_id = await _persist_turn(conversation_id, trace, final_content)
+        assistant_id = await _persist_turn(ai_conversation_id, trace, final_content)
     except Exception:
         logger.warning("Failed to persist assistant turn", exc_info=True)
     yield sse("done", {
-        "conversation_id": conversation_id,
+        "ai_conversation_id": ai_conversation_id,
         "user_message_id": user_message_id,
         "assistant_message_id": assistant_id,
     })
@@ -788,79 +768,52 @@ async def intelligence_status():
     return {"configured": True, "model": getattr(provider, "model", None)}
 
 
-def _serialize_msg(m: Any) -> dict:
-    media_path = getattr(m, "media_path", None)
-    return {
-        "id": m.id,
-        "tg_message_id": m.tg_message_id,
-        "chat_id": m.chat_id,
-        "sender_id": m.sender_id,
-        "sender_name": m.sender_name,
-        "text": m.text,
-        "date": iso_utc(m.date),
-        "is_outgoing": m.is_outgoing,
-        "media_type": m.media_type,
-        "media_url": f"/api/media/{media_path}" if media_path else None,
-        "my_reaction": getattr(m, "my_reaction", None),
-    }
-
-
 @router.get("/intelligence/mentions")
 async def intelligence_mentions(
     days: int = 7,
     group_name: str = "",
     tag_name: str = "",
+    channel: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Return up to 50 mention groups: messages in group/channel chats where
-    the authenticated user's username appears in the text.
+    Return up to 50 mention groups: messages in group/channel conversations
+    that mention the user (on any signed-in account).
     Each group includes 2 context messages before and 1 after.
     Batched: a fixed number of queries regardless of the number of mentions.
     """
-    username, user_id = await _get_cached_me()
-    if not username and not user_id:
-        return []
-
     mention_rows = await crud.get_mentions(
         db,
-        username or "",
         limit=50,
         days=days,
         group_name_filter=group_name,
         tag_name_filter=tag_name,
-        user_id=user_id,
+        channel=channel,
     )
-    keys = [(msg.chat_id, msg.tg_message_id) for msg, _ in mention_rows]
     # after=2: one shown as context, the second tells us whether messages were
     # omitted between the context and the user's reply.
-    contexts = await crud.get_mention_contexts(db, keys, before=2, after=2)
-    tags = await crud.get_tags_for_chats(db, list({chat.telegram_id for _, chat in mention_rows}))
+    contexts = await crud.get_mention_contexts(db, [msg for msg, _ in mention_rows], before=2, after=2)
+    tags = await crud.get_tags_for_conversations(db, [conv.id for _, conv in mention_rows])
 
     groups = []
-    for msg, chat in mention_rows:
-        ctx = contexts[(msg.chat_id, msg.tg_message_id)]
+    for msg, conv in mention_rows:
+        ctx = contexts[msg.id]
         after = ctx["after"]
         reply = ctx["reply"]
         reply_has_gap = False
         if reply is not None and after:
-            shown_last = after[0].tg_message_id
-            reply_has_gap = reply.tg_message_id > shown_last and len(after) > 1 \
-                and after[1].tg_message_id < reply.tg_message_id
+            shown_last = after[0].seq
+            reply_has_gap = reply.seq > shown_last and len(after) > 1 and after[1].seq < reply.seq
         groups.append({
-            "mention_msg": _serialize_msg(msg),
-            "context_before": [_serialize_msg(m) for m in ctx["before"]],
-            "context_after": [_serialize_msg(m) for m in after[:1]],
+            "mention_msg": message_out(msg),
+            "context_before": [message_out(m) for m in ctx["before"]],
+            "context_after": [message_out(m) for m in after[:1]],
             "replied": reply is not None,
-            "user_reply_msg": _serialize_msg(reply) if reply is not None else None,
+            "user_reply_msg": message_out(reply) if reply is not None else None,
             "reply_has_gap": reply_has_gap,
-            "chat": {
-                "id": chat.telegram_id,
-                "telegram_id": chat.telegram_id,
-                "name": chat.name,
-                "type": chat.type,
-                "is_tracked": chat.is_tracked,
-                "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in tags.get(chat.telegram_id, [])],
+            "conversation": {
+                **conversation_out(conv, with_last_message=False),
+                "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in tags.get(conv.id, [])],
             },
         })
     return groups
@@ -874,7 +827,7 @@ async def intelligence_chat(
     """
     Streaming agentic chat endpoint (SSE: tool_call, tool_result, text, done, error).
 
-    Preferred usage: {conversation_id, message}. The backend is the single
+    Preferred usage: {ai_conversation_id, message}. The backend is the single
     writer of the turn: it persists the user message now, and the assistant
     reply (+ tool trace) when the turn completes. Clients must NOT append
     either message themselves.
@@ -882,21 +835,21 @@ async def intelligence_chat(
     Legacy fallback: {messages: [...]} — stateless, nothing persisted.
     """
     user_message_id = None
-    if req.conversation_id is not None and req.message is not None:
-        user_message_id = await _persist_user_message(req.conversation_id, req.message)
-        prior = await crud.get_conversation_messages(db, req.conversation_id, limit=HISTORY_MESSAGES)
+    if req.ai_conversation_id is not None and req.message is not None:
+        user_message_id = await _persist_user_message(req.ai_conversation_id, req.message)
+        prior = await crud.get_ai_conversation_messages(db, req.ai_conversation_id, limit=HISTORY_MESSAGES)
         history = _window_history(prior)
         if not history or history[-1].role != "user" or history[-1].content != req.message:
             history.append(ChatMessage(role="user", content=req.message))
     elif req.messages:
         history = [ChatMessage(role=m.role, content=m.content) for m in req.messages]
     else:
-        raise HTTPException(status_code=400, detail="Provide conversation_id + message")
+        raise HTTPException(status_code=400, detail="Provide ai_conversation_id + message")
 
     # Release the request session's read transaction before streaming begins;
     # the agent loop opens its own short-lived sessions per tool call.
     await db.commit()
-    return sse_response(_run_agent(history, req.conversation_id, user_message_id))
+    return sse_response(_run_agent(history, req.ai_conversation_id, user_message_id))
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Cloud, ShieldAlert, ShieldCheck, X } from 'lucide-react'
 import type { ScamFlag } from '../../api/types'
 import { errorMessage } from '../../lib/toast'
+import { chatUrl, personUrl } from '../../lib/routes'
 import { useVerdictActions } from './useVerdictActions'
 import { ConfidencePill, EmptyState, ErrorState, LoadingRow, SyncBadge } from './shared'
 
@@ -43,16 +44,22 @@ export default function FlaggedTab({ flags, loading, error, onRetry }: {
       <tbody className="divide-y divide-slate-800">
         {flags.map((flag) => {
           const source = SOURCE_STYLE[flag.source] ?? SOURCE_STYLE.local
-          const chatId = flag.flagged_message_chat_id
+          const conversationId = flag.flagged_conversation_id
           const msgId = flag.flagged_message_id
           return (
-            <tr key={flag.telegram_id} className="hover:bg-slate-800/50 transition-colors">
+            <tr key={flag.identity_id} className="hover:bg-slate-800/50 transition-colors">
               <td className="px-6 py-2.5">
                 <div className="flex items-center gap-2">
                   <ShieldAlert size={12} className="flex-shrink-0 text-red-400" />
-                  <span className="text-xs font-medium text-slate-200 truncate max-w-[140px]">
-                    {flag.sender_name || `ID: ${flag.telegram_id}`}
-                  </span>
+                  {flag.person_id != null ? (
+                    <Link to={personUrl(flag.person_id)} className="text-xs font-medium text-slate-200 hover:text-indigo-300 truncate max-w-[140px]">
+                      {flag.sender_name || `ID: ${flag.identity_id}`}
+                    </Link>
+                  ) : (
+                    <span className="text-xs font-medium text-slate-200 truncate max-w-[140px]">
+                      {flag.sender_name || `ID: ${flag.identity_id}`}
+                    </span>
+                  )}
                 </div>
               </td>
               <td className="px-3 py-2.5">
@@ -61,8 +68,8 @@ export default function FlaggedTab({ flags, loading, error, onRetry }: {
               <td className="px-3 py-2.5">
                 {flag.flagged_message_text ? (
                   <button
-                    disabled={!chatId || !msgId}
-                    onClick={() => chatId && msgId && navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)}
+                    disabled={!conversationId || !msgId}
+                    onClick={() => conversationId && msgId && navigate(chatUrl(conversationId, msgId))}
                     className="text-xs text-slate-400 hover:text-slate-200 truncate max-w-[220px] block text-left transition-colors"
                     title={flag.flagged_message_text}
                   >
@@ -85,7 +92,7 @@ export default function FlaggedTab({ flags, loading, error, onRetry }: {
               </td>
               <td className="px-3 py-2.5">
                 <button
-                  onClick={() => { void dismissSender(flag.telegram_id, flag.sender_name) }}
+                  onClick={() => { void dismissSender(flag.identity_id, flag.sender_name) }}
                   title="Unflag user"
                   className="rounded p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-colors"
                 >

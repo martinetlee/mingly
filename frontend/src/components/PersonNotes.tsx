@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { chatUrl } from '../lib/routes'
 import { Bot, Loader2, MessageSquareQuote, NotebookPen, Pencil, Plus, Trash2, User } from 'lucide-react'
 import type { PersonNote, PersonNoteInput, PersonNoteKind } from '../api/types'
 import { createPersonNote, deletePersonNote, getPersonNotes, updatePersonNote } from '../api/client'
@@ -30,54 +31,54 @@ export function sortNotes(notes: PersonNote[]): PersonNote[] {
 }
 
 /**
- * Notes timeline for any Telegram user (contact or not): agent-written
+ * Notes timeline for any person (contact or not): agent-written
  * context / due diligence over MCP plus the user's own notes. The user can
  * edit or delete any note. Live via `person_notes_changed`.
  */
-export default function PersonNotes({ telegramId }: { telegramId: number }) {
+export default function PersonNotes({ personId }: { personId: number }) {
   const navigate = useNavigate()
   const confirm = useConfirm()
-  const q = useLatestQuery(['person-notes', telegramId], (signal) => getPersonNotes(telegramId, signal))
+  const q = useLatestQuery(['person-notes', personId], (signal) => getPersonNotes(personId, signal))
   const notes = useMemo(() => (q.data ? sortNotes(q.data) : []), [q.data])
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
 
-  const idRef = useRef(telegramId)
-  idRef.current = telegramId
+  const idRef = useRef(personId)
+  idRef.current = personId
   // Switching person closes any open editor
-  const shownIdRef = useRef(telegramId)
-  if (shownIdRef.current !== telegramId) {
-    shownIdRef.current = telegramId
+  const shownIdRef = useRef(personId)
+  if (shownIdRef.current !== personId) {
+    shownIdRef.current = personId
     if (adding) setAdding(false)
     if (editingId != null) setEditingId(null)
   }
 
   /** Apply a mutation result only if that person is still on screen, then resync with the server */
-  const settle = (tid: number, fn: (prev: PersonNote[]) => PersonNote[]) => {
-    if (idRef.current !== tid) return
+  const settle = (pid: number, fn: (prev: PersonNote[]) => PersonNote[]) => {
+    if (idRef.current !== pid) return
     q.setData((prev) => fn(prev ?? []))
     void q.refetch()
   }
 
-  useWsEvent('person_notes_changed', (e) => { if (e.telegram_id === idRef.current) void q.refetch() })
+  useWsEvent('person_notes_changed', (e) => { if (e.person_id === idRef.current) void q.refetch() })
   useWsEvent('resync', () => { void q.refetch() })
 
-  const create = useAsyncAction(async (tid: number, input: PersonNoteInput) => {
-    const note = await createPersonNote(tid, input)
-    settle(tid, (prev) => [note, ...prev.filter((n) => n.id !== note.id)])
-    if (idRef.current === tid) setAdding(false)
+  const create = useAsyncAction(async (pid: number, input: PersonNoteInput) => {
+    const note = await createPersonNote(pid, input)
+    settle(pid, (prev) => [note, ...prev.filter((n) => n.id !== note.id)])
+    if (idRef.current === pid) setAdding(false)
     return true
   }, { errorContext: "Couldn't add the note" })
 
-  const update = useAsyncAction(async (tid: number, id: number, input: PersonNoteInput) => {
-    const note = await updatePersonNote(tid, id, input)
-    settle(tid, (prev) => prev.map((n) => (n.id === id ? note : n)))
-    if (idRef.current === tid) setEditingId(null)
+  const update = useAsyncAction(async (pid: number, id: number, input: PersonNoteInput) => {
+    const note = await updatePersonNote(pid, id, input)
+    settle(pid, (prev) => prev.map((n) => (n.id === id ? note : n)))
+    if (idRef.current === pid) setEditingId(null)
     return true
   }, { errorContext: "Couldn't save the note" })
 
   const remove = (note: PersonNote) => {
-    const tid = note.telegram_id
+    const pid = note.person_id
     void confirm({
       title: 'Delete this note?',
       message: note.author === 'agent'
@@ -86,13 +87,13 @@ export default function PersonNotes({ telegramId }: { telegramId: number }) {
       destructive: true,
       confirmLabel: 'Delete',
       onConfirm: async () => {
-        await deletePersonNote(tid, note.id)
-        settle(tid, (prev) => prev.filter((n) => n.id !== note.id))
+        await deletePersonNote(pid, note.id)
+        settle(pid, (prev) => prev.filter((n) => n.id !== note.id))
       },
     })
   }
 
-  const openCitation = (chatId: number, tgMessageId: number) => navigate(`/chats?chatId=${chatId}&msgId=${tgMessageId}`)
+  const openCitation = (conversationId: number, messageId: number) => navigate(chatUrl(conversationId, messageId))
 
   return (
     <div className="mb-6 rounded-xl border border-slate-700/50 bg-slate-800 p-4" data-testid="person-notes">
@@ -115,7 +116,7 @@ export default function PersonNotes({ telegramId }: { telegramId: number }) {
         <NoteEditor
           saving={create.pending}
           onCancel={() => setAdding(false)}
-          onSave={(input) => void create.run(telegramId, input)}
+          onSave={(input) => void create.run(personId, input)}
         />
       )}
 
@@ -140,7 +141,7 @@ export default function PersonNotes({ telegramId }: { telegramId: number }) {
                 initial={note}
                 saving={update.pending}
                 onCancel={() => setEditingId(null)}
-                onSave={(input) => void update.run(note.telegram_id, note.id, input)}
+                onSave={(input) => void update.run(note.person_id, note.id, input)}
               />
             ) : (
               <>
@@ -187,9 +188,9 @@ export default function PersonNotes({ telegramId }: { telegramId: number }) {
                   <div className="mt-2 flex flex-wrap gap-1">
                     {note.citations.map((c, i) => (
                       <button
-                        key={`${c.chat_id}:${c.tg_message_id}`}
+                        key={`${c.conversation_id}:${c.message_id}`}
                         type="button"
-                        onClick={() => openCitation(c.chat_id, c.tg_message_id)}
+                        onClick={() => openCitation(c.conversation_id, c.message_id)}
                         className="inline-flex items-center gap-1 rounded border border-indigo-500/25 bg-indigo-500/10 px-1.5 py-0.5 text-[10px] text-indigo-300 hover:bg-indigo-500/25 transition-colors"
                         title="Open the cited message"
                       >

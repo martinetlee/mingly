@@ -7,16 +7,17 @@ import { useAsyncAction } from '../hooks/useAsyncAction'
 import { errorMessage, toast } from '../lib/toast'
 
 interface Props {
-  /** Captured when the dialog opened — never the "currently selected" chat */
-  chatId: number
+  /** Captured when the dialog opened — never the "currently selected" conversation */
+  conversationId: number
   targetMessageId: number
-  targetSenderId: number
+  /** Identity of the reported sender */
+  targetIdentityId: number
   onClose: () => void
 }
 
-export default function ReportScamDialog({ chatId, targetMessageId, targetSenderId, onClose }: Props) {
-  const ctx = useLatestQuery(['report-ctx', chatId, targetMessageId], async () => {
-    const [c, pipeline] = await Promise.all([getReportContext(chatId, targetMessageId), getScamPipeline()])
+export default function ReportScamDialog({ conversationId, targetMessageId, targetIdentityId, onClose }: Props) {
+  const ctx = useLatestQuery(['report-ctx', conversationId, targetMessageId], async () => {
+    const [c, pipeline] = await Promise.all([getReportContext(conversationId, targetMessageId), getScamPipeline()])
     return { messages: c.messages, categories: pipeline.categories }
   })
   // Messages the user unticked (all are included by default)
@@ -26,12 +27,12 @@ export default function ReportScamDialog({ chatId, targetMessageId, targetSender
   const [submitted, setSubmitted] = useState(false)
 
   const messages = ctx.data?.messages ?? []
-  const checkedIds = messages.map((m) => m.tg_message_id).filter((id) => !unchecked.has(id))
+  const checkedIds = messages.map((m) => m.message_id).filter((id) => !unchecked.has(id))
 
   const submit = useAsyncAction(async () => {
     await createScamReport({
-      reported_telegram_id: targetSenderId,
-      reported_in_chat_id: chatId,
+      reported_identity_id: targetIdentityId,
+      reported_in_conversation_id: conversationId,
       reporter_verdict: 'scam',
       scam_category: category || undefined,
       custom_category: category === 'other' ? customCategory || undefined : undefined,
@@ -89,22 +90,22 @@ export default function ReportScamDialog({ chatId, targetMessageId, targetSender
             </p>
             <div className="space-y-1 rounded-lg border border-slate-700 bg-slate-900 p-2 max-h-64 overflow-y-auto">
               {messages.map((msg) => {
-                const isReported = msg.sender_id === targetSenderId
-                const isChecked = !unchecked.has(msg.tg_message_id)
+                const isReported = msg.sender_identity_id === targetIdentityId
+                const isChecked = !unchecked.has(msg.message_id)
                 return (
                   <label
-                    key={msg.tg_message_id}
+                    key={msg.message_id}
                     className={`flex items-start gap-2 rounded-lg px-2 py-1.5 cursor-pointer transition-colors ${isChecked ? 'bg-slate-800' : 'opacity-50'}`}
                   >
                     <input
                       type="checkbox"
                       checked={isChecked}
-                      onChange={() => toggle(msg.tg_message_id)}
+                      onChange={() => toggle(msg.message_id)}
                       className="mt-0.5 rounded border-slate-600 bg-slate-700 text-red-500 focus:ring-0 h-3.5 w-3.5"
                     />
                     <div className="flex-1 min-w-0">
                       <span className={`text-[10px] font-medium ${isReported ? 'text-red-400' : msg.is_outgoing ? 'text-indigo-400' : 'text-purple-400'}`}>
-                        {isReported ? (msg.sender_name || `ID: ${msg.sender_id}`) : msg.is_outgoing ? 'You' : (msg.sender_name || 'Unknown')}
+                        {isReported ? (msg.sender_name || 'Reported sender') : msg.is_outgoing ? 'You' : (msg.sender_name || 'Unknown')}
                       </span>
                       <p className={`text-xs ${isChecked ? 'text-slate-300' : 'line-through text-slate-500'}`}>
                         {msg.text ? (msg.text.length > 150 ? msg.text.slice(0, 150) + '…' : msg.text) : '(media)'}

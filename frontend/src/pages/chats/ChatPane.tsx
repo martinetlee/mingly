@@ -1,24 +1,27 @@
 /**
  * Right pane: header, in-chat search, forum topics, pinned banner, message
- * window and compose box for ONE chat. Chats mounts it with
- * `key={chat.telegram_id}`, so nothing here can outlive a chat switch;
+ * window and compose box for ONE conversation. Chats mounts it with
+ * `key={chat.id}`, so nothing here can outlive a conversation switch;
  * per-chat state that must survive (draft, reply, edit, upload progress)
  * lives in chatUiStore, and every async action writes to the chat it was
  * started for (captured ids — never "the currently selected chat").
+ *
+ * Features render only when the conversation's capabilities include them
+ * (lib/capabilities): reply, react, edit, delete, forward, pin, send,
+ * media_send, typing, forum_topics, admin_moderation, history_backfill.
  */
 import { memo, useCallback, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { RefreshCw, Info, X, Search, Star, Loader2, MessageSquare, Pin, AlertTriangle } from 'lucide-react'
-import type { Chat, Message, Reaction, SendFileResult, SendFilesResponse } from '../../api/types'
+import type { Conversation, Message, MessageSender, Reaction, SendFileResult, SendFilesResponse } from '../../api/types'
 import {
   ApiError,
-  deleteMessages, editMessage, ensureChat, forwardMessages, getContactByTelegram, getPinnedMessage, pinMessage,
-  reactToMessage, restrictMember, searchChatMessages, sendFiles, sendMessage, sendTypingAction,
-  setContactImportantByTelegram, setMessageVerdict, setSenderVerdict, syncChat,
+  deleteMessages, editMessage, forwardMessages, getPerson, getPinnedMessage, pinMessage,
+  reactToMessage, restrictMember, searchConversationMessages, sendFiles, sendMessage, sendTypingAction,
+  setPersonImportant, setMessageVerdict, setSenderVerdict, syncConversation,
 } from '../../api/client'
 import { authenticatedMediaUrl } from '../../api/session'
 import { useChatMessages } from '../../hooks/useChatMessages'
-import type { JumpNotice } from '../../hooks/useChatMessages'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { useDebouncedQuery } from '../../hooks/useDebouncedQuery'
 import { useAsyncAction } from '../../hooks/useAsyncAction'
@@ -28,6 +31,12 @@ import { useFeatures } from '../../context/FeaturesContext'
 import { useConfirm } from '../../components/ui'
 import { errorMessage, reportError, toast } from '../../lib/toast'
 import { fmtShortDate } from '../../utils/time'
+import { can } from '../../lib/capabilities'
+import { conversationTitle, isMultiParty } from '../../lib/conversation'
+import { personUrl } from '../../lib/routes'
+import { openDirectConversation } from '../../lib/directConversation'
+import ChannelIcon from '../../components/ChannelIcon'
+import { HistoryHeader, JumpingStatus, PaneJumpNotice } from '../../components/MessageWindowStatus'
 import MessageList from '../../components/MessageList'
 import type { ScamVerdictScope } from '../../components/MessageBubble'
 import ComposeBar from '../../components/ComposeBar'
@@ -41,19 +50,19 @@ import type { ComposeDraft } from './chatUiStore'
 import { useScamCheckEvents } from './scamChecks'
 
 export interface ChatPaneProps {
-  chat: Chat
+  chat: Conversation
   topic: { id: number; title: string } | null
-  /** Bumped by selectChat; `anchorTgId` opens the chat centred on a message */
-  selection: { anchorTgId: number | null; unreadCount: number; nonce: number; viaKeyboard?: boolean }
+  /** Bumped by selectChat; `anchorMessageId` opens the conversation centred on a message */
+  selection: { anchorMessageId: number | null; anchorExternalId?: string | null; unreadCount: number; nonce: number; viaKeyboard?: boolean }
   showInfo: boolean
   onToggleInfo: () => void
   showSearch: boolean
   onShowSearch: (open: boolean) => void
   onSelectTopic: (topic: { id: number; title: string } | null) => void
-  /** Open another chat through the page's single selectChat entry point */
-  onOpenChat: (chat: Chat) => void
-  /** Own send landed: update the chat list preview */
-  onChatActivity: (chatId: number, preview: { text: string; date: string }) => void
+  /** Open another conversation through the page's single selectChat entry point */
+  onOpenChat: (chat: Conversation) => void
+  /** Own send landed: update the conversation list preview */
+  onChatActivity: (conversationId: number, preview: { text: string; date: string }) => void
 }
 
 /** Optimistic reaction toggle that keeps the aggregate counts consistent. */
@@ -86,7 +95,7 @@ const NO_RESTRICTIONS = {
 }
 
 function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, onShowSearch, onSelectTopic, onOpenChat, onChatActivity }: ChatPaneProps) {
-  const chatId = chat.telegram_id
+  const chatId = chat.id
   const navigate = useNavigate()
   const confirm = useConfirm()
   // Only the sync flag here: the compose slot changes per keystroke and is read by ComposeArea
@@ -95,41 +104,48 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   const { shield } = useFeatures()
   useScamCheckEvents()
 
+  const canBackfill = can(chat, 'history_backfill')
   const msgs = useChatMessages({
-    chatId,
+    conversationId: chatId,
     topicId: topic?.id ?? null,
-    anchorTgId: selection.anchorTgId,
+    anchorMessageId: selection.anchorMessageId,
+    anchorExternalId: selection.anchorExternalId ?? null,
     unreadCount: selection.unreadCount,
     nonce: selection.nonce,
+    canBackfill,
   })
   const msgsRef = useRef(msgs)
   msgsRef.current = msgs
 
-  // ── Header data (keyed by chat; aborted on switch) ─────────────────────────
-  const pinned = useLatestQuery(['pinned', chatId], (signal) => getPinnedMessage(chatId, signal))
+  // ── Header data (keyed by conversation; aborted on switch) ─────────────────
+  const canPin = can(chat, 'pin')
+  const pinned = useLatestQuery(['pinned', chatId], (signal) => getPinnedMessage(chatId, signal), { enabled: canPin })
   const refetchPinned = useRef(pinned.refetch)
   refetchPinned.current = pinned.refetch
-  useWsEvent('messages_pinned', (e) => { if (e.chat_id === chatId) void pinned.refetch() })
+  useWsEvent('messages_pinned', (e) => { if (e.conversation_id === chatId) void pinned.refetch() }, canPin)
+  // A direct conversation's peer is a person: the star marks them important
+  const peerPersonId = chat.kind === 'direct' ? chat.peer?.person_id ?? null : null
   const important = useLatestQuery(
-    ['important', chatId],
-    (signal) => getContactByTelegram(chatId, signal).then((c) => c.is_important).catch(() => false),
-    { enabled: chat.type === 'private' },
+    ['important', peerPersonId],
+    (signal) => getPerson(peerPersonId as number, signal).then((p) => p.is_important).catch(() => false),
+    { enabled: peerPersonId != null },
   )
   const toggleImportant = useAsyncAction(async () => {
-    const updated = await setContactImportantByTelegram(chatId, !important.data)
+    if (peerPersonId == null) return
+    const updated = await setPersonImportant(peerPersonId, !important.data)
     important.setData(updated.is_important)
-  }, { errorContext: 'Couldn’t update important contact' })
+  }, { errorContext: 'Couldn’t update important person' })
 
   // ── In-chat search ─────────────────────────────────────────────────────────
   const [chatSearch, setChatSearch] = useState('')
-  const searchResults = useDebouncedQuery(chatSearch, (q, signal) => searchChatMessages(chatId, q, 50, signal), { delayMs: 300, enabled: showSearch })
+  const searchResults = useDebouncedQuery(chatSearch, (q, signal) => searchConversationMessages(chatId, q, 50, signal), { delayMs: 300, enabled: showSearch })
 
   // ── Manual sync ────────────────────────────────────────────────────────────
   const handleSync = useCallback(async () => {
     if (getChatUi(chatId).syncing) return
     updateChatUi(chatId, { syncing: true })
     try {
-      const res = await syncChat(chatId)
+      const res = await syncConversation(chatId)
       if (res?.status === 'changed') void msgsRef.current.refresh()
       else if (res?.error) toast.error(`Sync: ${res.error}`)
     } catch (e) {
@@ -144,15 +160,15 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     const before = getChatUi(chatId)
     const replyTo = before.replyTo
     const topicId = topic?.id ?? null
-    const key = sendKey(text, [], replyTo?.tg_message_id, topicId)
+    const key = sendKey(text, [], replyTo?.id, topicId)
     const nonce = before.failedSend?.key === key ? before.failedSend.nonce : newNonce()
     updateChatUi(chatId, { sending: true })
     try {
-      const res = await sendMessage(chatId, text, replyTo?.tg_message_id, { topicId, clientNonce: nonce })
+      const res = await sendMessage(chatId, text, replyTo?.id, { topicId, clientNonce: nonce })
       updateChatUi(chatId, (p) => ({
         sending: false,
         failedSend: null,
-        replyTo: p.replyTo?.tg_message_id === replyTo?.tg_message_id ? null : p.replyTo,
+        replyTo: p.replyTo?.id === replyTo?.id ? null : p.replyTo,
         draft: p.draft.text.trim() === text ? { ...p.draft, text: '' } : p.draft,
       }))
       const m = msgsRef.current
@@ -173,7 +189,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     const before = getChatUi(chatId)
     const replyTo = before.replyTo
     const topicId = topic?.id ?? null
-    const key = sendKey(text, files, replyTo?.tg_message_id, topicId)
+    const key = sendKey(text, files, replyTo?.id, topicId)
     // Reuse the nonce only after a transport failure (the server may have sent it).
     // When the server answered with per-file failures, a retry needs a NEW nonce
     // (the same nonce would just replay that response).
@@ -181,7 +197,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     updateChatUi(chatId, { sending: true, uploadProgress: 0 })
     let res: SendFilesResponse
     try {
-      const { promise } = sendFiles(chatId, files, text || undefined, replyTo?.tg_message_id,
+      const { promise } = sendFiles(chatId, files, text || undefined, replyTo?.id,
         (fraction) => updateChatUi(chatId, { uploadProgress: fraction }),
         { topicId, clientNonce: nonce })
       res = await promise
@@ -208,7 +224,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
       sending: false,
       uploadProgress: null,
       failedSend: null,
-      replyTo: p.replyTo?.tg_message_id === replyTo?.tg_message_id ? null : p.replyTo,
+      replyTo: p.replyTo?.id === replyTo?.id ? null : p.replyTo,
       // The caption went out with the first sent item
       draft: {
         text: p.draft.text.trim() === text ? '' : p.draft.text,
@@ -233,8 +249,8 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     // The edit target was captured when Edit was clicked (and lives in its chat's slot)
     const target = getChatUi(chatId).editing
     if (!target) return
-    const res = await editMessage(target.chat_id, target.tg_message_id, text)
-    updateChatUi(target.chat_id, (p) => (p.editing?.tg_message_id === target.tg_message_id ? { editing: null } : {}))
+    const res = await editMessage(target.id, text)
+    updateChatUi(target.conversation_id, (p) => (p.editing?.id === target.id ? { editing: null } : {}))
     msgsRef.current.applyMessage(res.message ?? { ...target, text, text_html: null, is_edited: true })
   }, [chatId])
 
@@ -246,16 +262,16 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   const clearMention = useCallback(() => setMentionInsert(null), [])
 
   // ── Message actions (targets come from the message itself) ─────────────────
-  const onReply = useCallback((msg: Message) => updateChatUi(msg.chat_id, { replyTo: msg, editing: null }), [])
-  const onEdit = useCallback((msg: Message) => updateChatUi(msg.chat_id, { editing: msg, replyTo: null }), [])
+  const onReply = useCallback((msg: Message) => updateChatUi(msg.conversation_id, { replyTo: msg, editing: null }), [])
+  const onEdit = useCallback((msg: Message) => updateChatUi(msg.conversation_id, { editing: msg, replyTo: null }), [])
 
   const onReact = useCallback(async (msg: Message, emoji: string | null) => {
     const m = msgsRef.current
-    m.patchMessage(msg.tg_message_id, (cur) => applyReaction(cur, emoji))
+    m.patchMessage(msg.id, (cur) => applyReaction(cur, emoji))
     try {
-      await reactToMessage(msg.chat_id, msg.tg_message_id, emoji)
+      await reactToMessage(msg.id, emoji)
     } catch (e) {
-      m.patchMessage(msg.tg_message_id, (cur) => applyReaction(cur, msg.my_reaction ?? null))
+      m.patchMessage(msg.id, (cur) => applyReaction(cur, msg.my_reaction ?? null))
       reportError(e, 'Reaction failed')
     }
   }, [])
@@ -263,8 +279,8 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   const onPin = useCallback(async (msg: Message) => {
     const next = !msg.is_pinned
     try {
-      await pinMessage(msg.chat_id, msg.tg_message_id, next)
-      msgsRef.current.patchMessage(msg.tg_message_id, { is_pinned: next })
+      await pinMessage(msg.id, next)
+      msgsRef.current.patchMessage(msg.id, { is_pinned: next })
       void refetchPinned.current()
       toast.success(next ? 'Message pinned' : 'Message unpinned')
     } catch (e) {
@@ -273,10 +289,10 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   }, [])
 
   const onDelete = useCallback(async (msg: Message, album?: Message[]) => {
-    // Target captured at open: {chatId, ids} — confirm can't act on another chat
-    const targetChat = msg.chat_id
-    const ids = (album ?? [msg]).map((m) => m.tg_message_id)
-    const preview = msg.text?.slice(0, 80) ?? (msg.media_type ? `[${msg.media_type}]` : 'this message')
+    // Target captured at open: {conversation, ids} — confirm can't act on another conversation
+    const targetChat = msg.conversation_id
+    const ids = (album ?? [msg]).map((m) => m.id)
+    const preview = msg.text?.slice(0, 80) ?? (msg.attachments?.[0] ? `[${msg.attachments[0].kind}]` : 'this message')
     const res = await confirm({
       title: ids.length > 1 ? `Delete ${ids.length} messages?` : 'Delete message?',
       message: <span className="line-clamp-2">{preview}</span>,
@@ -289,26 +305,29 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
 
   const [forwardTarget, setForwardTarget] = useState<{ fromChatId: number; ids: number[] } | null>(null)
   const onForward = useCallback((msg: Message, album?: Message[]) => {
-    setForwardTarget({ fromChatId: msg.chat_id, ids: (album ?? [msg]).map((m) => m.tg_message_id) })
+    setForwardTarget({ fromChatId: msg.conversation_id, ids: (album ?? [msg]).map((m) => m.id) })
   }, [])
-  const forward = useAsyncAction(async (target: { fromChatId: number; ids: number[] }, to: Chat) => {
-    await forwardMessages(target.fromChatId, target.ids, to.telegram_id)
-    toast.success(`Forwarded to ${to.name}`)
+  const forward = useAsyncAction(async (target: { fromChatId: number; ids: number[] }, to: Conversation) => {
+    await forwardMessages(target.fromChatId, target.ids, to.id)
+    toast.success(`Forwarded to ${conversationTitle(to)}`)
     setForwardTarget(null)
   }, { errorContext: 'Forward failed' })
 
-  const [reportTarget, setReportTarget] = useState<{ chatId: number; tgId: number; senderId: number } | null>(null)
+  const [reportTarget, setReportTarget] = useState<{ conversationId: number; messageId: number; identityId: number } | null>(null)
   const onReportScam = useCallback((msg: Message) => {
-    setReportTarget({ chatId: msg.chat_id, tgId: msg.tg_message_id, senderId: msg.sender_id ?? 0 })
+    const identityId = msg.sender?.identity_id
+    if (identityId == null) { toast.info('This message has no reportable sender'); return }
+    setReportTarget({ conversationId: msg.conversation_id, messageId: msg.id, identityId })
   }, [])
 
   const onScamVerdict = useCallback(async (msg: Message, scope: ScamVerdictScope) => {
     try {
-      const res = scope === 'sender' && msg.sender_id != null
-        ? await setSenderVerdict(msg.sender_id, 'not_scam')
-        : await setMessageVerdict([{ chat_id: msg.chat_id, tg_message_id: msg.tg_message_id }], 'not_scam')
+      const senderIdentity = msg.sender?.identity_id
+      const res = scope === 'sender' && senderIdentity != null
+        ? await setSenderVerdict(senderIdentity, 'not_scam')
+        : await setMessageVerdict([{ message_id: msg.id, conversation_id: msg.conversation_id }], 'not_scam')
       for (const st of res.messages ?? []) {
-        if (st.chat_id === msg.chat_id) msgsRef.current.patchMessage(st.tg_message_id, (m) => ({ ...m, ...st }))
+        if (st.conversation_id === msg.conversation_id) msgsRef.current.patchMessage(st.message_id, (m) => ({ ...m, ...st }))
       }
       applyFlagChanges(res.flags)
       toast.success(scope === 'sender' ? 'Sender dismissed' : 'Marked as not a scam')
@@ -318,54 +337,53 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   }, [])
 
   // ── Avatar menu ────────────────────────────────────────────────────────────
-  const onOpenProfile = useCallback((senderId: number) => navigate(`/profile/${senderId}`), [navigate])
-  const onSendMessage = useCallback(async (senderId: number) => {
+  const onOpenProfile = useCallback((sender: MessageSender) => {
+    if (sender.person_id != null) navigate(personUrl(sender.person_id))
+  }, [navigate])
+  // Their existing direct conversation on any channel, else a new Telegram one
+  // (a sender in a Telegram conversation has a Telegram identity)
+  const canStartFromHere = chat.channel === 'telegram'
+  const onSendMessage = useCallback(async (sender: MessageSender) => {
+    if (sender.person_id == null) return
     try {
-      onOpenChat(await ensureChat(senderId))
+      onOpenChat(await openDirectConversation(sender.person_id, { canStart: canStartFromHere }))
     } catch (e) {
       reportError(e, 'Couldn’t open a chat with this user')
     }
-  }, [onOpenChat])
-  const onMention = useCallback((_senderId: number, senderName: string) => {
-    setMentionInsert(`@${senderName.replace(/\s+/g, '_')} `)
+  }, [onOpenChat, canStartFromHere])
+  const onMention = useCallback((sender: MessageSender) => {
+    if (sender.name) setMentionInsert(`@${sender.name.replace(/\s+/g, '_')} `)
   }, [])
-  const chatName = chat.name
-  const onRestrict = useCallback((senderId: number, inChatId: number) => {
+  const chatName = conversationTitle(chat)
+  const onRestrict = useCallback((sender: MessageSender, inConversationId: number) => {
+    const identityId = sender.identity_id
+    if (identityId == null) return
     void confirm({
       title: 'Restrict this user?',
       message: `They won't be able to send messages in ${chatName}.`,
       destructive: true,
       confirmLabel: 'Restrict',
-      onConfirm: () => restrictMember(inChatId, senderId, NO_RESTRICTIONS),
+      onConfirm: () => restrictMember(inConversationId, identityId, NO_RESTRICTIONS),
     }).then((ok) => { if (ok) toast.success('User restricted') })
   }, [confirm, chatName])
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const history = msgs.messages.length > 0 && !msgs.hasOlder ? (
-    <div className="flex justify-center py-2 text-[11px] text-slate-500">
-      {msgs.backfill === 'loading' ? (
-        <span className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" /> Loading older messages from Telegram…</span>
-      ) : msgs.backfill === 'exhausted' ? (
-        <span>Beginning of conversation</span>
-      ) : (
-        <span className="flex items-center gap-2">
-          {msgs.backfillError && <span className="text-orange-300">{msgs.backfillError}</span>}
-          <button onClick={() => void msgs.fetchOlderFromTelegram()} className="rounded border border-slate-600 px-2 py-0.5 hover:bg-slate-700 hover:text-slate-300">
-            Load older messages from Telegram
-          </button>
-        </span>
-      )}
-    </div>
-  ) : null
+  const history = <HistoryHeader msgs={msgs} canBackfill={canBackfill} />
+  const canSend = can(chat, 'send')
+  const canForwardTo = useCallback((to: Conversation) => to.channel === chat.channel && can(to, 'send'), [chat.channel])
 
   const pinnedMsg = pinned.data
+  const pinnedPhoto = pinnedMsg?.attachments?.find((a) => a.kind === 'photo')
   const empty = msgs.messages.length === 0
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-slate-900">
       <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
         <div className="flex items-center gap-2 min-w-0">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-gray-100">{chat.name}</h2>
+            <h2 className="flex items-center gap-1.5 text-sm font-semibold text-gray-100">
+              <span className="truncate">{chatName}</span>
+              <ChannelIcon channel={chat.channel} size={11} />
+            </h2>
             <div className="flex items-center gap-1.5">
               <p className="text-xs text-slate-400"><ChatStatusLine chat={chat} /></p>
               {chat.is_forum && <span className="rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">forum</span>}
@@ -377,7 +395,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
               )}
             </div>
           </div>
-          {chat.type === 'private' && (
+          {peerPersonId != null && (
             <button
               onClick={() => void toggleImportant.run()}
               disabled={toggleImportant.pending || important.loading}
@@ -451,11 +469,11 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
             <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5">
               {searchResults.data!.map((msg) => (
                 <button
-                  key={msg.tg_message_id}
-                  onClick={() => void msgs.jumpTo(msg.tg_message_id)}
+                  key={msg.id}
+                  onClick={() => void msgs.jumpTo(msg.id)}
                   className="flex items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-slate-700/50 transition-colors"
                 >
-                  <span className="text-slate-400 flex-shrink-0">{msg.sender_name || 'Unknown'}</span>
+                  <span className="text-slate-400 flex-shrink-0">{msg.sender?.name || 'Unknown'}</span>
                   <span className="truncate text-slate-500">{msg.text || '[media]'}</span>
                   {msg.date && <span className="ml-auto flex-shrink-0 text-[10px] text-slate-600">{fmtShortDate(msg.date)}</span>}
                 </button>
@@ -465,26 +483,26 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
         </div>
       )}
 
-      {chat.is_forum && (
-        <ForumTopicsPanel telegramId={chatId} onSelectTopic={onSelectTopic} selectedTopicId={topic?.id ?? null} />
+      {chat.is_forum && can(chat, 'forum_topics') && (
+        <ForumTopicsPanel conversationId={chatId} onSelectTopic={onSelectTopic} selectedTopicId={topic?.id ?? null} />
       )}
 
-      {pinnedMsg && (
+      {canPin && pinnedMsg && (
         <div
           role="button"
           tabIndex={0}
           className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/50 px-4 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors"
-          onClick={() => void msgs.jumpTo(pinnedMsg.tg_message_id)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void msgs.jumpTo(pinnedMsg.tg_message_id) }}
+          onClick={() => void msgs.jumpTo(pinnedMsg.id)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void msgs.jumpTo(pinnedMsg.id) }}
         >
           <Pin size={14} className="text-indigo-400 flex-shrink-0" />
-          {pinnedMsg.media_url && pinnedMsg.media_type === 'photo' && (
-            <img src={authenticatedMediaUrl(pinnedMsg.media_url)} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
+          {pinnedPhoto?.url && (
+            <img src={authenticatedMediaUrl(pinnedPhoto.url)} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
           )}
           <div className="min-w-0 flex-1">
             <p className="text-[11px] font-medium text-indigo-400">Pinned message</p>
             <p className="text-xs text-slate-300 truncate">
-              {pinnedMsg.text ? pinnedMsg.text.slice(0, 120) : pinnedMsg.media_type ? `[${pinnedMsg.media_type}]` : ''}
+              {pinnedMsg.text ? pinnedMsg.text.slice(0, 120) : pinnedMsg.attachments?.[0] ? `[${pinnedMsg.attachments[0].kind}]` : ''}
             </p>
           </div>
           <button
@@ -501,28 +519,14 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
         <div className="flex items-center gap-2 border-b border-orange-500/20 bg-orange-500/10 px-4 py-1.5 text-xs text-orange-300">
           <AlertTriangle size={13} className="flex-shrink-0" />
           <span className="flex-1">
-            Couldn’t sync this chat from Telegram{msgs.syncFailed.error ? `: ${msgs.syncFailed.error}` : ''}
+            Couldn’t sync this chat{msgs.syncFailed.error ? `: ${msgs.syncFailed.error}` : ''}
           </span>
           <button onClick={() => void handleSync()} disabled={syncing} className="underline hover:text-orange-100">Retry</button>
         </div>
       )}
 
-      {msgs.replacing && msgs.jumpingTo && (
-        <div role="status" className="flex items-center gap-2 border-b border-slate-700/50 bg-slate-800/60 px-4 py-1.5 text-xs text-slate-400">
-          <Loader2 size={12} className="animate-spin text-indigo-400" />
-          {msgs.jumpingTo.kind === 'message' ? 'Loading the message (fetching from Telegram if needed)…' : 'Loading messages from that date…'}
-        </div>
-      )}
-      {msgs.jumpNotice && (
-        <JumpNoticeBar
-          notice={msgs.jumpNotice}
-          onRetry={() => {
-            const t = msgs.jumpNotice!.target
-            void (t.kind === 'message' ? msgs.jumpTo(t.tgId) : msgs.jumpToDate(t.date))
-          }}
-          onDismiss={msgs.dismissJumpNotice}
-        />
-      )}
+      <JumpingStatus msgs={msgs} />
+      <PaneJumpNotice msgs={msgs} />
 
       {msgs.loading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-slate-500">Loading…</div>
@@ -539,15 +543,16 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
       ) : empty && !msgs.syncFailed && (msgs.syncing || chat.last_synced_at == null) ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-sm text-slate-500">
           <Loader2 size={18} className="animate-spin text-indigo-400" />
-          Syncing message history from Telegram — first-time sync can take a while…
+          Syncing message history — first-time sync can take a while…
         </div>
       ) : (
         <MessageList
           messages={msgs.messages}
-          chatType={chat.type}
-          highlightTelegramId={msgs.highlightTgId}
+          multiParty={isMultiParty(chat)}
+          channel={chat.channel}
+          highlightMessageId={msgs.highlightMessageId}
           scrollIntent={msgs.scrollIntent}
-          firstUnreadTgId={msgs.firstUnreadTgId}
+          firstUnreadMessageId={msgs.firstUnreadMessageId}
           header={history}
           loadingOlder={msgs.loadingOlder}
           loadingNewer={msgs.loadingNewer}
@@ -556,47 +561,51 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
           onScrollNearBottom={msgs.loadNewer}
           onJumpToLatest={msgs.jumpToLatest}
           onJumpToMessage={msgs.jumpTo}
-          onReply={onReply}
-          onReact={onReact}
-          onEdit={onEdit}
-          onDelete={onDelete}
-          onForward={onForward}
-          onPin={onPin}
+          onJumpToExternal={msgs.jumpToExternal}
+          onReply={can(chat, 'reply') ? onReply : undefined}
+          onReact={can(chat, 'react') ? onReact : undefined}
+          onEdit={can(chat, 'edit') ? onEdit : undefined}
+          onDelete={can(chat, 'delete') ? onDelete : undefined}
+          onForward={can(chat, 'forward') ? onForward : undefined}
+          onPin={canPin ? onPin : undefined}
           flaggedSenderIds={flagged.ids}
           onReportScam={shield ? onReportScam : undefined}
           onScamVerdict={shield ? onScamVerdict : undefined}
           onOpenProfile={onOpenProfile}
           onSendMessage={onSendMessage}
-          onMention={onMention}
-          onRestrict={chat.type === 'group' ? onRestrict : undefined}
+          onMention={canSend ? onMention : undefined}
+          onRestrict={chat.kind === 'group' && can(chat, 'admin_moderation') ? onRestrict : undefined}
         />
       )}
 
-      <TypingBar chatId={chatId} />
+      <TypingBar chat={chat} />
 
-      <ComposeArea
-        chatId={chatId}
-        autoFocus={!selection.viaKeyboard}
-        onSend={handleSend}
-        onSendFiles={handleSendFiles}
-        onSaveEdit={handleSaveEdit}
-        onTyping={handleTyping}
-        insertText={mentionInsert}
-        onInsertConsumed={clearMention}
-      />
+      {canSend && (
+        <ComposeArea
+          chatId={chatId}
+          autoFocus={!selection.viaKeyboard}
+          onSend={handleSend}
+          onSendFiles={can(chat, 'media_send') ? handleSendFiles : undefined}
+          onSaveEdit={handleSaveEdit}
+          onTyping={can(chat, 'typing') ? handleTyping : undefined}
+          insertText={mentionInsert}
+          onInsertConsumed={clearMention}
+        />
+      )}
 
       <ChatPickerDialog
         open={!!forwardTarget}
         busy={forward.pending}
+        filter={canForwardTo}
         onClose={() => setForwardTarget(null)}
         onSelect={(to) => { if (forwardTarget) void forward.run(forwardTarget, to) }}
       />
 
       {shield && reportTarget && (
         <ReportScamDialog
-          chatId={reportTarget.chatId}
-          targetMessageId={reportTarget.tgId}
-          targetSenderId={reportTarget.senderId}
+          conversationId={reportTarget.conversationId}
+          targetMessageId={reportTarget.messageId}
+          targetIdentityId={reportTarget.identityId}
           onClose={() => setReportTarget(null)}
         />
       )}
@@ -604,41 +613,14 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   )
 }
 
-/** Why a jump (search hit, reply quote, pinned banner, mention, date) didn't land */
-export function jumpNoticeText(n: JumpNotice): string {
-  const what = n.target.kind === 'message' ? 'that message' : 'messages at that date'
-  switch (n.reason) {
-    case 'not_found':
-      return n.target.kind === 'message'
-        ? 'That message isn’t available — it may have been deleted.'
-        : 'No messages found at that date.'
-    case 'unavailable': return `Telegram is offline — couldn’t load ${what}.`
-    case 'rate_limited': return `Telegram rate limit — couldn’t load ${what} yet. Try again in a moment.`
-    default: return `Couldn’t load ${what}${n.detail ? `: ${n.detail}` : '.'}`
-  }
-}
-
-export function JumpNoticeBar({ notice, onRetry, onDismiss }: { notice: JumpNotice; onRetry: () => void; onDismiss: () => void }) {
-  return (
-    <div role="alert" className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-xs text-amber-200">
-      <AlertTriangle size={13} className="flex-shrink-0" />
-      <span className="flex-1">{jumpNoticeText(notice)}</span>
-      {notice.reason !== 'not_found' && (
-        <button onClick={onRetry} className="underline hover:text-amber-50">Retry</button>
-      )}
-      <button onClick={onDismiss} aria-label="Dismiss" className="hover:text-amber-50"><X size={12} /></button>
-    </div>
-  )
-}
-
-/** Compose box bound to the chat's slot (draft, reply, edit target, upload progress). */
+/** Compose box bound to the conversation's slot (draft, reply, edit target, upload progress). */
 function ComposeArea({ chatId, autoFocus, onSend, onSendFiles, onSaveEdit, onTyping, insertText, onInsertConsumed }: {
   chatId: number
   autoFocus: boolean
   onSend: (text: string) => Promise<void>
-  onSendFiles: (files: File[], text: string) => Promise<FilesSendOutcome>
+  onSendFiles?: (files: File[], text: string) => Promise<FilesSendOutcome>
   onSaveEdit: (text: string) => Promise<void>
-  onTyping: () => void
+  onTyping?: () => void
   insertText: string | null
   onInsertConsumed: () => void
 }) {

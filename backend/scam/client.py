@@ -41,21 +41,31 @@ class FollowUpRequest:
 class ScanRequest:
     """One scam check: the messages being judged (``targets``) plus read-only
     ``context``. Only targets are scored, only target senders are flagged and
-    signature short-circuits look only at targets. Message dicts carry
-    message_id, sender_id, sender_name, text, date."""
-    chat_id: int
+    signature short-circuits look only at targets.
+
+    Message dicts carry message_id (internal), identity_id (the sender, or
+    None), sender_name, text, date, and ``telegram_user_id`` for Telegram
+    senders (signature matching and the Telegram-shaped external API).
+    ``metadata`` describes the conversation: conversation_id, title, kind
+    (direct | group | channel | email_thread) and channel."""
+    conversation_id: int
     targets: list
+    channel: Optional[str] = None
     context: list = field(default_factory=list)
     profiles: list = field(default_factory=list)
-    chat_metadata: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
 
     @property
     def target_ids(self) -> list:
         return [m["message_id"] for m in self.targets]
 
     @property
-    def target_sender_ids(self) -> list:
-        return list(dict.fromkeys(m["sender_id"] for m in self.targets if m.get("sender_id")))
+    def target_identity_ids(self) -> list:
+        return list(dict.fromkeys(m["identity_id"] for m in self.targets if m.get("identity_id")))
+
+    @property
+    def conversation_kind(self) -> Optional[str]:
+        return self.metadata.get("kind")
 
     def all_messages(self) -> list:
         """Context then targets, chronological — for APIs that take one list."""
@@ -74,12 +84,16 @@ def build_message_context(req: ScanRequest, budget: int = PROMPT_CHAR_BUDGET) ->
     """Render the request for the LLM. Targets come last, under
     ``Messages to analyze:``, and are never truncated."""
     head = []
-    if req.chat_metadata:
-        head.append(f"Chat: {req.chat_metadata.get('name', 'Unknown')} ({req.chat_metadata.get('type', 'unknown')})")
+    if req.metadata:
+        kind = req.metadata.get("kind") or "unknown"
+        channel = req.metadata.get("channel") or req.channel
+        head.append(
+            f"Conversation: {req.metadata.get('title') or 'Unknown'} ({kind}{f' on {channel}' if channel else ''})"
+        )
     for profile in req.profiles[:5]:
         bio = profile.get("bio") or ""
         head.append(
-            f"Profile - ID:{profile.get('telegram_id')}, Name:{profile.get('name', '?')}, "
+            f"Profile - Name:{profile.get('name') or '?'}, "
             f"Bio:{bio}, Is contact:{profile.get('is_contact', False)}"
         )
     target_lines = [TARGETS_HEADER] + [
@@ -107,7 +121,9 @@ def build_message_context(req: ScanRequest, budget: int = PROMPT_CHAR_BUDGET) ->
 class ScamAPIClient(ABC):
     @abstractmethod
     async def are_flagged_scams(self, telegram_ids: list[int]) -> dict[int, ScamCheckResult]:
-        """Check if telegram users are known scammers. Returns {telegram_id: result}."""
+        """Check if Telegram users (by Telegram user id — the signature and
+        cloud contract) are known scammers. Returns {telegram_user_id: result}.
+        The service translates identities to user ids and back."""
 
     @abstractmethod
     async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
@@ -193,7 +209,10 @@ class LocalPipelineClient(ScamAPIClient):
             return ScamCheckResult(is_scam=False, confidence=0.0, reason="", error="Pipeline not loaded")
 
         from backend.scam.engine import execute_pipeline
-        engine_result = await execute_pipeline(self._pipeline, build_message_context(req), req.targets)
+        engine_result = await execute_pipeline(
+            self._pipeline, build_message_context(req), req.targets,
+            channel=req.channel, conversation_kind=req.conversation_kind,
+        )
         return engine_result.scam_result
 
     async def get_result(self, request_id: str) -> Union[ScamCheckResult, None]:
@@ -214,6 +233,40 @@ MockScamAPIClient = LocalPipelineClient
 def _vault_scam_api_key() -> str:
     from backend.api.settings import get_secret_pref
     return get_secret_pref("scam_detection_api_key")
+
+
+# The external API speaks the Telegram-shaped v1 contract: message ids only
+# need to be consistent within one request (internal ids are), senders are
+# Telegram user ids (None for other channels) and "private" means direct.
+_EXTERNAL_KIND = {"direct": "private"}
+
+
+def _external_message(m: dict) -> dict:
+    return {
+        "message_id": m.get("message_id"),
+        "sender_id": m.get("telegram_user_id"),
+        "sender_name": m.get("sender_name"),
+        "text": m.get("text"),
+        "date": m.get("date"),
+    }
+
+
+def _external_profile(p: dict) -> dict:
+    return {
+        "telegram_id": p.get("telegram_user_id"),
+        "name": p.get("name"),
+        "bio": p.get("bio") or "",
+        "is_contact": bool(p.get("is_contact")),
+    }
+
+
+def _external_metadata(req: ScanRequest) -> dict:
+    kind = req.metadata.get("kind")
+    return {
+        "name": req.metadata.get("title") or "Unknown",
+        "type": _EXTERNAL_KIND.get(kind, kind),
+        "channel": req.channel,
+    }
 
 
 class ExternalScamAPIClient(ScamAPIClient):
@@ -264,11 +317,11 @@ class ExternalScamAPIClient(ScamAPIClient):
                 f"{self._base_url}/isThisScam",
                 json={
                     "request_id": request_id,
-                    "messages": req.all_messages(),
+                    "messages": [_external_message(m) for m in req.all_messages()],
                     "target_message_ids": req.target_ids,
                     "user_telegram_id": 0,
-                    "profiles": req.profiles,
-                    "chat_metadata": req.chat_metadata,
+                    "profiles": [_external_profile(p) for p in req.profiles],
+                    "chat_metadata": _external_metadata(req),
                 },
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 timeout=60,

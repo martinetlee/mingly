@@ -41,7 +41,7 @@ export async function fetchScannedRows(
   return { messages, total, nextCursor: cursor }
 }
 
-/** Overlay WS / mutation row states onto loaded rows by (chat_id, tg_message_id). */
+/** Overlay WS / mutation row states onto loaded rows by message_id. */
 export function applyRowStates(rows: ScannedMessage[], states: ScamMsgState[]): ScannedMessage[] {
   if (!states.length) return rows
   const byKey = new Map(states.map((s) => [messageKey(s), s]))

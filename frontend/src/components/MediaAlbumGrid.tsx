@@ -1,40 +1,41 @@
 import { useState } from 'react'
-import type { Message } from '../api/types'
+import type { Attachment } from '../api/types'
 import ImageLightbox from './ImageLightbox'
-import MediaView from './MediaView'
+import MediaView, { VISUAL_MEDIA } from './MediaView'
 
 interface Props {
-  messages: Message[]
+  /** Every attachment of the album (a grouped set of messages, or one message with several attachments) */
+  attachments: Attachment[]
   isOut: boolean
 }
 
 /**
  * Album grid. Every item renders through MediaView (photos auto-download,
  * videos are click-to-load and play in the video lightbox, documents/audio
- * render as their own cards), so items without a stored media_url aren't
+ * render as their own cards), so items without a stored url aren't
  * dropped and videos never render as <img>.
  */
-export default function MediaAlbumGrid({ messages, isOut }: Props) {
+export default function MediaAlbumGrid({ attachments, isOut }: Props) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
-  const visual = messages.filter((m) => m.media_type === 'photo' || m.media_type === 'video' || m.media_type === 'gif')
-  const other = messages.filter((m) => m.media_type && !visual.includes(m))
+  const visual = attachments.filter((a) => VISUAL_MEDIA.has(a.kind))
+  const other = attachments.filter((a) => !VISUAL_MEDIA.has(a.kind))
   const count = visual.length
 
   return (
     <div className={isOut ? 'ml-auto' : 'mr-auto'} style={{ maxWidth: 360 }}>
       {count > 0 && (
         <div className={`grid gap-0.5 ${count === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
-          {visual.map((m, i) => {
+          {visual.map((a, i) => {
             // 3 items: the first spans the full width
             const spanFull = count === 3 && i === 0
             return (
               <div
-                key={m.tg_message_id}
+                key={a.id}
                 className={`relative overflow-hidden ${spanFull ? 'col-span-2' : ''}`}
                 style={{ height: spanFull ? 240 : count === 1 ? undefined : 180 }}
               >
                 <MediaView
-                  message={m}
+                  attachment={a}
                   isOut={isOut}
                   compact
                   onOpen={setLightboxSrc}
@@ -44,8 +45,8 @@ export default function MediaAlbumGrid({ messages, isOut }: Props) {
           })}
         </div>
       )}
-      {other.map((m) => (
-        <MediaView key={m.tg_message_id} message={m} isOut={isOut} />
+      {other.map((a) => (
+        <MediaView key={a.id} attachment={a} isOut={isOut} />
       ))}
       {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>

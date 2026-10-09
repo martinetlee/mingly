@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMUnavailable, get_provider_for_model
+from backend.scam.channel_ids import TELEGRAM
 from backend.scam.client import ScamCheckResult
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ class PipelineTrace:
     error: Optional[str] = None
     short_circuit: Optional[dict] = None
     input: Optional[str] = None  # the message context fed to the pipeline
+    channel: Optional[str] = None  # telegram | gmail | ... of the conversation
+    conversation_kind: Optional[str] = None  # direct | group | channel | email_thread
     steps: list[StepTrace] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -675,16 +678,17 @@ def _failed_result(trace: PipelineTrace, t0: float, error: str) -> EngineResult:
     )
 
 
-def _signature_match(sigs, targets: list[dict]) -> Optional[dict]:
-    """First signature hit among the *target* messages (context never matches)."""
+def _signature_match(sigs, targets: list[dict], channel: Optional[str] = None) -> Optional[dict]:
+    """First signature hit among the *target* messages (context never matches).
+    Known-scammer ids are Telegram user ids, so they only match Telegram senders."""
     from backend.scam.client import _extract_domains
 
-    known_ids = set(sigs.telegram_ids)
+    known_ids = set(sigs.telegram_ids) if channel == TELEGRAM else set()
     for msg in targets:
         text = msg.get("text") or ""
-        sender_id = msg.get("sender_id")
-        if sender_id and sender_id in known_ids:
-            return {"match_type": "telegram_id", "matched_value": str(sender_id), "confidence": 0.95,
+        user_id = msg.get("telegram_user_id")
+        if user_id and user_id in known_ids:
+            return {"match_type": "telegram_id", "matched_value": str(user_id), "confidence": 0.95,
                     "category": "impersonation", "reason": "Sender matches known scammer ID"}
         if not text:
             continue
@@ -705,25 +709,39 @@ def _signature_match(sigs, targets: list[dict]) -> Optional[dict]:
     return None
 
 
-async def execute_pipeline(pipeline_config, message_context: str, targets: list[dict]) -> EngineResult:
+async def execute_pipeline(
+    pipeline_config,
+    message_context: str,
+    targets: list[dict],
+    *,
+    channel: Optional[str] = None,
+    conversation_kind: Optional[str] = None,
+) -> EngineResult:
     """Execute a pipeline DAG and return the result with full trace.
 
     Args:
         pipeline_config: PipelineConfig with nodes, edges, output, signatures, categories
-        message_context: Rendered prompt input (chat info + profiles + context + targets)
+        message_context: Rendered prompt input (conversation info + profiles + context + targets)
         targets: The message dicts being judged. Signature checks and the ML
             prefilter look only at these.
+        channel: The conversation's channel (telegram, gmail, ...); nodes see
+            it as ``{{$channel}}``.
+        conversation_kind: direct | group | channel | email_thread; nodes see
+            it as ``{{$conversation_kind}}``.
     """
     t0 = time.monotonic()
     trace = PipelineTrace(
         pipeline_version=pipeline_config.version,
         started_at=datetime.now(timezone.utc).isoformat(),
         input=message_context,
+        channel=channel,
+        conversation_kind=conversation_kind,
     )
     target_text = "\n".join((m.get("text") or "") for m in targets if m.get("text"))
+    scan_inputs = {"$channel": channel or "", "$conversation_kind": conversation_kind or ""}
 
     # --- Step 1: Signature check (targets only) ---
-    hit = _signature_match(pipeline_config.signatures, targets)
+    hit = _signature_match(pipeline_config.signatures, targets, channel)
     if hit:
         reason = hit.pop("reason")
         trace.short_circuit = hit
@@ -764,6 +782,7 @@ async def execute_pipeline(pipeline_config, message_context: str, targets: list[
             node_inputs: dict[str, Any] = {
                 pred_id: results[pred_id] for pred_id in predecessors.get(nid, []) if pred_id in results
             }
+            node_inputs.update(scan_inputs)
             if node.type == "llm":
                 tasks.append((nid, _execute_llm_node(node.config, node_inputs, message_context, category_ids)))
             elif node.type == "script":

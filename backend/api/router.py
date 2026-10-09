@@ -19,7 +19,11 @@ from backend import instance
 from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
-from backend.api import accounts, admin, archive, auth, catchup, chats, compose, contacts, conversations, dashboard, media, mcp, organizations, scam, search, session, settings, llm, tags, intelligence, profiles, translate, workspaces
+from backend.api import (
+    accounts, admin, ai_conversations, archive, auth, catchup, compose, conversations, dashboard, intelligence, llm,
+    mcp, media, organizations, people, person_notes, scam, search, session, settings, tags, telegram, translate,
+    workspaces,
+)
 from backend.api.dependencies import HostOriginMiddleware, is_valid_session_token, require_session_token, validate_ws_origin
 
 logger = logging.getLogger(__name__)
@@ -120,23 +124,20 @@ def create_app() -> FastAPI:
     # All other API routes require a valid session token
     protected = [Depends(require_session_token)]
     app.include_router(accounts.router, prefix="/api/accounts", tags=["accounts"], dependencies=protected)
+    app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"], dependencies=protected)
+    app.include_router(conversations.messages_router, prefix="/api/messages", tags=["messages"], dependencies=protected)
+    app.include_router(telegram.router, prefix="/api/telegram", tags=["telegram"], dependencies=protected)
     app.include_router(admin.router, prefix="/api/admin", tags=["admin"], dependencies=protected)
-    app.include_router(chats.router, prefix="/api/chats", tags=["chats"], dependencies=protected)
     app.include_router(archive.router, prefix="/api/archive", tags=["archive"], dependencies=protected)
     app.include_router(compose.router, prefix="/api/compose", tags=["compose"], dependencies=protected)
-    app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"], dependencies=protected)
-    people_router = getattr(contacts, "people_router", None)
-    if people_router is not None:
-        app.include_router(people_router, prefix="/api/people", tags=["people"], dependencies=protected)
-    from backend.api import person_notes
+    app.include_router(people.router, prefix="/api/people", tags=["people"], dependencies=protected)
     app.include_router(person_notes.router, prefix="/api/people", tags=["people"], dependencies=protected)
-    app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"], dependencies=protected)
+    app.include_router(ai_conversations.router, prefix="/api/ai/conversations", tags=["ai"], dependencies=protected)
     app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"], dependencies=protected)
     app.include_router(settings.router, prefix="/api/settings", tags=["settings"], dependencies=protected)
     app.include_router(llm.router, prefix="/api/llm", tags=["llm"], dependencies=protected)
     app.include_router(tags.router, prefix="/api", tags=["tags"], dependencies=protected)
     app.include_router(intelligence.router, prefix="/api", tags=["intelligence"], dependencies=protected)
-    app.include_router(profiles.router, prefix="/api/profiles", tags=["profiles"], dependencies=protected)
     app.include_router(catchup.router, prefix="/api/catchup", tags=["catchup"], dependencies=protected)
     app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
     app.include_router(search.router, prefix="/api/search", tags=["search"], dependencies=protected)

@@ -34,12 +34,12 @@ export default function ReportsTab({ reports, loading, error, onRetry }: {
               <div className="flex items-center gap-2">
                 <Flag size={12} className="flex-shrink-0 text-red-400" />
                 <span className="text-xs font-medium text-slate-200 truncate max-w-[140px]">
-                  {r.reported_sender_name || `ID: ${r.reported_telegram_id}`}
+                  {r.reported_sender_name || `ID: ${r.reported_identity_id}`}
                 </span>
               </div>
             </td>
             <td className="px-3 py-2.5">
-              <span className="text-xs text-slate-400 truncate max-w-[160px] block">{r.chat_name}</span>
+              <span className="text-xs text-slate-400 truncate max-w-[160px] block">{r.conversation_title}</span>
             </td>
             <td className="px-3 py-2.5">
               <span className="text-xs text-slate-400">{r.custom_category || r.scam_category || '—'}</span>

@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from backend.db.migrations import areas, runner
+from backend.db.migrations import runner
 
 
 async def _run(tmp_path, migrations, *, fresh):
@@ -16,15 +16,13 @@ async def _run(tmp_path, migrations, *, fresh):
             "is_default BOOLEAN, created_at DATETIME)"
         )
         await c.commit()
-    orig_core, orig_areas = list(runner.MIGRATIONS), list(areas.MODULES)
+    orig_core = list(runner.MIGRATIONS)
     runner.MIGRATIONS[:] = migrations
-    areas.MODULES[:] = []
     try:
         async with eng.connect() as c:
             await runner.run_migrations(c, fresh=fresh)
     finally:
         runner.MIGRATIONS[:] = orig_core
-        areas.MODULES[:] = orig_areas
     return eng
 
 

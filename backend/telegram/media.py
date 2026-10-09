@@ -1,5 +1,6 @@
-"""Media downloads: atomic, single-flight per message, plus a bounded
-background queue for photo thumbnails discovered by sync/live updates.
+"""Telegram media downloads: atomic, single-flight per attachment, plus a
+bounded background queue for photo thumbnails discovered by sync/live
+updates, and profile photos stored as identity / conversation avatars.
 
 Every download writes to a sibling temp file and is renamed into place, so an
 interrupted or concurrent download can never leave a truncated file that is
@@ -13,13 +14,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from backend.config import DATA_DIR
+from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Message
+from backend.db.models import Conversation, Identity, Message, MessageAttachment
 from backend.jobs import await_single
+from backend.serializers import media_url
 from backend.tasks import spawn
+from backend.telegram import ids
 from backend.telegram.runtime import runtime
 from backend.telegram.convert import media_type as _media_type
 
@@ -27,8 +31,7 @@ logger = logging.getLogger(__name__)
 
 MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(exist_ok=True)
-PROFILE_PHOTO_DIR = DATA_DIR / "profile_photos"
-PROFILE_PHOTO_DIR.mkdir(exist_ok=True)
+AVATAR_DIR = MEDIA_DIR / "avatars"
 
 _EXTENSIONS = {
     "photo": ".jpg",
@@ -120,41 +123,48 @@ def _extension(media_type: str, tg_msg, media_filename: Optional[str]) -> str:
         return ""
 
 
-def _final_path(chat_id: int, tg_msg_id: int, ext: str) -> Path:
-    return MEDIA_DIR / str(chat_id) / f"{tg_msg_id}{ext}"
+def _final_path(conversation_id: int, attachment_id: int, ext: str) -> Path:
+    return MEDIA_DIR / str(conversation_id) / f"{attachment_id}{ext}"
 
 
-async def _persist_media_path(chat_id: int, tg_msg_id: int, rel: str) -> None:
+async def _attachment_context(attachment_id: int):
+    """(attachment, message, conversation) or MediaNotFound."""
     async with AsyncSessionLocal() as db:
-        await db.execute(
-            update(Message)
-            .where(Message.chat_id == chat_id, Message.tg_message_id == tg_msg_id)
-            .values(media_path=rel)
-        )
-        await db.commit()
+        row = (await db.execute(
+            select(MessageAttachment, Message)
+            .join(Message, Message.id == MessageAttachment.message_id)
+            .where(MessageAttachment.id == attachment_id)
+        )).first()
+        if row is None:
+            raise MediaNotFound("Attachment not found")
+        att, msg = row
+        conv = await crud.get_conversation(db, msg.conversation_id)
+    if conv is None or conv.account is None or conv.account.channel != ids.CHANNEL:
+        raise MediaNotFound("Not a Telegram attachment")
+    return att, msg, conv
 
 
-async def _download(chat_id: int, tg_msg_id: int, media_type: Optional[str], tg_msg, media_filename: Optional[str]) -> str:
+async def _download(attachment_id: int, tg_msg) -> str:
+    att, msg, conv = await _attachment_context(attachment_id)
     client = await runtime.client(require=False)
     if client is None:
         raise MediaUnavailable("Telegram client not connected")
     if tg_msg is None:
-        tg_msg = await client.get_messages(chat_id, ids=tg_msg_id)
+        tg_msg = await client.get_messages(ids.peer_id_of(conv), ids=ids.tg_message_id_of(msg))
     if not tg_msg or not getattr(tg_msg, "media", None):
         raise MediaNotFound("Media not found on Telegram")
-    media_type = media_type or _media_type(tg_msg)
-    ext = _extension(media_type or "", tg_msg, media_filename)
-    final = _final_path(chat_id, tg_msg_id, ext)
+    media_type = att.kind or _media_type(tg_msg)
+    ext = _extension(media_type or "", tg_msg, att.filename)
+    final = _final_path(conv.id, att.id, ext)
     rel = str(final.relative_to(DATA_DIR))
     thumb = pick_thumb(tg_msg) if media_type == "photo" else None
     expected = getattr(thumb, "size", None) if thumb is not None else _document_size(tg_msg)
     if final.exists() and not file_is_complete(final, media_type, expected):
-        # Truncated by the old non-atomic download code: fetch it again.
         logger.info("Re-downloading truncated media %s", rel)
         final.unlink()
     if not final.exists():
         final.parent.mkdir(parents=True, exist_ok=True)
-        tmp = final.with_name(f".{tg_msg_id}.{uuid.uuid4().hex[:8]}.part{ext}")
+        tmp = final.with_name(f".{att.id}.{uuid.uuid4().hex[:8]}.part{ext}")
         out = None
         try:
             out = await client.download_media(tg_msg, file=str(tmp), thumb=thumb)
@@ -170,25 +180,16 @@ async def _download(chat_id: int, tg_msg_id: int, media_type: Optional[str], tg_
                         os.unlink(leftover)
                     except OSError:
                         pass
-    await _persist_media_path(chat_id, tg_msg_id, rel)
+    async with AsyncSessionLocal() as db:
+        await crud.set_attachment_local_path(db, att.id, rel)
     return rel
 
 
-async def download_message_media(
-    chat_id: int,
-    tg_msg_id: int,
-    *,
-    media_type: Optional[str] = None,
-    tg_msg=None,
-    media_filename: Optional[str] = None,
-) -> str:
-    """Download a message's media (photos as a ~600px thumbnail) and store
-    ``media_path``. Concurrent callers for the same message share one
-    download. Returns the path relative to DATA_DIR."""
-    return await await_single(
-        f"media:{chat_id}:{tg_msg_id}",
-        lambda: _download(chat_id, tg_msg_id, media_type, tg_msg, media_filename),
-    )
+async def download_attachment(attachment_id: int, *, tg_msg=None) -> str:
+    """Download a Telegram attachment (photos as a ~600px thumbnail) and
+    store its ``local_path``. Concurrent callers for the same attachment
+    share one download. Returns the path relative to DATA_DIR."""
+    return await await_single(f"media:{attachment_id}", lambda: _download(attachment_id, tg_msg))
 
 
 # ---------------------------------------------------------------------------
@@ -215,70 +216,70 @@ def _ensure_queue() -> asyncio.Queue:
 async def _worker(queue: asyncio.Queue) -> None:
     from backend.ws.manager import ws_manager
     while True:
-        chat_id, tg_msg_id, tg_msg = await queue.get()
+        conversation_id, attachment_id, tg_msg = await queue.get()
         try:
-            rel = await download_message_media(chat_id, tg_msg_id, media_type="photo", tg_msg=tg_msg)
+            rel = await download_attachment(attachment_id, tg_msg=tg_msg)
+            async with AsyncSessionLocal() as db:
+                message_id = (await db.execute(
+                    select(MessageAttachment.message_id).where(MessageAttachment.id == attachment_id)
+                )).scalar()
             await ws_manager.broadcast({
                 "type": "media_ready",
-                "chat_id": chat_id,
-                "tg_message_id": tg_msg_id,
-                "media_type": "photo",
-                "media_url": f"/api/media/{rel}",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "attachment_id": attachment_id,
+                "kind": "photo",
+                "url": media_url(rel),
             })
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug("Background photo download failed for %s/%s: %s", chat_id, tg_msg_id, e)
+            logger.debug("Background photo download failed for attachment %s: %s", attachment_id, e)
         finally:
             queue.task_done()
 
 
 async def audit_media_files() -> int:
-    """Startup pass: find stored media files that are truncated (left by the
-    old non-atomic downloader), delete them and clear ``media_path`` so the
-    UI re-downloads through the atomic path. Returns the number cleared."""
-    from sqlalchemy import select
+    """Startup pass: find stored attachment files that are truncated or
+    missing, delete them and clear ``local_path`` so the UI re-downloads
+    through the atomic path. Returns the number cleared."""
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(
-            select(Message.chat_id, Message.tg_message_id, Message.media_path, Message.media_type, Message.media_size)
-            .where(Message.media_path.isnot(None))
+            select(MessageAttachment.id, MessageAttachment.local_path, MessageAttachment.kind, MessageAttachment.size)
+            .where(MessageAttachment.local_path.isnot(None))
         )).all()
 
     def _scan() -> list:
         bad = []
-        for chat_id, tg_id, rel, mtype, msize in rows:
+        for att_id, rel, kind, size in rows:
             path = DATA_DIR / rel
-            expected = msize if mtype != "photo" else None
-            if not file_is_complete(path, mtype, expected):
-                bad.append((chat_id, tg_id, path))
+            expected = size if kind != "photo" else None
+            if not file_is_complete(path, kind, expected):
+                bad.append((att_id, path))
         return bad
 
     bad = await asyncio.to_thread(_scan)
     if not bad:
         return 0
     async with AsyncSessionLocal() as db:
-        for chat_id, tg_id, path in bad:
+        for att_id, path in bad:
             try:
                 path.unlink()
             except OSError:
                 pass
-            await db.execute(
-                update(Message)
-                .where(Message.chat_id == chat_id, Message.tg_message_id == tg_id)
-                .values(media_path=None)
-            )
+            await db.execute(update(MessageAttachment).where(MessageAttachment.id == att_id).values(local_path=None))
         await db.commit()
     logger.info("Cleared %d truncated/missing media files", len(bad))
     return len(bad)
 
 
-def enqueue_photo(chat_id: int, tg_msg) -> bool:
+def enqueue_photo(conversation_id: int, attachment_id: int, tg_msg) -> bool:
     """Queue a photo thumbnail download. Returns False when the queue is full
-    (the on-demand /api/media-download endpoint covers whatever is dropped)."""
+    (the on-demand download endpoint covers whatever is dropped)."""
     if _media_type(tg_msg) != "photo":
         return False
     try:
-        _ensure_queue().put_nowait((chat_id, tg_msg.id, tg_msg))
+        _ensure_queue().put_nowait((conversation_id, attachment_id, tg_msg))
         return True
     except asyncio.QueueFull:
         return False
@@ -293,21 +294,46 @@ def stop_media_workers() -> None:
     _queue_loop = None
 
 
-async def download_profile_photo(client, entity, dialog_id: int) -> None:
-    """Download a chat/user profile photo once, atomically."""
-    final = PROFILE_PHOTO_DIR / f"{dialog_id}.jpg"
+async def _download_avatar(client, entity, final: Path) -> bool:
+    """Download a profile photo to ``final`` once, atomically. Returns
+    whether the file exists afterwards."""
     if final.exists():
-        return
-    tmp = final.with_name(f".{dialog_id}.{uuid.uuid4().hex[:8]}.part.jpg")
+        return True
+    final.parent.mkdir(parents=True, exist_ok=True)
+    tmp = final.with_name(f".{final.stem}.{uuid.uuid4().hex[:8]}.part.jpg")
     try:
         out = await client.download_profile_photo(entity, file=str(tmp), download_big=False)
         if out:
             os.replace(out, final)
     except Exception:
-        logger.debug("Profile photo download failed for %s", dialog_id, exc_info=True)
+        logger.debug("Profile photo download failed for %s", final.name, exc_info=True)
     finally:
         if tmp.exists():
             try:
                 tmp.unlink()
             except OSError:
                 pass
+    return final.exists()
+
+
+async def download_avatar(client, entity, *, conversation_id: Optional[int] = None,
+                          identity_id: Optional[int] = None) -> Optional[str]:
+    """Store ``entity``'s profile photo as the avatar of an identity (users)
+    or a conversation (groups/channels). Returns the relative path."""
+    if identity_id is not None:
+        final = AVATAR_DIR / "identities" / f"{identity_id}.jpg"
+        table, key = Identity, identity_id
+    elif conversation_id is not None:
+        final = AVATAR_DIR / "conversations" / f"{conversation_id}.jpg"
+        table, key = Conversation, conversation_id
+    else:
+        raise ValueError("download_avatar needs conversation_id or identity_id")
+    if not await _download_avatar(client, entity, final):
+        return None
+    rel = str(final.relative_to(DATA_DIR))
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(table).where(table.id == key, table.avatar_path.is_distinct_from(rel)).values(avatar_path=rel)
+        )
+        await db.commit()
+    return rel

@@ -5,14 +5,14 @@ import {
   applyLive, appendNewer, cursorOf, deletionApplies, firstUnreadId, fromPage, inScope, mergeLatest, mergeMessages, prependOlder,
 } from '../messageWindow'
 
-const ids = (ms: Message[]) => ms.map((m) => m.tg_message_id)
+const ids = (ms: Message[]) => ms.map((m) => m.id)
 
 describe('messageWindow', () => {
-  it('cursor is "<date>~<tg_message_id>"', () => {
-    expect(cursorOf(msg(5))).toBe('2026-10-06T10:00:05Z~5')
+  it('cursor is the message id', () => {
+    expect(cursorOf(msg(5))).toBe(5)
   })
 
-  it('merges by tg_message_id without duplicates and keeps order (WS + overlapping page)', () => {
+  it('merges by message id without duplicates and keeps order (WS + overlapping page)', () => {
     const w = fromPage(page([10, 11, 12], { has_older: true }))
     // A WS message arrived (13), then an older page that overlaps (shifted offsets used to re-send 10..12)
     const live = applyLive(w, msg(13))
@@ -21,10 +21,13 @@ describe('messageWindow', () => {
     expect(new Set(ids(merged.messages)).size).toBe(merged.messages.length)
   })
 
-  it('orders same-timestamp album items by tg_message_id', () => {
+  it('orders same-timestamp album items by channel seq, not insertion id', () => {
     const d = '2026-10-06T10:00:00Z'
     const out = mergeMessages([msg(3, { date: d })], [msg(1, { date: d }), msg(2, { date: d })])
     expect(ids(out)).toEqual([1, 2, 3])
+    // Backfilled rows get higher internal ids than newer ones: seq decides
+    const backfilled = mergeMessages([msg(10, { date: d, seq: 1 })], [msg(5, { date: d, seq: 2 })])
+    expect(ids(backfilled)).toEqual([10, 5])
   })
 
   it('appends a live message only when the window is at latest', () => {
@@ -60,18 +63,18 @@ describe('messageWindow', () => {
     expect(gap.hasNewer).toBe(true)
   })
 
-  it('scopes messages by chat and forum topic (General includes untagged)', () => {
-    expect(inScope({ chat_id: -100, topic_id: 7 }, { chatId: -100, topicId: null })).toBe(true)
-    expect(inScope({ chat_id: -200, topic_id: null }, { chatId: -100, topicId: null })).toBe(false)
-    expect(inScope({ chat_id: -100, topic_id: 7 }, { chatId: -100, topicId: 8 })).toBe(false)
-    expect(inScope({ chat_id: -100, topic_id: null }, { chatId: -100, topicId: 1 })).toBe(true)
-    expect(inScope({ chat_id: -100, topic_id: 7 }, { chatId: -100, topicId: 1 })).toBe(false)
+  it('scopes messages by conversation and forum topic (General includes untagged)', () => {
+    expect(inScope({ conversation_id: 100, topic_id: 7 }, { conversationId: 100, topicId: null })).toBe(true)
+    expect(inScope({ conversation_id: 200, topic_id: null }, { conversationId: 100, topicId: null })).toBe(false)
+    expect(inScope({ conversation_id: 100, topic_id: 7 }, { conversationId: 100, topicId: 8 })).toBe(false)
+    expect(inScope({ conversation_id: 100, topic_id: null }, { conversationId: 100, topicId: 1 })).toBe(true)
+    expect(inScope({ conversation_id: 100, topic_id: 7 }, { conversationId: 100, topicId: 1 })).toBe(false)
   })
 
-  it('applies chat-less deletions only in the shared id namespace', () => {
+  it('applies deletions for this conversation, or conversation-less ones (internal ids are global)', () => {
     expect(deletionApplies(null, 12345)).toBe(true)
-    expect(deletionApplies(null, -1001234567890)).toBe(false)
-    expect(deletionApplies(-1001234567890, -1001234567890)).toBe(true)
+    expect(deletionApplies(7, 7)).toBe(true)
+    expect(deletionApplies(8, 7)).toBe(false)
   })
 
   it('anchors the unread separator on the first unread incoming message', () => {

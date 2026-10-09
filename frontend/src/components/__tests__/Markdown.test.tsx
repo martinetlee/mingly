@@ -16,9 +16,9 @@ describe('Markdown', () => {
 
   it('turns [n] citations into source buttons (1-based) and leaves out-of-range ones as text', () => {
     const onCite = vi.fn()
-    render(<Markdown content={'- Launch moved [1][2]\n- Unknown [3]'} sources={[{ chat_id: -100, telegram_id: 5 }, { chat_id: -100, telegram_id: 6 }]} onCite={onCite} />)
+    render(<Markdown content={'- Launch moved [1][2]\n- Unknown [3]'} sources={[{ conversation_id: 100, message_id: 5 }, { conversation_id: 100, message_id: 6 }]} onCite={onCite} />)
     fireEvent.click(screen.getAllByTitle('Jump to source message')[1])
-    expect(onCite).toHaveBeenCalledWith({ chat_id: -100, telegram_id: 6 })
+    expect(onCite).toHaveBeenCalledWith({ conversation_id: 100, message_id: 6 })
     expect(screen.getAllByTitle('Jump to source message')).toHaveLength(2)
     expect(screen.getByText('[3]')).toBeTruthy()
   })

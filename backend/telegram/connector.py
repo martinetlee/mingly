@@ -50,6 +50,7 @@ class TelegramConnector(Connector):
     display_name = "Telegram"
     capabilities = frozenset({
         Capability.SEND, Capability.EDIT, Capability.DELETE, Capability.REACT, Capability.REPLY,
+        Capability.PIN, Capability.FORWARD,
         Capability.MEDIA_SEND, Capability.READ_RECEIPTS, Capability.FORUM_TOPICS,
         Capability.ADMIN_MODERATION, Capability.HISTORY_BACKFILL, Capability.TYPING,
         Capability.PRESENCE,
@@ -73,6 +74,14 @@ class TelegramConnector(Connector):
 
     def status(self) -> ConnectorStatus:
         return ConnectorStatus(runtime.state, runtime.last_error)
+
+    def conversation_capabilities(self, conversation) -> frozenset[Capability]:
+        caps = set(self.capabilities)
+        if not conversation.is_forum:
+            caps.discard(Capability.FORUM_TOPICS)
+        if conversation.kind == "direct":
+            caps.discard(Capability.ADMIN_MODERATION)
+        return frozenset(caps)
 
     # -- sign-in steps (shared with the legacy /api/auth routes) -------------
 

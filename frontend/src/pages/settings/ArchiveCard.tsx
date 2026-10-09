@@ -105,7 +105,7 @@ export default function ArchiveCard() {
           )}
           {status.current_chat && active && (
             <p className="truncate text-xs text-slate-400">
-              Now archiving: <span className="text-slate-200">{status.current_chat.name}</span>
+              Now archiving: <span className="text-slate-200">{status.current_chat.title ?? `Conversation ${status.current_chat.conversation_id}`}</span>
             </p>
           )}
           {status.groups_queued > 0 && (

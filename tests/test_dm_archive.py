@@ -15,7 +15,8 @@ from telethon.tl import types as T
 
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, ChatHistoryCoverage, Message
+from backend.db.models import Conversation, HistoryCoverage, Message
+from backend.telegram import ids as tg_ids
 
 BASE = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -105,6 +106,7 @@ class FakeTelegram:
                 yield d
 
     async def iter_messages(self, chat_id, limit=None, *, offset_id=0, min_id=0, reverse=False):
+        """``chat_id`` is the Telegram peer the archive resolved."""
         self.calls.append((chat_id, offset_id, min_id, reverse))
         if chat_id in self.error_for:
             raise self.error_for[chat_id]
@@ -177,15 +179,33 @@ async def wait_until(cond, timeout=15.0, describe=None):
     raise AssertionError(f"condition not reached: {describe() if describe else ''}")
 
 
-async def stored_ids(chat_id):
+async def conv_id(peer) -> int:
+    async with AsyncSessionLocal() as db:
+        conv = await tg_ids.conversation_for(db, peer)
+    return conv.id if conv is not None else None
+
+
+async def stored_ids(peer):
+    """Telegram ids (= seq) stored for a peer's conversation."""
+    cid = await conv_id(peer)
+    if cid is None:
+        return []
     async with AsyncSessionLocal() as db:
         return sorted(r[0] for r in (await db.execute(
-            select(Message.tg_message_id).where(Message.chat_id == chat_id))).all())
+            select(Message.seq).where(Message.conversation_id == cid))).all())
 
 
-async def coverage(chat_id):
+async def coverage(peer):
+    cid = await conv_id(peer)
+    if cid is None:
+        return None
     async with AsyncSessionLocal() as db:
-        return (await crud.get_coverage(db, [chat_id])).get(chat_id)
+        return (await crud.get_coverage(db, [cid])).get(cid)
+
+
+async def ensure(peer, entity):
+    async with AsyncSessionLocal() as db:
+        return (await tg_ids.upsert_dialog(db, peer, entity)).id
 
 
 def all_ids(fake, chat_id):
@@ -220,7 +240,7 @@ async def test_full_walk_stores_every_message_and_skips_groups_and_bots(db, tg, 
         assert await stored_ids(uid) == all_ids(tg, uid), uid
         cov = await coverage(uid)
         assert cov.history_complete and cov.error is None
-        assert cov.newest_contiguous_tg_id == (all_ids(tg, uid)[-1] if tg.history[uid] else 0)
+        assert cov.newest_contiguous_seq == (all_ids(tg, uid)[-1] if tg.history[uid] else 0)
     assert await stored_ids(105) == []  # bot skipped
     assert await stored_ids(gid) == []  # group not walked without a request
     assert await coverage(gid) is None
@@ -231,15 +251,16 @@ async def test_full_walk_stores_every_message_and_skips_groups_and_bots(db, tg, 
     assert any(b["type"] == "archive_progress" for b in broadcasts)
 
     async with AsyncSessionLocal() as s:
-        chats = {c.telegram_id: c for c in (await s.execute(select(Chat))).scalars()}
+        chats = {tg_ids.peer_id_of(c): c for c in (await s.execute(select(Conversation))).scalars()}
     assert chats[104].is_archived and not chats[101].is_archived
     assert chats[105].is_bot and chats[106].is_deleted_account and chats[999].is_self
     assert chats[101].history_complete and not chats[gid].history_complete
+    assert chats[101].kind == "direct" and chats[gid].kind == "group"
 
     # Service, poll and forward rows carry the contract fields
     async with AsyncSessionLocal() as s:
-        rows = {m.tg_message_id: m for m in (await s.execute(
-            select(Message).where(Message.chat_id == 101))).scalars()}
+        rows = {m.seq: m for m in (await s.execute(
+            select(Message).where(Message.conversation_id == chats[101].id))).scalars()}
     call, poll, fwd, plain = rows[7], rows[8], rows[9], rows[10]
     assert call.kind == "service" and call.text in ("Outgoing call (1:05)", "Incoming call (1:05)")
     assert json.loads(call.meta_json)["service"] == {"action": "phone_call", "duration": 65, "video": False}
@@ -269,25 +290,24 @@ async def test_floodwait_mid_walk_waits_and_resumes_from_cursor(db, tg, arch, br
 @pytest.mark.asyncio
 async def test_crash_mid_chat_resumes_from_walk_cursor_without_gaps(db, tg, fast_limiter):
     from backend.telegram.archive import DMArchive
-    tg.add_user(301, "Eve", 420)
-    async with AsyncSessionLocal() as s:
-        await crud.upsert_chat(s, 301, "Eve", "private")
+    eve = tg.add_user(301, "Eve", 420)
+    cid = await ensure(301, eve)
     tg.crash_after[301] = 230  # two pages saved, 30 messages in flight
 
     first = DMArchive()
     with pytest.raises(Crash):
-        await first._process(tg, 301, preemptible=False)
+        await first._process(tg, cid, preemptible=False)
     cov = await coverage(301)
     assert not cov.history_complete
-    assert cov.walk_cursor_tg_id == 221 and cov.newest_contiguous_tg_id == 420
+    assert cov.walk_cursor_seq == 221 and cov.newest_contiguous_seq == 420
     assert await stored_ids(301) == list(range(221, 421))
 
     second = DMArchive()  # fresh process: state comes from the DB only
-    await second._process(tg, 301, preemptible=False)
+    await second._process(tg, cid, preemptible=False)
     assert tg.calls[-2] == (301, 221, 0, False)  # walk resumed at the cursor
     assert await stored_ids(301) == all_ids(tg, 301)
     cov = await coverage(301)
-    assert cov.history_complete and cov.oldest_tg_id == 1 and cov.newest_contiguous_tg_id == 420
+    assert cov.history_complete and cov.oldest_seq == 1 and cov.newest_contiguous_seq == 420
 
 
 # ── top-up ───────────────────────────────────────────────────────────────────
@@ -300,14 +320,15 @@ async def test_topup_after_missed_live_updates_leaves_no_holes(db, tg, arch):
 
     # 250 new messages; the live handler only caught two of them
     new = tg.add_messages(401, 250)
-    from backend.telegram.convert import message_to_row
+    from backend.telegram.convert import rows_for
+    cid = await conv_id(401)
     async with AsyncSessionLocal() as s:
-        await crud.save_messages(s, [message_to_row(m, 401) for m in tg.history[401] if m.id in (130, 300)])
+        await crud.save_messages(s, await rows_for(s, cid, [m for m in tg.history[401] if m.id in (130, 300)], forum=False))
     assert len(await stored_ids(401)) == 122
 
-    await arch._process(tg, 401, preemptible=False)
+    await arch._process(tg, cid, preemptible=False)
     assert await stored_ids(401) == all_ids(tg, 401)
-    assert (await coverage(401)).newest_contiguous_tg_id == new[-1]
+    assert (await coverage(401)).newest_contiguous_seq == new[-1]
     topups = [c for c in tg.calls if c[0] == 401 and c[3]]
     assert topups[-1] == (401, 0, 120, True)
 
@@ -322,7 +343,7 @@ async def test_messages_arriving_during_walk_are_topped_up(db, tg, arch):
     tg.on_yield = arrive
     await run_until_idle(arch, expect_complete=1)
     assert await stored_ids(402) == all_ids(tg, 402) == list(range(1, 258))
-    assert (await coverage(402)).newest_contiguous_tg_id == 257
+    assert (await coverage(402)).newest_contiguous_seq == 257
 
 
 @pytest.mark.asyncio
@@ -332,8 +353,9 @@ async def test_periodic_topup_only_for_dms_with_new_activity(db, tg, arch):
     await run_until_idle(arch, expect_complete=2)
     tg.calls.clear()
     async with AsyncSessionLocal() as s:
-        cov = (await crud.get_coverage(s, [403, 404]))
-        cov[403].last_topup_at = datetime(2000, 1, 1)  # activity moved since
+        c403 = await conv_id(403)
+        cov = (await crud.get_coverage(s, [c403]))
+        cov[c403].last_topup_at = datetime(2000, 1, 1)  # activity moved since
         await s.commit()
     tg.add_messages(403, 3)
     arch.last_topup_at = None  # pass due now
@@ -357,7 +379,7 @@ async def test_request_chat_jumps_the_queue_and_walks_a_group(db, tg, arch):
     async def interrupt(chat_id, n):
         if chat_id == 501 and n == 150 and not requested:
             requested.append(True)
-            await arch.request_chat(gid)
+            await arch.request_conversation(await conv_id(gid))
     tg.on_yield = interrupt
 
     await run_until_idle(arch, expect_complete=1)
@@ -373,13 +395,12 @@ async def test_request_chat_jumps_the_queue_and_walks_a_group(db, tg, arch):
 @pytest.mark.asyncio
 async def test_request_and_wait_for_chat(db, tg, arch):
     gid = tg.add_group(700, "Group", 40)
-    async with AsyncSessionLocal() as s:
-        await crud.upsert_chat(s, gid, "Group", "group")
-    await arch.request_chat(gid)
+    cid = await ensure(gid, tg.dialogs[-1].entity)
+    await arch.request_conversation(cid)
     assert arch.get_status()["groups_queued"] == 1
     arch.auto_start()
-    cov = await arch.wait_for_chat(gid, timeout=10)
-    assert cov is not None and cov.history_complete and cov.newest_contiguous_tg_id == 40
+    cov = await arch.wait_for_conversation(cid, timeout=10)
+    assert cov is not None and cov.history_complete and cov.newest_contiguous_seq == 40
     assert await stored_ids(gid) == all_ids(tg, gid)
 
 
@@ -394,8 +415,9 @@ async def test_pause_stops_backlog_but_serves_requests(db, tg, arch):
         return arch.state == "paused"
     await wait_until(paused)
     assert await stored_ids(801) == []
-    await arch.request_chat(gid)
-    cov = await arch.wait_for_chat(gid, timeout=10)
+    cid = await ensure(gid, tg.dialogs[-1].entity)
+    await arch.request_conversation(cid)
+    cov = await arch.wait_for_conversation(cid, timeout=10)
     assert cov.history_complete and await stored_ids(801) == []
     arch.start()
     await run_until_idle(arch, expect_complete=1)
@@ -427,7 +449,7 @@ async def test_per_chat_error_is_recorded_and_others_continue(db, tg, arch):
 async def test_api_contract(api, tg, arch, monkeypatch):
     from backend.telegram import archive as archive_mod
     monkeypatch.setattr(archive_mod, "archive", arch)
-    for name in ("get_status", "refresh_status", "request_chat", "wait_for_chat", "start", "pause"):
+    for name in ("get_status", "refresh_status", "request_conversation", "wait_for_conversation", "start", "pause"):
         monkeypatch.setattr(archive_mod, name, getattr(arch, name))
 
     tg.add_user(1101, "Mia", 60)
@@ -445,20 +467,21 @@ async def test_api_contract(api, tg, arch, monkeypatch):
     r = await api.post("/api/archive/start")
     assert r.json()["state"] in ("running", "idle")
 
-    r = await api.post("/api/chats/1101/archive-history")
+    cid = await conv_id(1101)
+    r = await api.post(f"/api/conversations/{cid}/archive-history")
     assert r.status_code == 200
     assert r.json() == {"queued": True, "coverage": {
-        "history_complete": True, "message_count": 60, "oldest_tg_id": 1, "newest_contiguous_tg_id": 60}}
-    assert (await api.post("/api/chats/424242/archive-history")).status_code == 404
+        "history_complete": True, "message_count": 60, "oldest_seq": 1, "newest_contiguous_seq": 60}}
+    assert (await api.post("/api/conversations/424242/archive-history")).status_code == 404
 
-    r = await api.post("/api/chats/by-ids", json={"ids": [1101]})
+    r = await api.post("/api/conversations/by-ids", json={"ids": [cid]})
     chat = r.json()[0]
     assert chat["history_complete"] is True and chat["is_bot"] is False and chat["is_deleted_account"] is False
 
     async with AsyncSessionLocal() as s:
-        await crud.update_chat_sync(s, 1101)  # fresh: no chat-open auto-sync against the fake
-    r = await api.get("/api/chats/1101/messages/window", params={"limit": 60})
-    msgs = {m["tg_message_id"]: m for m in r.json()["messages"]}
+        await crud.touch_synced(s, cid)  # fresh: no auto-sync against the fake
+    r = await api.get(f"/api/conversations/{cid}/messages/window", params={"limit": 60})
+    msgs = {m["seq"]: m for m in r.json()["messages"]}
     assert msgs[7]["kind"] == "service" and msgs[7]["meta"]["service"]["action"] == "phone_call"
     assert msgs[8]["meta"]["poll"]["question"] == "Lunch?"
     assert msgs[9]["fwd_from_name"] == "Hidden Bob"
@@ -466,76 +489,17 @@ async def test_api_contract(api, tg, arch, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_service_rows_do_not_count_as_needing_reply(db):
-    async with AsyncSessionLocal() as s:
-        await crud.upsert_chat(s, 1201, "Nia", "private")
-        s.add_all([
-            Message(tg_message_id=1, chat_id=1201, text="hi", date=datetime(2024, 1, 1), is_outgoing=True),
-            Message(tg_message_id=2, chat_id=1201, text="Nia joined Telegram", kind="service",
-                    date=datetime(2024, 1, 2), is_outgoing=False),
-        ])
-        from backend.db.models import Contact
-        s.add(Contact(telegram_id=1201, first_name="Nia", is_important=True))
-        await s.commit()
-        active, _ = await crud.get_needs_reply(s)
-        assert [row[0].telegram_id for row in active] == []
-        contact = (await s.execute(select(Contact).where(Contact.telegram_id == 1201))).scalar_one()
-        status, *_ = await crud.compute_relationship_status(s, contact)
-        assert status != "needs_reply"
-        # A missed call is a service line too: still no reply owed
-        s.add(Message(tg_message_id=3, chat_id=1201, text="Missed call", kind="service",
-                      date=datetime(2024, 1, 3), is_outgoing=False))
-        await s.commit()
-        active, _ = await crud.get_needs_reply(s)
-        assert active == []
-        assert (await crud.compute_relationship_status(s, contact))[0] != "needs_reply"
-        # …while a real incoming message after them does need a reply
-        s.add(Message(tg_message_id=4, chat_id=1201, text="are you there?", date=datetime(2024, 1, 4)))
-        await s.commit()
-        active, _ = await crud.get_needs_reply(s)
-        assert [row[0].telegram_id for row in active] == [1201]
-
-
-@pytest.mark.asyncio
-async def test_service_rows_are_not_scam_scanned(db, monkeypatch):
-    from backend.scam import queue as scam_queue
-    from backend.scam import service as scam_service
-    now = datetime.utcnow()
-    async with AsyncSessionLocal() as s:
-        s.add_all([
-            Message(tg_message_id=1, chat_id=1501, text="old", date=now - timedelta(days=5)),
-            Message(tg_message_id=2, chat_id=1501, text="Pia joined Telegram", kind="service",
-                    date=now - timedelta(hours=1), is_outgoing=False),
-            Message(tg_message_id=3, chat_id=1501, text="Missed call", kind="service",
-                    date=now - timedelta(hours=1), is_outgoing=False),
-            Message(tg_message_id=4, chat_id=1501, text="send me your seed phrase",
-                    date=now - timedelta(hours=1), is_outgoing=False),
-        ])
-        await s.commit()
-    queued = []
-
-    async def enqueue(chat_id, ids, source):
-        queued.extend(ids)
-        return ids
-    monkeypatch.setattr(scam_queue, "shield_enabled", lambda: True)
-    monkeypatch.setattr(scam_service, "get_scam_service", lambda: object())
-    monkeypatch.setattr(scam_queue._scan_queue, "enqueue", enqueue)
-    assert await scam_queue.scan_unscanned_messages() == 1
-    assert queued == [4]
-
-
-@pytest.mark.asyncio
 async def test_coverage_absent_means_not_complete(db):
+    cid = await ensure(1301, T.User(id=1301, first_name="Ola"))
     async with AsyncSessionLocal() as s:
-        await crud.upsert_chat(s, 1301, "Ola", "private")
-        assert await crud.get_coverage(s, [1301]) == {}
-        chat = await crud.get_chat_by_telegram_id(s, 1301)
-        assert not chat.history_complete
-        s.add(ChatHistoryCoverage(chat_id=1301, history_complete=True))
+        assert await crud.get_coverage(s, [cid]) == {}
+        conv = await crud.get_conversation(s, cid)
+        assert conv.history_complete is False
+        s.add(HistoryCoverage(conversation_id=cid, history_complete=True))
         await s.commit()
-        chat = (await s.execute(select(Chat).where(Chat.telegram_id == 1301)
+        conv = (await s.execute(select(Conversation).where(Conversation.id == cid)
                                 .execution_options(populate_existing=True))).scalar_one()
-        assert chat.history_complete is True
+        assert conv.history_complete is True
 
 
 @pytest.mark.asyncio
@@ -551,10 +515,9 @@ async def test_live_service_message_triggers_chat_sync(db, monkeypatch):
             self.handlers[cb.__name__] = cb
     client = Client()
     tg_sync.register_event_handlers(client)
-    async with AsyncSessionLocal() as s:
-        await crud.upsert_chat(s, 1401, "Pia", "private")
-    sync = AsyncMock(return_value=SyncResult("changed", 1401, added=1))
-    monkeypatch.setattr(coordinator, "sync_chat", sync)
+    cid = await ensure(1401, T.User(id=1401, first_name="Pia"))
+    sync = AsyncMock(return_value=SyncResult("changed", cid, added=1))
+    monkeypatch.setattr(coordinator, "sync_conversation", sync)
     svc = T.MessageService(id=9, peer_id=T.PeerUser(1401), date=BASE,
                            action=T.MessageActionContactSignUp())
     await client.handlers["on_raw_update"](T.UpdateNewMessage(message=svc, pts=1, pts_count=1))
@@ -564,4 +527,4 @@ async def test_live_service_message_triggers_chat_sync(db, monkeypatch):
     task = get_running("service_sync:1401")
     assert task is not None
     await task
-    sync.assert_awaited_once_with(1401, 20, max_wait=60)
+    sync.assert_awaited_once_with(cid, 20, max_wait=60)

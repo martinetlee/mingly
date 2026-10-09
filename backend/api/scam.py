@@ -23,7 +23,7 @@ from sqlalchemy import and_, func, or_, select
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import (
-    SCAM_SUCCESS_STATUSES, Chat, Message, ScamAnalytics, ScamCheckRequest, ScamDismissal,
+    SCAM_SUCCESS_STATUSES, Conversation, Identity, Message, ScamAnalytics, ScamCheckRequest, ScamDismissal,
     ScamFeedback, ScamFlag, ScamReport,
 )
 from backend.scam.queue import enqueue_targets, get_scan_queue, scan_unscanned_messages
@@ -42,12 +42,12 @@ _EXPORT_BATCH = 1000
 
 
 class CheckUsersRequest(BaseModel):
-    telegram_ids: list[int]
+    identity_ids: list[int]
 
 
 class CheckMessagesRequest(BaseModel):
-    chat_id: int
-    message_telegram_ids: list[int]
+    conversation_id: int
+    message_ids: list[int]
 
 
 class CallbackPayload(BaseModel):
@@ -61,12 +61,12 @@ class CallbackPayload(BaseModel):
 
 @router.post("/check-users")
 async def check_users(req: CheckUsersRequest):
-    """Trigger areFlaggedScams check for a list of telegram IDs."""
+    """Trigger an areFlaggedScams check for a list of sender identities."""
     svc = get_scam_service()
     if not svc:
         raise HTTPException(status_code=503, detail="Scam detection not initialized")
-    spawn(svc.check_flagged_users(req.telegram_ids), name="scam_check_flagged_users")
-    return {"status": "queued", "count": len(req.telegram_ids)}
+    spawn(svc.check_flagged_users(req.identity_ids), name="scam_check_flagged_users")
+    return {"status": "queued", "count": len(req.identity_ids)}
 
 
 @router.post("/check-messages")
@@ -79,22 +79,20 @@ async def check_messages(req: CheckMessagesRequest):
     """
     if not get_scam_service():
         raise HTTPException(status_code=503, detail="Scam detection not initialized")
-    ids = list(dict.fromkeys(req.message_telegram_ids))
+    ids = list(dict.fromkeys(req.message_ids))
     if not ids:
         raise HTTPException(status_code=400, detail="No messages given")
 
     async with AsyncSessionLocal() as db:
         found = {row[0] for row in (await db.execute(
-            select(Message.tg_message_id).where(
-                Message.chat_id == req.chat_id, Message.tg_message_id.in_(ids)
-            )
+            select(Message.id).where(Message.conversation_id == req.conversation_id, Message.id.in_(ids))
         )).all()}
     if not found:
         raise HTTPException(status_code=404, detail="No messages found")
 
     queue = get_scan_queue()
-    already = [i for i in ids if i in found and queue.is_busy(req.chat_id, i)]
-    await enqueue_targets(req.chat_id, [i for i in ids if i in found], source="manual")
+    already = [i for i in ids if i in found and queue.is_busy(req.conversation_id, i)]
+    await enqueue_targets(req.conversation_id, [i for i in ids if i in found], source="manual")
 
     from backend.scam.analytics import get_analytics_tracker
     await get_analytics_tracker().increment(manual_checks=1)
@@ -118,9 +116,10 @@ async def scam_callback(request_id: str, payload: CallbackPayload):
     return {"status": "received"}
 
 
-def _flag_dict(f: ScamFlag, info: dict) -> dict:
+def _flag_dict(f: ScamFlag, person_id: Optional[int], info: dict) -> dict:
     return {
-        "telegram_id": f.telegram_id,
+        "identity_id": f.identity_id,
+        "person_id": person_id,
         "sender_name": info.get("sender_name"),
         "status": f.status,
         "source": f.source,
@@ -128,13 +127,13 @@ def _flag_dict(f: ScamFlag, info: dict) -> dict:
         "reason": f.reason,
         "category": f.category,
         "flagged_message_text": f.flagged_message_text,
-        "flagged_message_chat_id": f.flagged_message_chat_id,
+        "flagged_conversation_id": f.flagged_conversation_id,
         "flagged_message_id": f.flagged_message_id,
         "flagged_at": iso_utc(f.flagged_at),
         "dismissed_at": iso_utc(f.dismissed_at),
         "synced_to_cloud": f.synced_to_cloud or False,
-        "last_chat_id": info.get("last_chat_id"),
-        "last_chat_name": info.get("last_chat_name"),
+        "last_conversation_id": info.get("last_conversation_id"),
+        "last_conversation_title": info.get("last_conversation_title"),
         "last_message_id": info.get("last_message_id"),
         "last_active": info.get("last_active"),
         "last_message": info.get("last_message"),
@@ -150,75 +149,85 @@ async def list_flags(include_dismissed: bool = Query(False)):
             q = q.where(ScamFlag.status == FLAG_ACTIVE)
         flags = (await db.execute(q)).scalars().all()
 
-        active_tids = [f.telegram_id for f in flags if f.status == FLAG_ACTIVE]
-        all_tids = [f.telegram_id for f in flags]
-        flagged_chat_ids: list[int] = []
+        active_ids = [f.identity_id for f in flags if f.status == FLAG_ACTIVE]
+        all_ids = [f.identity_id for f in flags]
+        persons = await _person_ids(db, all_ids)
+        flagged_conversation_ids: list[int] = []
         sender_info: dict[int, dict] = {}
 
-        if active_tids:
-            flagged_chat_ids = [row[0] for row in (await db.execute(
-                select(Message.chat_id).where(Message.sender_id.in_(active_tids)).distinct()
+        if active_ids:
+            flagged_conversation_ids = [row[0] for row in (await db.execute(
+                select(Message.conversation_id).where(Message.sender_identity_id.in_(active_ids)).distinct()
             )).all()]
 
-        if all_tids:
+        if all_ids:
             # Most recent message per sender (ties on date broken by id)
             latest_sub = (
-                select(Message.sender_id, func.max(Message.id).label("max_id"))
-                .where(Message.sender_id.in_(all_tids))
-                .group_by(Message.sender_id)
+                select(Message.sender_identity_id, func.max(Message.id).label("max_id"))
+                .where(Message.sender_identity_id.in_(all_ids))
+                .group_by(Message.sender_identity_id)
                 .subquery()
             )
             latest_msgs = (await db.execute(
                 select(Message).join(latest_sub, Message.id == latest_sub.c.max_id)
             )).scalars().all()
-            chat_names = await _chat_names(db, {m.chat_id for m in latest_msgs})
+            titles = await _conversation_titles(db, {m.conversation_id for m in latest_msgs})
             for m in latest_msgs:
-                sender_info[m.sender_id] = {
+                sender_info[m.sender_identity_id] = {
                     "sender_name": m.sender_name,
-                    "last_chat_id": m.chat_id,
-                    "last_chat_name": chat_names.get(m.chat_id, "Unknown"),
-                    "last_message_id": m.tg_message_id,
+                    "last_conversation_id": m.conversation_id,
+                    "last_conversation_title": titles.get(m.conversation_id, "Unknown"),
+                    "last_message_id": m.id,
                     "last_active": iso_utc(m.date),
                     "last_message": (m.text or "")[:200],
                 }
 
         return {
-            "flags": [_flag_dict(f, sender_info.get(f.telegram_id, {})) for f in flags],
-            # Senders with an active flag, and the chats they appear in
-            "flagged_sender_ids": active_tids,
-            "flagged_chat_ids": flagged_chat_ids,
+            "flags": [_flag_dict(f, persons.get(f.identity_id), sender_info.get(f.identity_id, {})) for f in flags],
+            # Senders with an active flag, their people, and the conversations they appear in
+            "flagged_identity_ids": active_ids,
+            "flagged_person_ids": list(dict.fromkeys(persons[i] for i in active_ids if i in persons)),
+            "flagged_conversation_ids": flagged_conversation_ids,
         }
 
 
-async def _chat_names(db, chat_ids) -> dict[int, str]:
-    chat_ids = list(chat_ids)
-    if not chat_ids:
+async def _conversation_titles(db, conversation_ids) -> dict[int, str]:
+    conversation_ids = list(conversation_ids)
+    if not conversation_ids:
         return {}
     rows = (await db.execute(
-        select(Chat.telegram_id, Chat.name).where(Chat.telegram_id.in_(chat_ids))
+        select(Conversation.id, Conversation.title).where(Conversation.id.in_(conversation_ids))
     )).all()
     return {row[0]: row[1] or "Unknown" for row in rows}
+
+
+async def _person_ids(db, identity_ids) -> dict[int, int]:
+    """{identity_id: person_id}"""
+    ids = [i for i in set(identity_ids) if i]
+    if not ids:
+        return {}
+    return dict((await db.execute(select(Identity.id, Identity.person_id).where(Identity.id.in_(ids)))).all())
 
 
 _VERDICT_FILTERS = ("scam", "not_scam", "failed", "pending", "manual", "unmarked")
 
 
 def _scanned_message_filters(
-    sender_id: Optional[int] = None,
-    chat_id: Optional[int] = None,
+    sender_identity_id: Optional[int] = None,
+    conversation_id: Optional[int] = None,
     min_members: Optional[int] = None,
     verdict_filter: Optional[str] = None,
 ):
     """Filter conditions for Shield's scanned list. All verdict filters use the
     stored ``effective_is_scam`` / ``scam_status``, never raw score checks."""
     conditions = [scanned_condition()]
-    if sender_id is not None:
-        conditions.append(Message.sender_id == sender_id)
-    if chat_id is not None:
-        conditions.append(Message.chat_id == chat_id)
+    if sender_identity_id is not None:
+        conditions.append(Message.sender_identity_id == sender_identity_id)
+    if conversation_id is not None:
+        conditions.append(Message.conversation_id == conversation_id)
     if min_members is not None:
-        conditions.append(Message.chat_id.in_(
-            select(Chat.telegram_id).where(Chat.members_count >= min_members)
+        conditions.append(Message.conversation_id.in_(
+            select(Conversation.id).where(Conversation.members_count >= min_members)
         ))
     if verdict_filter in (None, "", "all"):
         pass
@@ -242,12 +251,17 @@ def _scanned_message_filters(
     return conditions
 
 
-def _serialize_scanned_message(m: Message, chat_name: str) -> dict:
+def _sender_person_id(m: Message) -> Optional[int]:
+    return m.sender_identity.person_id if m.sender_identity is not None else None
+
+
+def _serialize_scanned_message(m: Message, conversation_title: str) -> dict:
     return {
-        "tg_message_id": m.tg_message_id,
-        "chat_id": m.chat_id,
-        "chat_name": chat_name,
-        "sender_id": m.sender_id,
+        "message_id": m.id,
+        "conversation_id": m.conversation_id,
+        "conversation_title": conversation_title,
+        "sender_identity_id": m.sender_identity_id,
+        "sender_person_id": _sender_person_id(m),
         "sender_name": m.sender_name,
         "text": m.text or "",
         "date": iso_utc(m.date),
@@ -288,8 +302,8 @@ async def list_scanned_messages(
     page: int = Query(1, ge=1),
     page_size: int = Query(200, ge=1, le=500),
     cursor: Optional[str] = Query(None, description="next_cursor from the previous page (keyset)"),
-    sender_id: Optional[int] = Query(None),
-    chat_id: Optional[int] = Query(None),
+    sender_identity_id: Optional[int] = Query(None),
+    conversation_id: Optional[int] = Query(None),
     min_members: Optional[int] = Query(None),
     verdict_filter: Optional[str] = Query(None),
 ):
@@ -299,7 +313,7 @@ async def list_scanned_messages(
     kept for compatibility and is ignored when a cursor is given.
     """
     async with AsyncSessionLocal() as db:
-        conditions = _scanned_message_filters(sender_id, chat_id, min_members, verdict_filter)
+        conditions = _scanned_message_filters(sender_identity_id, conversation_id, min_members, verdict_filter)
         total = (await db.execute(select(func.count()).select_from(Message).where(*conditions))).scalar() or 0
 
         q = select(Message).where(*conditions)
@@ -312,20 +326,20 @@ async def list_scanned_messages(
         )).scalars().all()
         has_more = len(msgs) > page_size
         msgs = msgs[:page_size]
-        chat_names = await _chat_names(db, {m.chat_id for m in msgs})
+        titles = await _conversation_titles(db, {m.conversation_id for m in msgs})
 
         return {
             "total": total,
             "page": page,
             "page_size": page_size,
             "next_cursor": _encode_cursor(msgs[-1]) if has_more and msgs else None,
-            "messages": [_serialize_scanned_message(m, chat_names.get(m.chat_id, "Unknown")) for m in msgs],
+            "messages": [_serialize_scanned_message(m, titles.get(m.conversation_id, "Unknown")) for m in msgs],
         }
 
 
 class MessageRef(BaseModel):
-    chat_id: int
-    tg_message_id: int
+    message_id: int
+    conversation_id: Optional[int] = None  # informational; message ids are unique
 
 
 class SetVerdictRequest(BaseModel):
@@ -344,7 +358,7 @@ async def set_message_verdict(req: SetVerdictRequest):
     _verdict_or_400(req.verdict)
     result = await set_verdict(
         scope="message", verdict=req.verdict,
-        messages=[(m.chat_id, m.tg_message_id) for m in req.messages],
+        messages=[m.message_id for m in req.messages],
     )
     return {"status": "updated", **result.to_dict()}
 
@@ -353,25 +367,32 @@ class SenderVerdictRequest(BaseModel):
     verdict: Optional[str] = None  # "scam" flags, "not_scam" dismisses, null resets
 
 
-@router.put("/senders/{telegram_id}/verdict")
-async def set_sender_verdict(telegram_id: int, req: SenderVerdictRequest):
-    """Sender-level verdict: flag, dismiss, or reset a sender."""
+async def _sender_verdict(identity_id: int, verdict: Optional[str]):
+    try:
+        return await set_verdict(scope="sender", verdict=verdict, identity_id=identity_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Sender not found")
+
+
+@router.put("/senders/{identity_id}/verdict")
+async def set_sender_verdict(identity_id: int, req: SenderVerdictRequest):
+    """Sender-level verdict: flag, dismiss, or reset a sender identity."""
     _verdict_or_400(req.verdict)
-    result = await set_verdict(scope="sender", verdict=req.verdict, telegram_id=telegram_id)
+    result = await _sender_verdict(identity_id, req.verdict)
     return {"status": "updated", **result.to_dict()}
 
 
-@router.delete("/flags/{telegram_id}")
-async def dismiss_flag(telegram_id: int):
+@router.delete("/flags/{identity_id}")
+async def dismiss_flag(identity_id: int):
     """Dismiss a flagged sender (= sender verdict 'not_scam')."""
-    result = await set_verdict(scope="sender", verdict="not_scam", telegram_id=telegram_id)
-    return {"status": "dismissed", "telegram_id": telegram_id, **result.to_dict()}
+    result = await _sender_verdict(identity_id, "not_scam")
+    return {"status": "dismissed", "identity_id": identity_id, **result.to_dict()}
 
 
-@router.delete("/scanned-messages/{chat_id}/{tg_message_id}")
-async def clear_message_scam(chat_id: int, tg_message_id: int):
+@router.delete("/scanned-messages/{message_id}")
+async def clear_message_scam(message_id: int):
     """Mark one message not scam (= message verdict 'not_scam'). Scores are kept."""
-    result = await set_verdict(scope="message", verdict="not_scam", messages=[(chat_id, tg_message_id)])
+    result = await set_verdict(scope="message", verdict="not_scam", messages=[message_id])
     return {"status": "cleared", **result.to_dict()}
 
 
@@ -402,8 +423,8 @@ def _pipeline_input(trace_json: Optional[str]) -> Optional[str]:
 
 @router.get("/scanned-messages/export")
 async def export_scanned_messages(
-    sender_id: Optional[int] = Query(None),
-    chat_id: Optional[int] = Query(None),
+    sender_identity_id: Optional[int] = Query(None),
+    conversation_id: Optional[int] = Query(None),
     min_members: Optional[int] = Query(None),
     verdict_filter: Optional[str] = Query(None),
 ):
@@ -417,7 +438,7 @@ async def export_scanned_messages(
     filename = f"shield_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.json"
     filepath = _EXPORTS_DIR / filename
     tmp = _EXPORTS_DIR / f".{filename}.tmp"
-    conditions = _scanned_message_filters(sender_id, chat_id, min_members, verdict_filter)
+    conditions = _scanned_message_filters(sender_identity_id, conversation_id, min_members, verdict_filter)
 
     count = 0
     cursor = None
@@ -432,17 +453,18 @@ async def export_scanned_messages(
                     msgs = (await db.execute(
                         q.order_by(Message.date.desc(), Message.id.desc()).limit(_EXPORT_BATCH)
                     )).scalars().all()
-                    chat_names = await _chat_names(db, {m.chat_id for m in msgs})
+                    titles = await _conversation_titles(db, {m.conversation_id for m in msgs})
                 if not msgs:
                     break
                 cursor = (msgs[-1].date, msgs[-1].id)
                 for m in msgs:
                     row = {
-                        "sender_id": m.sender_id,
+                        "sender_identity_id": m.sender_identity_id,
+                        "sender_person_id": _sender_person_id(m),
                         "sender_name": m.sender_name,
-                        "chat_id": m.chat_id,
-                        "chat_name": chat_names.get(m.chat_id, "Unknown"),
-                        "tg_message_id": m.tg_message_id,
+                        "conversation_id": m.conversation_id,
+                        "conversation_title": titles.get(m.conversation_id, "Unknown"),
+                        "message_id": m.id,
                         "message_text": m.text or "",
                         "pipeline_input": _pipeline_input(m.scam_trace_json),
                         "pipeline_score": m.scam_score,
@@ -478,30 +500,32 @@ async def download_export_file(path: str = Query(...)):
     return FileResponse(str(filepath), filename=filepath.name, media_type="application/json")
 
 
-@router.get("/status/{chat_id}")
-async def chat_scam_status(chat_id: int):
-    """Scam status for a chat: effective-scam messages and active flagged senders."""
+@router.get("/status/{conversation_id}")
+async def conversation_scam_status(conversation_id: int):
+    """Scam status for a conversation: effective-scam messages and active flagged senders."""
     async with AsyncSessionLocal() as db:
         flagged_msgs = (await db.execute(
-            select(Message.tg_message_id, Message.sender_id).where(
-                Message.chat_id == chat_id, Message.effective_is_scam,
-            )
+            select(Message.id).where(Message.conversation_id == conversation_id, Message.effective_is_scam)
         )).all()
         flagged_users = (await db.execute(
             select(ScamFlag).where(
                 ScamFlag.status == FLAG_ACTIVE,
-                ScamFlag.telegram_id.in_(
-                    select(Message.sender_id).where(Message.chat_id == chat_id, Message.sender_id.isnot(None))
+                ScamFlag.identity_id.in_(
+                    select(Message.sender_identity_id).where(
+                        Message.conversation_id == conversation_id, Message.sender_identity_id.isnot(None),
+                    )
                 ),
             )
         )).scalars().all()
+        persons = await _person_ids(db, [f.identity_id for f in flagged_users])
 
         return {
             "has_scam_flags": bool(flagged_msgs) or bool(flagged_users),
             "flagged_message_count": len(flagged_msgs),
             "flagged_message_ids": [row[0] for row in flagged_msgs],
             "flagged_users": [
-                {"telegram_id": f.telegram_id, "confidence": f.confidence, "reason": f.reason, "source": f.source}
+                {"identity_id": f.identity_id, "person_id": persons.get(f.identity_id),
+                 "confidence": f.confidence, "reason": f.reason, "source": f.source}
                 for f in flagged_users
             ],
         }
@@ -520,8 +544,9 @@ async def list_requests(status: Optional[str] = None):
                 "request_id": r.request_id,
                 "request_type": r.request_type,
                 "status": r.status,
-                "related_chat_id": r.related_chat_id,
+                "related_conversation_id": r.related_conversation_id,
                 "related_message_ids": json.loads(r.related_message_ids_json or "[]"),
+                "related_identity_ids": json.loads(r.related_identity_ids_json or "[]"),
                 "created_at": iso_utc(r.created_at),
                 "completed_at": iso_utc(r.completed_at),
             }
@@ -645,11 +670,18 @@ async def _count(db, *conditions) -> int:
 
 @router.get("/sync/history")
 async def sync_history():
-    """Sync status summary — counts of synced vs unsynced items."""
+    """Sync status summary — counts of synced vs unsynced items. Flags and
+    scans count the rows the current (Telegram-only) cloud contract uploads."""
+    from backend.scam.cloud_sync import telegram_flag_condition, telegram_message_condition
+
     async with AsyncSessionLocal() as db:
-        flags_total = (await db.execute(select(func.count()).select_from(ScamFlag))).scalar() or 0
+        flags_total = (await db.execute(
+            select(func.count()).select_from(ScamFlag).where(telegram_flag_condition())
+        )).scalar() or 0
         flags_synced = (await db.execute(
-            select(func.count()).select_from(ScamFlag).where(ScamFlag.synced_to_cloud == True)  # noqa: E712
+            select(func.count()).select_from(ScamFlag).where(
+                telegram_flag_condition(), ScamFlag.synced_to_cloud == True,  # noqa: E712
+            )
         )).scalar() or 0
 
         reports_total = (await db.execute(select(func.count()).select_from(ScamReport))).scalar() or 0
@@ -659,6 +691,7 @@ async def sync_history():
 
         # Same row set the uploader sends (see cloud_sync._upload_scan_results)
         syncable = and_(
+            telegram_message_condition(),
             Message.scam_updated_at.isnot(None),
             not_pending_condition(),
             or_(
@@ -743,111 +776,100 @@ async def sync_history():
 # ---------------------------------------------------------------------------
 
 class CreateReportRequest(BaseModel):
-    reported_telegram_id: int
-    reported_in_chat_id: int
+    reported_identity_id: int
+    reported_in_conversation_id: int
     reporter_verdict: str = "scam"
     scam_category: Optional[str] = None
     custom_category: Optional[str] = None
-    included_message_ids: list[int]  # tg_message_ids to include
+    included_message_ids: list[int]  # message ids to include
+
+
+def _report_context_entry(m: Message) -> dict:
+    return {
+        "message_id": m.id,
+        "sender_identity_id": m.sender_identity_id,
+        "sender_person_id": _sender_person_id(m),
+        "sender_name": m.sender_name,
+        "text": m.text,
+        "date": iso_utc(m.date),
+        "is_outgoing": m.is_outgoing,
+        **scam_fields(m),
+    }
 
 
 @router.get("/reports/context")
 async def get_report_context(
-    chat_id: int = Query(...),
+    conversation_id: int = Query(...),
     target_message_id: int = Query(...),
 ):
     """Get surrounding messages for building a report."""
     async with AsyncSessionLocal() as db:
-        # Get messages around the target
-        target_result = await db.execute(
-            select(Message).where(
-                Message.chat_id == chat_id,
-                Message.tg_message_id == target_message_id,
-            )
-        )
-        target = target_result.scalars().first()
+        target = (await db.execute(
+            select(Message).where(Message.conversation_id == conversation_id, Message.id == target_message_id)
+        )).scalars().first()
         if not target:
             raise HTTPException(status_code=404, detail="Target message not found")
 
-        # Get 10 messages before and 5 after by date
-        before_result = await db.execute(
+        # 10 messages before and 5 after by date
+        before_msgs = (await db.execute(
             select(Message).where(
-                Message.chat_id == chat_id,
+                Message.conversation_id == conversation_id,
                 Message.date <= target.date,
-                Message.tg_message_id != target_message_id,
-            ).order_by(Message.date.desc()).limit(10)
-        )
-        after_result = await db.execute(
+                Message.id != target.id,
+            ).order_by(Message.date.desc(), Message.id.desc()).limit(10)
+        )).scalars().all()
+        after_msgs = (await db.execute(
             select(Message).where(
-                Message.chat_id == chat_id,
+                Message.conversation_id == conversation_id,
                 Message.date > target.date,
-            ).order_by(Message.date.asc()).limit(5)
-        )
+            ).order_by(Message.date.asc(), Message.id.asc()).limit(5)
+        )).scalars().all()
 
-        before_msgs = list(reversed(before_result.scalars().all()))
-        after_msgs = after_result.scalars().all()
-        all_msgs = before_msgs + [target] + after_msgs
-
-        return {
-            "messages": [
-                {
-                    "tg_message_id": m.tg_message_id,
-                    "sender_id": m.sender_id,
-                    "sender_name": m.sender_name,
-                    "text": m.text,
-                    "date": iso_utc(m.date),
-                    "is_outgoing": m.is_outgoing,
-                    **scam_fields(m),
-                }
-                for m in all_msgs
-            ],
-        }
+        all_msgs = list(reversed(before_msgs)) + [target] + list(after_msgs)
+        return {"messages": [_report_context_entry(m) for m in all_msgs]}
 
 
 @router.post("/reports")
 async def create_report(req: CreateReportRequest):
-    """Submit a scam report."""
+    """Submit a scam report. Stored with internal ids; cloud sync resolves the
+    channel ids on upload."""
     async with AsyncSessionLocal() as db:
-        # Fetch the included messages
-        msg_result = await db.execute(
+        conv = await db.get(Conversation, req.reported_in_conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if await db.get(Identity, req.reported_identity_id) is None:
+            raise HTTPException(status_code=404, detail="Sender not found")
+
+        included_msgs = (await db.execute(
             select(Message).where(
-                Message.chat_id == req.reported_in_chat_id,
-                Message.tg_message_id.in_(req.included_message_ids),
-            ).order_by(Message.date.asc())
-        )
-        included_msgs = msg_result.scalars().all()
-        included_ids = {m.tg_message_id for m in included_msgs}
+                Message.conversation_id == conv.id,
+                Message.id.in_(req.included_message_ids),
+            ).order_by(Message.date.asc(), Message.id.asc())
+        )).scalars().all()
+        included_ids = {m.id for m in included_msgs}
 
-        # Get chat info
-        chat_result = await db.execute(
-            select(Chat).where(Chat.telegram_id == req.reported_in_chat_id)
-        )
-        chat = chat_result.scalars().first()
-        chat_type = chat.type if chat else None
-
-        # Build messages_json — only include text for checked messages
-        # Get the full context window to show omitted positions
+        # messages_json covers the whole window so omitted positions show;
+        # only included messages carry their text
         if included_msgs:
             min_date = min(m.date for m in included_msgs if m.date)
             max_date = max(m.date for m in included_msgs if m.date)
-            context_result = await db.execute(
+            context_msgs = (await db.execute(
                 select(Message).where(
-                    Message.chat_id == req.reported_in_chat_id,
+                    Message.conversation_id == conv.id,
                     Message.date >= min_date,
                     Message.date <= max_date,
-                ).order_by(Message.date.asc())
-            )
-            context_msgs = context_result.scalars().all()
+                ).order_by(Message.date.asc(), Message.id.asc())
+            )).scalars().all()
         else:
             context_msgs = []
 
         messages_data = []
         for i, m in enumerate(context_msgs):
-            is_reported = m.sender_id == req.reported_telegram_id
-            is_included = m.tg_message_id in included_ids
+            is_reported = m.sender_identity_id == req.reported_identity_id
+            is_included = m.id in included_ids
             entry: dict = {
                 "position": i,
-                "telegram_id": m.sender_id,
+                "identity_id": m.sender_identity_id,
                 "role": "reported" if is_reported else ("reporter" if m.is_outgoing else "bystander"),
                 "included": is_included,
             }
@@ -857,13 +879,13 @@ async def create_report(req: CreateReportRequest):
                 entry["date"] = iso_utc(m.date)
             messages_data.append(entry)
 
-        # Get local detection info if any scam scores exist
+        # Local detection info if any message was scanned or marked
         local_detection = None
         scam_msgs = [m for m in included_msgs if m.scam_status is not None or m.scam_manual_verdict is not None]
         if scam_msgs:
             local_detection = {
                 "scores": [
-                    {"tg_message_id": m.tg_message_id, "scam_score": m.scam_score,
+                    {"message_id": m.id, "scam_score": m.scam_score,
                      "scam_reason": m.scam_reason, "scam_category": m.scam_category,
                      "scam_status": m.scam_status, "manual_verdict": m.scam_manual_verdict,
                      "effective_is_scam": bool(m.effective_is_scam)}
@@ -874,9 +896,9 @@ async def create_report(req: CreateReportRequest):
         now = datetime.utcnow()
         report = ScamReport(
             report_id=str(uuid.uuid4()),
-            reported_telegram_id=req.reported_telegram_id,
-            reported_in_chat_id=req.reported_in_chat_id,
-            chat_type=chat_type,
+            reported_identity_id=req.reported_identity_id,
+            reported_in_conversation_id=conv.id,
+            chat_type=conv.kind,  # conversation kind
             reporter_verdict=req.reporter_verdict,
             scam_category=req.scam_category,
             custom_category=req.custom_category,
@@ -904,43 +926,44 @@ async def create_report(req: CreateReportRequest):
 async def list_reports():
     """List all scam reports."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
+        reports = (await db.execute(
             select(ScamReport).order_by(ScamReport.created_at.desc()).limit(100)
-        )
-        reports = result.scalars().all()
+        )).scalars().all()
 
-        # Resolve chat names and sender names
-        chat_ids = list({r.reported_in_chat_id for r in reports})
-        sender_ids = list({r.reported_telegram_id for r in reports})
-        chat_names: dict[int, str] = {}
+        titles = await _conversation_titles(db, {r.reported_in_conversation_id for r in reports})
+        sender_ids = list({r.reported_identity_id for r in reports if r.reported_identity_id})
+        identities: dict[int, Identity] = {}
         sender_names: dict[int, str] = {}
-
-        if chat_ids:
-            cn_result = await db.execute(
-                select(Chat.telegram_id, Chat.name).where(Chat.telegram_id.in_(chat_ids))
-            )
-            chat_names = {row[0]: row[1] or "Unknown" for row in cn_result.fetchall()}
-
         if sender_ids:
-            sn_result = await db.execute(
-                select(Message.sender_id, Message.sender_name)
-                .where(Message.sender_id.in_(sender_ids), Message.sender_name.isnot(None))
+            identities = {i.id: i for i in (await db.execute(
+                select(Identity).where(Identity.id.in_(sender_ids))
+            )).scalars()}
+            rows = (await db.execute(
+                select(Message.sender_identity_id, Message.sender_name)
+                .where(Message.sender_identity_id.in_(sender_ids), Message.sender_name.isnot(None))
                 .order_by(Message.date.desc())
-            )
-            for row in sn_result.fetchall():
-                if row[0] not in sender_names and row[1]:
-                    sender_names[row[0]] = row[1]
+            )).all()
+            for iid, name in rows:
+                if iid not in sender_names and name:
+                    sender_names[iid] = name
+
+        def _sender_name(iid: Optional[int]) -> Optional[str]:
+            ident = identities.get(iid)
+            return sender_names.get(iid) or (ident.display_name or ident.username if ident is not None else None)
 
         return {
             "reports": [
                 {
                     "id": r.id,
                     "report_id": r.report_id,
-                    "reported_telegram_id": r.reported_telegram_id,
-                    "reported_sender_name": sender_names.get(r.reported_telegram_id),
-                    "reported_in_chat_id": r.reported_in_chat_id,
-                    "chat_name": chat_names.get(r.reported_in_chat_id, "Unknown"),
-                    "chat_type": r.chat_type,
+                    "reported_identity_id": r.reported_identity_id,
+                    "reported_person_id": (
+                        identities[r.reported_identity_id].person_id if r.reported_identity_id in identities else None
+                    ),
+                    "reported_sender_name": _sender_name(r.reported_identity_id),
+                    "reported_in_conversation_id": r.reported_in_conversation_id,
+                    "conversation_title": titles.get(r.reported_in_conversation_id, "Unknown"),
+                    "conversation_kind": r.chat_type,
                     "reporter_verdict": r.reporter_verdict,
                     "scam_category": r.scam_category,
                     "custom_category": r.custom_category,
@@ -960,9 +983,9 @@ async def list_reports():
 class CreateFeedbackRequest(BaseModel):
     feedback_type: str  # general, false_positive, missed_scam, feature_request, bug
     message: str
-    related_chat_id: Optional[int] = None
+    related_conversation_id: Optional[int] = None
     related_message_id: Optional[int] = None
-    related_flag_telegram_id: Optional[int] = None
+    related_flag_identity_id: Optional[int] = None
 
 
 @router.post("/feedback")
@@ -973,12 +996,19 @@ async def submit_feedback(req: CreateFeedbackRequest):
 
     now = datetime.utcnow()
     async with AsyncSessionLocal() as db:
+        for model, ref_id, what in (
+            (Conversation, req.related_conversation_id, "Conversation"),
+            (Message, req.related_message_id, "Message"),
+            (Identity, req.related_flag_identity_id, "Sender"),
+        ):
+            if ref_id is not None and await db.get(model, ref_id) is None:
+                raise HTTPException(status_code=404, detail=f"{what} not found")
         feedback = ScamFeedback(
             feedback_type=req.feedback_type,
             message=req.message.strip(),
-            related_chat_id=req.related_chat_id,
+            related_conversation_id=req.related_conversation_id,
             related_message_id=req.related_message_id,
-            related_flag_telegram_id=req.related_flag_telegram_id,
+            related_flag_identity_id=req.related_flag_identity_id,
             status="pending",
             created_at=now,
         )
@@ -1019,9 +1049,9 @@ async def list_feedback():
                     "id": f.id,
                     "feedback_type": f.feedback_type,
                     "message": f.message,
-                    "related_chat_id": f.related_chat_id,
+                    "related_conversation_id": f.related_conversation_id,
                     "related_message_id": f.related_message_id,
-                    "related_flag_telegram_id": f.related_flag_telegram_id,
+                    "related_flag_identity_id": f.related_flag_identity_id,
                     "status": f.status,
                     "synced_at": iso_utc(f.synced_at),
                     "created_at": iso_utc(f.created_at),

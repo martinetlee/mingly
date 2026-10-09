@@ -34,7 +34,7 @@ describe('buildItems', () => {
   })
   it('the album bubble carries the captioned item; sender shown once per run', () => {
     const items = buildItems([msg(1, { grouped_id: 5, text: null }), msg(2, { grouped_id: 5, text: 'caption' }), msg(3)], true)
-    expect(items[0].message.tg_message_id).toBe(2)
+    expect(items[0].message.id).toBe(2)
     expect(items[0].showSender).toBe(true)
     expect(items[1].showSender).toBe(false)
   })
@@ -46,11 +46,11 @@ describe('MessageList virtualization', () => {
     const { container } = render(
       <MemoryRouter>
         <VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 60 }}>
-          <MessageList messages={messages} chatType="group" />
+          <MessageList messages={messages} multiParty />
         </VirtuosoMockContext.Provider>
       </MemoryRouter>,
     )
-    const rows = container.querySelectorAll('[data-tg-ids]').length
+    const rows = container.querySelectorAll('[data-message-ids]').length
     expect(rows).toBeGreaterThan(0)
     expect(rows).toBeLessThan(60)
   })

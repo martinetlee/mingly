@@ -94,10 +94,11 @@ def entities_to_html(raw_text: str, entities) -> Optional[str]:
         except Exception:
             result = None
         if result is not None:
-            # tg://user?id=X mention links → in-app profile links
+            # tg://user?id=X mention links → in-app mention links, resolved
+            # to a person by the frontend's /mention/:channel/:externalId route
             result = re.sub(
                 r'href="tg://user\?id=(\d+)"',
-                r'href="/profile/\1" data-mention="true"',
+                r'href="/mention/telegram/\1" data-mention="true"',
                 result,
             )
             return sanitize_hrefs(_newlines_to_br(result))

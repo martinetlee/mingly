@@ -23,9 +23,9 @@ Before implementing any feature, trace ALL user-facing code paths that touch the
 
 ---
 
-# Mingly — Telegram Relationship Manager
+# Mingly — Relationship Manager
 
-A desktop app (macOS) for managing Telegram relationships, powered by local LLMs. Built with FastAPI + React, packaged via PyInstaller + pywebview.
+A desktop app (macOS) for managing relationships across messaging channels (Telegram today; Gmail, Signal and more being added — see `docs/multichannel/PLAN.md`), powered by local LLMs. Built with FastAPI + React, packaged via PyInstaller + pywebview.
 
 ## Tech Stack
 
@@ -39,10 +39,13 @@ A desktop app (macOS) for managing Telegram relationships, powered by local LLMs
 
 ```
 backend/
-  api/          # FastAPI routers (one per domain: chats, contacts, organizations, etc.)
-  db/           # models.py, crud.py, migrations/runner.py
+  api/          # FastAPI routers (one per domain: conversations, people, organizations, telegram, …)
+  connectors/   # Channel connector contract + manager (lifecycle, sign-in steps, capabilities)
+  ingest/       # fanout.py: what every channel's new/edited message triggers (WS, Shield, catch-up, notify)
+  db/           # models.py, crud/ (one module per area), migrations/runner.py
+  serializers.py# The JSON shapes of Conversation / Message / Person / Identity
   llm/          # Provider registry, base class, ollama/anthropic/openai providers
-  telegram/     # Telethon client wrapper + sync logic
+  telegram/     # Telethon runtime, sync, archive, media; ids.py maps Telegram ids ↔ internal ids
   ai/           # Message importance scoring
 
 frontend/src/
@@ -77,9 +80,10 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 - Auth dependency: `require_session_token()` in `dependencies.py`
 
 ### Database
-- Async SQLAlchemy ORM models in `backend/db/models.py`
-- CRUD helpers in `backend/db/crud.py`
-- **Migrations**: Append-only numbered SQL tuples in `backend/db/migrations/runner.py` `MIGRATIONS` list. Auto-applied on startup. Currently at migration 20.
+- Schema v2 contract: `docs/multichannel/SCHEMA_V2.md` (tables, id rules, payload shapes, route map, WS events). Read it before touching ids.
+- Async SQLAlchemy ORM models in `backend/db/models.py`. Every row has an internal integer id; a channel's own ids live only in `external_id` text columns and only that channel's code (`backend/telegram/ids.py`) interprets them.
+- CRUD helpers in the `backend/db/crud/` package (one module per area, each with `__all__`, re-exported so callers use `crud.<name>`)
+- **Migrations**: `create_all` builds the full schema on a fresh DB; later changes are append-only numbered steps in `backend/db/migrations/runner.py` `MIGRATIONS` (SQL strings or async callables). An existing DB is backed up to `DATA_DIR/backups/` before pending migrations run. A DB from an older schema generation is backed up and replaced on startup (`init_db`).
 
 ### LLM Integration
 - Provider registry singleton in `backend/llm/registry.py`
@@ -90,7 +94,7 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 ### Auth Flow
 1. Master password → Fernet vault (`vault.enc`) with PBKDF2 key derivation
 2. Session token issued on unlock, validated on every request
-3. Telegram credentials stored encrypted in vault
+3. Channel credentials (Telegram API id/hash + session, …) stored encrypted in vault
 4. WebSocket auth via `?token=` query param
 
 ### Frontend Data Flow
@@ -102,8 +106,8 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 
 - **Python**: snake_case everywhere. **TypeScript**: camelCase vars, PascalCase components/types.
 - API response shapes must match TypeScript interfaces in `frontend/src/api/types.ts`
-- `ContactPosition` uses `telegram_id` (BigInteger, not FK) — works for any Telegram user, not just saved contacts
-- Frontend position CRUD calls pass `telegram_id` as the route identifier
+- APIs, WS events and the frontend only carry internal ids (`conversation_id`, `message_id`, `person_id`, `identity_id`); never Telegram ids
+- Telegram-only operations go through `backend/api/lookups.telegram_peer()`, which answers 409 `unsupported_channel` for other channels; the frontend gates such UI on `conversation.capabilities`
 - Preferences: `data/prefs.json` (notification, briefing, user orgs, etc.)
 - LLM config: `data/llm_config.json`
 - Org context: `backend/org_context.py` provides shared helpers for injecting colleague/org context into LLM prompts
@@ -122,25 +126,26 @@ Vite proxy: `/api` → `http://localhost:8765` in dev (configured in `frontend/v
 
 ## Key Models
 
-- **Chat** — Telegram chats (private/group/channel), flags: is_monitored, is_hidden, is_briefing, is_tracked
-- **Message** — Chat messages with reactions, importance scoring, reply threading
-- **Contact** — Saved Telegram contacts with relationship status tracking
-- **ContactPosition** — Job history linked by `telegram_id` (not contact FK)
+- **Account** — one signed-in account on one channel
+- **Conversation** — a chat/group/channel/email thread on an account (kind direct/group/channel/email_thread), flags: is_monitored, is_hidden, is_briefing, is_tracked
+- **Message** — messages with `attachments`, reactions, importance scoring, reply threading (`reply_to_external_id`), `seq` = channel ordering
+- **Person** — a human across channels (the CRM record, relationship status); **Identity** — one handle of a person on one channel
+- **PersonPosition** — job history of a person
 - **Organization** — Org directory with auto-generated context summaries
 - **BriefingRun/Entry** — Scheduled LLM-generated briefing summaries
 - **CatchUpItem/Summary** — Triage queue with LLM-generated catch-up summaries
 
 ## Adding a Migration
 
-Add a numbered tuple to the `MIGRATIONS` list in `backend/db/migrations/runner.py`:
+Change the model in `backend/db/models.py` (fresh DBs get it from `create_all`), then add a numbered tuple to the `MIGRATIONS` list in `backend/db/migrations/runner.py` for existing DBs. Steps are SQL strings or async callables taking the connection (for data transforms); each migration runs in one transaction:
 
 ```python
 (
-    21,
+    1,
     "Description of what this migration does",
     [
         "SQL STATEMENT 1",
-        "SQL STATEMENT 2",
+        transform_rows,  # async def transform_rows(conn): ...
     ],
 ),
 ```

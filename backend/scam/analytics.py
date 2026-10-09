@@ -33,7 +33,7 @@ _COUNTER_COLUMNS = (
     "short_circuited_signatures", "pipeline_errors", "total_pipeline_ms",
     "ml_safe", "ml_borderline", "ml_auto_scam", "ml_unavailable",
     "flags_dismissed", "messages_unflagged", "reports_submitted", "manual_checks",
-    "rescans", "scans_private", "scans_group", "scans_channel",
+    "rescans", "scans_direct", "scans_group", "scans_channel",
 )
 _JSON_COLUMNS = ("categories_json", "tool_calls_json", "scenarios_matched_json", "safe_patterns_matched_json")
 _JSON_KEY_RE = re.compile(r"[^A-Za-z0-9_.:\- ]")
@@ -99,7 +99,7 @@ class AnalyticsTracker:
     # --- Event methods ---
 
     async def record_scan(self, is_scam: bool, category: Optional[str],
-                          duration_ms: int, chat_type: Optional[str],
+                          duration_ms: int, conversation_kind: Optional[str],
                           trace_status: str, ml_verdict: Optional[str] = None):
         """Record a completed scan."""
         counters = {
@@ -120,12 +120,12 @@ class AnalyticsTracker:
         elif trace_status == "failed":
             counters["pipeline_errors"] = 1
 
-        # Chat type
-        if chat_type == "private":
-            counters["scans_private"] = 1
-        elif chat_type == "group":
+        # Conversation kind (no counter for email threads yet)
+        if conversation_kind == "direct":
+            counters["scans_direct"] = 1
+        elif conversation_kind == "group":
             counters["scans_group"] = 1
-        elif chat_type == "channel":
+        elif conversation_kind == "channel":
             counters["scans_channel"] = 1
 
         await self._increment(**counters)
@@ -225,8 +225,9 @@ class AnalyticsTracker:
                     "manual_checks": r.manual_checks,
                     "rescans": r.rescans,
                 },
+                # Current cloud contract: "chat_types" with "private" = direct
                 "chat_types": {
-                    "private": r.scans_private,
+                    "private": r.scans_direct,
                     "group": r.scans_group,
                     "channel": r.scans_channel,
                 },

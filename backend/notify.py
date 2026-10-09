@@ -29,8 +29,8 @@ def set_webview_window(window):
     _webview_window = window
 
 
-def _handle_notification_click(chat_id):
-    """Handle notification click: bring app to front and navigate to chat via WebSocket."""
+def _handle_notification_click(conversation_id):
+    """Bring the app to the front and open the conversation (via WebSocket)."""
     try:
         from AppKit import NSApplication
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -39,8 +39,8 @@ def _handle_notification_click(chat_id):
 
     # Clicks arrive on the Cocoa main thread: hand the broadcast to the
     # server loop that owns the sockets.
-    if chat_id:
-        ws_manager.broadcast_threadsafe({"type": "navigate_to_chat", "chat_id": int(chat_id)})
+    if conversation_id:
+        ws_manager.broadcast_threadsafe({"type": "navigate_to_conversation", "conversation_id": int(conversation_id)})
 
 
 if _NS_AVAILABLE:
@@ -59,8 +59,8 @@ if _NS_AVAILABLE:
             self, center, notification
         ):
             user_info = notification.userInfo()
-            chat_id = user_info.get("chat_id") if user_info else None
-            _handle_notification_click(chat_id)
+            conversation_id = user_info.get("conversation_id") if user_info else None
+            _handle_notification_click(conversation_id)
 
     _delegate = _NotificationDelegate.alloc().init()
     _center = NSUserNotificationCenter.defaultUserNotificationCenter()
@@ -69,7 +69,7 @@ if _NS_AVAILABLE:
 
 
 def send_native_notification(
-    title: str, body: str, chat_id: Optional[int] = None
+    title: str, body: str, conversation_id: Optional[int] = None
 ) -> None:
     """Send a macOS native notification attributed to the Mingly app."""
     if _NS_AVAILABLE:
@@ -77,8 +77,8 @@ def send_native_notification(
             n = NSUserNotification.alloc().init()
             n.setTitle_(title)
             n.setInformativeText_(body)
-            if chat_id is not None:
-                n.setUserInfo_({"chat_id": chat_id})
+            if conversation_id is not None:
+                n.setUserInfo_({"conversation_id": conversation_id})
             NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
             return
         except Exception:

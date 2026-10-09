@@ -59,7 +59,7 @@ function WorkspaceDialogBody({ onClose, onSaved, workspace }: WorkspaceDialogPro
     const q = tagQuery.trim().toLowerCase()
     return allTags
       .filter((t) => t.category !== 'stage' && t.category !== 'stream' && !selectedTagIds.includes(t.id))
-      .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
+      .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.conversation_count ?? 0) > 0))
       .slice(0, 12)
   }, [allTags, selectedTagIds, tagQuery])
 
@@ -217,7 +217,7 @@ function WorkspaceDialogBody({ onClose, onSaved, workspace }: WorkspaceDialogPro
                 >
                   <span className={`h-2 w-2 rounded-full ${COLOR_DOTS[t.color] ?? 'bg-slate-400'}`} />
                   {t.name}
-                  <span className="text-slate-500">{t.chat_count ?? 0}</span>
+                  <span className="text-slate-500">{t.conversation_count ?? 0}</span>
                 </button>
               ))}
             </div>

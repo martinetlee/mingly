@@ -7,6 +7,7 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import type { ShortcutMap } from '../hooks/useKeyboardShortcuts'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { LOCK_ACTION } from '../lib/nav'
+import { chatUrl } from '../lib/routes'
 import { useNav } from '../context/FeaturesContext'
 import { useLockVault } from '../hooks/useLockVault'
 
@@ -36,9 +37,9 @@ export default function Layout() {
 
   useKeyboardShortcuts(shortcuts)
 
-  // Native notification clicks are relayed by the backend as navigate_to_chat
-  useWsEvent('navigate_to_chat', (event) => {
-    navigate(`/chats?chatId=${event.chat_id}`)
+  // Native notification clicks are relayed by the backend as navigate_to_conversation
+  useWsEvent('navigate_to_conversation', (event) => {
+    navigate(chatUrl(event.conversation_id))
   })
 
   return (

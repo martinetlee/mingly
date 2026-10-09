@@ -1,7 +1,10 @@
 import { useState, useCallback, useRef } from 'react'
 import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
-import type { Chat } from '../api/types'
-import { getTrackedChats, setTracked, syncChat, sendMessage } from '../api/client'
+import type { Conversation } from '../api/types'
+import { getTrackedConversations, setTracked, syncConversation, sendMessage } from '../api/client'
+import { can } from '../lib/capabilities'
+import { conversationTitle } from '../lib/conversation'
+import ChannelIcon from '../components/ChannelIcon'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
@@ -15,9 +18,9 @@ import ChatInfoPanel from '../components/ChatInfoPanel'
 
 export default function Tracked() {
   const { data: chatsData, error: chatsError, loading: chatsLoading, refetch: refetchChats, setData: setChats } =
-    useLatestQuery(['tracked-chats'], () => getTrackedChats())
+    useLatestQuery(['tracked-chats'], () => getTrackedConversations())
   const chats = chatsData ?? []
-  const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
+  const [selectedChat, setSelectedChat] = useState<Conversation | null>(null)
   const [syncing, setSyncing] = useState<number | null>(null)
   const [showInfo, setShowInfo] = useState(false)
   const [search, setSearch] = useState('')
@@ -26,9 +29,9 @@ export default function Tracked() {
 
   // Messages are bound to the selected chat: a late response for a previous
   // chat can never render here (or be replied to via Compose)
-  const selectedId = selectedChat?.telegram_id ?? null
+  const selectedId = selectedChat?.id ?? null
   // Same message-window engine as the Chats pane (paging, backfill, live WS updates)
-  const pane = useChatMessages({ chatId: selectedId, topicId: null, nonce: 0 })
+  const pane = useChatMessages({ conversationId: selectedId, topicId: null, nonce: 0, canBackfill: can(selectedChat, 'history_backfill') })
   const selectedRef = useRef(selectedChat)
   selectedRef.current = selectedChat
 
@@ -36,46 +39,46 @@ export default function Tracked() {
   const refreshList = useCoalescedRefetch(refetchChats, 3000)
   // The open chat's messages update themselves (useChatMessages); only the list is refreshed here
   useWsEvent('new_message', refreshList)
-  useWsEvent('chats_synced', refreshList)
+  useWsEvent('conversations_synced', refreshList)
   useWsEvent('resync', refreshList)
 
-  const handleSelectChat = (chat: Chat) => {
-    if (selectedRef.current?.telegram_id === chat.telegram_id) return
+  const handleSelectChat = (chat: Conversation) => {
+    if (selectedRef.current?.id === chat.id) return
     setSelectedChat(chat)
     setShowInfo(false)
   }
 
   const handleSync = async () => {
     const chat = selectedRef.current
-    if (!chat || syncing === chat.telegram_id) return
-    setSyncing(chat.telegram_id)
+    if (!chat || syncing === chat.id) return
+    setSyncing(chat.id)
     try {
-      await syncChat(chat.telegram_id)
-      if (selectedRef.current?.telegram_id === chat.telegram_id) await pane.refresh()
+      await syncConversation(chat.id)
+      if (selectedRef.current?.id === chat.id) await pane.refresh()
     } catch (e) {
       reportError(e, 'Sync failed')
     } finally {
-      setSyncing((v) => (v === chat.telegram_id ? null : v))
+      setSyncing((v) => (v === chat.id ? null : v))
     }
   }
 
-  const handleUntrack = async (chat: Chat) => {
+  const handleUntrack = async (chat: Conversation) => {
     try {
-      await setTracked(chat.telegram_id, false)
+      await setTracked(chat.id, false)
     } catch (e) {
       reportError(e, 'Untrack failed')
       return
     }
-    setChats((prev) => prev?.filter((c) => c.telegram_id !== chat.telegram_id))
-    setSelectedChat((cur) => (cur?.telegram_id === chat.telegram_id ? null : cur))
+    setChats((prev) => prev?.filter((c) => c.id !== chat.id))
+    setSelectedChat((cur) => (cur?.id === chat.id ? null : cur))
   }
 
   const handleSend = async (text: string) => {
     const chat = selectedRef.current
     if (!chat) return
-    const res = await sendMessage(chat.telegram_id, text)
+    const res = await sendMessage(chat.id, text)
     if (res?.message) pane.applyMessage(res.message)
-    else if (selectedRef.current?.telegram_id === chat.telegram_id) await pane.refresh()
+    else if (selectedRef.current?.id === chat.id) await pane.refresh()
   }
 
 
@@ -98,7 +101,7 @@ export default function Tracked() {
   }, [sidebarWidth])
 
   const filtered = chats.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase())
+    conversationTitle(c).toLowerCase().includes(search.toLowerCase())
   )
 
   return (
@@ -135,20 +138,21 @@ export default function Tracked() {
           ) : (
             filtered.map((chat) => (
               <div
-                key={chat.telegram_id}
+                key={chat.id}
                 onClick={() => handleSelectChat(chat)}
                 className={`group flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors ${
-                  selectedChat?.telegram_id === chat.telegram_id ? 'bg-amber-500/15' : 'hover:bg-slate-700/50'
+                  selectedChat?.id === chat.id ? 'bg-amber-500/15' : 'hover:bg-slate-700/50'
                 }`}
               >
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-sm font-medium text-amber-400">
-                  {chat.name.charAt(0).toUpperCase()}
+                  {conversationTitle(chat).charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <p title={chat.name} className={`truncate text-sm font-medium ${selectedChat?.telegram_id === chat.telegram_id ? 'text-amber-300' : 'text-gray-100'}`}>
-                      {chat.name}
+                    <p title={conversationTitle(chat)} className={`truncate text-sm font-medium ${selectedChat?.id === chat.id ? 'text-amber-300' : 'text-gray-100'}`}>
+                      {conversationTitle(chat)}
                     </p>
+                    <ChannelIcon channel={chat.channel} />
                     {chat.last_message?.date && (
                       <span className="ml-auto flex-shrink-0 text-[10px] text-slate-500">
                         {fmtDate(chat.last_message.date)}
@@ -163,7 +167,7 @@ export default function Tracked() {
                       {chat.last_message.text || '[media]'}
                     </p>
                   ) : (
-                    <span className="text-[10px] text-slate-500">{chat.type}</span>
+                    <span className="text-[10px] text-slate-500">{chat.kind.replace('_', ' ')}</span>
                   )}
                 </div>
                 {(chat.unread_count ?? 0) > 0 && (
@@ -190,8 +194,8 @@ export default function Tracked() {
           <>
             <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
               <div>
-                <h2 className="text-sm font-semibold text-gray-100">{selectedChat.name}</h2>
-                <p className="text-xs text-slate-500">{selectedChat.type}</p>
+                <h2 className="text-sm font-semibold text-gray-100">{conversationTitle(selectedChat)}</h2>
+                <p className="flex items-center gap-1 text-xs text-slate-500"><ChannelIcon channel={selectedChat.channel} />{selectedChat.kind.replace('_', ' ')}</p>
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -206,17 +210,17 @@ export default function Tracked() {
                 </button>
                 <button
                   onClick={handleSync}
-                  disabled={syncing === selectedChat.telegram_id}
+                  disabled={syncing === selectedChat.id}
                   className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
                 >
-                  <RefreshCw size={13} className={syncing === selectedChat.telegram_id ? 'animate-spin' : ''} />
+                  <RefreshCw size={13} className={syncing === selectedChat.id ? 'animate-spin' : ''} />
                   Sync
                 </button>
               </div>
             </div>
 
-            <ChatMessagesView key={selectedChat.telegram_id} msgs={pane} chatType={selectedChat.type} />
-            <ComposeBar key={selectedChat.telegram_id} onSend={handleSend} />
+            <ChatMessagesView key={selectedChat.id} msgs={pane} conversation={selectedChat} />
+            {can(selectedChat, 'send') && <ComposeBar key={selectedChat.id} onSend={handleSend} />}
           </>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center text-slate-400">

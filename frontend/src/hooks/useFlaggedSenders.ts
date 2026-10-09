@@ -7,10 +7,10 @@ import { useWebSocketClient } from '../context/WebSocketContext'
 import { reportError } from '../lib/toast'
 
 /**
- * App-wide set of actively flagged scam senders (telegram ids), shared by
+ * App-wide set of actively flagged scam senders (identity ids), shared by
  * Shield, Chats and MessageBubble.
  *
- * - Seeded from GET /api/scam/flags `flagged_sender_ids` when the first
+ * - Seeded from GET /api/scam/flags `flagged_identity_ids` when the first
  *   consumer mounts, and refetched on WS `resync`.
  * - Kept current by WS: `scam_users_flagged` adds; `scam_verdict_changed.flags`
  *   adds (active) or removes (dismissed / reset).
@@ -55,7 +55,7 @@ function setIds(changes: Iterable<[number, boolean]>) {
 /** Apply `flags` from a verdict response or `scam_verdict_changed` event. */
 export function applyFlagChanges(flags: ScamFlagChange[] | undefined | null) {
   if (!flags?.length) return
-  setIds(flags.map((f) => [f.telegram_id, f.status === 'active'] as [number, boolean]))
+  setIds(flags.map((f) => [f.identity_id, f.status === 'active'] as [number, boolean]))
 }
 
 export function markFlaggedSender(id: number) { setIds([[id, true]]) }
@@ -68,7 +68,7 @@ export function refreshFlaggedSenders(): Promise<void> {
   return getScamFlags()
     .then((r) => {
       if (seq !== refreshSeq) return
-      const ids = new Set(r.flagged_sender_ids ?? [])
+      const ids = new Set(r.flagged_identity_ids ?? [])
       for (const [id, flagged] of overlay ?? []) {
         if (flagged) ids.add(id)
         else ids.delete(id)
@@ -94,7 +94,7 @@ function attach(client: WebSocketClient | null): () => void {
     detachWs?.()
     attachedClient = client
     const offs = [
-      client.subscribe('scam_users_flagged', (e) => setIds(e.telegram_ids.map((id) => [id, true] as [number, boolean]))),
+      client.subscribe('scam_users_flagged', (e) => setIds(e.identity_ids.map((id) => [id, true] as [number, boolean]))),
       client.subscribe('scam_verdict_changed', (e) => applyFlagChanges(e.flags)),
       client.subscribe('resync', () => { void refreshFlaggedSenders() }),
     ]
@@ -123,8 +123,8 @@ export function useFlaggedSenders(): {
   ids: Set<number>
   loading: boolean
   refresh(): void
-  markDismissed(senderId: number): void
-  markFlagged(senderId: number): void
+  markDismissed(identityId: number): void
+  markFlagged(identityId: number): void
 } {
   const client = useWebSocketClient()
   const { shield } = useFeatures()

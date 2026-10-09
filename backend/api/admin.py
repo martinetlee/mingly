@@ -6,29 +6,21 @@ group settings, and admin action log.
 """
 
 from datetime import datetime
-from typing import Optional, Union
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.lookups import conversation_or_404, telegram_peer
 from backend.db.database import get_db
-from backend.db import crud
+from backend.db.models import AdminActionLog, Identity
 from backend.serialization import iso_utc
+from backend.telegram import ids
 from backend.telegram.runtime import runtime
 
 router = APIRouter()
-
-
-def _db_datetime(value: Union[datetime, str, None]) -> Optional[datetime]:
-    """Raw ``text()`` queries bypass SQLAlchemy's DateTime type, so SQLite hands
-    back the stored string ("YYYY-MM-DD HH:MM:SS[.ffffff]") instead of a datetime."""
-    if value is None or isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
 
 
 # ── Request models ────────────────────────────────────────────────────────
@@ -47,20 +39,20 @@ class AdminPermissions(BaseModel):
 
 
 class PromoteRequest(BaseModel):
-    user_id: int
+    identity_id: int
     permissions: AdminPermissions
 
 
 class DemoteRequest(BaseModel):
-    user_id: int
+    identity_id: int
 
 
 class BanRequest(BaseModel):
-    user_id: int
+    identity_id: int
 
 
 class RestrictRequest(BaseModel):
-    user_id: int
+    identity_id: int
     send_messages: bool = False
     send_media: bool = False
     send_stickers: bool = False
@@ -76,7 +68,7 @@ class RestrictRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    user_id: int
+    identity_id: int
 
 
 class CreateInviteLinkRequest(BaseModel):
@@ -97,51 +89,47 @@ class GroupSettingsRequest(BaseModel):
 
 # ── Helper ────────────────────────────────────────────────────────────────
 
-async def _require_group_chat(telegram_id: int, db: AsyncSession):
-    """Validate that chat exists and is a group/channel."""
-    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    if chat.type == "private":
+async def _require_group(conversation_id: int, db: AsyncSession) -> int:
+    """The Telegram peer of a group/channel conversation (404 / 409 / 400 otherwise)."""
+    conv = await conversation_or_404(db, conversation_id)
+    peer = telegram_peer(conv, "Admin actions")
+    if conv.kind == "direct":
         raise HTTPException(status_code=400, detail="Admin actions are only available for groups and channels")
-    return chat
+    return peer
+
+
+async def _user_id(db: AsyncSession, identity_id: int) -> int:
+    """The Telegram user id of the identity an admin action targets."""
+    user_ids = await ids.user_ids_for(db, [identity_id])
+    if identity_id not in user_ids:
+        raise HTTPException(status_code=404, detail="Telegram user not found")
+    return user_ids[identity_id]
 
 
 async def _log_admin_action(
     db: AsyncSession,
-    chat_telegram_id: int,
+    conversation_id: int,
     action: str,
-    target_user_id: Optional[int] = None,
+    target_identity_id: Optional[int] = None,
     details: Optional[str] = None,
 ):
-    """Insert an admin action log entry."""
-    from sqlalchemy import text
-    await db.execute(
-        text(
-            "INSERT INTO admin_action_log (chat_telegram_id, action, target_user_id, details, created_at) "
-            "VALUES (:chat_id, :action, :target, :details, :ts)"
-        ),
-        {
-            "chat_id": chat_telegram_id,
-            "action": action,
-            "target": target_user_id,
-            "details": details,
-            "ts": datetime.utcnow(),
-        },
-    )
+    db.add(AdminActionLog(
+        conversation_id=conversation_id, action=action, target_identity_id=target_identity_id,
+        details=details, created_at=datetime.utcnow(),
+    ))
     await db.commit()
 
 
 # ── Promote / Demote ─────────────────────────────────────────────────────
 
-@router.post("/{telegram_id}/promote")
+@router.post("/{conversation_id}/promote")
 async def promote_admin(
-    telegram_id: int,
+    conversation_id: int,
     req: PromoteRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Promote a user to admin with granular permissions."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -161,26 +149,26 @@ async def promote_admin(
             add_admins=req.permissions.add_admins,
         )
         await client(EditAdminRequest(
-            channel=telegram_id,
-            user_id=req.user_id,
+            channel=peer,
+            user_id=await _user_id(db, req.identity_id),
             admin_rights=rights,
             rank="Admin",
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to promote user: {e}")
 
-    await _log_admin_action(db, telegram_id, "promote", req.user_id)
+    await _log_admin_action(db, conversation_id, "promote", req.identity_id)
     return {"success": True}
 
 
-@router.post("/{telegram_id}/demote")
+@router.post("/{conversation_id}/demote")
 async def demote_admin(
-    telegram_id: int,
+    conversation_id: int,
     req: DemoteRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Demote an admin back to regular member."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -190,28 +178,28 @@ async def demote_admin(
         # All-false rights effectively demotes
         rights = ChatAdminRights()
         await client(EditAdminRequest(
-            channel=telegram_id,
-            user_id=req.user_id,
+            channel=peer,
+            user_id=await _user_id(db, req.identity_id),
             admin_rights=rights,
             rank="",
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to demote user: {e}")
 
-    await _log_admin_action(db, telegram_id, "demote", req.user_id)
+    await _log_admin_action(db, conversation_id, "demote", req.identity_id)
     return {"success": True}
 
 
 # ── Ban / Restrict / Approve ─────────────────────────────────────────────
 
-@router.post("/{telegram_id}/ban")
+@router.post("/{conversation_id}/ban")
 async def ban_member(
-    telegram_id: int,
+    conversation_id: int,
     req: BanRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Ban a user from the group/channel."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -230,25 +218,25 @@ async def ban_member(
             embed_links=True,
         )
         await client(EditBannedRequest(
-            channel=telegram_id,
-            participant=req.user_id,
+            channel=peer,
+            participant=await _user_id(db, req.identity_id),
             banned_rights=rights,
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to ban user: {e}")
 
-    await _log_admin_action(db, telegram_id, "ban", req.user_id)
+    await _log_admin_action(db, conversation_id, "ban", req.identity_id)
     return {"success": True}
 
 
-@router.post("/{telegram_id}/restrict")
+@router.post("/{conversation_id}/restrict")
 async def restrict_member(
-    telegram_id: int,
+    conversation_id: int,
     req: RestrictRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Restrict a member's permissions."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -271,25 +259,25 @@ async def restrict_member(
             pin_messages=not req.pin_messages,
         )
         await client(EditBannedRequest(
-            channel=telegram_id,
-            participant=req.user_id,
+            channel=peer,
+            participant=await _user_id(db, req.identity_id),
             banned_rights=rights,
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to restrict user: {e}")
 
-    await _log_admin_action(db, telegram_id, "restrict", req.user_id)
+    await _log_admin_action(db, conversation_id, "restrict", req.identity_id)
     return {"success": True}
 
 
-@router.post("/{telegram_id}/approve")
+@router.post("/{conversation_id}/approve")
 async def approve_member(
-    telegram_id: int,
+    conversation_id: int,
     req: ApproveRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Remove all restrictions from a user (unban/unrestrict)."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -299,33 +287,33 @@ async def approve_member(
         # All-false rights = no restrictions
         rights = ChatBannedRights(until_date=None)
         await client(EditBannedRequest(
-            channel=telegram_id,
-            participant=req.user_id,
+            channel=peer,
+            participant=await _user_id(db, req.identity_id),
             banned_rights=rights,
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to approve user: {e}")
 
-    await _log_admin_action(db, telegram_id, "approve", req.user_id)
+    await _log_admin_action(db, conversation_id, "approve", req.identity_id)
     return {"success": True}
 
 
 # ── Invite Links ──────────────────────────────────────────────────────────
 
-@router.get("/{telegram_id}/invite-links")
+@router.get("/{conversation_id}/invite-links")
 async def get_invite_links(
-    telegram_id: int,
+    conversation_id: int,
     db: AsyncSession = Depends(get_db),
 ):
     """Get all invite links for a group/channel."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import GetExportedChatInvitesRequest
         me = await client.get_me()
         result = await client(GetExportedChatInvitesRequest(
-            peer=telegram_id,
+            peer=peer,
             admin_id=me,
             limit=50,
             revoked=False,
@@ -346,14 +334,14 @@ async def get_invite_links(
         raise HTTPException(status_code=500, detail=f"Failed to get invite links: {e}")
 
 
-@router.post("/{telegram_id}/invite-links")
+@router.post("/{conversation_id}/invite-links")
 async def create_invite_link(
-    telegram_id: int,
+    conversation_id: int,
     req: CreateInviteLinkRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new invite link."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
@@ -361,7 +349,7 @@ async def create_invite_link(
 
         expire = datetime.fromtimestamp(req.expire_date) if req.expire_date else None
         result = await client(ExportChatInviteRequest(
-            peer=telegram_id,
+            peer=peer,
             expire_date=expire,
             usage_limit=req.usage_limit,
             title=req.title,
@@ -379,57 +367,57 @@ async def create_invite_link(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create invite link: {e}")
 
-    await _log_admin_action(db, telegram_id, "create_invite_link", details=link_data["link"])
+    await _log_admin_action(db, conversation_id, "create_invite_link", details=link_data["link"])
     return link_data
 
 
-@router.post("/{telegram_id}/invite-links/revoke")
+@router.post("/{conversation_id}/invite-links/revoke")
 async def revoke_invite_link(
-    telegram_id: int,
+    conversation_id: int,
     req: RevokeInviteLinkRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Revoke an existing invite link."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
         from telethon.tl.functions.messages import EditExportedChatInviteRequest
         await client(EditExportedChatInviteRequest(
-            peer=telegram_id,
+            peer=peer,
             link=req.link,
             revoked=True,
         ))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to revoke invite link: {e}")
 
-    await _log_admin_action(db, telegram_id, "revoke_invite_link", details=req.link)
+    await _log_admin_action(db, conversation_id, "revoke_invite_link", details=req.link)
     return {"success": True}
 
 
 # ── Group/Channel Settings ───────────────────────────────────────────────
 
-@router.get("/{telegram_id}/settings")
+@router.get("/{conversation_id}/settings")
 async def get_group_settings(
-    telegram_id: int,
+    conversation_id: int,
     db: AsyncSession = Depends(get_db),
 ):
     """Get the current title and about/description for a group or channel."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     try:
-        full = await client.get_entity(telegram_id)
+        full = await client.get_entity(peer)
         title = getattr(full, "title", "")
         # about requires full chat info
         from telethon.tl.functions.channels import GetFullChannelRequest
         from telethon.tl.functions.messages import GetFullChatRequest
         try:
-            full_info = await client(GetFullChannelRequest(channel=telegram_id))
+            full_info = await client(GetFullChannelRequest(channel=peer))
             about = full_info.full_chat.about or ""
         except Exception:
             try:
-                full_info = await client(GetFullChatRequest(chat_id=telegram_id))
+                full_info = await client(GetFullChatRequest(chat_id=peer))
                 about = full_info.full_chat.about or ""
             except Exception:
                 about = ""
@@ -442,64 +430,60 @@ async def get_group_settings(
         raise HTTPException(status_code=500, detail=f"Failed to get settings: {e}")
 
 
-@router.put("/{telegram_id}/settings")
+@router.put("/{conversation_id}/settings")
 async def update_group_settings(
-    telegram_id: int,
+    conversation_id: int,
     req: GroupSettingsRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Update group/channel title and/or description."""
-    await _require_group_chat(telegram_id, db)
+    peer = await _require_group(conversation_id, db)
     client = await runtime.client()
 
     changes = []
     try:
         if req.title is not None:
             from telethon.tl.functions.channels import EditTitleRequest
-            await client(EditTitleRequest(channel=telegram_id, title=req.title))
+            await client(EditTitleRequest(channel=peer, title=req.title))
             changes.append("title")
 
         if req.about is not None:
             from telethon.tl.functions.messages import EditChatAboutRequest
-            await client(EditChatAboutRequest(peer=telegram_id, about=req.about))
+            await client(EditChatAboutRequest(peer=peer, about=req.about))
             changes.append("about")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update settings: {e}")
 
-    await _log_admin_action(db, telegram_id, "update_settings", details=", ".join(changes))
+    await _log_admin_action(db, conversation_id, "update_settings", details=", ".join(changes))
     return {"success": True, "updated": changes}
 
 
 # ── Admin Action Log ─────────────────────────────────────────────────────
 
-@router.get("/{telegram_id}/action-log")
+@router.get("/{conversation_id}/action-log")
 async def get_admin_action_log(
-    telegram_id: int,
+    conversation_id: int,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get recent admin actions for a group/channel."""
-    await _require_group_chat(telegram_id, db)
-
-    from sqlalchemy import text
-    result = await db.execute(
-        text(
-            "SELECT id, chat_telegram_id, action, target_user_id, details, created_at "
-            "FROM admin_action_log "
-            "WHERE chat_telegram_id = :chat_id "
-            "ORDER BY created_at DESC LIMIT :lim"
-        ),
-        {"chat_id": telegram_id, "lim": limit},
-    )
-    rows = result.fetchall()
+    """Recent admin actions taken from the app in a group/channel."""
+    await _require_group(conversation_id, db)
+    rows = (await db.execute(
+        select(AdminActionLog, Identity.person_id)
+        .outerjoin(Identity, Identity.id == AdminActionLog.target_identity_id)
+        .where(AdminActionLog.conversation_id == conversation_id)
+        .order_by(AdminActionLog.created_at.desc())
+        .limit(limit)
+    )).all()
     return [
         {
-            "id": r[0],
-            "chat_telegram_id": r[1],
-            "action": r[2],
-            "target_user_id": r[3],
-            "details": r[4],
-            "created_at": iso_utc(_db_datetime(r[5])),
+            "id": log.id,
+            "conversation_id": log.conversation_id,
+            "action": log.action,
+            "target_identity_id": log.target_identity_id,
+            "target_person_id": person_id,
+            "details": log.details,
+            "created_at": iso_utc(log.created_at),
         }
-        for r in rows
+        for log, person_id in rows
     ]

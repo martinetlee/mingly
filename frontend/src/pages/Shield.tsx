@@ -133,7 +133,7 @@ export default function Shield() {
   }, { errorContext: 'Export failed' })
 
   const devFiltersDirty = JSON.stringify(devDraft) !== JSON.stringify(devApplied)
-  const devFiltersActive = !!(devApplied.senderId || devApplied.chatId || devApplied.minMembers)
+  const devFiltersActive = !!(devApplied.senderId || devApplied.conversationId || devApplied.minMembers)
 
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden">
@@ -193,8 +193,8 @@ export default function Shield() {
                   className="flex items-center gap-2"
                   onSubmit={(e) => { e.preventDefault(); setDevApplied(devDraft) }}
                 >
-                  <input placeholder="Sender ID" value={devDraft.senderId} onChange={(e) => setDevDraft((d) => ({ ...d, senderId: e.target.value }))} className={`w-20 ${devInput}`} />
-                  <input placeholder="Chat ID" value={devDraft.chatId} onChange={(e) => setDevDraft((d) => ({ ...d, chatId: e.target.value }))} className={`w-20 ${devInput}`} />
+                  <input placeholder="Sender identity ID" value={devDraft.senderId} onChange={(e) => setDevDraft((d) => ({ ...d, senderId: e.target.value }))} className={`w-20 ${devInput}`} />
+                  <input placeholder="Conversation ID" value={devDraft.conversationId} onChange={(e) => setDevDraft((d) => ({ ...d, conversationId: e.target.value }))} className={`w-20 ${devInput}`} />
                   <input placeholder="Min members" value={devDraft.minMembers} onChange={(e) => setDevDraft((d) => ({ ...d, minMembers: e.target.value }))} className={`w-24 ${devInput}`} />
                   <button type="submit" disabled={!devFiltersDirty} className="rounded bg-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-600 disabled:opacity-40">Apply</button>
                   {(devFiltersActive || devFiltersDirty) && (

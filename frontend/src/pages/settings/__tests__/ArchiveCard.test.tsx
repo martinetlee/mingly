@@ -85,7 +85,7 @@ describe('ArchiveCard', () => {
     fireEvent.click(start)
     fireEvent.click(start)
     expect(startArchive).toHaveBeenCalledTimes(1)
-    await act(async () => { d.resolve(status({ state: 'running', current_chat: { telegram_id: 7, name: 'Alice' } })) })
+    await act(async () => { d.resolve(status({ state: 'running', current_chat: { conversation_id: 7, title: 'Alice' } })) })
     expect(screen.getByTestId('archive-state').textContent).toBe('Archiving')
     expect(screen.getByText('Alice')).toBeTruthy()
     vi.mocked(pauseArchive).mockResolvedValue(status({ state: 'paused' }))

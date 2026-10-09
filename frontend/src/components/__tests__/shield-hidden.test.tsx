@@ -6,7 +6,7 @@ import { msg } from '../../pages/chats/__tests__/fixtures'
 
 vi.mock('../../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/client')>()),
-  getScamFlags: vi.fn(() => Promise.resolve({ flags: [], flagged_sender_ids: [], flagged_chat_ids: [] })),
+  getScamFlags: vi.fn(() => Promise.resolve({ flags: [], flagged_identity_ids: [], flagged_conversation_ids: [] })),
 }))
 
 import { getScamFlags } from '../../api/client'

@@ -23,7 +23,7 @@ class TestSafeHref:
         assert _safe_href("mailto:user@example.com") == "mailto:user@example.com"
 
     def test_relative_path_allowed(self):
-        assert _safe_href("/profile/123") == "/profile/123"
+        assert _safe_href("/mention/telegram/123") == "/mention/telegram/123"
 
     def test_javascript_blocked(self):
         assert _safe_href("javascript:alert(1)") == "#"
@@ -56,7 +56,7 @@ class TestSanitizeHrefs:
         assert _sanitize_hrefs(html) == html
 
     def test_allows_profile_href(self):
-        html = '<a href="/profile/123">mention</a>'
+        html = '<a href="/mention/telegram/123">mention</a>'
         assert _sanitize_hrefs(html) == html
 
     def test_blocks_data_href(self):

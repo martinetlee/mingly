@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { getMentions, reactToMessage } from '../api/client'
 import type { MentionGroup } from '../api/types'
 import { reportError } from '../lib/toast'
+import { can } from '../lib/capabilities'
+import { chatUrl } from '../lib/routes'
 import { useLatestQuery } from './useLatestQuery'
 import { useCoalescedRefetch } from './useCoalescedRefetch'
 import { useWebSocket } from './useWebSocket'
@@ -22,7 +24,7 @@ const REFETCH_INTERVAL_MS = 3000
  * Mentions for the given server-side filters, shared by Home and
  * Intelligence. Results are bound to the filters they were requested for
  * (latest-only, aborting superseded requests), and WebSocket storms
- * (new_message, chats_synced, bulk_sync_complete, resync) collapse into at
+ * (new_message, conversations_synced, bulk_sync_complete, resync) collapse into at
  * most one refetch per few seconds.
  */
 export function useMentions(filters: MentionFilters) {
@@ -47,25 +49,28 @@ export function useMentions(filters: MentionFilters) {
         settleTimerRef.current = null
         refresh()
       }, NEW_MESSAGE_SETTLE_MS)
-    } else if (evt.type === 'chats_synced' || evt.type === 'bulk_sync_complete' || evt.type === 'resync') {
+    } else if (evt.type === 'conversations_synced' || evt.type === 'bulk_sync_complete' || evt.type === 'resync') {
       refresh()
     }
   })
 
-  /** Toggle the 👀 acknowledgement reaction on a mention (optimistic, reverts on failure). */
+  /**
+   * Toggle the 👀 acknowledgement reaction on a mention (optimistic, reverts
+   * on failure). Only where the conversation supports reactions.
+   */
   const toggleAcknowledge = useCallback((g: MentionGroup) => {
-    const chatId = g.chat.telegram_id
-    const msgId = g.mention_msg.tg_message_id
+    if (!can(g.conversation, 'react')) return
+    const msgId = g.mention_msg.id
     const previous = g.mention_msg.my_reaction ?? null
     const emoji = previous ? null : '👀'
     const patch = (reaction: string | null) =>
       setData((prev) => prev?.map((pg) =>
-        pg.chat.telegram_id === chatId && pg.mention_msg.tg_message_id === msgId
+        pg.mention_msg.id === msgId
           ? { ...pg, mention_msg: { ...pg.mention_msg, my_reaction: reaction } }
           : pg,
       ))
     patch(emoji)
-    reactToMessage(chatId, msgId, emoji).catch((e) => {
+    reactToMessage(msgId, emoji).catch((e) => {
       patch(previous)
       reportError(e, 'Reaction failed')
     })
@@ -101,8 +106,8 @@ export function useMentionNavigator(
     selectedRef.current?.scrollIntoView?.({ block: 'nearest' })
   }, [selectedIdx])
 
-  const openInChat = useCallback((chatId: number, msgId: number) => {
-    navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
+  const openInChat = useCallback((conversationId: number, messageId: number) => {
+    navigate(chatUrl(conversationId, messageId))
   }, [navigate])
 
   const shortcuts = useMemo(() => ({
@@ -112,13 +117,13 @@ export function useMentionNavigator(
     arrowup: () => setSelectedIdx((i) => Math.max(i - 1, 0)),
     a: () => {
       const g = visible[selectedIdx]
-      if (!g) return false
+      if (!g || !can(g.conversation, 'react')) return false
       onAcknowledge(g)
     },
     r: () => {
       const g = visible[selectedIdx]
       if (!g) return false
-      openInChat(g.chat.telegram_id, g.mention_msg.tg_message_id)
+      openInChat(g.conversation.id, g.mention_msg.id)
     },
   }), [visible, selectedIdx, onAcknowledge, openInChat])
 

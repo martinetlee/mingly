@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pencil, Twitter, Linkedin, Phone, StickyNote, Loader2 } from 'lucide-react'
-import type { Contact } from '../api/types'
-import { getPerson, updateContact } from '../api/client'
+import type { Person } from '../api/types'
+import { getPerson, updatePerson } from '../api/client'
 import { sanitizeUrl } from '../utils/sanitizeUrl'
 import { errorMessage, reportError } from '../lib/toast'
 import { invalidatePerson } from '../hooks/usePersonSummary'
@@ -134,82 +134,87 @@ export function EditableField({
 // ---------------------------------------------------------------------------
 
 interface ContactInfoSectionProps {
-  contact: Contact
-  onContactChange: (updated: Contact) => void
+  person: Person
+  onPersonChange: (updated: Person) => void
   /** Denser layout for side panels (same actions) */
   compact?: boolean
 }
 
-export default function ContactInfoSection({ contact, onContactChange, compact }: ContactInfoSectionProps) {
-  // Completions merge into the contact as rendered *now*, not as it was when
+export default function ContactInfoSection({ person, onPersonChange, compact }: ContactInfoSectionProps) {
+  // Completions merge into the person as rendered *now*, not as it was when
   // the request started — so a position change can't revert a concurrent
-  // phone/notes edit (and vice versa)
-  const contactRef = useRef(contact)
-  contactRef.current = contact
-  const onChangeRef = useRef(onContactChange)
-  onChangeRef.current = onContactChange
+  // notes edit (and vice versa)
+  const personRef = useRef(person)
+  personRef.current = person
+  const onChangeRef = useRef(onPersonChange)
+  onChangeRef.current = onPersonChange
 
   // Bumped when a local field save starts and ends: a refresh that overlapped
   // one is stale (it may predate the save) and is redone instead of applied
   const writeSeqRef = useRef(0)
 
-  // An agent (MCP) changed this person: reload the contact in place. Fields
-  // being edited keep their draft (EditableField adopts outside values only
-  // when not editing), so the new value shows once the edit closes.
-  const refreshContact = useCoalescedRefetch(async () => {
-    const { id, telegram_id: tid } = contactRef.current
+  // An agent (MCP) changed this person: reload it in place. Fields being
+  // edited keep their draft (EditableField adopts outside values only when
+  // not editing), so the new value shows once the edit closes.
+  const refreshPerson = useCoalescedRefetch(async () => {
+    const id = personRef.current.id
     const seq = writeSeqRef.current
     try {
-      const person = await getPerson(tid)
-      if (contactRef.current.id !== id || !person.contact) return
-      if (seq !== writeSeqRef.current) { refreshContact(); return }
-      onChangeRef.current({ ...person.contact, positions: person.positions })
+      const fresh = await getPerson(id)
+      if (personRef.current.id !== id) return
+      if (seq !== writeSeqRef.current) { refreshPerson(); return }
+      onChangeRef.current(fresh)
     } catch (e) {
-      reportError(e, "Couldn't refresh contact")
+      reportError(e, "Couldn't refresh person")
     }
   }, 1000)
-  useWsEvent('person_changed', (e) => { if (e.telegram_id === contactRef.current.telegram_id) refreshContact() })
+  useWsEvent('person_changed', (e) => { if (e.person_id === personRef.current.id) refreshPerson() })
 
   const iconSize = compact ? 12 : 13
   const pad = compact ? 'p-3' : 'p-4'
 
-  const handleUpdateField = async (field: 'phone' | 'twitter_handle' | 'linkedin_url' | 'notes', value: string) => {
-    const id = contact.id
+  const handleUpdateField = async (field: 'twitter_handle' | 'linkedin_url' | 'notes', value: string) => {
+    const id = person.id
     writeSeqRef.current++
-    let updated: Contact
+    let updated: Person
     try {
-      updated = await updateContact(id, { [field]: value })
+      updated = await updatePerson(id, { [field]: value })
     } finally {
       writeSeqRef.current++
     }
-    invalidatePerson(updated.telegram_id)
-    // Server response is the full contact (positions included)
-    if (contactRef.current.id === id) onChangeRef.current(updated)
+    invalidatePerson(updated.id)
+    // Server response is the full person; keep the positions we hold if it omits them
+    if (personRef.current.id === id) {
+      onChangeRef.current({ ...updated, positions: updated.positions ?? personRef.current.positions })
+    }
   }
+
+  // Phones come from the person's channel identities (read-only here)
+  const phones = Array.from(new Set(person.identities.map((i) => i.phone).filter((p): p is string => !!p)))
 
   return (
     <>
       {/* Extra fields */}
       <div className={`rounded-xl bg-slate-800 border border-slate-700/50 ${pad} flex flex-col gap-3`}>
         <h3 className="text-xs font-medium uppercase tracking-wider text-slate-500">Contact Info</h3>
-        <EditableField
-          icon={<Phone size={iconSize} />}
-          label="Phone"
-          value={contact.phone}
-          placeholder="Add phone..."
-          onSave={(v) => handleUpdateField('phone', v)}
-        />
+        {phones.length > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 flex-shrink-0"><Phone size={iconSize} /></span>
+            <span className="w-16 text-[10px] text-slate-500 uppercase tracking-wider flex-shrink-0">Phone</span>
+            <span className="flex-1 text-xs text-gray-200 truncate">{phones.join(', ')}</span>
+          </div>
+        )}
         <EditableField
           icon={<Twitter size={iconSize} />}
           label="Twitter"
-          value={contact.twitter_handle}
+          value={person.twitter_handle}
           placeholder="Add handle..."
           onSave={(v) => handleUpdateField('twitter_handle', v)}
         />
         <EditableField
           icon={<Linkedin size={iconSize} />}
           label="LinkedIn"
-          value={contact.linkedin_url}
+          value={person.linkedin_url}
           placeholder="Add URL..."
           onSave={(v) => handleUpdateField('linkedin_url', v)}
           isUrl
@@ -217,20 +222,20 @@ export default function ContactInfoSection({ contact, onContactChange, compact }
         <EditableField
           icon={<StickyNote size={iconSize} />}
           label="Notes"
-          value={contact.notes}
+          value={person.notes}
           placeholder="Add notes..."
           onSave={(v) => handleUpdateField('notes', v)}
         />
       </div>
 
       <PositionsEditor
-        key={contact.telegram_id}
-        telegramId={contact.telegram_id}
-        initialPositions={contact.positions}
+        key={person.id}
+        personId={person.id}
+        initialPositions={person.positions}
         compact={compact}
         onChange={(positions) => {
-          const current = contactRef.current
-          if (current.telegram_id === contact.telegram_id) onChangeRef.current({ ...current, positions })
+          const current = personRef.current
+          if (current.id === person.id) onChangeRef.current({ ...current, positions })
         }}
       />
     </>

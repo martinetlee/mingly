@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, within, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import type { BoardData, Chat, Workspace } from '../../api/types'
+import type { BoardData, Conversation, Workspace } from '../../api/types'
+import { makeConversation } from '../chats/__tests__/fixtures'
 import { ConfirmProvider } from '../../components/ui/ConfirmDialog'
 import { resetToasts } from '../../lib/toast'
 
@@ -14,7 +15,7 @@ function deferred<T>() {
 
 const api = vi.hoisted(() => ({
   getBoard: vi.fn(),
-  moveBoardChat: vi.fn(),
+  moveBoardConversation: vi.fn(),
   reorderBoardColumns: vi.fn(),
 }))
 const ws = vi.hoisted(() => ({
@@ -30,7 +31,7 @@ vi.mock('../../api/client', () => {
   const noop = vi.fn(async () => ({}))
   return {
     getBoard: fwd('getBoard'),
-    moveBoardChat: fwd('moveBoardChat'),
+    moveBoardConversation: fwd('moveBoardConversation'),
     reorderBoardColumns: fwd('reorderBoardColumns'),
     addBoardColumn: noop, addWorkspaceBoard: noop, deleteBoardColumn: noop, deleteWorkspaceBoard: noop,
     updateBoardColumn: noop, updateWorkspaceBoard: noop, getTags: vi.fn(async () => []),
@@ -54,10 +55,7 @@ vi.mock('../../context/WorkspaceContext', async (orig) => ({
 
 import Board from '../Board'
 
-const chat = (telegram_id: number, name: string): Chat => ({
-  id: telegram_id, telegram_id, name, type: 'group', username: null, unread_count: 0,
-  last_activity_at: new Date().toISOString(), last_message: null,
-} as unknown as Chat)
+const chat = (id: number, name: string): Conversation => makeConversation(id, name, { last_activity_at: new Date().toISOString() })
 
 const workspace = (id: number, name: string): Workspace => ({
   id, name, emoji: null, color: 'indigo', match_mode: 'any', view_mode: 'kanban', position: 0,
@@ -70,10 +68,10 @@ function boardData(wsId: number, opts: { inColumn: boolean; columnName?: string 
     workspace: { id: wsId, name: `WS${wsId}`, emoji: null, color: 'indigo', view_mode: 'kanban' },
     boards: [{ id: wsId * 10, name: 'Main', scope_tag_id: null, scope_tag_name: null, position: 0, unallocated_count: 0 }],
     board_id: wsId * 10,
-    columns: [{ tag_id: 100, name: opts.columnName ?? 'Doing', color: 'indigo', position: 0, chats: opts.inColumn ? [alice] : [] }],
+    columns: [{ tag_id: 100, name: opts.columnName ?? 'Doing', color: 'indigo', position: 0, conversations: opts.inColumn ? [alice] : [] }],
     unallocated: [],
     backlog: { active: opts.inColumn ? [] : [alice], cooling: [], dormant: [] },
-    classified_chat_ids: [],
+    classified_conversation_ids: [],
   }
 }
 
@@ -109,7 +107,7 @@ describe('Board', () => {
     await waitFor(() => expect(api.getBoard).toHaveBeenCalledTimes(2))
 
     const move = deferred<BoardData>()
-    api.moveBoardChat.mockReturnValueOnce(move.promise)
+    api.moveBoardConversation.mockReturnValueOnce(move.promise)
     fireEvent.drop(column('Doing'), { dataTransfer: { getData: () => '5' } })
     expect(within(column('Doing')).queryByText('Alice chat')).not.toBeNull() // optimistic
 
@@ -119,14 +117,14 @@ describe('Board', () => {
     // The server's committed board replaces local state
     await act(async () => { move.resolve(boardData(1, { inColumn: true, columnName: 'Doing' })) })
     expect(within(column('Doing')).queryByText('Alice chat')).not.toBeNull()
-    expect(api.moveBoardChat).toHaveBeenCalledWith(1, 10, 5, 100)
+    expect(api.moveBoardConversation).toHaveBeenCalledWith(1, 10, 5, 100)
   })
 
   it('a failed move resyncs from the server', async () => {
     api.getBoard.mockResolvedValueOnce(boardData(1, { inColumn: false }))
     renderBoard()
     await screen.findByText('Doing')
-    api.moveBoardChat.mockRejectedValueOnce(new Error('boom'))
+    api.moveBoardConversation.mockRejectedValueOnce(new Error('boom'))
     api.getBoard.mockResolvedValueOnce(boardData(1, { inColumn: false }))
     await act(async () => { fireEvent.drop(column('Doing'), { dataTransfer: { getData: () => '5' } }) })
     await waitFor(() => expect(api.getBoard).toHaveBeenCalledTimes(2))
@@ -156,7 +154,7 @@ describe('Board', () => {
     const view = renderBoard()
     await screen.findByText('Old column')
     const move = deferred<BoardData>()
-    api.moveBoardChat.mockReturnValueOnce(move.promise)
+    api.moveBoardConversation.mockReturnValueOnce(move.promise)
     fireEvent.drop(column('Old column'), { dataTransfer: { getData: () => '5' } })
 
     // Switch while the move is in flight
@@ -175,7 +173,7 @@ describe('Board', () => {
 
   it('reorders columns with one atomic call', async () => {
     const data = boardData(1, { inColumn: false })
-    data.columns.push({ tag_id: 101, name: 'Done', color: 'indigo', position: 1, chats: [] })
+    data.columns.push({ tag_id: 101, name: 'Done', color: 'indigo', position: 1, conversations: [] })
     api.getBoard.mockResolvedValueOnce(data)
     api.reorderBoardColumns.mockResolvedValueOnce({ ...data, columns: [data.columns[1], data.columns[0]] })
     renderBoard()

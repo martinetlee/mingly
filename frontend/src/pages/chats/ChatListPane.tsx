@@ -1,6 +1,6 @@
 /**
- * Left pane of the Chats page: folders, search (local + Telegram + message
- * content), tag filter, sort, the chat list, and the archived/hidden panels.
+ * Left pane of the Chats page: folders, search (local + Telegram directory +
+ * message content), tag filter, sort, the chat list, and the archived/hidden panels.
  * Presentational: every action is a callback into Chats, which owns the one
  * selectChat() entry point.
  */
@@ -9,13 +9,16 @@ import type { ReactNode, Ref, RefObject } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import type { VirtuosoHandle } from 'react-virtuoso'
 import { Radio, EyeOff, Eye, FileText, Search, MessageSquare, Pin, Archive, BellOff, Bell, MailOpen, MoreVertical, Plus, ShieldAlert, Tag as TagIcon, Columns3, X, Loader2 } from 'lucide-react'
-import type { Chat, Folder, Tag } from '../../api/types'
+import type { Conversation, Folder, Tag, TelegramDirectoryResult } from '../../api/types'
 import type { MessageSearchResult } from '../../api/client'
-import { getArchivedChats, getHiddenChats, getTags } from '../../api/client'
+import { getArchivedConversations, getHiddenConversations, getTags } from '../../api/client'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { errorMessage } from '../../lib/toast'
 import { fmtDate } from '../../utils/time'
+import ChannelIcon from '../../components/ChannelIcon'
 import SenderAvatar from '../../components/SenderAvatar'
+import ConversationAvatar from '../../components/ConversationAvatar'
+import { conversationTitle, isDirectoryHit, kindLabel } from '../../lib/conversation'
 
 // Same tag color maps as ChatInfoPanel
 const TAG_COLORS: Record<string, string> = {
@@ -31,33 +34,29 @@ const COLOR_DOTS: Record<string, string> = {
   indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
   amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
 }
-const TYPE_COLOR: Record<string, string> = {
-  private: 'bg-indigo-500/20 text-indigo-400',
+const KIND_COLOR: Record<string, string> = {
+  direct: 'bg-indigo-500/20 text-indigo-400',
   group: 'bg-purple-500/20 text-purple-400',
   channel: 'bg-amber-500/20 text-amber-400',
+  email_thread: 'bg-sky-500/20 text-sky-400',
 }
 
 export type SortBy = 'recent' | 'unread' | 'alpha'
 
-/** Chat-level mutations; each resolves true on success (failures are toasted) */
+/** Conversation-level mutations; each resolves true on success (failures are toasted) */
 export interface ChatActions {
-  toggleTrack: (chat: Chat) => Promise<boolean>
-  hide: (chat: Chat) => Promise<boolean>
-  unhide: (chat: Chat) => Promise<boolean>
-  briefing: (chat: Chat) => Promise<boolean>
-  pin: (chat: Chat) => Promise<boolean>
-  archive: (chat: Chat) => Promise<boolean>
-  mute: (chat: Chat, duration?: string) => Promise<boolean>
-  markUnread: (chat: Chat) => Promise<boolean>
-}
-
-/** A chat's avatar: the shared SenderAvatar (profile photos are keyed by telegram id for users and chats alike) */
-export function ChatAvatar({ chatId, chatName, size = 36 }: { chatId: number; chatName: string; size?: number }) {
-  return <SenderAvatar senderId={chatId} senderName={chatName} size={size} link={false} />
+  toggleTrack: (chat: Conversation) => Promise<boolean>
+  hide: (chat: Conversation) => Promise<boolean>
+  unhide: (chat: Conversation) => Promise<boolean>
+  briefing: (chat: Conversation) => Promise<boolean>
+  pin: (chat: Conversation) => Promise<boolean>
+  archive: (chat: Conversation) => Promise<boolean>
+  mute: (chat: Conversation, duration?: string) => Promise<boolean>
+  markUnread: (chat: Conversation) => Promise<boolean>
 }
 
 function ChatContextMenu({ chat, position, onClose, actions }: {
-  chat: Chat
+  chat: Conversation
   position: { x: number; y: number }
   onClose: () => void
   actions: ChatActions
@@ -139,20 +138,20 @@ function ChatContextMenu({ chat, position, onClose, actions }: {
 }
 
 interface ChatItemProps {
-  chat: Chat
+  chat: Conversation
   selected: boolean
   hasScamFlag?: boolean
-  onSelect: (chat: Chat) => void
-  /** Omitted for Telegram search results (no local chat yet) */
-  onContextMenu?: (chat: Chat, x: number, y: number) => void
-  onToggleTrack?: (chat: Chat) => void
+  onSelect: (chat: Conversation) => void
+  onContextMenu?: (chat: Conversation, x: number, y: number) => void
+  onToggleTrack?: (chat: Conversation) => void
 }
 
 const ChatItem = memo(function ChatItem({ chat, selected, hasScamFlag, onSelect, onContextMenu, onToggleTrack }: ChatItemProps) {
   const unread = chat.unread_count ?? 0
+  const title = conversationTitle(chat)
   return (
     <div
-      data-chat-id={chat.telegram_id}
+      data-chat-id={chat.id}
       onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu(chat, e.clientX, e.clientY) } : undefined}
       className={`group flex items-center gap-3 px-3 py-2.5 transition-colors ${selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'}`}
     >
@@ -163,12 +162,13 @@ const ChatItem = memo(function ChatItem({ chat, selected, hasScamFlag, onSelect,
         data-chat-row=""
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:rounded"
       >
-        <ChatAvatar chatId={chat.telegram_id} chatName={chat.name} size={36} />
+        <ConversationAvatar conversation={chat} size={36} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             {chat.is_pinned && <Pin size={11} className="flex-shrink-0 text-indigo-400" />}
-            <p title={chat.name} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>{chat.name}</p>
-            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${TYPE_COLOR[chat.type] ?? 'bg-slate-600 text-slate-400'}`}>{chat.type}</span>
+            <p title={title} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>{title}</p>
+            <ChannelIcon channel={chat.channel} />
+            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${KIND_COLOR[chat.kind] ?? 'bg-slate-600 text-slate-400'}`}>{kindLabel(chat.kind)}</span>
             {chat.is_forum && (
               <span className="flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">
                 <MessageSquare size={9} className="inline" />
@@ -225,6 +225,34 @@ const ChatItem = memo(function ChatItem({ chat, selected, hasScamFlag, onSelect,
   )
 })
 
+/** A Telegram search hit: a stored conversation, or a directory hit that opening ensures */
+const DirectoryItem = memo(function DirectoryItem({ result, selected, onSelect }: {
+  result: TelegramDirectoryResult
+  selected: boolean
+  onSelect: (r: TelegramDirectoryResult) => void
+}) {
+  const hit = isDirectoryHit(result)
+  const name = result.title || kindLabel(result.kind)
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(result)}
+      aria-current={selected ? 'true' : undefined}
+      className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/50'}`}
+    >
+      <SenderAvatar avatarUrl={hit ? null : result.avatar_url} name={name} colorSeed={hit ? result.peer_id : result.id} size={36} link={false} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p title={name} className="truncate text-sm font-medium text-gray-200">{name}</p>
+          <ChannelIcon channel="telegram" />
+          <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${KIND_COLOR[result.kind] ?? 'bg-slate-600 text-slate-400'}`}>{kindLabel(result.kind)}</span>
+        </div>
+        {result.username && <p className="truncate text-xs text-slate-500 mt-0.5">@{result.username}</p>}
+      </div>
+    </button>
+  )
+})
+
 function TagFilter({ selectedTag, onSelectTag }: { selectedTag: Tag | null; onSelectTag: (tag: Tag | null) => void }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -242,7 +270,7 @@ function TagFilter({ selectedTag, onSelectTag }: { selectedTag: Tag | null; onSe
   const all = tags.data ?? []
   const visible = all
     .filter((t) => t.category !== 'stage' && t.category !== 'stream') // board tags live on boards, not here
-    .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.chat_count ?? 0) > 0))
+    .filter((t) => (q ? t.name.toLowerCase().includes(q) : (t.conversation_count ?? 0) > 0))
 
   return (
     <div ref={ref} className="relative flex-shrink-0">
@@ -286,7 +314,7 @@ function TagFilter({ selectedTag, onSelectTag }: { selectedTag: Tag | null; onSe
               >
                 <span className={`h-2 w-2 flex-shrink-0 rounded-full ${COLOR_DOTS[tag.color] ?? 'bg-slate-400'}`} />
                 <span className="min-w-0 flex-1 truncate">{tag.name}</span>
-                <span className="text-slate-500">{tag.chat_count ?? 0}</span>
+                <span className="text-slate-500">{tag.conversation_count ?? 0}</span>
               </button>
             ))}
           </div>
@@ -297,9 +325,9 @@ function TagFilter({ selectedTag, onSelectTag }: { selectedTag: Tag | null; onSe
 }
 
 /** Archived / hidden chats drawer (fetched when opened, refetched after a restore) */
-function SideDrawer({ kind, onRestore }: { kind: 'archived' | 'hidden'; onRestore: (chat: Chat) => Promise<boolean> }) {
+function SideDrawer({ kind, onRestore }: { kind: 'archived' | 'hidden'; onRestore: (chat: Conversation) => Promise<boolean> }) {
   const [open, setOpen] = useState(false)
-  const list = useLatestQuery([kind], () => (kind === 'archived' ? getArchivedChats() : getHiddenChats()), { enabled: open })
+  const list = useLatestQuery([kind], () => (kind === 'archived' ? getArchivedConversations() : getHiddenConversations()), { enabled: open })
   const Icon = kind === 'archived' ? Archive : Eye
   const label = kind === 'archived' ? 'archived' : 'hidden'
   return (
@@ -321,13 +349,14 @@ function SideDrawer({ kind, onRestore }: { kind: 'archived' | 'hidden'; onRestor
           ) : (list.data ?? []).length === 0 ? (
             <p className="px-4 py-3 text-center text-xs text-slate-500">No {label} chats</p>
           ) : (list.data ?? []).map((chat) => (
-            <div key={chat.telegram_id} className="flex items-center gap-2 px-3 py-2">
-              <ChatAvatar chatId={chat.telegram_id} chatName={chat.name} size={28} />
-              <p title={chat.name} className="min-w-0 flex-1 truncate text-xs text-slate-400">{chat.name}</p>
+            <div key={chat.id} className="flex items-center gap-2 px-3 py-2">
+              <ConversationAvatar conversation={chat} size={28} />
+              <p title={conversationTitle(chat)} className="min-w-0 flex-1 truncate text-xs text-slate-400">{conversationTitle(chat)}</p>
+              <ChannelIcon channel={chat.channel} />
               <button
                 onClick={() => { void onRestore(chat).then((ok) => { if (ok) void list.refetch() }) }}
                 title={kind === 'archived' ? 'Unarchive' : 'Unhide'}
-                aria-label={kind === 'archived' ? `Unarchive ${chat.name}` : `Unhide ${chat.name}`}
+                aria-label={kind === 'archived' ? `Unarchive ${conversationTitle(chat)}` : `Unhide ${conversationTitle(chat)}`}
                 className="flex-shrink-0 rounded p-1 text-slate-500 hover:text-slate-300 transition-colors"
               >
                 <Icon size={12} />
@@ -355,13 +384,13 @@ export interface ChatListPaneProps {
   onSelectFolder: (id: number | null) => void
   search: string
   onSearchChange: (q: string) => void
-  /** Telegram/global matches not already in the list */
-  telegramResults: Chat[]
+  /** Telegram directory matches not already in the list (Telegram-only) */
+  telegramResults: TelegramDirectoryResult[]
   searchingTelegram: boolean
   messageResults: MessageSearchResult[] | null
   searchingMessages: boolean
   onSearchMessages: () => void
-  onOpenSearchResult: (chat: Chat) => void
+  onOpenSearchResult: (r: TelegramDirectoryResult) => void
   onOpenMessageResult: (r: MessageSearchResult) => void
   sortBy: SortBy
   onSortBy: (s: SortBy) => void
@@ -369,36 +398,36 @@ export interface ChatListPaneProps {
   onSelectTag: (t: Tag | null) => void
   boardButton?: { title: string; onClick: () => void } | null
   onNewChat: () => void
-  chats: Chat[]
+  chats: Conversation[]
   loading: boolean
   loadingMore: boolean
   onLoadMore: () => void
   selectedId: number | null
   flaggedChatIds: Set<number>
-  onSelect: (chat: Chat) => void
+  onSelect: (chat: Conversation) => void
   actions: ChatActions
 }
 
 export default function ChatListPane(p: ChatListPaneProps) {
-  const [contextMenu, setContextMenu] = useState<{ chat: Chat; x: number; y: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ chat: Conversation; x: number; y: number } | null>(null)
   const actionsRef = useRef(p.actions)
   actionsRef.current = p.actions
   // Stable row callbacks so memoised rows don't re-render on unrelated updates
-  const openMenu = useRef((chat: Chat, x: number, y: number) => setContextMenu({ chat, x, y })).current
-  const toggleTrack = useRef((chat: Chat) => { void actionsRef.current.toggleTrack(chat) }).current
+  const openMenu = useRef((chat: Conversation, x: number, y: number) => setContextMenu({ chat, x, y })).current
+  const toggleTrack = useRef((chat: Conversation) => { void actionsRef.current.toggleTrack(chat) }).current
   const searching = p.search.trim().length > 0
   const searchExtras = (
     <>
       {searching && (
         <div className="border-t border-slate-700/50">
           <p className="px-3 py-1.5 text-[10px] font-medium text-slate-500 uppercase tracking-wider">
-            {p.searchingTelegram ? 'Searching all chats…' : p.telegramResults.length > 0 ? 'All chats' : 'No other chats found'}
+            {p.searchingTelegram ? 'Searching Telegram…' : p.telegramResults.length > 0 ? 'On Telegram' : 'Nothing else found on Telegram'}
           </p>
-          {p.telegramResults.map((chat) => (
-            <ChatItem
-              key={`tg-${chat.telegram_id}`}
-              chat={chat}
-              selected={p.selectedId === chat.telegram_id}
+          {p.telegramResults.map((r) => (
+            <DirectoryItem
+              key={isDirectoryHit(r) ? `tg-${r.peer_id}` : `c-${r.id}`}
+              result={r}
+              selected={!isDirectoryHit(r) && p.selectedId === r.id}
               onSelect={p.onOpenSearchResult}
             />
           ))}
@@ -417,11 +446,11 @@ export default function ChatListPane(p: ChatListPaneProps) {
                 <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1">Messages</p>
                 {p.messageResults.map((r) => (
                   <button
-                    key={r.telegram_id}
+                    key={r.conversation_id}
                     onClick={() => p.onOpenMessageResult(r)}
                     className="w-full text-left px-2 py-1.5 rounded hover:bg-slate-700/50 transition-colors"
                   >
-                    <p className="text-xs font-medium text-slate-300 truncate">{r.name}</p>
+                    <p className="text-xs font-medium text-slate-300 truncate">{r.conversation_title || kindLabel(r.conversation_kind)}</p>
                     {r.messages[0] && (
                       <p className="text-[11px] text-slate-500 truncate">
                         {r.messages[0].sender_name && <span className="text-slate-400">{r.messages[0].sender_name}: </span>}
@@ -535,12 +564,12 @@ export default function ChatListPane(p: ChatListPaneProps) {
             ref={p.virtuosoRef}
             className="flex-1"
             data={p.chats}
-            computeItemKey={(_i, chat) => chat.telegram_id}
+            computeItemKey={(_i, chat) => chat.id}
             itemContent={(_i, chat) => (
               <ChatItem
                 chat={chat}
-                selected={p.selectedId === chat.telegram_id}
-                hasScamFlag={p.flaggedChatIds.has(chat.telegram_id)}
+                selected={p.selectedId === chat.id}
+                hasScamFlag={p.flaggedChatIds.has(chat.id)}
                 onSelect={p.onSelect}
                 onContextMenu={openMenu}
                 onToggleTrack={toggleTrack}

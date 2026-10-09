@@ -1,9 +1,10 @@
 import { useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronRight, Newspaper, Radio, RefreshCw, Star, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { BriefingHistoryEntry, BriefingSource, BriefingSummary } from '../api/types'
 import Markdown from './Markdown'
+import { chatUrl, personUrl } from '../lib/routes'
 
 type Category = BriefingSummary['category']
 
@@ -67,7 +68,7 @@ const isHistoryEntry = (e: BriefingSummary | BriefingHistoryEntry): e is Briefin
 /** Navigate to a cited source message */
 export function useCiteNavigation() {
   const navigate = useNavigate()
-  return useCallback((src: BriefingSource) => navigate(`/chats?chatId=${src.chat_id}&msgId=${src.telegram_id}`), [navigate])
+  return useCallback((src: BriefingSource) => navigate(chatUrl(src.conversation_id, src.message_id)), [navigate])
 }
 
 interface CardProps {
@@ -86,7 +87,14 @@ export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
   return (
     <div className={`rounded-lg border px-3 py-2 ${accent.card}`}>
       <div className="mb-1 flex items-center justify-between gap-2">
-        <p className={`text-[11px] font-medium ${accent.name}`}>{entry.chat_name}</p>
+        {(() => {
+          // Important-person entries link to the person; the rest to their conversation
+          const to = entry.person_id != null && entry.conversation_id == null ? personUrl(entry.person_id)
+            : entry.conversation_id != null ? chatUrl(entry.conversation_id) : null
+          return to
+            ? <Link to={to} className={`text-[11px] font-medium hover:underline ${accent.name}`}>{entry.conversation_title}</Link>
+            : <p className={`text-[11px] font-medium ${accent.name}`}>{entry.conversation_title}</p>
+        })()}
         {regen && id != null && isHistoryEntry(entry) && (
           <div className="inline-flex items-center gap-1">
             {active ? (
@@ -169,7 +177,7 @@ export function BriefingEntryList({
             <div className="space-y-2">
               {items.map((e, i) => (
                 <BriefingEntryCard
-                  key={isHistoryEntry(e) ? e.id : `${e.chat_id}-${i}`}
+                  key={isHistoryEntry(e) ? e.id : `${e.conversation_id}-${i}`}
                   entry={e}
                   onCite={onCite}
                   regen={regen}

@@ -1,14 +1,15 @@
 import { Link } from 'react-router-dom'
 import { Star, BadgeCheck, Crown, Bot } from 'lucide-react'
-import type { PersonSummary } from '../api/types'
 import { sanitizeLinkedInUrl } from '../utils/sanitizeUrl'
 import { authenticatedMediaUrl } from '../api/session'
 import { fmtRelativeDays } from '../utils/time'
 import { usePersonSummary, invalidatePerson, invalidateAllPeople, primePeople } from '../hooks/usePersonSummary'
+import type { PersonSummary } from '../hooks/usePersonSummary'
+import { personUrl } from '../lib/routes'
 
 /** @deprecated use invalidatePerson / invalidateAllPeople from hooks/usePersonSummary */
-export function invalidatePersonCache(telegramId?: number) {
-  if (telegramId != null) invalidatePerson(telegramId)
+export function invalidatePersonCache(personId?: number) {
+  if (personId != null) invalidatePerson(personId)
   else invalidateAllPeople()
 }
 
@@ -56,14 +57,13 @@ export function fmtRelative(iso: string | null | undefined): string {
 }
 
 interface PersonCardProps {
-  telegramId: number
+  personId: number
   name?: string
   username?: string | null
   status?: string | null
   position?: { title: string | null; organization: string } | null
   lastInteraction?: string | null
   isImportant?: boolean
-  contactId?: number | null
   phone?: string | null
   twitterHandle?: string | null
   linkedinUrl?: string | null
@@ -85,7 +85,7 @@ interface PersonCardProps {
 }
 
 export default function PersonCard({
-  telegramId,
+  personId,
   name: propName,
   username: propUsername,
   status: propStatus,
@@ -118,7 +118,7 @@ export default function PersonCard({
   if (mode !== 'header') shown.push(propPosition, propLastInteraction)
   if (mode === 'full' || mode === 'profile') shown.push(propPhone, propTwitter, propLinkedin, propHasNotes)
   const needsResolve = shown.some((v) => v === undefined)
-  const resolved = usePersonSummary(telegramId, needsResolve)
+  const resolved = usePersonSummary(personId, needsResolve)
 
   const name = propName ?? resolved?.name ?? ''
   const username = propUsername !== undefined ? propUsername : resolved?.username
@@ -131,8 +131,9 @@ export default function PersonCard({
   const linkedinUrl = propLinkedin !== undefined ? propLinkedin : resolved?.linkedin_url
   const hasNotes = propHasNotes ?? resolved?.has_notes ?? false
 
-  // Every person (contact or not) has a profile page keyed by telegram_id
-  const profileLink = `/profile/${telegramId}`
+  // Every person (contact or not) has a page keyed by person id
+  const profileLink = personUrl(personId)
+  const avatarUrl = photoUrl !== undefined ? photoUrl : resolved?.avatar_url
   const initial = name ? name.charAt(0).toUpperCase() : '?'
 
   if (!name && !resolved) {
@@ -176,7 +177,7 @@ export default function PersonCard({
   }
 
   if (mode === 'profile') {
-    const authPhoto = photoUrl ? authenticatedMediaUrl(photoUrl) : null
+    const authPhoto = avatarUrl ? authenticatedMediaUrl(avatarUrl) : null
     const avatar = authPhoto ? (
       <img
         src={authPhoto}
@@ -193,7 +194,7 @@ export default function PersonCard({
       <div className={className}>
         <div className="flex items-start gap-5 mb-8">
           {!disableLink ? (
-            <Link to={`/profile/${telegramId}`}>{avatar}</Link>
+            <Link to={profileLink}>{avatar}</Link>
           ) : (
             avatar
           )}
@@ -342,7 +343,7 @@ export default function PersonCard({
     <div className={`${className}`}>
       <div className="flex items-start gap-4 mb-4">
         {!disableLink ? (
-          <Link to={`/profile/${telegramId}`}>
+          <Link to={profileLink}>
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-700 text-xl font-semibold text-slate-300 hover:ring-2 hover:ring-indigo-500 transition-all">
               {initial}
             </div>
@@ -356,7 +357,7 @@ export default function PersonCard({
           <div className="flex items-center gap-2">
             {!disableLink ? (
               <Link
-                to={`/profile/${telegramId}`}
+                to={profileLink}
                 className="text-lg font-bold text-gray-100 hover:text-indigo-300 transition-colors"
               >
                 {name}

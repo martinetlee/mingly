@@ -102,7 +102,7 @@ export default function ComposeBar({
   }, [replyTo])
 
   // Entering edit mode (or switching the edited message) loads its text into the edit buffer
-  const editingId = editingMessage?.tg_message_id ?? null
+  const editingId = editingMessage?.id ?? null
   useEffect(() => {
     if (editingId == null) return
     setEditText(editingMessage?.text ?? '')
@@ -290,7 +290,7 @@ export default function ComposeBar({
   }
 
   const replyPreview = replyTo
-    ? replyTo.text?.slice(0, 100) ?? (replyTo.media_type ? `[${replyTo.media_type}]` : '')
+    ? replyTo.text?.slice(0, 100) ?? (replyTo.attachments?.[0] ? `[${replyTo.attachments[0].kind}]` : '')
     : null
 
   const inFlight = sending || !!busy || isUploading
@@ -323,7 +323,7 @@ export default function ComposeBar({
         <div className="mb-2 flex items-start gap-2 rounded-lg border-l-2 border-indigo-500 bg-slate-800/80 px-3 py-1.5">
           <CornerUpLeft size={13} className="mt-0.5 flex-shrink-0 text-indigo-400" />
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium text-indigo-400">{replyTo.sender_name ?? 'You'}</p>
+            <p className="text-xs font-medium text-indigo-400">{replyTo.sender?.name ?? 'You'}</p>
             <p className="truncate text-xs text-slate-400">{replyPreview}</p>
           </div>
           <button

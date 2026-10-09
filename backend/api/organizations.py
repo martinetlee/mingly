@@ -3,13 +3,13 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, desc, update, case
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Organization, Contact, ContactPosition, Message, Chat
+from backend.db.models import Conversation, Message, Organization, PersonPosition
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMUnavailable, complete_text
 from backend.serialization import iso_utc
@@ -44,81 +44,58 @@ async def _get_org(db: AsyncSession, org_id: int) -> Organization:
 
 
 async def _org_detail(db: AsyncSession, org: Organization) -> dict:
-    """Build full org dict with members and recent group messages."""
-    # Members: people with a position at this org (split into current and former).
-    # Left join Contact so positions without a Contact record still appear.
-    pos_result = await db.execute(
-        select(ContactPosition, Contact)
-        .outerjoin(Contact, ContactPosition.telegram_id == Contact.telegram_id)
-        .where(ContactPosition.organization_id == org.id)
-        .order_by(Contact.first_name, ContactPosition.id)
-    )
+    """Full org: current and former members, related group conversations."""
+    positions = list((await db.execute(
+        select(PersonPosition).where(PersonPosition.organization_id == org.id).order_by(PersonPosition.id)
+    )).scalars().all())
+    people = await crud.get_people(db, {p.person_id for p in positions})
+    identities = await crud.identities_for_people(db, people)
     members = []
     former_members = []
-    for pos, contact in pos_result.all():
-        if contact:
-            name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or str(pos.telegram_id)
-            username = contact.username
-            contact_id = contact.id
-        else:
-            name = str(pos.telegram_id)
-            username = None
-            contact_id = None
+    for pos in positions:
+        person = people.get(pos.person_id)
+        username = next((i.username for i in identities.get(pos.person_id, []) if i.username), None)
         entry = {
-            "contact_id": contact_id,
-            "telegram_id": pos.telegram_id,
+            "person_id": pos.person_id,
             "position_id": pos.id,
-            "name": name,
+            "name": (person.name if person is not None else None) or username or f"Person {pos.person_id}",
             "username": username,
             "title": pos.title,
             "ended_at": iso_utc(pos.ended_at),
         }
-        if pos.is_active:
-            members.append(entry)
-        else:
-            former_members.append(entry)
+        (members if pos.is_active else former_members).append(entry)
+    for group in (members, former_members):
+        group.sort(key=lambda m: (m["name"].lower(), m["position_id"]))
 
-    # Group chats whose name contains the org name (heuristic)
-    related_chats = list((await db.execute(
-        select(Chat)
+    # Group conversations whose title contains the org name (heuristic)
+    related = list((await db.execute(
+        select(Conversation)
         .where(
-            crud.contains_ci(Chat.name, org.name),
-            Chat.type.in_(["group", "channel"]),
-            Chat.is_deactivated == False,  # noqa: E712
+            crud.contains_ci(Conversation.title, org.name),
+            Conversation.kind.in_(["group", "channel"]),
+            Conversation.is_deactivated == False,  # noqa: E712
         )
-        .order_by(desc(Chat.last_activity_at), Chat.name)
+        .order_by(desc(Conversation.last_activity_at), Conversation.title)
         .limit(10)
     )).scalars().all())
 
-    # Latest message per related chat, in one query
+    # Latest message per related conversation, in one query
     latest: dict[int, Message] = {}
-    if related_chats:
+    if related:
         ranked = (
             select(
                 Message.id,
-                func.row_number().over(partition_by=Message.chat_id, order_by=desc(Message.date)).label("rn"),
+                func.row_number().over(
+                    partition_by=Message.conversation_id, order_by=(desc(Message.date), desc(Message.id)),
+                ).label("rn"),
             )
-            .where(Message.chat_id.in_([c.telegram_id for c in related_chats]))
+            .where(Message.conversation_id.in_([c.id for c in related]))
             .subquery()
         )
         for msg in (await db.execute(
             select(Message).join(ranked, ranked.c.id == Message.id).where(ranked.c.rn == 1)
         )).scalars().all():
-            latest[msg.chat_id] = msg
-
-    related = []
-    for chat in related_chats:
-        msg = latest.get(chat.telegram_id)
-        related.append({
-            "chat_id": chat.telegram_id,
-            "chat_name": chat.name,
-            "chat_type": chat.type,
-            "last_message": {
-                "text": (msg.text or "")[:200],
-                "sender_name": msg.sender_name,
-                "date": iso_utc(msg.date),
-            } if msg else None,
-        })
+            latest[msg.conversation_id] = msg
 
     return {
         "id": org.id,
@@ -126,7 +103,19 @@ async def _org_detail(db: AsyncSession, org: Organization) -> dict:
         "context": org.context,
         "members": members,
         "former_members": former_members,
-        "related_chats": related,
+        "related_conversations": [
+            {
+                "conversation_id": conv.id,
+                "conversation_title": conv.title,
+                "conversation_kind": conv.kind,
+                "last_message": {
+                    "text": (msg.text or "")[:200],
+                    "sender_name": msg.sender_name,
+                    "date": iso_utc(msg.date),
+                } if msg is not None else None,
+            }
+            for conv, msg in ((c, latest.get(c.id)) for c in related)
+        ],
         "created_at": iso_utc(org.created_at),
     }
 
@@ -155,29 +144,15 @@ async def list_organizations(
     search: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    counts = (
-        select(
-            ContactPosition.organization_id.label("org_id"),
-            func.sum(case((ContactPosition.is_active.is_(True), 1), else_=0)).label("active"),
-            func.sum(case((ContactPosition.is_active.is_(True), 0), else_=1)).label("former"),
-        )
-        .where(ContactPosition.organization_id.isnot(None))
-        .group_by(ContactPosition.organization_id)
-        .subquery()
-    )
-    q = select(Organization, counts.c.active, counts.c.former).outerjoin(counts, counts.c.org_id == Organization.id)
-    if search:
-        q = q.where(crud.contains_ci(Organization.name, search))
-    rows = (await db.execute(q.order_by(Organization.name))).all()
     return [
         {
             "id": org.id,
             "name": org.name,
             "context": org.context,
-            "member_count": int(active or 0),
-            "former_member_count": int(former or 0),
+            "member_count": active,
+            "former_member_count": former,
         }
-        for org, active, former in rows
+        for org, active, former in await crud.list_organizations_with_counts(db, search)
     ]
 
 
@@ -203,14 +178,7 @@ async def create_organization(data: OrgCreate, db: AsyncSession = Depends(get_db
 async def auto_discover_organizations(db: AsyncSession = Depends(get_db)):
     """Create organizations for detached position names that have none yet
     (case/whitespace-insensitive) and attach those positions."""
-    keyed = crud.name_key(ContactPosition.organization)
-    names = [
-        row[0] for row in (await db.execute(
-            select(func.min(func.trim(ContactPosition.organization)))
-            .where(ContactPosition.organization_id.is_(None), keyed != "")
-            .group_by(keyed)
-        )).all()
-    ]
+    names = await crud.detached_position_names(db)
     created = 0
     for name in names:
         _org, was_created = await crud.get_or_create_organization(db, name)
@@ -325,8 +293,8 @@ async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
     ) or "No members yet."
 
     related_text = ""
-    for rc in detail["related_chats"]:
-        related_text += f"\n- {rc['chat_name']} ({rc['chat_type']})"
+    for rc in detail["related_conversations"]:
+        related_text += f"\n- {rc['conversation_title']} ({rc['conversation_kind']})"
         if rc.get("last_message") and rc["last_message"].get("text"):
             lm = rc["last_message"]
             sender = lm.get("sender_name") or "Unknown"
@@ -336,7 +304,7 @@ async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
     prompt = (
         f"Organization: {detail['name']}\n\n"
         f"Members:\n{members_text}\n\n"
-        f"Related Telegram groups and latest messages:\n{related_text}\n\n"
+        f"Related groups and latest messages:\n{related_text}\n\n"
         "Write a concise 2-4 sentence context summary for this organization. "
         "Describe what the organization does, who the key people are, and any "
         "relevant recent activity. Be factual and professional."

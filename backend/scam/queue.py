@@ -1,7 +1,8 @@
 """Bounded scan queue: the only way messages get scam-checked.
 
-Real-time checks (sync.py), the startup/mass scan, manual "Check for scam"
-and resumed requests all enqueue ``(chat_id, tg_message_id)`` targets here.
+Real-time checks (ingest fan-out), the startup/mass scan, manual "Check for
+scam" and resumed requests all enqueue ``(conversation_id, message_id)``
+targets here (internal ids).
 A small pool of workers (default 1 — a local Ollama serves one request at a
 time anyway) builds one ``ScanRequest`` per target and runs it.
 
@@ -29,9 +30,10 @@ from typing import Optional
 from sqlalchemy import or_, select, update
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, Contact, Message
+from backend.db.models import Conversation, Identity, Message
 from backend.features import shield_enabled
 from backend.prefs import get_pref
+from backend.scam.channel_ids import TELEGRAM, telegram_user_ids
 from backend.scam.client import ScanRequest
 from backend.scam.verdict import unscanned_condition
 from backend.tasks import spawn
@@ -54,24 +56,24 @@ def worker_count() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Sender profile hints (bio / contact flag known to the live Telegram client)
+# Sender profile hints (bio / contact flag known to the live channel client)
 # ---------------------------------------------------------------------------
 
 _profile_hints: "OrderedDict[int, dict]" = OrderedDict()
 _MAX_HINTS = 2000
 
 
-def note_sender_profile(telegram_id: int, *, bio: Optional[str] = None, is_contact: Optional[bool] = None) -> None:
-    """Optional: remember what Telegram told us about a sender so the next
-    scan of their message can include it (the DB has no bio column)."""
-    if not telegram_id or not shield_enabled():
+def note_sender_profile(identity_id: int, *, bio: Optional[str] = None, is_contact: Optional[bool] = None) -> None:
+    """Optional: remember what the channel told us about a sender so the next
+    scan of their message can include it, ahead of the stored identity."""
+    if not identity_id or not shield_enabled():
         return
-    hint = _profile_hints.pop(telegram_id, {})
+    hint = _profile_hints.pop(identity_id, {})
     if bio is not None:
         hint["bio"] = bio
     if is_contact is not None:
         hint["is_contact"] = is_contact
-    _profile_hints[telegram_id] = hint
+    _profile_hints[identity_id] = hint
     while len(_profile_hints) > _MAX_HINTS:
         _profile_hints.popitem(last=False)
 
@@ -80,14 +82,17 @@ def note_sender_profile(telegram_id: int, *, bio: Optional[str] = None, is_conta
 # Request building
 # ---------------------------------------------------------------------------
 
-def _msg_dict(m: Message) -> dict:
-    return {
-        "message_id": m.tg_message_id,
-        "sender_id": m.sender_id,
+def _msg_dict(m: Message, tg_users: dict[int, int]) -> dict:
+    d = {
+        "message_id": m.id,
+        "identity_id": m.sender_identity_id,
         "sender_name": m.sender_name,
         "text": m.text,
         "date": m.date.isoformat() if m.date else None,
     }
+    if m.sender_identity_id in tg_users:
+        d["telegram_user_id"] = tg_users[m.sender_identity_id]
+    return d
 
 
 def _context_limit() -> int:
@@ -102,14 +107,15 @@ def _context_limit() -> int:
         return _DEFAULT_CONTEXT
 
 
-async def build_scan_request(chat_id: int, target_ids: list[int]) -> Optional[ScanRequest]:
-    """Build a request for ``target_ids`` from the DB. Context = each target
-    sender's earlier messages in the chat. Returns None if no target has text."""
+async def build_scan_request(conversation_id: int, message_ids: list[int]) -> Optional[ScanRequest]:
+    """Build a request for ``message_ids`` from the DB. Context = each target
+    sender's earlier messages in the conversation. Returns None if no target
+    has text."""
     async with AsyncSessionLocal() as db:
         targets = (await db.execute(
             select(Message).where(
-                Message.chat_id == chat_id,
-                Message.tg_message_id.in_(list(target_ids)),
+                Message.conversation_id == conversation_id,
+                Message.id.in_(list(message_ids)),
                 Message.text.isnot(None),
                 Message.text != "",
             ).order_by(Message.date.asc(), Message.id.asc())
@@ -119,54 +125,63 @@ async def build_scan_request(chat_id: int, target_ids: list[int]) -> Optional[Sc
 
         limit = _context_limit()
         context: list[Message] = []
-        seen = {m.tg_message_id for m in targets}
+        seen = {m.id for m in targets}
         if limit > 0:
             first_by_sender: dict[int, Message] = {}
             for m in targets:
-                if m.sender_id and m.sender_id not in first_by_sender:
-                    first_by_sender[m.sender_id] = m
+                if m.sender_identity_id and m.sender_identity_id not in first_by_sender:
+                    first_by_sender[m.sender_identity_id] = m
             for sid, first in first_by_sender.items():
                 rows = (await db.execute(
                     select(Message).where(
-                        Message.chat_id == chat_id,
-                        Message.sender_id == sid,
+                        Message.conversation_id == conversation_id,
+                        Message.sender_identity_id == sid,
                         Message.text.isnot(None),
                         Message.text != "",
                         or_(Message.date < first.date,
-                            (Message.date == first.date) & (Message.tg_message_id < first.tg_message_id)),
+                            (Message.date == first.date) & (Message.seq < first.seq)),
                     ).order_by(Message.date.desc(), Message.id.desc()).limit(limit)
                 )).scalars().all()
-                context.extend(m for m in rows if m.tg_message_id not in seen)
+                context.extend(m for m in rows if m.id not in seen)
         context.sort(key=lambda m: (m.date, m.id))
 
-        sender_ids = list(dict.fromkeys(m.sender_id for m in targets if m.sender_id))
-        contact_ids: set[int] = set()
-        if sender_ids:
-            contact_ids = {row[0] for row in (await db.execute(
-                select(Contact.telegram_id).where(Contact.telegram_id.in_(sender_ids))
-            )).all()}
-        chat = (await db.execute(select(Chat).where(Chat.telegram_id == chat_id))).scalars().first()
+        sender_ids = list(dict.fromkeys(m.sender_identity_id for m in targets if m.sender_identity_id))
+        identities = {
+            i.id: i for i in (await db.execute(select(Identity).where(Identity.id.in_(sender_ids)))).scalars()
+        } if sender_ids else {}
+        conv = await db.get(Conversation, conversation_id)
+        channel = conv.account.channel if conv is not None and conv.account is not None else None
+        tg_users: dict[int, int] = {}
+        if channel == TELEGRAM:
+            tg_users = await telegram_user_ids(db, {m.sender_identity_id for m in targets + context})
 
     profiles = []
     for sid in sender_ids:
         hint = _profile_hints.get(sid, {})
-        name = next((m.sender_name for m in targets if m.sender_id == sid), None)
-        profiles.append({
-            "telegram_id": sid,
-            "name": name,
-            "bio": hint.get("bio", ""),
-            "is_contact": hint.get("is_contact", sid in contact_ids),
-        })
+        ident = identities.get(sid)
+        name = next((m.sender_name for m in targets if m.sender_identity_id == sid), None)
+        profile = {
+            "identity_id": sid,
+            "person_id": ident.person_id if ident is not None else None,
+            "name": name or (ident.display_name if ident is not None else None),
+            "bio": hint.get("bio", (ident.bio if ident is not None else None) or ""),
+            "is_contact": hint.get("is_contact", bool(ident.is_contact) if ident is not None else False),
+        }
+        if sid in tg_users:
+            profile["telegram_user_id"] = tg_users[sid]
+        profiles.append(profile)
 
     return ScanRequest(
-        chat_id=chat_id,
-        targets=[_msg_dict(m) for m in targets],
-        context=[_msg_dict(m) for m in context],
+        conversation_id=conversation_id,
+        channel=channel,
+        targets=[_msg_dict(m, tg_users) for m in targets],
+        context=[_msg_dict(m, tg_users) for m in context],
         profiles=profiles,
-        chat_metadata={
-            "chat_id": chat_id,
-            "name": (chat.name if chat else None) or "Unknown",
-            "type": (chat.type if chat else None) or "private",
+        metadata={
+            "conversation_id": conversation_id,
+            "title": (conv.title if conv else None) or "Unknown",
+            "kind": (conv.kind if conv else None) or "direct",
+            "channel": channel,
         },
     )
 
@@ -223,11 +238,11 @@ class _ScanQueue:
 
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(
-                select(Message.id, Message.chat_id, Message.tg_message_id, Message.scam_attempts, Message.text)
+                select(Message.id, Message.conversation_id, Message.scam_attempts, Message.text)
                 .where(Message.scam_status == "pending")
             )).all()
-            stale = [r for r in rows if (r.chat_id, r.tg_message_id) not in self._pending
-                     and (r.chat_id, r.tg_message_id) not in self._running]
+            stale = [r for r in rows if (r.conversation_id, r.id) not in self._pending
+                     and (r.conversation_id, r.id) not in self._running]
             if not stale:
                 return
             ids = [r.id for r in stale]
@@ -243,31 +258,31 @@ class _ScanQueue:
             await db.commit()
         logger.info("Reclaimed %d stale pending scam scans", len(stale))
 
-        by_chat: dict[int, list[int]] = {}
+        by_conv: dict[int, list[int]] = {}
         for r in stale:
             if (r.scam_attempts or 0) < MAX_AUTO_ATTEMPTS and r.text:
-                by_chat.setdefault(r.chat_id, []).append(r.tg_message_id)
-        for chat_id, tids in by_chat.items():
-            await self._enqueue(chat_id, tids, "resume")
+                by_conv.setdefault(r.conversation_id, []).append(r.id)
+        for conversation_id, mids in by_conv.items():
+            await self._enqueue(conversation_id, mids, "resume")
 
-    def is_busy(self, chat_id: int, tg_message_id: int) -> bool:
-        key = (chat_id, tg_message_id)
+    def is_busy(self, conversation_id: int, message_id: int) -> bool:
+        key = (conversation_id, message_id)
         return key in self._pending or key in self._running
 
     def stats(self) -> dict:
         return {"queued": len(self._pending), "running": len(self._running), "workers": len(self._workers)}
 
-    async def enqueue(self, chat_id: int, target_ids: list[int], source: str) -> list[int]:
+    async def enqueue(self, conversation_id: int, message_ids: list[int], source: str) -> list[int]:
         await self._ensure_ready()
-        return await self._enqueue(chat_id, target_ids, source)
+        return await self._enqueue(conversation_id, message_ids, source)
 
-    async def _enqueue(self, chat_id: int, target_ids: list[int], source: str) -> list[int]:
+    async def _enqueue(self, conversation_id: int, message_ids: list[int], source: str) -> list[int]:
         queue = self._ensure_started()
         prio = _PRIORITY.get(source, _DEFAULT_PRIORITY)
         added: list[int] = []
         dropped: list[int] = []
-        for tid in dict.fromkeys(int(t) for t in target_ids):
-            key = (chat_id, tid)
+        for tid in dict.fromkeys(int(t) for t in message_ids):
+            key = (conversation_id, tid)
             if key in self._running:
                 if source == "edit":
                     # The scan in flight read the old text: run once more after it
@@ -288,23 +303,23 @@ class _ScanQueue:
                 await db.execute(
                     update(Message)
                     .where(
-                        Message.chat_id == chat_id,
-                        Message.tg_message_id.in_(added),
+                        Message.conversation_id == conversation_id,
+                        Message.id.in_(added),
                         or_(Message.scam_status.is_(None), Message.scam_status == "failed"),
                     )
                     .values(scam_status="pending")
                 )
                 await db.commit()
         if dropped:
-            logger.warning("Scam scan queue full (%d); dropped %d %s targets in chat %s",
-                           MAX_QUEUE, len(dropped), source, chat_id)
+            logger.warning("Scam scan queue full (%d); dropped %d %s targets in conversation %s",
+                           MAX_QUEUE, len(dropped), source, conversation_id)
             await ws_manager.broadcast({
                 "type": "scam_check_error",
                 "request_id": None,
                 "source": source,
-                "chat_id": chat_id,
+                "conversation_id": conversation_id,
                 "message_ids": dropped,
-                "sender_ids": [],
+                "identity_ids": [],
                 "messages": [],
                 "error": "Scan queue is full; the message will be scanned later",
             })
@@ -339,9 +354,9 @@ class _ScanQueue:
     async def _process(self, key: tuple, source: str) -> None:
         from backend.scam.service import get_scam_service
 
-        chat_id, tg_id = key
+        conversation_id, message_id = key
         svc = get_scam_service()
-        req = await build_scan_request(chat_id, [tg_id]) if svc is not None else None
+        req = await build_scan_request(conversation_id, [message_id]) if svc is not None else None
         if req is not None:
             await svc.check_messages_for_scam(req, source=source)
             return
@@ -352,7 +367,7 @@ class _ScanQueue:
         async with AsyncSessionLocal() as db:
             await db.execute(
                 update(Message)
-                .where(Message.chat_id == chat_id, Message.tg_message_id == tg_id, Message.scam_status == "pending")
+                .where(Message.id == message_id, Message.scam_status == "pending")
                 .values(scam_status=None)
             )
             await db.commit()
@@ -360,9 +375,9 @@ class _ScanQueue:
             "type": "scam_check_error",
             "request_id": None,
             "source": source,
-            "chat_id": chat_id,
-            "message_ids": [tg_id],
-            "sender_ids": [],
+            "conversation_id": conversation_id,
+            "message_ids": [message_id],
+            "identity_ids": [],
             "messages": [],
             "error": error,
         })
@@ -375,14 +390,15 @@ def get_scan_queue() -> _ScanQueue:
     return _scan_queue
 
 
-async def enqueue_targets(chat_id: int, target_tg_ids: list[int], source: str = "realtime") -> None:
-    """Queue messages to be judged (one request per target). ``source`` is one
+async def enqueue_targets(conversation_id: int, message_ids: list[int], source: str = "realtime") -> None:
+    """Queue messages (internal ids in ``conversation_id``) to be judged, one
+    request per target. ``source`` is one
     of manual | rescan | realtime | edit | resume | scan (unknown values are
     accepted at normal priority). An edited message is re-judged even if it
     already had a result; the earlier result stays visible until then."""
     if not shield_enabled():
         return
-    await _scan_queue.enqueue(chat_id, list(target_tg_ids), source)
+    await _scan_queue.enqueue(conversation_id, list(message_ids), source)
 
 
 async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 48) -> int:
@@ -405,7 +421,7 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
             logger.info("scan_unscanned_messages: no messages older than %dh — likely first sync, skipping", max_age_hours)
             return 0
         rows = (await db.execute(
-            select(Message.chat_id, Message.tg_message_id).where(
+            select(Message.conversation_id, Message.id).where(
                 unscanned_condition(now),
                 Message.scam_attempts < MAX_AUTO_ATTEMPTS,
                 Message.is_outgoing == False,  # noqa: E712
@@ -416,13 +432,13 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
             ).order_by(Message.date.desc(), Message.id.desc()).limit(max_messages)
         )).all()
 
-    by_chat: dict[int, list[int]] = {}
-    for chat_id, tg_id in rows:
-        by_chat.setdefault(chat_id, []).append(tg_id)
+    by_conv: dict[int, list[int]] = {}
+    for conversation_id, message_id in rows:
+        by_conv.setdefault(conversation_id, []).append(message_id)
 
     queued = 0
-    for chat_id, ids in by_chat.items():
-        queued += len(await _scan_queue.enqueue(chat_id, ids, "scan"))
-    logger.info("scan_unscanned_messages: queued %d of %d candidates across %d chats",
-                queued, len(rows), len(by_chat))
+    for conversation_id, ids in by_conv.items():
+        queued += len(await _scan_queue.enqueue(conversation_id, ids, "scan"))
+    logger.info("scan_unscanned_messages: queued %d of %d candidates across %d conversations",
+                queued, len(rows), len(by_conv))
     return queued

@@ -15,10 +15,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import and_, or_, select, tuple_
+from sqlalchemy import and_, or_, select
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Message, ScamDismissal, ScamFlag
+from backend.db.models import Identity, Message, ScamDismissal, ScamFlag
 from backend.prefs import get_pref
 from backend.serialization import iso_utc
 from backend.ws.manager import ws_manager
@@ -44,7 +44,15 @@ def scam_fields(m: Message) -> dict:
 
 
 def ws_message_entry(m: Message) -> dict:
-    return {"chat_id": m.chat_id, "tg_message_id": m.tg_message_id, "sender_id": m.sender_id, **scam_fields(m)}
+    """A message's scam state for WS events and verdict responses (v2 ids)."""
+    ident = m.sender_identity
+    return {
+        "message_id": m.id,
+        "conversation_id": m.conversation_id,
+        "identity_id": m.sender_identity_id,
+        "person_id": ident.person_id if ident is not None else None,
+        **scam_fields(m),
+    }
 
 
 def scanned_condition():
@@ -73,24 +81,28 @@ class VerdictResult:
     scope: str
     verdict: Optional[str]
     messages: list = field(default_factory=list)  # ws_message_entry dicts
-    telegram_ids: list = field(default_factory=list)  # senders whose flag state changed
-    flag_status: dict = field(default_factory=dict)  # telegram_id -> active|dismissed|None
+    identity_ids: list = field(default_factory=list)  # senders whose flag state changed
+    flag_status: dict = field(default_factory=dict)  # identity_id -> active|dismissed|None
+    person_ids: dict = field(default_factory=dict)  # identity_id -> person_id
 
     def to_dict(self) -> dict:
         return {
             "scope": self.scope,
             "verdict": self.verdict,
-            "count": len(self.messages) if self.scope == "message" else len(self.telegram_ids),
+            "count": len(self.messages) if self.scope == "message" else len(self.identity_ids),
             "messages": self.messages,
             "flags": [
-                {"telegram_id": tid, "status": self.flag_status.get(tid)} for tid in self.telegram_ids
+                {"identity_id": iid, "person_id": self.person_ids.get(iid), "status": self.flag_status.get(iid)}
+                for iid in self.identity_ids
             ],
         }
 
 
 def _flag_snapshot(flag: ScamFlag) -> dict:
+    """Dismissal record of a sender flag. Internal ids only; cloud sync
+    resolves the channel ids when it uploads."""
     return {
-        "telegram_id": flag.telegram_id,
+        "identity_id": flag.identity_id,
         "source": flag.source,
         "confidence": flag.confidence,
         "reason": flag.reason,
@@ -108,9 +120,9 @@ def _scan_snapshot(m: Message) -> dict:
         except (ValueError, TypeError):
             trace = None
     return {
-        "chat_id": m.chat_id,
-        "tg_message_id": m.tg_message_id,
-        "sender_id": m.sender_id,
+        "conversation_id": m.conversation_id,
+        "message_id": m.id,
+        "identity_id": m.sender_identity_id,
         "scam_score": m.scam_score,
         "scam_reason": m.scam_reason,
         "scam_category": m.scam_category,
@@ -124,12 +136,12 @@ async def set_verdict(
     *,
     scope: str,
     verdict: Optional[str],
-    messages: Optional[Iterable[tuple]] = None,
-    telegram_id: Optional[int] = None,
+    messages: Optional[Iterable[int]] = None,
+    identity_id: Optional[int] = None,
 ) -> VerdictResult:
     """Apply a user verdict.
 
-    scope="message": set ``scam_manual_verdict`` on each (chat_id, tg_message_id).
+    scope="message": set ``scam_manual_verdict`` on each message id.
       Scores are never touched. 'scam' activates the sender's flag (explicit
       user intent); 'not_scam' dismisses an automated sender flag once that
       sender has no remaining effective-scam messages, so "mark not scam" on a
@@ -144,20 +156,26 @@ async def set_verdict(
     if scope == "message":
         result = await _set_message_verdict(list(messages or []), verdict)
     elif scope == "sender":
-        if telegram_id is None:
-            raise ValueError("telegram_id is required for scope=sender")
-        result = await _set_sender_verdict(telegram_id, verdict)
+        if identity_id is None:
+            raise ValueError("identity_id is required for scope=sender")
+        result = await _set_sender_verdict(identity_id, verdict)
     else:
         raise ValueError("scope must be 'message' or 'sender'")
+
+    if result.identity_ids:
+        async with AsyncSessionLocal() as db:
+            result.person_ids = dict((await db.execute(
+                select(Identity.id, Identity.person_id).where(Identity.id.in_(result.identity_ids))
+            )).all())
 
     await ws_manager.broadcast({"type": "scam_verdict_changed", **result.to_dict()})
     return result
 
 
-async def _set_message_verdict(keys: list[tuple], verdict: Optional[str]) -> VerdictResult:
-    keys = list({(int(c), int(t)) for c, t in keys})
+async def _set_message_verdict(message_ids: list, verdict: Optional[str]) -> VerdictResult:
+    message_ids = list({int(i) for i in message_ids})
     result = VerdictResult(scope="message", verdict=verdict)
-    if not keys:
+    if not message_ids:
         return result
     now = datetime.utcnow()
     unflagged = 0
@@ -166,7 +184,7 @@ async def _set_message_verdict(keys: list[tuple], verdict: Optional[str]) -> Ver
 
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(
-            select(Message).where(tuple_(Message.chat_id, Message.tg_message_id).in_(keys))
+            select(Message).where(Message.id.in_(message_ids))
         )).scalars().all()
         for m in rows:
             was_scam = bool(m.effective_is_scam)
@@ -179,23 +197,23 @@ async def _set_message_verdict(keys: list[tuple], verdict: Optional[str]) -> Ver
                     dismissals.append(_scan_snapshot(m))
         await db.flush()
 
-        sender_ids = {m.sender_id for m in rows if m.sender_id}
+        sender_ids = list(dict.fromkeys(m.sender_identity_id for m in rows if m.sender_identity_id))
         for sid in sender_ids:
-            flag = (await db.execute(select(ScamFlag).where(ScamFlag.telegram_id == sid))).scalars().first()
+            flag = (await db.execute(select(ScamFlag).where(ScamFlag.identity_id == sid))).scalars().first()
             if verdict == "scam":
-                trigger = next(m for m in rows if m.sender_id == sid)
+                trigger = next(m for m in rows if m.sender_identity_id == sid)
                 flag = _activate_flag(db, flag, sid, now, source="manual", trigger=trigger)
-                result.telegram_ids.append(sid)
+                result.identity_ids.append(sid)
                 result.flag_status[sid] = flag.status
             elif verdict == "not_scam" and flag is not None and flag.status == FLAG_ACTIVE and flag.source != "manual":
                 remaining = (await db.execute(
-                    select(Message.id).where(Message.sender_id == sid, Message.effective_is_scam).limit(1)
+                    select(Message.id).where(Message.sender_identity_id == sid, Message.effective_is_scam).limit(1)
                 )).first()
                 if remaining is None:
                     if sync_dismissals:
                         dismissals.append({"__flag__": True, **_flag_snapshot(flag)})
                     _dismiss_flag(flag, now)
-                    result.telegram_ids.append(sid)
+                    result.identity_ids.append(sid)
                     result.flag_status[sid] = flag.status
 
         for d in dismissals:
@@ -213,22 +231,24 @@ async def _set_message_verdict(keys: list[tuple], verdict: Optional[str]) -> Ver
     return result
 
 
-async def _set_sender_verdict(telegram_id: int, verdict: Optional[str]) -> VerdictResult:
+async def _set_sender_verdict(identity_id: int, verdict: Optional[str]) -> VerdictResult:
     now = datetime.utcnow()
-    result = VerdictResult(scope="sender", verdict=verdict, telegram_ids=[telegram_id])
+    result = VerdictResult(scope="sender", verdict=verdict, identity_ids=[identity_id])
     dismissed = False
     async with AsyncSessionLocal() as db:
-        flag = (await db.execute(select(ScamFlag).where(ScamFlag.telegram_id == telegram_id))).scalars().first()
+        if await db.get(Identity, identity_id) is None:
+            raise LookupError(f"identity {identity_id} not found")
+        flag = (await db.execute(select(ScamFlag).where(ScamFlag.identity_id == identity_id))).scalars().first()
         if verdict is None:
             if flag is not None:
                 await db.delete(flag)
-            result.flag_status[telegram_id] = None
+            result.flag_status[identity_id] = None
         elif verdict == "scam":
-            flag = _activate_flag(db, flag, telegram_id, now, source="manual")
-            result.flag_status[telegram_id] = flag.status
+            flag = _activate_flag(db, flag, identity_id, now, source="manual")
+            result.flag_status[identity_id] = flag.status
         else:
             if flag is None:
-                flag = ScamFlag(telegram_id=telegram_id, source="manual", flagged_at=now, synced_to_cloud=False)
+                flag = ScamFlag(identity_id=identity_id, source="manual", flagged_at=now, synced_to_cloud=False)
                 db.add(flag)
             elif flag.status == FLAG_ACTIVE:
                 dismissed = True
@@ -239,13 +259,13 @@ async def _set_sender_verdict(telegram_id: int, verdict: Optional[str]) -> Verdi
                         created_at=now,
                     ))
             _dismiss_flag(flag, now)
-            result.flag_status[telegram_id] = flag.status
+            result.flag_status[identity_id] = flag.status
 
             # Clear this sender's red banners without overriding any verdict
             # the user already set by hand and without touching scores.
             targets = (await db.execute(
                 select(Message).where(
-                    Message.sender_id == telegram_id,
+                    Message.sender_identity_id == identity_id,
                     Message.scam_manual_verdict.is_(None),
                     Message.effective_is_scam,
                 )
@@ -262,10 +282,10 @@ async def _set_sender_verdict(telegram_id: int, verdict: Optional[str]) -> Verdi
     return result
 
 
-def _activate_flag(db, flag: Optional[ScamFlag], telegram_id: int, now: datetime,
+def _activate_flag(db, flag: Optional[ScamFlag], identity_id: int, now: datetime,
                    *, source: str, trigger: Optional[Message] = None) -> ScamFlag:
     if flag is None:
-        flag = ScamFlag(telegram_id=telegram_id, source=source, flagged_at=now)
+        flag = ScamFlag(identity_id=identity_id, source=source, flagged_at=now)
         db.add(flag)
     flag.status = FLAG_ACTIVE
     flag.source = source
@@ -274,8 +294,8 @@ def _activate_flag(db, flag: Optional[ScamFlag], telegram_id: int, now: datetime
     flag.synced_to_cloud = False
     if trigger is not None and not flag.flagged_message_id:
         flag.flagged_message_text = (trigger.text or "")[:500]
-        flag.flagged_message_chat_id = trigger.chat_id
-        flag.flagged_message_id = trigger.tg_message_id
+        flag.flagged_conversation_id = trigger.conversation_id
+        flag.flagged_message_id = trigger.id
     return flag
 
 

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { useState } from 'react'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import type { Contact, ContactPosition, OrgSummary, Workspace } from '../../api/types'
+import type { ContactPosition, OrgSummary, Person, Workspace } from '../../api/types'
+import { makePerson } from '../../pages/chats/__tests__/fixtures'
 import { ConfirmProvider } from '../ui/ConfirmDialog'
 import { resetToasts } from '../../lib/toast'
 
@@ -17,14 +18,14 @@ const api = vi.hoisted(() => ({
   addPosition: vi.fn(),
   removePosition: vi.fn(),
   updatePosition: vi.fn(),
-  updateContact: vi.fn(),
+  updatePerson: vi.fn(),
   getOrganizations: vi.fn(),
   getTags: vi.fn(),
   updateWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
   deleteWorkspace: vi.fn(),
   addBoardColumn: vi.fn(),
-  resolvePeople: vi.fn(),
+  getPerson: vi.fn(),
 }))
 
 vi.mock('../../api/client', () => {
@@ -34,14 +35,14 @@ vi.mock('../../api/client', () => {
     addPosition: fwd('addPosition'),
     removePosition: fwd('removePosition'),
     updatePosition: fwd('updatePosition'),
-    updateContact: fwd('updateContact'),
+    updatePerson: fwd('updatePerson'),
     getOrganizations: fwd('getOrganizations'),
     getTags: fwd('getTags'),
     updateWorkspace: fwd('updateWorkspace'),
     createWorkspace: fwd('createWorkspace'),
     deleteWorkspace: fwd('deleteWorkspace'),
     addBoardColumn: fwd('addBoardColumn'),
-    resolvePeople: fwd('resolvePeople'),
+    getPerson: fwd('getPerson'),
   }
 })
 
@@ -54,12 +55,7 @@ const pos = (id: number, organization: string, extra: Partial<ContactPosition> =
   id, organization, organization_id: id, title: null, is_active: true, ended_at: null, ...extra,
 })
 
-const contact = (extra: Partial<Contact> = {}): Contact => ({
-  id: 1, telegram_id: 100, first_name: 'Ann', last_name: null, name: 'Ann', username: null, phone: null,
-  twitter_handle: null, linkedin_url: null, notes: null, is_important: false, relationship_status: null,
-  relationship_status_manual: false, last_interaction_at: null, last_outgoing_at: null, last_incoming_at: null,
-  synced_at: null, positions: [], ...extra,
-})
+const person = (extra: Partial<Person> = {}): Person => makePerson(100, 'Ann', extra)
 
 /** Click the Confirm/Remove button of the shared confirm dialog. */
 async function acceptConfirm(label: string) {
@@ -70,7 +66,7 @@ async function acceptConfirm(label: string) {
 beforeEach(() => {
   vi.clearAllMocks()
   resetToasts()
-  api.resolvePeople.mockResolvedValue({})
+  api.getPerson.mockImplementation(async (id: number) => makePerson(id, `P${id}`))
 })
 afterEach(() => cleanup())
 
@@ -81,7 +77,7 @@ describe('PositionsEditor', () => {
     const delB = deferred<{ success: boolean }>()
     api.removePosition.mockImplementation((_t: number, id: number) => (id === 1 ? delA.promise : delB.promise))
     const onChange = vi.fn()
-    render(<ConfirmProvider><PositionsEditor telegramId={100} onChange={onChange} /></ConfirmProvider>)
+    render(<ConfirmProvider><PositionsEditor personId={100} onChange={onChange} /></ConfirmProvider>)
     await screen.findByText('Acme')
 
     fireEvent.click(screen.getAllByTitle('Remove position')[0]) // Acme
@@ -104,7 +100,7 @@ describe('PositionsEditor', () => {
     api.getPositions.mockResolvedValue([])
     api.getOrganizations.mockResolvedValue([])
     api.addPosition.mockRejectedValue(new Error('This person already has a position at "Acme"'))
-    render(<ConfirmProvider><PositionsEditor telegramId={100} /></ConfirmProvider>)
+    render(<ConfirmProvider><PositionsEditor personId={100} /></ConfirmProvider>)
     await screen.findByText('No positions added')
     fireEvent.click(screen.getByRole('button', { name: /Add/ }))
     fireEvent.change(screen.getByPlaceholderText('Organization name...'), { target: { value: 'Acme' } })
@@ -114,17 +110,17 @@ describe('PositionsEditor', () => {
   })
 
   it('switching person drops a completion for the previous person', async () => {
-    api.getPositions.mockImplementation(async (tid: number) => (tid === 100 ? [] : [pos(9, 'Zed')]))
+    api.getPositions.mockImplementation(async (pid: number) => (pid === 100 ? [] : [pos(9, 'Zed')]))
     api.getOrganizations.mockResolvedValue([])
     const add = deferred<ContactPosition>()
     api.addPosition.mockReturnValue(add.promise)
     const onChange = vi.fn()
-    const { rerender } = render(<ConfirmProvider><PositionsEditor telegramId={100} onChange={onChange} /></ConfirmProvider>)
+    const { rerender } = render(<ConfirmProvider><PositionsEditor personId={100} onChange={onChange} /></ConfirmProvider>)
     await screen.findByText('No positions added')
     fireEvent.click(screen.getByRole('button', { name: /Add/ }))
     fireEvent.change(screen.getByPlaceholderText('Organization name...'), { target: { value: 'Acme' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add Position' }))
-    rerender(<ConfirmProvider><PositionsEditor telegramId={200} onChange={onChange} /></ConfirmProvider>)
+    rerender(<ConfirmProvider><PositionsEditor personId={200} onChange={onChange} /></ConfirmProvider>)
     await screen.findByText('Zed')
     await act(async () => { add.resolve(pos(5, 'Acme')) })
     expect(screen.queryByText('Acme')).toBeNull()
@@ -133,18 +129,18 @@ describe('PositionsEditor', () => {
 })
 
 describe('ContactInfoSection', () => {
-  it('a position change merges into the latest contact — it never reverts a concurrent notes edit', async () => {
+  it('a position change merges into the latest person — it never reverts a concurrent notes edit', async () => {
     api.getPositions.mockResolvedValue([])
     api.getOrganizations.mockResolvedValue([])
     const add = deferred<ContactPosition>()
     api.addPosition.mockReturnValue(add.promise)
-    const changes: Contact[] = []
+    const changes: Person[] = []
     function Host() {
-      const [c, setC] = useState(contact())
+      const [c, setC] = useState(person())
       return (
         <ConfirmProvider>
           <button onClick={() => setC((p) => ({ ...p, notes: 'new notes' }))}>external-notes-edit</button>
-          <ContactInfoSection contact={c} onContactChange={(u) => { changes.push(u); setC(u) }} />
+          <ContactInfoSection person={c} onPersonChange={(u) => { changes.push(u); setC(u) }} />
         </ConfirmProvider>
       )
     }
@@ -158,7 +154,7 @@ describe('ContactInfoSection', () => {
     await act(async () => { add.resolve(pos(5, 'Acme')) })
     const last = changes[changes.length - 1]
     expect(last.notes).toBe('new notes')
-    expect(last.positions.map((p: ContactPosition) => p.organization)).toEqual(['Acme'])
+    expect((last.positions ?? []).map((p: ContactPosition) => p.organization)).toEqual(['Acme'])
   })
 })
 

@@ -69,7 +69,7 @@ class EventJob:
     def emit(self, event: str, data: dict) -> None:
         self.events.append((event, data))
         if event in ("start", "progress"):
-            self.progress.update({k: v for k, v in data.items() if k in ("total", "current", "chat_name", "run_id", "days")})
+            self.progress.update({k: v for k, v in data.items() if k in ("total", "current", "conversation_title", "run_id", "days")})
         changed, self._changed = self._changed, asyncio.Event()
         changed.set()
 

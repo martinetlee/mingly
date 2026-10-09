@@ -1,26 +1,179 @@
+"""Schema v2: channel-neutral, person-centric (docs/multichannel/SCHEMA_V2.md).
+
+Every row is keyed by an internal integer id. A channel's own ids live in
+``external_id`` text columns and are only interpreted by that channel's
+connector code.
+"""
+
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, column_property, mapped_column
+
+from sqlalchemy import (
+    BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+    and_, case, exists, func, select, text,
+)
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import Mapped, column_property, mapped_column, relationship
 
 from backend.db.database import Base
 
-# Scam/Shield verdict model (see Message.effective_is_scam)
-from sqlalchemy import Index, and_, case, func, select  # noqa: E402
-from sqlalchemy.ext.hybrid import hybrid_property  # noqa: E402
+SCHEMA_GENERATION = "2"
 
 SCAM_SCORE_THRESHOLD = 0.5
 SCAM_SUCCESS_STATUSES = ("completed", "short_circuited")
 
+CONVERSATION_KINDS = ("direct", "group", "channel", "email_thread")
+ATTACHMENT_KINDS = ("photo", "video", "video_note", "voice", "audio", "gif", "document", "sticker")
 
-class Chat(Base):
-    __tablename__ = "chats"
+
+class SchemaMeta(Base):
+    __tablename__ = "schema_meta"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+
+
+# ── Accounts & people ────────────────────────────────────────────────────────
+
+class Account(Base):
+    """One signed-in account on one channel."""
+    __tablename__ = "accounts"
+    __table_args__ = (UniqueConstraint("channel", "external_id", name="uq_account_channel_external"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    name: Mapped[Optional[str]] = mapped_column(String)
-    type: Mapped[Optional[str]] = mapped_column(String)  # private, group, channel
+    channel: Mapped[str] = mapped_column(String, nullable=False)  # telegram | gmail | signal | sms
+    external_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    self_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Identity(Base):
+    """One handle of a person on one channel (a Telegram user, an email
+    address, a Signal account)."""
+    __tablename__ = "identities"
+    __table_args__ = (UniqueConstraint("channel", "external_id", name="uq_identity_channel_external"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel: Mapped[str] = mapped_column(String, nullable=False)
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[Optional[str]] = mapped_column(String)
+    first_name: Mapped[Optional[str]] = mapped_column(String)
+    last_name: Mapped[Optional[str]] = mapped_column(String)
     username: Mapped[Optional[str]] = mapped_column(String)
+    phone: Mapped[Optional[str]] = mapped_column(String)
+    bio: Mapped[Optional[str]] = mapped_column(Text)
+    avatar_path: Mapped[Optional[str]] = mapped_column(String)  # relative to DATA_DIR
+    is_contact: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_self: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ContactPoint(Base):
+    """A normalized phone number or email address an identity is reachable
+    at; the key for linking one person's identities across channels."""
+    __tablename__ = "contact_points"
+    __table_args__ = (
+        UniqueConstraint("identity_id", "kind", "value", name="uq_contact_point"),
+        Index("ix_contact_points_kind_value", "kind", "value"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # phone | email
+    value: Mapped[str] = mapped_column(String, nullable=False)  # E.164 / lowercased email
+
+
+class Person(Base):
+    """A human, across every channel they use. The CRM record."""
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # user override
+    twitter_handle: Mapped[Optional[str]] = mapped_column(String)
+    linkedin_url: Mapped[Optional[str]] = mapped_column(String)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    is_important: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_self: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    relationship_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    relationship_status_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_interaction_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_outgoing_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_incoming_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Derived, read-only: in any channel's address book; the best display name
+    is_contact: Mapped[bool] = column_property(
+        exists().where(Identity.person_id == id, Identity.is_contact == True)  # noqa: E712
+        .correlate_except(Identity)
+    )
+    name: Mapped[Optional[str]] = column_property(
+        func.coalesce(
+            display_name,
+            select(func.coalesce(Identity.display_name, Identity.username, Identity.phone))
+            .where(Identity.person_id == id)
+            .order_by(Identity.is_contact.desc(), Identity.id)
+            .limit(1)
+            .correlate_except(Identity)
+            .scalar_subquery(),
+        )
+    )
+
+
+# ── Conversations & messages ─────────────────────────────────────────────────
+
+class HistoryCoverage(Base):
+    """How much of a conversation's history is stored (backend.telegram.archive).
+
+    Invariant: every message with ``walk_cursor_seq <= seq <=
+    newest_contiguous_seq`` is stored; with ``history_complete`` the range
+    starts at the conversation's first message. Absent row = nothing known.
+    """
+    __tablename__ = "history_coverage"
+
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True, autoincrement=False
+    )
+    history_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    oldest_seq: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    newest_contiguous_seq: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Lowest seq the in-progress full walk has stored; resume point after a restart
+    walk_cursor_seq: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_walk_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_topup_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+
+class Conversation(Base):
+    """A chat, group, channel or email thread on one account."""
+    __tablename__ = "conversations"
+    __table_args__ = (UniqueConstraint("account_id", "external_id", name="uq_conversation_account_external"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # direct | group | channel | email_thread
+    title: Mapped[Optional[str]] = mapped_column(String)
+    username: Mapped[Optional[str]] = mapped_column(String)
+    avatar_path: Mapped[Optional[str]] = mapped_column(String)  # relative to DATA_DIR
+    peer_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     is_monitored: Mapped[bool] = mapped_column(Boolean, default=False)
     is_hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     is_briefing: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -29,52 +182,78 @@ class Chat(Base):
     slow_mode_seconds: Mapped[int] = mapped_column(Integer, default=0)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Telegram group deactivated after migration to a supergroup — hidden from all lists
+    # No longer usable (e.g. a Telegram group migrated to a supergroup) — hidden from all lists
     is_deactivated: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Private chats only, set from the dialog entity by sync_dialogs
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     is_deleted_account: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    is_self: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # Saved Messages
+    is_self: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # notes to self
     is_muted: Mapped[bool] = mapped_column(Boolean, default=False)
     muted_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_marked_unread: Mapped[bool] = mapped_column(Boolean, default=False)
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
     members_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    last_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
-    pinned_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    pinned_message_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_message_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_message_sender: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    last_message_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Eager (selectin): every serializer needs the channel and the other party.
+    account: Mapped["Account"] = relationship(lazy="selectin", viewonly=True)
+    peer_identity: Mapped[Optional["Identity"]] = relationship(
+        foreign_keys=[peer_identity_id], lazy="selectin", viewonly=True,
+    )
+    # Derived, read-only: False without a coverage row
+    history_complete: Mapped[bool] = column_property(
+        func.coalesce(
+            select(HistoryCoverage.history_complete)
+            .where(HistoryCoverage.conversation_id == id)
+            .correlate_except(HistoryCoverage)
+            .scalar_subquery(),
+            False,
+        )
+    )
 
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (UniqueConstraint("tg_message_id", "chat_id", name="uq_message_tgmsgid_chat"),)
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "external_id", name="uq_message_conversation_external"),
+        Index("ix_messages_conversation_seq", "conversation_id", "seq"),
+        Index("ix_messages_conversation_date", "conversation_id", "date", "id"),
+        Index("ix_messages_date_id", "date", "id"),
+        Index("ix_messages_scam_status", "scam_status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tg_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    sender_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    # Channel-native ordering within the conversation (Telegram message id;
+    # epoch milliseconds for channels without one)
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sender_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     sender_name: Mapped[Optional[str]] = mapped_column(String)
+    subject: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     text: Mapped[Optional[str]] = mapped_column(Text)
     text_html: Mapped[Optional[str]] = mapped_column(Text)
     reactions_json: Mapped[Optional[str]] = mapped_column(Text)
     date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     is_outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
-    media_type: Mapped[Optional[str]] = mapped_column(String)
-    media_path: Mapped[Optional[str]] = mapped_column(String)
     importance_score: Mapped[Optional[float]] = mapped_column(Float)
     importance_reason: Mapped[Optional[str]] = mapped_column(Text)
     user_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
-    reply_to_tg_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    reply_to_external_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     my_reaction: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     topic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
-    media_filename: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    media_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     grouped_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     delivery_state: Mapped[Optional[str]] = mapped_column(String, default="sent")  # sending, sent, delivered, read
     is_edited: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -101,6 +280,13 @@ class Message(Base):
     meta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     fwd_from_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Eager (selectin): every serializer needs a message's files and sender.
+    attachments: Mapped[list["MessageAttachment"]] = relationship(
+        order_by="MessageAttachment.position", lazy="selectin",
+        cascade="all, delete-orphan", passive_deletes=True,
+    )
+    sender_identity: Mapped[Optional["Identity"]] = relationship(lazy="selectin", viewonly=True)
 
     # Transient, not mapped: set by crud.save_message to "created" | "updated" | None
     _change = None  # type: Optional[str]
@@ -139,41 +325,33 @@ class Message(Base):
         )
 
 
-class ChatHistoryCoverage(Base):
-    """How much of a chat's Telegram history is stored (backend.telegram.archive).
+class MessageAttachment(Base):
+    """A file attached to a message. Telegram has at most one per message
+    (albums are separate messages); email can have many."""
+    __tablename__ = "message_attachments"
+    __table_args__ = (UniqueConstraint("message_id", "position", name="uq_attachment_message_position"),)
 
-    Invariant: every message with ``walk_cursor_tg_id <= id <=
-    newest_contiguous_tg_id`` is stored; with ``history_complete`` the range
-    starts at the chat's first message. Absent row = nothing known.
-    """
-    __tablename__ = "chat_history_coverage"
-
-    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)  # marked id
-    history_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
-    oldest_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    newest_contiguous_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    # Lowest id the in-progress full walk has stored; resume point after a restart
-    walk_cursor_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    last_walk_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    last_topup_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # see ATTACHMENT_KINDS
+    filename: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    local_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # relative to DATA_DIR; NULL until downloaded
+    external_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # channel handle to fetch it
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-# Read-only: loaded with every Chat (indexed PK lookup), False without a row.
-Chat.history_complete = column_property(  # type: ignore[attr-defined]
-    select(func.coalesce(ChatHistoryCoverage.history_complete, False))
-    .where(ChatHistoryCoverage.chat_id == Chat.telegram_id)
-    .correlate_except(ChatHistoryCoverage)
-    .scalar_subquery()
-)
-
+# ── Tags, workspaces, organizations ──────────────────────────────────────────
 
 class Tag(Base):
     __tablename__ = "tags"
+    __table_args__ = (Index("uq_tags_name_ci", text("lower(trim(name))"), unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # Also unique on lower(trim(name)) (index uq_tags_name_ci, migration 91)
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     color: Mapped[str] = mapped_column(String, default="slate")
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -181,13 +359,15 @@ class Tag(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class ChatTag(Base):
-    __tablename__ = "chat_tags"
-    __table_args__ = (UniqueConstraint("chat_id", "tag_id", name="uq_chat_tag"),)
+class ConversationTag(Base):
+    __tablename__ = "conversation_tags"
+    __table_args__ = (UniqueConstraint("conversation_id", "tag_id", name="uq_conversation_tag"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # telegram_id
-    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id"), nullable=False)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False, index=True)
 
 
 class Workspace(Base):
@@ -210,8 +390,10 @@ class WorkspaceTag(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "tag_id", name="uq_workspace_tag"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
     is_exclusion: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -220,10 +402,14 @@ class WorkspaceBoard(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_workspace_board_name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String, nullable=False)
     # Stream tag scoping this board; NULL = unscoped (all workspace members)
-    scope_tag_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    scope_tag_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("tags.id", ondelete="SET NULL"), nullable=True
+    )
     position: Mapped[int] = mapped_column(Integer, default=0)
 
 
@@ -232,9 +418,13 @@ class WorkspaceColumn(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "tag_id", name="uq_workspace_column"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)  # stage tag backing this column
-    board_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)  # stage tag
+    board_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("workspace_boards.id", ondelete="CASCADE"), nullable=True
+    )
     # Display name; may differ from the tag name so boards can share labels
     # ("Done" on two boards) while keeping independent pipeline state
     label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -242,49 +432,45 @@ class WorkspaceColumn(Base):
     color: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
-class WorkspaceChatOverride(Base):
-    __tablename__ = "workspace_chat_overrides"
-    __table_args__ = (UniqueConstraint("workspace_id", "chat_id", name="uq_workspace_chat_override"),)
+class WorkspaceConversationOverride(Base):
+    __tablename__ = "workspace_conversation_overrides"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "conversation_id", name="uq_workspace_conversation_override"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # telegram_id
+    workspace_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
     needs_triage_since: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     triaged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
-class Contact(Base):
-    __tablename__ = "contacts"
+class Organization(Base):
+    __tablename__ = "organizations"
+    __table_args__ = (Index("uq_organizations_name_ci", text("lower(trim(name))"), unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    first_name: Mapped[Optional[str]] = mapped_column(String)
-    last_name: Mapped[Optional[str]] = mapped_column(String)
-    username: Mapped[Optional[str]] = mapped_column(String)
-    phone: Mapped[Optional[str]] = mapped_column(String)
-    twitter_handle: Mapped[Optional[str]] = mapped_column(String)
-    linkedin_url: Mapped[Optional[str]] = mapped_column(String)
-    notes: Mapped[Optional[str]] = mapped_column(Text)
-    is_important: Mapped[bool] = mapped_column(Boolean, default=False)
-    relationship_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    relationship_status_manual: Mapped[bool] = mapped_column(Boolean, default=False)
-    last_interaction_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    last_outgoing_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    last_incoming_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    context: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class ContactPosition(Base):
-    __tablename__ = "contact_positions"
-    __table_args__ = (UniqueConstraint("telegram_id", "organization_id", name="uq_telegram_org"),)
+class PersonPosition(Base):
+    __tablename__ = "person_positions"
+    __table_args__ = (UniqueConstraint("person_id", "organization_id", name="uq_person_org"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     # Source of truth for membership. NULL = detached (the org was deleted with
     # mode=detach); the position keeps its history under `organization`.
     organization_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("organizations.id"), nullable=True, index=True
+        Integer, ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     # Display name: mirrors organizations.name while attached, frozen once detached
     organization: Mapped[str] = mapped_column(String, nullable=False)
@@ -294,18 +480,30 @@ class ContactPosition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class Organization(Base):
-    __tablename__ = "organizations"
+class PersonNote(Base):
+    """Context / due-diligence note about a person. Written by the user or an
+    MCP agent."""
+    __tablename__ = "person_notes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # Also unique on lower(trim(name)) (index uq_organizations_name_ci, migration 92)
-    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    context: Mapped[Optional[str]] = mapped_column(Text)
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("people.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # context|due_diligence|risk|relationship|todo
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")  # markdown
+    citations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [{conversation_id, message_id}]
+    author: Mapped[str] = mapped_column(String, nullable=False, default="user")  # user | agent
+    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class Conversation(Base):
-    __tablename__ = "conversations"
+# ── Intelligence ─────────────────────────────────────────────────────────────
+
+class AIConversation(Base):
+    """A conversation with the built-in LLM assistant (Intelligence page)."""
+    __tablename__ = "ai_conversations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # null = untitled/pending auto-suggest
@@ -313,11 +511,13 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class ConversationMessage(Base):
-    __tablename__ = "conversation_messages"
+class AIConversationMessage(Base):
+    __tablename__ = "ai_conversation_messages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    conversation_id: Mapped[int] = mapped_column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    ai_conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("ai_conversations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     role: Mapped[str] = mapped_column(String, nullable=False)  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -325,11 +525,14 @@ class ConversationMessage(Base):
 
 class CatchUpItem(Base):
     __tablename__ = "catchup_items"
-    __table_args__ = (UniqueConstraint("chat_telegram_id", name="uq_catchup_chat"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    contact_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    person_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("people.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String, default="pending")  # pending, handled, snoozed
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     snoozed_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -340,10 +543,11 @@ class CatchUpItem(Base):
 
 class CatchUpSummary(Base):
     __tablename__ = "catchup_summaries"
-    __table_args__ = (UniqueConstraint("chat_telegram_id", name="uq_catchup_summary_chat"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    chat_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     summary_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     recent_messages_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -367,6 +571,62 @@ class BriefingRun(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class BriefingEntry(Base):
+    __tablename__ = "briefing_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("briefing_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    # The person an 'important_contact' entry is about (they may span several
+    # conversations, so conversation_id is NULL for those entries)
+    person_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("people.id", ondelete="SET NULL"), nullable=True
+    )
+    conversation_title: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact'
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [{conversation_id, message_id}]
+
+
+class AgentReview(Base):
+    """How far an MCP agent has reviewed a conversation. It counts as
+    reviewed only while its history is complete, nothing newer than
+    reviewed_through_seq is stored, and no older message appeared since
+    (count of stored seqs <= reviewed_through_seq still <= reviewed_message_count)."""
+    __tablename__ = "agent_reviews"
+
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True, autoincrement=False
+    )
+    reviewed_through_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reviewed_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class AdminActionLog(Base):
+    """Audit trail of admin/moderation actions taken from the app."""
+    __tablename__ = "admin_action_log"
+    __table_args__ = (Index("ix_admin_action_log_conversation", "conversation_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    target_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+# ── Shield (scam detection) ──────────────────────────────────────────────────
+
 class ScamCheckRequest(Base):
     __tablename__ = "scam_check_requests"
 
@@ -376,9 +636,11 @@ class ScamCheckRequest(Base):
     status: Mapped[str] = mapped_column(String, default="pending")  # pending, awaiting_followup, completed, failed, expired
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     response_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    related_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    related_message_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    related_telegram_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    related_conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    related_message_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # internal message ids
+    related_identity_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     followup_request_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -386,22 +648,29 @@ class ScamCheckRequest(Base):
 
 
 class ScamFlag(Base):
+    """Per-sender verdict record."""
     __tablename__ = "scam_flags"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    identity_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
     source: Mapped[str] = mapped_column(String, nullable=False)  # local, cloud, manual
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     request_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     flagged_message_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    flagged_message_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    flagged_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    flagged_conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    flagged_message_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
     flagged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     synced_to_cloud: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Per-sender verdict record: 'active' = flagged scammer, 'dismissed' = the
-    # user cleared this sender; automated flagging never re-activates it.
+    # 'active' = flagged scammer, 'dismissed' = the user cleared this sender;
+    # automated flagging never re-activates it.
     status: Mapped[str] = mapped_column(String, default="active", server_default="active")
     dismissed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -412,8 +681,12 @@ class ScamReport(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     report_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    reported_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    reported_in_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reported_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
+    reported_in_conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
     chat_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     reporter_verdict: Mapped[str] = mapped_column(String, nullable=False)
     scam_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -442,9 +715,15 @@ class ScamFeedback(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     feedback_type: Mapped[str] = mapped_column(String, nullable=False)  # general, false_positive, missed_scam, feature_request, bug
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    related_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    related_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    related_flag_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    related_conversation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    related_message_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    related_flag_identity_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String, default="pending")  # pending, synced
     synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -489,53 +768,10 @@ class ScamAnalytics(Base):
     manual_checks: Mapped[int] = mapped_column(Integer, default=0)
     rescans: Mapped[int] = mapped_column(Integer, default=0)
 
-    # Chat type breakdown
-    scans_private: Mapped[int] = mapped_column(Integer, default=0)
+    # Conversation kind breakdown
+    scans_direct: Mapped[int] = mapped_column(Integer, default=0)
     scans_group: Mapped[int] = mapped_column(Integer, default=0)
     scans_channel: Mapped[int] = mapped_column(Integer, default=0)
 
     # System info (JSON)
     system_info_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-
-class BriefingEntry(Base):
-    __tablename__ = "briefing_entries"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("briefing_runs.id", ondelete="CASCADE"), nullable=False)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chat_name: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False)  # 'tracked' | 'briefing' | 'important_contact'
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
-    sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON: [{chat_id, telegram_id}]
-
-
-class PersonNote(Base):
-    """Context / due-diligence note about a person (any Telegram user, keyed by
-    telegram_id like ContactPosition). Written by the user or an MCP agent."""
-    __tablename__ = "person_notes"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String, nullable=False)  # context|due_diligence|risk|relationship|todo
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False, default="")  # markdown
-    citations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [{chat_id, tg_message_id}]
-    author: Mapped[str] = mapped_column(String, nullable=False, default="user")  # user | agent
-    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
-class AgentReview(Base):
-    """How far an MCP agent has reviewed a chat. The chat counts as reviewed
-    only while its history is complete, nothing newer than
-    reviewed_through_tg_id is stored, and no older message appeared since
-    (count of stored ids <= reviewed_through_tg_id still <= reviewed_message_count)."""
-    __tablename__ = "agent_reviews"
-
-    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # telegram_id
-    reviewed_through_tg_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    reviewed_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    agent_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)

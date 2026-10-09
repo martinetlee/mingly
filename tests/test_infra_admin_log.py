@@ -1,40 +1,41 @@
-"""Admin action log: raw-SQL datetimes come back as strings from SQLite."""
+"""Admin action log: recorded per conversation, targets as identities."""
+
+from unittest.mock import patch
 
 import pytest
 
-from backend.api.admin import _db_datetime, _log_admin_action
-from backend.db.models import Chat
+from backend.api.admin import _log_admin_action
+from tests import factories as f
 
 
 @pytest.mark.asyncio
-async def test_action_log_returns_utc_iso(api, db):
-    db.add(Chat(telegram_id=-100777, name="Admins", type="group"))
-    await db.commit()
-    await _log_admin_action(db, -100777, "ban", target_user_id=42, details="spam")
+async def test_action_log_returns_utc_iso_and_target_person(api, db):
+    group = await f.conversation(db, "-100777", title="Admins", kind="group")
+    spammer = await f.identity(db, "42", display_name="Spammer")
+    await _log_admin_action(db, group.id, "ban", target_identity_id=spammer.id, details="spam")
 
-    r = await api.get("/api/admin/-100777/action-log")
+    r = await api.get(f"/api/admin/{group.id}/action-log")
     assert r.status_code == 200
-    rows = r.json()
-    assert len(rows) == 1
-    assert rows[0]["action"] == "ban" and rows[0]["target_user_id"] == 42
-    assert rows[0]["created_at"].endswith("Z")
-    assert "T" in rows[0]["created_at"]
-
-
-def test_db_datetime_parses_sqlite_strings():
-    assert _db_datetime(None) is None
-    assert _db_datetime("2026-10-06 12:30:00").hour == 12
-    assert _db_datetime("2026-10-06 12:30:00.123456").microsecond == 123456
-    assert _db_datetime("garbage") is None
+    [row] = r.json()
+    assert row["action"] == "ban" and row["conversation_id"] == group.id
+    assert row["target_identity_id"] == spammer.id and row["target_person_id"] == spammer.person_id
+    assert row["created_at"].endswith("Z") and "T" in row["created_at"]
 
 
 @pytest.mark.asyncio
 async def test_admin_action_without_telegram_is_503(api, db):
-    from unittest.mock import patch
-
-    db.add(Chat(telegram_id=-100778, name="Admins2", type="group"))
-    await db.commit()
+    group = await f.conversation(db, "-100778", title="Admins2", kind="group")
     with patch("backend.telegram.client.get_client", return_value=None):
-        r = await api.get("/api/admin/-100778/invite-links")
+        r = await api.get(f"/api/admin/{group.id}/invite-links")
     assert r.status_code == 503
     assert isinstance(r.json()["detail"], str)
+
+
+@pytest.mark.asyncio
+async def test_admin_actions_need_a_telegram_group(api, db):
+    dm = await f.conversation(db, "77", title="Ann")
+    assert (await api.get(f"/api/admin/{dm.id}/action-log")).status_code == 400
+    mail = await f.conversation(db, "thread-1", title="Hi", kind="email_thread", channel="gmail")
+    r = await api.get(f"/api/admin/{mail.id}/action-log")
+    assert r.status_code == 409 and r.json()["code"] == "unsupported_channel"
+    assert (await api.get("/api/admin/999999/action-log")).status_code == 404

@@ -13,9 +13,10 @@ work, so walks never overlap:
 4. every 15 minutes, top up complete DMs whose activity moved since their
    last top-up.
 
-Coverage (``chat_history_coverage``) is the durable state. The invariant: every
-message with ``walk_cursor_tg_id <= id <= newest_contiguous_tg_id`` is stored,
-and ``history_complete`` means the range reaches the chat's first message.
+Coverage (``history_coverage``, per conversation, in Telegram message ids =
+``messages.seq``) is the durable state. The invariant: every message with
+``walk_cursor_seq <= seq <= newest_contiguous_seq`` is stored, and
+``history_complete`` means the range reaches the chat's first message.
 
 - A full walk pages newest→oldest with ``offset_id`` and never jumps. The
   cursor is saved with every page, in the same transaction as the page, so
@@ -23,8 +24,8 @@ and ``history_complete`` means the range reaches the chat's first message.
   Telethon's iterator is exhausted. It handles MessageEmpty, short pages
   from "buggy" channels and the non-slice single response, so short pages
   are never taken as the end.
-- A top-up walks ``min_id=newest_contiguous_tg_id`` upwards (``reverse=True``).
-  It advances ``newest_contiguous_tg_id`` page by page, so missed live
+- A top-up walks ``min_id=newest_contiguous_seq`` upwards (``reverse=True``).
+  It advances ``newest_contiguous_seq`` page by page, so missed live
   updates can't leave holes. Messages that arrive during a full walk are
   above its starting point and are fetched by the top-up that follows
   every walk.
@@ -51,12 +52,13 @@ from telethon.errors import FloodWaitError
 from backend import prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Chat, ChatHistoryCoverage
+from backend.db.models import Account, Conversation, HistoryCoverage
 from backend.jobs import get_running, run_single
 from backend.serialization import iso_utc
 from backend.tasks import spawn
-from backend.telegram.convert import is_storable, message_to_row
-from backend.telegram.coordinator import broadcast_chats_synced, coordinator
+from backend.telegram import ids
+from backend.telegram.convert import rows_for
+from backend.telegram.coordinator import broadcast_conversations_synced, coordinator
 from backend.telegram.runtime import runtime
 from backend.ws.manager import ws_manager
 
@@ -87,9 +89,13 @@ def _include_bots() -> bool:
 
 
 def _dm_filter():
-    cond = Chat.type == "private"
+    """Telegram direct conversations (bots only with the pref)."""
+    cond = and_(
+        Conversation.kind == "direct",
+        Conversation.account_id.in_(select(Account.id).where(Account.channel == ids.CHANNEL)),
+    )
     if not _include_bots():
-        cond = and_(cond, Chat.is_bot == False)  # noqa: E712
+        cond = and_(cond, Conversation.is_bot == False)  # noqa: E712
     return cond
 
 
@@ -121,7 +127,7 @@ class DMArchive:
             "current_chat": dict(self.current_chat) if self.current_chat else None,
             "started_at": iso_utc(self.started_at),
             "last_topup_at": iso_utc(self.last_topup_at),
-            "groups_queued": sum(1 for cid in self._queue if self._queue_types.get(cid) != "private"),
+            "groups_queued": sum(1 for cid in self._queue if self._queue_types.get(cid) != "direct"),
         }
 
     async def refresh_status(self) -> dict:
@@ -130,23 +136,26 @@ class DMArchive:
 
     async def _refresh_counts(self) -> None:
         async with AsyncSessionLocal() as db:
-            cov = ChatHistoryCoverage
+            cov = HistoryCoverage
             complete = cov.history_complete == True  # noqa: E712
             # case() → integer sums (a Boolean-typed SUM would come back as bool)
             row = (await db.execute(
                 select(
-                    func.count(Chat.id),
+                    func.count(Conversation.id),
                     func.sum(case((complete, 1), else_=0)),
                     func.sum(case((and_(~func.coalesce(complete, False), cov.error.isnot(None)), 1), else_=0)),
                 )
-                .select_from(Chat)
-                .outerjoin(cov, cov.chat_id == Chat.telegram_id)
+                .select_from(Conversation)
+                .outerjoin(cov, cov.conversation_id == Conversation.id)
                 .where(_dm_filter())
             )).one()
             bots = 0
             if not _include_bots():
                 bots = (await db.execute(
-                    select(func.count(Chat.id)).where(Chat.type == "private", Chat.is_bot == True)  # noqa: E712
+                    select(func.count(Conversation.id)).where(
+                        Conversation.kind == "direct", Conversation.is_bot == True,  # noqa: E712
+                        Conversation.account_id.in_(select(Account.id).where(Account.channel == ids.CHANNEL)),
+                    )
                 )).scalar() or 0
         total, complete, failed = int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
         self._counts = {
@@ -232,46 +241,47 @@ class DMArchive:
         for cid in list(self._waiters):
             self._resolve(cid)
 
-    async def request_chat(self, chat_id: int, priority: bool = True) -> None:
-        """Queue a full walk (or a top-up when already complete) for any chat,
-        DM or group, ahead of the DM backlog."""
-        if chat_id not in self._queue:
+    async def request_conversation(self, conversation_id: int, priority: bool = True) -> None:
+        """Queue a full walk (or a top-up when already complete) for any
+        Telegram conversation, DM or group, ahead of the DM backlog."""
+        if conversation_id not in self._queue:
             async with AsyncSessionLocal() as db:
-                chat = await crud.get_chat_by_telegram_id(db, chat_id)
-            self._queue_types[chat_id] = chat.type if chat is not None else None
+                conv = await crud.get_conversation(db, conversation_id)
+            self._queue_types[conversation_id] = conv.kind if conv is not None else None
             if priority:
-                self._queue.insert(0, chat_id)
+                self._queue.insert(0, conversation_id)
             else:
-                self._queue.append(chat_id)
+                self._queue.append(conversation_id)
         elif priority:
-            self._queue.remove(chat_id)
-            self._queue.insert(0, chat_id)
+            self._queue.remove(conversation_id)
+            self._queue.insert(0, conversation_id)
         self._ensure_worker()
         self._poke()
         await self._broadcast()
 
-    def is_queued(self, chat_id: int) -> bool:
-        return chat_id in self._queue or (self.current_chat or {}).get("telegram_id") == chat_id
+    def is_queued(self, conversation_id: int) -> bool:
+        return conversation_id in self._queue or (self.current_chat or {}).get("conversation_id") == conversation_id
 
-    async def wait_for_chat(self, chat_id: int, timeout: float) -> Optional[ChatHistoryCoverage]:
-        """Wait up to ``timeout`` seconds for a queued/running chat to finish,
-        then return its coverage row (complete or not; None if never walked)."""
-        if self.is_queued(chat_id) and timeout > 0:
+    async def wait_for_conversation(self, conversation_id: int, timeout: float) -> Optional[HistoryCoverage]:
+        """Wait up to ``timeout`` seconds for a queued/running conversation to
+        finish, then return its coverage row (complete or not; None if never
+        walked)."""
+        if self.is_queued(conversation_id) and timeout > 0:
             fut = asyncio.get_running_loop().create_future()
-            self._waiters.setdefault(chat_id, []).append(fut)
+            self._waiters.setdefault(conversation_id, []).append(fut)
             try:
                 await asyncio.wait_for(asyncio.shield(fut), timeout)
             except asyncio.TimeoutError:
                 pass
             finally:
-                waiters = self._waiters.get(chat_id)
+                waiters = self._waiters.get(conversation_id)
                 if waiters and fut in waiters:
                     waiters.remove(fut)
         async with AsyncSessionLocal() as db:
-            return (await crud.get_coverage(db, [chat_id])).get(chat_id)
+            return (await crud.get_coverage(db, [conversation_id])).get(conversation_id)
 
-    def _resolve(self, chat_id: int) -> None:
-        for fut in self._waiters.pop(chat_id, []):
+    def _resolve(self, conversation_id: int) -> None:
+        for fut in self._waiters.pop(conversation_id, []):
             if not fut.done():
                 fut.set_result(None)
 
@@ -318,9 +328,9 @@ class DMArchive:
         await self._refresh_counts()
 
         if self._queue:
-            chat_id = self._queue.pop(0)
-            await self._process(client, chat_id, preemptible=False)
-            self._queue_types.pop(chat_id, None)
+            conversation_id = self._queue.pop(0)
+            await self._process(client, conversation_id, preemptible=False)
+            self._queue_types.pop(conversation_id, None)
             return
         if self.paused:
             await self._set_state("paused")
@@ -328,9 +338,9 @@ class DMArchive:
             await self._wait_wake(None)
             return
 
-        chat_id, retry_in = await self._next_backlog()
-        if chat_id is not None:
-            await self._process(client, chat_id, preemptible=True)
+        conversation_id, retry_in = await self._next_backlog()
+        if conversation_id is not None:
+            await self._process(client, conversation_id, preemptible=True)
             return
 
         now = datetime.utcnow()
@@ -378,86 +388,96 @@ class DMArchive:
         """Most recently active incomplete DM that isn't backing off, plus the
         seconds until the next backed-off DM becomes eligible."""
         now = datetime.utcnow()
-        cov = ChatHistoryCoverage
+        cov = HistoryCoverage
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(
-                select(Chat.telegram_id, cov.error, cov.attempts, cov.last_walk_at)
-                .outerjoin(cov, cov.chat_id == Chat.telegram_id)
-                .where(_dm_filter(), or_(cov.chat_id.is_(None), cov.history_complete == False))  # noqa: E712
-                .order_by(Chat.last_activity_at.is_(None), Chat.last_activity_at.desc(), Chat.telegram_id)
+                select(Conversation.id, cov.error, cov.attempts, cov.last_walk_at)
+                .outerjoin(cov, cov.conversation_id == Conversation.id)
+                .where(_dm_filter(), or_(cov.conversation_id.is_(None), cov.history_complete == False))  # noqa: E712
+                .order_by(
+                    Conversation.last_activity_at.is_(None), Conversation.last_activity_at.desc(), Conversation.id,
+                )
             )).all()
         retry_in: Optional[float] = None
-        for chat_id, error, attempts, last_walk_at in rows:
+        for conversation_id, error, attempts, last_walk_at in rows:
             if error is None or last_walk_at is None:
-                return chat_id, None
+                return conversation_id, None
             due = last_walk_at + _retry_after(attempts or 1)
             if due <= now:
-                return chat_id, None
+                return conversation_id, None
             wait = (due - now).total_seconds()
             retry_in = wait if retry_in is None else min(retry_in, wait)
         return None, retry_in
 
     async def _topup_pass(self, client) -> None:
         """Top up complete DMs whose activity moved since their last top-up."""
-        cov = ChatHistoryCoverage
+        cov = HistoryCoverage
         async with AsyncSessionLocal() as db:
-            ids = (await db.execute(
-                select(Chat.telegram_id)
-                .join(cov, cov.chat_id == Chat.telegram_id)
+            due = (await db.execute(
+                select(Conversation.id)
+                .join(cov, cov.conversation_id == Conversation.id)
                 .where(
                     _dm_filter(),
                     cov.history_complete == True,  # noqa: E712
                     or_(
                         cov.last_topup_at.is_(None),
-                        and_(Chat.last_activity_at.isnot(None), Chat.last_activity_at > cov.last_topup_at),
+                        and_(
+                            Conversation.last_activity_at.isnot(None),
+                            Conversation.last_activity_at > cov.last_topup_at,
+                        ),
                     ),
                 )
-                .order_by(Chat.last_activity_at.is_(None), Chat.last_activity_at.desc())
+                .order_by(Conversation.last_activity_at.is_(None), Conversation.last_activity_at.desc())
             )).scalars().all()
-        for chat_id in ids:
+        for conversation_id in due:
             if self._should_yield():
                 return  # resumed on the next pass; nothing marked done
-            await self._process(client, chat_id, preemptible=True)
+            await self._process(client, conversation_id, preemptible=True)
         self.last_topup_at = datetime.utcnow()
         await self._broadcast(force=True)
 
     # -- one chat ------------------------------------------------------------------
 
-    async def _process(self, client, chat_id: int, *, preemptible: bool) -> None:
+    async def _process(self, client, conversation_id: int, *, preemptible: bool) -> None:
+        """Walk / top up one Telegram conversation."""
         async with AsyncSessionLocal() as db:
-            chat = await crud.get_chat_by_telegram_id(db, chat_id)
-            covered = await crud.get_or_create_coverage(db, chat_id)
+            conv = await crud.get_conversation(db, conversation_id)
+            if conv is None or conv.account is None or conv.account.channel != ids.CHANNEL:
+                self._resolve(conversation_id)
+                return
+            covered = await crud.get_or_create_coverage(db, conversation_id)
             await db.commit()
             complete = covered.history_complete
-        self.current_chat = {"telegram_id": chat_id, "name": chat.name if chat else str(chat_id)}
+        peer = ids.peer_id_of(conv)
+        self.current_chat = {"conversation_id": conversation_id, "title": conv.title}
         await self._set_state("running")
         await self._broadcast()
-        forum = bool(chat and chat.is_forum)
+        forum = bool(conv.is_forum)
         changed = False
         try:
             while True:
                 try:
                     if not complete:
-                        changed |= await self._walk(client, chat_id, forum, preemptible)
+                        changed |= await self._walk(client, conversation_id, peer, forum, preemptible)
                         complete = True
-                    changed |= await self._topup(client, chat_id, forum, preemptible)
+                    changed |= await self._topup(client, conversation_id, peer, forum, preemptible)
                     break
                 except FloodWaitError as e:
                     await self._flood_sleep(e.seconds)
-            await self._record_success(chat_id)
-            self._resolve(chat_id)
+            await self._record_success(conversation_id)
+            self._resolve(conversation_id)
         except _Preempted:
             pass  # cursor saved with the last page; resumed later
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.info("DM archive: chat %s failed: %s", chat_id, e)
-            await self._record_error(chat_id, e)
-            self._resolve(chat_id)
+            logger.info("DM archive: chat %s failed: %s", conversation_id, e)
+            await self._record_error(conversation_id, e)
+            self._resolve(conversation_id)
         finally:
             self.current_chat = None
             if changed:
-                await broadcast_chats_synced([chat_id])
+                await broadcast_conversations_synced([conversation_id])
             await self._refresh_counts()
             await self._broadcast()
 
@@ -481,19 +501,19 @@ class DMArchive:
         self.flood_wait_until = None
         await self._set_state("running")
 
-    async def _walk(self, client, chat_id: int, forum: bool, preemptible: bool) -> bool:
+    async def _walk(self, client, conversation_id: int, peer: int, forum: bool, preemptible: bool) -> bool:
         """Full walk newest→oldest from the saved cursor. Returns whether
         anything new was stored. Raises _Preempted at a page boundary."""
         async with AsyncSessionLocal() as db:
-            cov = await crud.get_or_create_coverage(db, chat_id)
-            cursor = cov.walk_cursor_tg_id
-            top = cov.newest_contiguous_tg_id if cursor is not None else None
+            cov = await crud.get_or_create_coverage(db, conversation_id)
+            cursor = cov.walk_cursor_seq
+            top = cov.newest_contiguous_seq if cursor is not None else None
         fresh = cursor is None
         changed = False
         batch: list = []
         fetched = 0
         await self._acquire()
-        async for msg in client.iter_messages(chat_id, limit=None, offset_id=cursor or 0):
+        async for msg in client.iter_messages(peer, limit=None, offset_id=cursor or 0):
             fetched += 1
             if fetched > 1 and fetched % PAGE_SIZE == 1:
                 await self._acquire()  # Telethon fetched another page
@@ -501,83 +521,81 @@ class DMArchive:
                 top = msg.id  # newest message at walk start; later ones → top-up
             batch.append(msg)
             if len(batch) >= PAGE_SIZE:
-                changed |= await self._save_walk_page(chat_id, batch, top, forum)
+                changed |= await self._save_walk_page(conversation_id, batch, top, forum)
                 batch = []
                 if preemptible and self._should_yield():
                     raise _Preempted()
         if batch:
-            changed |= await self._save_walk_page(chat_id, batch, top, forum)
+            changed |= await self._save_walk_page(conversation_id, batch, top, forum)
         async with AsyncSessionLocal() as db:
-            cov = await crud.get_or_create_coverage(db, chat_id)
+            cov = await crud.get_or_create_coverage(db, conversation_id)
             cov.history_complete = True
-            if cov.newest_contiguous_tg_id is None:
-                cov.newest_contiguous_tg_id = top or 0  # empty chat: top-up from the start
+            if cov.newest_contiguous_seq is None:
+                cov.newest_contiguous_seq = top or 0  # empty chat: top-up from the start
             cov.last_walk_at = datetime.utcnow()
             await db.commit()
         return changed
 
-    async def _save_walk_page(self, chat_id: int, batch: list, top: Optional[int], forum: bool) -> bool:
-        rows = [message_to_row(m, chat_id, forum=forum) for m in batch if is_storable(m)]
+    async def _save_walk_page(self, conversation_id: int, batch: list, top: Optional[int], forum: bool) -> bool:
         lowest = min(m.id for m in batch)
         async with AsyncSessionLocal() as db:
-            res = await crud.save_messages(db, rows, commit=False)
-            cov = await crud.get_or_create_coverage(db, chat_id)
-            cov.walk_cursor_tg_id = lowest
-            cov.oldest_tg_id = lowest if cov.oldest_tg_id is None else min(cov.oldest_tg_id, lowest)
-            if cov.newest_contiguous_tg_id is None:
-                cov.newest_contiguous_tg_id = top
+            res = await crud.save_messages(db, await rows_for(db, conversation_id, batch, forum=forum), commit=False)
+            cov = await crud.get_or_create_coverage(db, conversation_id)
+            cov.walk_cursor_seq = lowest
+            cov.oldest_seq = lowest if cov.oldest_seq is None else min(cov.oldest_seq, lowest)
+            if cov.newest_contiguous_seq is None:
+                cov.newest_contiguous_seq = top
             cov.last_walk_at = datetime.utcnow()
             await db.commit()  # page + cursor in one transaction
         return bool(res["created"] or res["updated"])
 
-    async def _topup(self, client, chat_id: int, forum: bool, preemptible: bool) -> bool:
-        """Everything above newest_contiguous_tg_id, oldest first, advancing
+    async def _topup(self, client, conversation_id: int, peer: int, forum: bool, preemptible: bool) -> bool:
+        """Everything above newest_contiguous_seq, oldest first, advancing
         it page by page."""
         async with AsyncSessionLocal() as db:
-            cov = await crud.get_or_create_coverage(db, chat_id)
-            min_id = cov.newest_contiguous_tg_id or 0
+            cov = await crud.get_or_create_coverage(db, conversation_id)
+            min_id = cov.newest_contiguous_seq or 0
         changed = False
         batch: list = []
         fetched = 0
         await self._acquire()
-        async for msg in client.iter_messages(chat_id, limit=None, min_id=min_id, reverse=True):
+        async for msg in client.iter_messages(peer, limit=None, min_id=min_id, reverse=True):
             fetched += 1
             if fetched > 1 and fetched % PAGE_SIZE == 1:
                 await self._acquire()
             batch.append(msg)
             if len(batch) >= PAGE_SIZE:
-                changed |= await self._save_topup_page(chat_id, batch, forum)
+                changed |= await self._save_topup_page(conversation_id, batch, forum)
                 batch = []
                 if preemptible and self._should_yield():
                     raise _Preempted()
-        changed |= await self._save_topup_page(chat_id, batch, forum, done=True)
+        changed |= await self._save_topup_page(conversation_id, batch, forum, done=True)
         return changed
 
-    async def _save_topup_page(self, chat_id: int, batch: list, forum: bool, done: bool = False) -> bool:
-        rows = [message_to_row(m, chat_id, forum=forum) for m in batch if is_storable(m)]
+    async def _save_topup_page(self, conversation_id: int, batch: list, forum: bool, done: bool = False) -> bool:
         async with AsyncSessionLocal() as db:
-            res = await crud.save_messages(db, rows, commit=False)
-            cov = await crud.get_or_create_coverage(db, chat_id)
+            res = await crud.save_messages(db, await rows_for(db, conversation_id, batch, forum=forum), commit=False)
+            cov = await crud.get_or_create_coverage(db, conversation_id)
             if batch:
                 highest = max(m.id for m in batch)
-                cov.newest_contiguous_tg_id = max(cov.newest_contiguous_tg_id or 0, highest)
-                if cov.oldest_tg_id is None:
-                    cov.oldest_tg_id = min(m.id for m in batch)
+                cov.newest_contiguous_seq = max(cov.newest_contiguous_seq or 0, highest)
+                if cov.oldest_seq is None:
+                    cov.oldest_seq = min(m.id for m in batch)
             if done:
                 cov.last_topup_at = datetime.utcnow()
             await db.commit()
         return bool(res["created"] or res["updated"])
 
-    async def _record_success(self, chat_id: int) -> None:
+    async def _record_success(self, conversation_id: int) -> None:
         async with AsyncSessionLocal() as db:
-            cov = await crud.get_or_create_coverage(db, chat_id)
+            cov = await crud.get_or_create_coverage(db, conversation_id)
             cov.error = None
             cov.attempts = 0
             await db.commit()
 
-    async def _record_error(self, chat_id: int, exc: Exception) -> None:
+    async def _record_error(self, conversation_id: int, exc: Exception) -> None:
         async with AsyncSessionLocal() as db:
-            cov = await crud.get_or_create_coverage(db, chat_id)
+            cov = await crud.get_or_create_coverage(db, conversation_id)
             cov.error = f"{type(exc).__name__}: {exc}"[:500]
             cov.attempts = (cov.attempts or 0) + 1
             cov.last_walk_at = datetime.utcnow()
@@ -589,8 +607,8 @@ archive = DMArchive()
 # Module-level API (the contract other modules code against)
 get_status = archive.get_status
 refresh_status = archive.refresh_status
-request_chat = archive.request_chat
-wait_for_chat = archive.wait_for_chat
+request_conversation = archive.request_conversation
+wait_for_conversation = archive.wait_for_conversation
 start = archive.start
 pause = archive.pause
 stop = archive.stop

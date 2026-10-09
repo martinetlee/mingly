@@ -1,18 +1,17 @@
-"""Replays migrations 90-92 against legacy states. Statements are executed
-strictly here (the runner tolerates "no such column", which would hide typos)."""
+"""Schema-level invariants of the CRM tables (once established by v1
+migrations 90-92, now part of the v2 schema): case/whitespace-insensitive
+unique tag and organization names, FK-keyed positions, and cascades that
+leave no orphaned tag assignments or board state."""
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
-from backend.db.migrations.areas import relations
+from tests import factories as f
 
 
-async def _run(engine, version, setup_sql=()):
-    stmts = next(s for v, _d, s in relations.MIGRATIONS if v == version)
+async def _exec(engine, *stmts):
     async with engine.connect() as conn:
-        await conn.exec_driver_sql("BEGIN")
-        for stmt in setup_sql:
-            await conn.execute(sa.text(stmt))
         for stmt in stmts:
             await conn.execute(sa.text(stmt))
         await conn.commit()
@@ -24,95 +23,71 @@ async def _rows(engine, sql):
 
 
 @pytest.mark.asyncio
-async def test_stage_split_preserves_cards_and_frees_shared_tags(db_engine):
-    await _run(db_engine, 90, [
+@pytest.mark.parametrize("table", ["tags", "organizations"])
+async def test_names_are_unique_case_and_whitespace_insensitively(db_engine, table):
+    cols = "name, color, is_default, created_at" if table == "tags" else "name, created_at"
+    vals = "'{}', 'slate', 0, '2026-01-01'" if table == "tags" else "'{}', '2026-01-01'"
+    await _exec(db_engine, f"DELETE FROM {table}", f"INSERT INTO {table} ({cols}) VALUES ({vals.format('Work')})")
+    for variant in ("work", " WORK ", "Work"):
+        with pytest.raises(IntegrityError):
+            await _exec(db_engine, f"INSERT INTO {table} ({cols}) VALUES ({vals.format(variant)})")
+    await _exec(db_engine, f"INSERT INTO {table} ({cols}) VALUES ({vals.format('Workshop')})")
+
+
+@pytest.mark.asyncio
+async def test_one_position_per_person_and_org_and_org_delete_detaches(db_engine, db):
+    pid = (await f.identity(db, "1")).person_id
+    await _exec(
+        db_engine,
+        "INSERT INTO organizations (id, name, created_at) VALUES (1, 'Acme', '2026-01-01')",
+        f"INSERT INTO person_positions (person_id, organization_id, organization, is_active, created_at) "
+        f"VALUES ({pid}, 1, 'Acme', 1, '2026-01-01')",
+    )
+    with pytest.raises(IntegrityError):
+        await _exec(db_engine, f"INSERT INTO person_positions (person_id, organization_id, organization, is_active, "
+                               f"created_at) VALUES ({pid}, 1, 'Acme', 0, '2026-01-01')")
+    # Detached history (organization_id NULL) may repeat
+    for _ in range(2):
+        await _exec(db_engine, f"INSERT INTO person_positions (person_id, organization_id, organization, is_active, "
+                               f"created_at) VALUES ({pid}, NULL, 'Old Co', 0, '2026-01-01')")
+    await _exec(db_engine, "DELETE FROM organizations WHERE id = 1")
+    rows = await _rows(db_engine, "SELECT organization_id, organization FROM person_positions ORDER BY id")
+    assert rows == [(None, "Acme"), (None, "Old Co"), (None, "Old Co")]
+    await _exec(db_engine, f"DELETE FROM people WHERE id = {pid}")
+    assert await _rows(db_engine, "SELECT COUNT(*) FROM person_positions") == [(0,)]
+
+
+@pytest.mark.asyncio
+async def test_conversation_delete_cascades_tags_and_board_state(db_engine, db):
+    conv = await f.conversation(db, "-1", title="G", kind="group")
+    await _exec(
+        db_engine,
+        "INSERT INTO tags (id, name, color, is_default, created_at) VALUES (100, 'T', 'slate', 0, '2026-01-01')",
+        "INSERT INTO workspaces (id, name, color, match_mode, view_mode, position, created_at) "
+        "VALUES (1, 'W', 'indigo', 'any', 'kanban', 0, '2026-01-01')",
+        f"INSERT INTO conversation_tags (conversation_id, tag_id) VALUES ({conv.id}, 100)",
+        f"INSERT INTO workspace_conversation_overrides (workspace_id, conversation_id) VALUES (1, {conv.id})",
+    )
+    with pytest.raises(IntegrityError):  # one assignment per (conversation, tag)
+        await _exec(db_engine, f"INSERT INTO conversation_tags (conversation_id, tag_id) VALUES ({conv.id}, 100)")
+    await _exec(db_engine, f"DELETE FROM conversations WHERE id = {conv.id}")
+    assert await _rows(db_engine, "SELECT COUNT(*) FROM conversation_tags") == [(0,)]
+    assert await _rows(db_engine, "SELECT COUNT(*) FROM workspace_conversation_overrides") == [(0,)]
+
+
+@pytest.mark.asyncio
+async def test_tag_delete_cascades_rules_columns_and_unscopes_boards(db_engine):
+    await _exec(
+        db_engine,
+        "INSERT INTO tags (id, name, color, is_default, created_at) VALUES "
+        "(100, 'Stream', 'slate', 0, '2026-01-01'), (101, 'Stage', 'slate', 0, '2026-01-01')",
+        "INSERT INTO workspaces (id, name, color, match_mode, view_mode, position, created_at) "
+        "VALUES (1, 'W', 'indigo', 'any', 'kanban', 0, '2026-01-01')",
+        "INSERT INTO workspace_tags (workspace_id, tag_id, is_exclusion) VALUES (1, 100, 0)",
+        "INSERT INTO workspace_boards (id, workspace_id, name, scope_tag_id, position) VALUES (1, 1, 'Main', 100, 0)",
+        "INSERT INTO workspace_columns (workspace_id, tag_id, board_id, label, position) VALUES (1, 101, 1, 'S', 0)",
         "DELETE FROM tags",
-        # 1 = include tag "Investors"; 2 = stage "Done" shared by two workspaces; 3 = orphan stage
-        "INSERT INTO tags (id, name, color, category, is_default, created_at) VALUES "
-        "(1,'Investors','slate',NULL,0,'2026-01-01'), (2,'Done','slate','stage',0,'2026-01-01'),"
-        "(3,'Old','slate','stage',0,'2026-01-01'), (4,'Sales','slate',NULL,0,'2026-01-01')",
-        "INSERT INTO workspaces (id, name, color, match_mode, view_mode, position, created_at) VALUES "
-        "(1,'A','indigo','any','kanban',0,'2026-01-01'), (2,'B','indigo','any','kanban',1,'2026-01-01')",
-        "INSERT INTO workspace_tags (workspace_id, tag_id, is_exclusion) VALUES (1,1,0),(2,4,0)",
-        "INSERT INTO workspace_boards (id, workspace_id, name, position) VALUES (1,1,'Main',0),(2,2,'Main',0)",
-        # col 1: backed by A's own include tag (ambiguous); col 2: Done (owner);
-        # col 3: B reuses Done (must split, cards copied for B members)
-        "INSERT INTO workspace_columns (id, workspace_id, tag_id, board_id, label, position) VALUES "
-        "(1,1,1,1,'investors',0),(2,1,2,1,'Done',1),(3,2,2,2,'Done',0)",
-        "INSERT INTO chat_tags (chat_id, tag_id) VALUES (10,1),(10,2),(20,4),(20,2),(30,3)",
-    ])
-    cols = dict(await _rows(db_engine, "SELECT id, tag_id FROM workspace_columns"))
-    assert cols[2] == 2  # lowest-id user of a pure stage tag keeps it
-    assert cols[1] not in (1, 2) and cols[3] not in (1, 2) and cols[1] != cols[3]
-    cats = dict(await _rows(db_engine, "SELECT id, category FROM tags"))
-    assert cats[cols[1]] == cats[cols[3]] == "stage"
-    assert 3 not in cats  # orphan stage tag removed
-    tags = set(await _rows(db_engine, "SELECT chat_id, tag_id FROM chat_tags"))
-    assert (10, 1) in tags and (20, 4) in tags  # membership untouched
-    assert (10, cols[1]) not in tags  # ambiguous placement not invented
-    assert (20, cols[3]) in tags  # B's card kept its place on B's board
-    assert (30, 3) not in tags
-    names = dict(await _rows(db_engine, "SELECT id, name FROM tags"))
-    assert names[cols[3]] == f"Done · stage {cols[3]}"
-
-
-@pytest.mark.asyncio
-async def test_tag_dedupe_merges_case_variants_and_spares_stage_tags(db_engine):
-    await _run(db_engine, 91, [
-        "DROP INDEX IF EXISTS uq_tags_name_ci",
-        "DELETE FROM tags",
-        "INSERT INTO tags (id, name, color, category, is_default, created_at) VALUES "
-        "(1,'Work','slate',NULL,1,'2026-01-01'), (2,'work ','slate',NULL,0,'2026-01-01'),"
-        "(3,'WORK','slate','stage',0,'2026-01-01'), (4,'Other','slate',NULL,0,'2026-01-01')",
-        "INSERT INTO workspaces (id, name, color, match_mode, view_mode, position, created_at) VALUES "
-        "(1,'A','indigo','any','kanban',0,'2026-01-01')",
-        "INSERT INTO workspace_tags (workspace_id, tag_id, is_exclusion) VALUES (1,2,0)",
-        "INSERT INTO workspace_boards (id, workspace_id, name, scope_tag_id, position) VALUES (1,1,'Main',2,0)",
-        "INSERT INTO workspace_columns (id, workspace_id, tag_id, board_id, label, position) VALUES (1,1,3,1,'Work',0)",
-        "INSERT INTO chat_tags (chat_id, tag_id) VALUES (10,1),(10,2),(20,2),(30,3)",
-    ])
-    names = dict(await _rows(db_engine, "SELECT id, name FROM tags"))
-    assert 2 not in names and names[1] == "Work"
-    assert names[3] == "WORK · stage 3"  # stage tag kept, renamed out of the way
-    assert set(await _rows(db_engine, "SELECT chat_id, tag_id FROM chat_tags")) == {(10, 1), (20, 1), (30, 3)}
-    assert await _rows(db_engine, "SELECT tag_id FROM workspace_tags") == [(1,)]
-    assert await _rows(db_engine, "SELECT scope_tag_id FROM workspace_boards") == [(1,)]
-    with pytest.raises(Exception):
-        await _run(db_engine, 91, ["INSERT INTO tags (name, color, is_default, created_at) VALUES (' work','x',0,'2026-01-01')"])
-
-
-@pytest.mark.asyncio
-async def test_org_fk_backfill_from_legacy_positions(db_engine):
-    await _run(db_engine, 92, [
-        "DROP INDEX IF EXISTS uq_organizations_name_ci",
-        "DROP TABLE contact_positions",
-        # legacy shape (migration 21)
-        "CREATE TABLE contact_positions (id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, "
-        "organization VARCHAR NOT NULL, title VARCHAR, is_active INTEGER NOT NULL DEFAULT 1, ended_at TEXT, "
-        "created_at DATETIME NOT NULL DEFAULT (datetime('now')), UNIQUE(telegram_id, organization))",
-        "INSERT INTO organizations (id, name, context, created_at) VALUES "
-        "(1,'Acme',NULL,'2026-01-01'), (2,'acme ','ctx','2026-01-02')",
-        "INSERT INTO contact_positions (id, telegram_id, organization, title, is_active) VALUES "
-        "(1,100,'Acme',NULL,0), (2,100,'ACME','CEO',1), (3,200,' acme',NULL,1),"
-        "(4,300,'Beta Corp','Eng',1), (5,300,'',NULL,1)",
-    ])
-    orgs = await _rows(db_engine, "SELECT id, name, context FROM organizations ORDER BY id")
-    assert orgs[0] == (2, "acme", "ctx")  # keeper: has context; trimmed
-    assert orgs[1][1] == "Beta Corp"
-    beta_id = orgs[1][0]
-    pos = await _rows(db_engine, "SELECT id, telegram_id, organization_id, organization, title FROM contact_positions ORDER BY id")
-    assert pos == [
-        (2, 100, 2, "acme", "CEO"),  # active+titled row wins over id 1
-        (3, 200, 2, "acme", None),
-        (4, 300, beta_id, "Beta Corp", "Eng"),
-        (5, 300, None, "", None),  # blank org stays detached
-    ]
-    idx = {r[0] for r in await _rows(db_engine, "SELECT name FROM sqlite_master WHERE type='index'")}
-    assert {"ix_contact_positions_telegram_id", "ix_contact_positions_organization_id",
-            "uq_organizations_name_ci"} <= idx
-
-
-@pytest.mark.asyncio
-async def test_fresh_schema_matches_model(db_engine):
-    cols = {r[1] for r in await _rows(db_engine, "PRAGMA table_info(contact_positions)")}
-    assert {"organization_id", "organization", "telegram_id"} <= cols
+    )
+    assert await _rows(db_engine, "SELECT COUNT(*) FROM workspace_tags") == [(0,)]
+    assert await _rows(db_engine, "SELECT COUNT(*) FROM workspace_columns") == [(0,)]
+    assert await _rows(db_engine, "SELECT scope_tag_id FROM workspace_boards") == [(None,)]

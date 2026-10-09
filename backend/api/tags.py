@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.database import get_db
+from backend.api.lookups import conversation_or_404
 from backend.db import crud
+from backend.db.database import get_db
 
 router = APIRouter()
 
@@ -16,10 +17,10 @@ router = APIRouter()
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tag_dict(t, chat_count: Optional[int] = None) -> dict:
+def _tag_dict(t, conversation_count: Optional[int] = None) -> dict:
     d = {"id": t.id, "name": t.name, "color": t.color, "category": t.category, "is_default": t.is_default}
-    if chat_count is not None:
-        d["chat_count"] = chat_count
+    if conversation_count is not None:
+        d["conversation_count"] = conversation_count
     return d
 
 
@@ -48,7 +49,7 @@ async def list_tags(include_stage: bool = False, db: AsyncSession = Depends(get_
     """User tags. Board-column stage tags are internal and only listed with
     include_stage=true (e.g. column-name autocomplete)."""
     rows = await crud.get_all_tags_with_counts(db, include_stage=include_stage)
-    return [_tag_dict(t, chat_count=count) for t, count in rows]
+    return [_tag_dict(t, conversation_count=count) for t, count in rows]
 
 
 @router.post("/tags")
@@ -94,24 +95,26 @@ async def delete_tag(tag_id: int, db: AsyncSession = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Per-chat tag management — /api/chats/{telegram_id}/tags
+# Per-conversation tags — /api/conversations/{conversation_id}/tags
 # ---------------------------------------------------------------------------
 
 class AddTagRequest(BaseModel):
     tag_id: int
 
 
-@router.get("/chats/{telegram_id}/tags")
-async def get_chat_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
-    # Board placement (stage tags) is shown on boards, not as chat tags
-    tags = await crud.get_tags_for_chat(db, telegram_id, include_stage=False)
+@router.get("/conversations/{conversation_id}/tags")
+async def get_conversation_tags(conversation_id: int, db: AsyncSession = Depends(get_db)):
+    await conversation_or_404(db, conversation_id)
+    # Board placement (stage tags) is shown on boards, not as conversation tags
+    tags = await crud.get_tags_for_conversation(db, conversation_id, include_stage=False)
     return [_tag_dict(t) for t in tags]
 
 
-@router.post("/chats/{telegram_id}/tags")
-async def add_tag(telegram_id: int, req: AddTagRequest, db: AsyncSession = Depends(get_db)):
+@router.post("/conversations/{conversation_id}/tags")
+async def add_tag(conversation_id: int, req: AddTagRequest, db: AsyncSession = Depends(get_db)):
+    await conversation_or_404(db, conversation_id)
     try:
-        ct = await crud.add_tag_to_chat(db, telegram_id, req.tag_id)
+        ct = await crud.add_tag_to_conversation(db, conversation_id, req.tag_id)
     except crud.StageTagLocked as e:
         raise _locked(e)
     if ct is None:
@@ -119,55 +122,51 @@ async def add_tag(telegram_id: int, req: AddTagRequest, db: AsyncSession = Depen
     return {"success": True}
 
 
-@router.delete("/chats/{telegram_id}/tags/{tag_id}")
-async def remove_tag(telegram_id: int, tag_id: int, db: AsyncSession = Depends(get_db)):
+@router.delete("/conversations/{conversation_id}/tags/{tag_id}")
+async def remove_tag(conversation_id: int, tag_id: int, db: AsyncSession = Depends(get_db)):
     try:
-        removed = await crud.remove_tag_from_chat(db, telegram_id, tag_id)
+        removed = await crud.remove_tag_from_conversation(db, conversation_id, tag_id)
     except crud.StageTagLocked as e:
         raise _locked(e)
     if not removed:
-        raise HTTPException(status_code=404, detail="Tag not assigned to this chat")
+        raise HTTPException(status_code=404, detail="Tag not assigned to this conversation")
     return {"success": True}
 
 
 # ---------------------------------------------------------------------------
-# LLM tag suggestion — /api/chats/{telegram_id}/tags/suggest
+# LLM tag suggestion — /api/conversations/{conversation_id}/tags/suggest
 # ---------------------------------------------------------------------------
 
-@router.post("/chats/{telegram_id}/tags/suggest")
-async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
-    """Ask the LLM to suggest tags for a chat based on its name and recent messages."""
-    # Gather context
-    chat = await crud.get_chat_by_telegram_id(db, telegram_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
+@router.post("/conversations/{conversation_id}/tags/suggest")
+async def suggest_tags(conversation_id: int, db: AsyncSession = Depends(get_db)):
+    """Ask the LLM to suggest tags for a conversation based on its title and recent messages."""
+    conv = await conversation_or_404(db, conversation_id)
 
     # Stage tags are board internals: never offered, never suggested
     all_tags = [t for t in await crud.get_all_tags(db) if t.category != crud.STAGE_CATEGORY]
-    chat_tags = await crud.get_tags_for_chat(db, telegram_id, include_stage=False)
-    chat_tag_names = {t.name for t in chat_tags}
-    chat_tag_keys = {t.name.strip().lower() for t in chat_tags}
+    conv_tags = await crud.get_tags_for_conversation(db, conversation_id, include_stage=False)
+    conv_tag_names = {t.name for t in conv_tags}
+    conv_tag_keys = {t.name.strip().lower() for t in conv_tags}
     all_tag_names = [t.name for t in all_tags]
 
-    # Fetch last 20 messages for context
-    rows = await crud.get_messages(db, telegram_id, limit=20, offset=0)
+    window = await crud.get_message_window(db, conversation_id, limit=20)
     messages_text = "\n".join(
         f"{m.sender_name or 'Me'}: {(m.text or '').strip()[:120]}"
-        for m, *_ in rows if (m.text or "").strip()
+        for m, *_ in window["rows"] if (m.text or "").strip()
     ) or "(no messages yet)"
 
     system_prompt = (
-        "You are a chat organizer. Given a Telegram chat's name and recent messages, "
-        "If the chat is a group, typically the chat name can infer a lot of the tags."
+        "You are a chat organizer. Given a conversation's name and recent messages, "
         "suggest 1–3 relevant tags from the provided list or propose new short ones. "
+        "If the conversation is a group, its name typically implies many of the tags. "
         "Respond ONLY with a JSON array: "
         '[{"name": "...", "color": "...", "reason": "..."}]. '
         "Use color values from: indigo, emerald, rose, amber, violet, sky, slate. "
-        "Do not include tags already assigned to the chat."
+        "Do not include tags already assigned to the conversation."
     )
     user_prompt = (
-        f"Chat name: {chat.name}\n"
-        f"Already assigned tags: {', '.join(chat_tag_names) or 'none'}\n"
+        f"Conversation name: {conv.title}\n"
+        f"Already assigned tags: {', '.join(conv_tag_names) or 'none'}\n"
         f"Available tags: {', '.join(all_tag_names) or 'none'}\n"
         f"Recent messages:\n{messages_text}"
     )
@@ -207,7 +206,7 @@ async def suggest_tags(telegram_id: int, db: AsyncSession = Depends(get_db)):
             name = str(s.get("name", "")).strip()
             color = str(s.get("color", "slate")).strip()
             reason = str(s.get("reason", "")).strip()
-            if not name or name.lower() in chat_tag_keys:
+            if not name or name.lower() in conv_tag_keys:
                 continue
             if color not in valid_colors:
                 color = "slate"

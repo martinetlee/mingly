@@ -1,12 +1,13 @@
 import { Fragment, memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ChevronDown, Cloud, RefreshCw, Shield as ShieldIcon, ShieldAlert, ShieldCheck, UserCheck, UserX, X } from 'lucide-react'
 import type { ScamManualVerdict, ScamVerdictResponse, ScannedMessage } from '../../api/types'
 import { useSelection } from '../../hooks/useSelection'
 import { useFlaggedSenders } from '../../hooks/useFlaggedSenders'
 import { fmtRelative } from '../../utils/time'
 import { errorMessage } from '../../lib/toast'
+import { chatUrl, personUrl } from '../../lib/routes'
 import type { ScannedList } from './useScannedList'
 import { useVerdictActions } from './useVerdictActions'
 import type { useRescan } from './useRescan'
@@ -23,8 +24,8 @@ interface RowProps {
   onToggle: (id: string) => void
   onContextMenu: (e: ReactMouseEvent, msg: ScannedMessage) => void
   onToggleTrace: (id: string) => void
-  onRescan: (chatId: number, tgMessageId: number) => void
-  onOpen: (chatId: number, tgMessageId: number) => void
+  onRescan: (conversationId: number, messageId: number) => void
+  onOpen: (conversationId: number, messageId: number) => void
 }
 
 /** One scanned-message row (+ its expandable trace). Shared by the Scanned and Unmarked tabs. */
@@ -48,18 +49,24 @@ const ScannedRow = memo(function ScannedRow({
           <input type="checkbox" checked={selected} onChange={() => onToggle(id)} className="rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-0 h-3 w-3" />
         </td>
         <td className="px-6 py-2.5">
-          <span className="text-xs text-slate-200 truncate max-w-[140px] block">
-            {msg.sender_name || (msg.sender_id ? `ID: ${msg.sender_id}` : '—')}
-          </span>
+          {msg.sender_person_id != null ? (
+            <Link to={personUrl(msg.sender_person_id)} className="text-xs text-slate-200 hover:text-indigo-300 truncate max-w-[140px] block">
+              {msg.sender_name || `ID: ${msg.sender_identity_id ?? msg.sender_person_id}`}
+            </Link>
+          ) : (
+            <span className="text-xs text-slate-200 truncate max-w-[140px] block">
+              {msg.sender_name || (msg.sender_identity_id ? `ID: ${msg.sender_identity_id}` : '—')}
+            </span>
+          )}
           {msg.date && <span className="text-[10px] text-slate-500">{fmtRelative(msg.date)}</span>}
         </td>
         <td className="px-3 py-2.5">
           <button
-            onClick={() => onOpen(msg.chat_id, msg.tg_message_id)}
+            onClick={() => onOpen(msg.conversation_id, msg.message_id)}
             className="text-xs text-indigo-400 hover:text-indigo-300 truncate max-w-[160px] block text-left"
-            title={msg.chat_name}
+            title={msg.conversation_title}
           >
-            {msg.chat_name}
+            {msg.conversation_title}
           </button>
         </td>
         <td className="px-3 py-2.5">
@@ -86,7 +93,7 @@ const ScannedRow = memo(function ScannedRow({
               <ChevronDown size={13} className={`transition-transform ${traceOpen ? 'rotate-180' : ''}`} />
             </button>
             <button
-              onClick={() => onRescan(msg.chat_id, msg.tg_message_id)}
+              onClick={() => onRescan(msg.conversation_id, msg.message_id)}
               title={retryTitle}
               disabled={rescanning}
               className={`rounded p-1 transition-colors disabled:opacity-40 ${failed ? 'text-orange-400 hover:bg-slate-700 hover:text-orange-300' : 'text-slate-500 hover:bg-slate-700 hover:text-indigo-400'}`}
@@ -130,8 +137,8 @@ function ContextMenu({ menu, flaggedIds, onClose, onVerdict, onFlagSender, onDis
     }
   }, [onClose])
 
-  const senders = new Set(menu.msgs.map((m) => m.sender_id))
-  const singleSender = senders.size === 1 ? menu.msgs[0].sender_id : null
+  const senders = new Set(menu.msgs.map((m) => m.sender_identity_id))
+  const singleSender = senders.size === 1 ? menu.msgs[0].sender_identity_id : null
   const senderName = menu.msgs[0]?.sender_name ?? null
   const item = 'flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-slate-700'
   const n = menu.msgs.length
@@ -197,8 +204,8 @@ export default function ScannedTable({ list, devMode, rescan, emptyTitle, emptyH
     if (r) selection.clear()
   }, [verdicts, selection])
 
-  const onOpen = useCallback((chatId: number, msgId: number) => {
-    navigate(`/chats?chatId=${chatId}&msgId=${msgId}`)
+  const onOpen = useCallback((conversationId: number, messageId: number) => {
+    navigate(chatUrl(conversationId, messageId))
   }, [navigate])
 
   const { click, toggle } = selection

@@ -1,6 +1,7 @@
-"""Sync engine: message conversion, upsert semantics, keyset windows,
-coordination, runtime ownership and the auth/compose/media entry points
-(reviews/APP_REVIEW_2026-10-06.md §2-A, §2-A2, §2-C, §2-E, §3)."""
+"""Telegram sync engine on schema v2: message conversion, upsert semantics,
+keyset windows, coordination, runtime ownership, live handlers and the
+compose/media entry points (reviews/APP_REVIEW_2026-10-06.md §2-A, §2-A2,
+§2-C, §2-E, §3)."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -13,8 +14,10 @@ from telethon.errors import FloodWaitError
 from telethon.tl import types
 
 from backend.db import crud
-from backend.db.models import Chat, Message
-from backend.telegram.convert import message_to_row
+from backend.db.models import Conversation, Identity, Message
+from backend.telegram import ids as tg_ids
+from backend.telegram.convert import message_to_row, rows_for
+from tests import factories as f
 
 UTC = timezone.utc
 
@@ -25,7 +28,7 @@ def use_client(client):
     return patch.object(runtime, "client", AsyncMock(return_value=client))
 
 
-def tg_msg(mid, text="hi", peer=77, date=None, entities=None, out=False, **kw):
+def tg_msg(mid, text="hi", peer=77, date=None, entities=None, out=False, sender=None, **kw):
     m = types.Message(
         id=mid,
         peer_id=types.PeerUser(peer) if peer > 0 else types.PeerChannel(-peer),
@@ -35,80 +38,129 @@ def tg_msg(mid, text="hi", peer=77, date=None, entities=None, out=False, **kw):
         out=out,
         **kw,
     )
-    m.get_sender = AsyncMock(return_value=None)
+    m.get_sender = AsyncMock(return_value=sender)
+    if sender is not None:
+        m._sender = sender
+        m._sender_id = sender.id
     return m
 
 
-async def seed_chat(db, telegram_id=77, **kw):
-    kw.setdefault("name", "Alice")
-    kw.setdefault("type", "private")
-    chat = Chat(telegram_id=telegram_id, **kw)
-    db.add(chat)
-    await db.commit()
-    return chat
+async def tg_conv(db, peer=77, **kw):
+    """A Telegram conversation for ``peer`` (direct for users, group otherwise)."""
+    kw.setdefault("title", "Alice")
+    kw.setdefault("kind", "direct" if peer > 0 else "group")
+    return await f.conversation(db, str(peer), **kw)
+
+
+async def save(db, conv, *msgs, forum=None):
+    rows = await rows_for(db, conv.id, list(msgs), forum=conv.is_forum if forum is None else forum)
+    return await crud.save_messages(db, rows)
+
+
+async def stored(db, conv, tg_id) -> Message:
+    return (await db.execute(
+        select(Message).where(Message.conversation_id == conv.id, Message.external_id == str(tg_id))
+        .execution_options(populate_existing=True)
+    )).scalar_one()
 
 
 # ── message_to_row ───────────────────────────────────────────────────────────
 
 def test_formatted_text_uses_raw_text_and_entities():
-    row = message_to_row(tg_msg(1, "hello world", entities=[types.MessageEntityItalic(6, 5)]))
+    row = message_to_row(tg_msg(1, "hello world", entities=[types.MessageEntityItalic(6, 5)]), 1)
     assert row["text"] == "hello world"
     assert row["text_html"] == "hello <em>world</em>"
-    row = message_to_row(tg_msg(2, "use x now", entities=[types.MessageEntityCode(4, 1)]))
+    assert (row["external_id"], row["seq"], row["conversation_id"]) == ("1", 1, 1)
+    row = message_to_row(tg_msg(2, "use x now", entities=[types.MessageEntityCode(4, 1)]), 1)
     assert row["text_html"] == "use <code>x</code> now"
-    assert row["delivery_state"] == "sent"
+    assert row["delivery_state"] == "sent" and row["attachments"] == []
 
 
 def test_outgoing_from_other_device_is_sent_not_sending():
-    assert message_to_row(tg_msg(3, "x", out=True))["delivery_state"] == "sent"
+    assert message_to_row(tg_msg(3, "x", out=True), 1)["delivery_state"] == "sent"
 
 
 def test_forum_topic_mapping():
     # plain message inside topic 10: topic membership, not a reply
     m = tg_msg(20, peer=-100, reply_to=types.MessageReplyHeader(reply_to_msg_id=10, forum_topic=True))
-    row = message_to_row(m, -100, forum=True)
-    assert (row["topic_id"], row["reply_to_tg_message_id"]) == (10, None)
+    row = message_to_row(m, 1, forum=True)
+    assert (row["topic_id"], row["reply_to_external_id"]) == (10, None)
     # real reply inside topic 10
     m = tg_msg(21, peer=-100, reply_to=types.MessageReplyHeader(reply_to_msg_id=15, reply_to_top_id=10, forum_topic=True))
-    row = message_to_row(m, -100, forum=True)
-    assert (row["topic_id"], row["reply_to_tg_message_id"]) == (10, 15)
+    row = message_to_row(m, 1, forum=True)
+    assert (row["topic_id"], row["reply_to_external_id"]) == (10, "15")
     # no header in a forum → General
-    row = message_to_row(tg_msg(22, peer=-100), -100, forum=True)
-    assert row["topic_id"] == 1
-    assert message_to_row(tg_msg(23, peer=-100), -100, forum=False)["topic_id"] is None
+    assert message_to_row(tg_msg(22, peer=-100), 1, forum=True)["topic_id"] == 1
+    assert message_to_row(tg_msg(23, peer=-100), 1, forum=False)["topic_id"] is None
+
+
+def test_document_becomes_one_attachment():
+    m = tg_msg(5, "file")
+    m.media = types.MessageMediaDocument(document=types.Document(
+        id=1, access_hash=1, file_reference=b"", date=None, mime_type="application/pdf",
+        size=3, dc_id=1, attributes=[types.DocumentAttributeFilename("a.pdf")]))
+    [att] = message_to_row(m, 1)["attachments"]
+    assert att == {"kind": "document", "filename": "a.pdf", "mime_type": "application/pdf", "size": 3, "external_ref": None}
+
+
+# ── identities from senders ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_senders_become_identities_and_min_users_keep_contact_flags(db):
+    conv = await tg_conv(db, -100, title="Group")
+    ann = types.User(id=501, first_name="Ann", last_name="Lee", phone="15550001", contact=True)
+    await save(db, conv, tg_msg(1, "hi", peer=-100, sender=ann))
+    ident = await crud.get_identity_by_external(db, "telegram", "501")
+    assert ident.display_name == "Ann Lee" and ident.is_contact is True and ident.phone == "15550001"
+    assert (await stored(db, conv, 1)).sender_identity_id == ident.id
+
+    # Seen later as a "min" user (no access to phone/contact): those stay.
+    min_ann = types.User(id=501, first_name="Ann", last_name="Lee", min=True, contact=False)
+    await save(db, conv, tg_msg(2, "again", peer=-100, sender=min_ann))
+    await db.refresh(ident)
+    assert ident.is_contact is True and ident.phone == "15550001"
+
+    # A channel posting as itself has no identity.
+    channel = types.Channel(id=100, title="News", photo=types.ChatPhotoEmpty(), date=None)
+    await save(db, conv, tg_msg(3, "post", peer=-100, sender=channel))
+    row = await stored(db, conv, 3)
+    assert row.sender_identity_id is None and row.sender_name == "News"
+    assert len((await db.execute(select(Identity))).scalars().all()) == 1  # only Ann; groups have no peer
 
 
 # ── upsert semantics ─────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_upsert_updates_telegram_columns_and_keeps_local_ones(db):
-    await seed_chat(db)
-    first = message_to_row(tg_msg(1, "meet at 5", entities=[types.MessageEntityBold(0, 4)]))
+    conv = await tg_conv(db)
+    first = message_to_row(tg_msg(1, "meet at 5", entities=[types.MessageEntityBold(0, 4)]), conv.id)
     first["reactions_json"] = '[{"emoji": "👍", "count": 1}]'
     first["is_pinned"] = True
+    first["attachments"] = [f.photo()]
     res = await crud.save_messages(db, [first])
-    assert res == {"created": [1], "updated": []}
+    assert len(res["created"]) == 1 and res["updated"] == []
 
-    row = (await db.execute(select(Message).where(Message.tg_message_id == 1))).scalar_one()
+    row = await stored(db, conv, 1)
     row.scam_score = 0.9
     row.my_reaction = "👍"
-    row.media_path = "media/77/1.jpg"
     row.delivery_state = "read"
     await db.commit()
+    await crud.set_attachment_local_path(db, row.attachments[0].id, "media/1/1.jpg")
 
-    edited = message_to_row(tg_msg(1, "meet at 6", edit_date=datetime(2026, 1, 1, 13, tzinfo=UTC)))
-    edited["media_path"] = "media/77/other.jpg"
+    edited = message_to_row(tg_msg(1, "meet at 6", edit_date=datetime(2026, 1, 1, 13, tzinfo=UTC)), conv.id)
+    edited["attachments"] = [f.photo()]
     res = await crud.save_messages(db, [edited])
-    assert res == {"created": [], "updated": [1]}
+    assert res == {"created": [], "updated": [row.id]}
 
-    row = (await db.execute(select(Message).where(Message.tg_message_id == 1).execution_options(populate_existing=True))).scalar_one()
+    row = await stored(db, conv, 1)
     assert row.text == "meet at 6"
     assert row.text_html is None          # plain-text edit clears old HTML
     assert row.reactions_json is None     # reaction removal propagates
     assert row.is_pinned is False         # unpin propagates
     assert row.is_edited is True
     assert row.scam_score == 0.9 and row.my_reaction == "👍"
-    assert row.media_path == "media/77/1.jpg"
+    await db.refresh(row)
+    assert row.attachments[0].local_path == "media/1/1.jpg"
     assert row.delivery_state == "read"   # monotonic
 
     # identical content → no change reported
@@ -117,107 +169,132 @@ async def test_upsert_updates_telegram_columns_and_keeps_local_ones(db):
 
 @pytest.mark.asyncio
 async def test_save_message_backfills_topic_and_updates_preview(db):
-    await seed_chat(db, -100, type="group", is_forum=True)
-    row = message_to_row(tg_msg(5, "x", peer=-100), -100, forum=False)
-    saved = await crud.save_message(db, **row)
+    conv = await tg_conv(db, -100, kind="group", is_forum=True)
+    saved = await crud.save_message(db, **message_to_row(tg_msg(5, "x", peer=-100), conv.id, forum=False))
     assert saved._change == "created" and saved.topic_id is None
-    saved = await crud.save_message(db, **message_to_row(tg_msg(5, "x", peer=-100), -100, forum=True))
+    saved = await crud.save_message(db, **message_to_row(tg_msg(5, "x", peer=-100), conv.id, forum=True))
     assert saved._change == "updated" and saved.topic_id == 1
-    chat = await crud.get_chat_by_telegram_id(db, -100)
-    await db.refresh(chat)
-    assert chat.last_message_text == "x"
+    await db.refresh(conv)
+    assert conv.last_message_text == "x"
 
 
 @pytest.mark.asyncio
-async def test_concurrent_upsert_chat_never_conflicts(db_engine):
+async def test_concurrent_conversation_upserts_never_conflict(db_engine):
     from backend.db.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as s:
+        acc = await f.account(s)
 
     async def one(i):
         async with AsyncSessionLocal() as s:
-            return await crud.upsert_chat(s, 555, f"n{i}", "private", unread_count=i)
+            return await crud.upsert_conversation(
+                s, account_id=acc.id, external_id="555", title=f"n{i}", kind="direct", unread_count=i,
+            )
 
-    chats = await asyncio.gather(*[one(i) for i in range(5)])
-    assert {c.telegram_id for c in chats} == {555}
+    convs = await asyncio.gather(*[one(i) for i in range(5)])
+    assert len({c.id for c in convs}) == 1
     async with AsyncSessionLocal() as s:
-        assert len((await s.execute(select(Chat).where(Chat.telegram_id == 555))).all()) == 1
+        assert len((await s.execute(select(Conversation).where(Conversation.external_id == "555"))).all()) == 1
         # optional fields keep old values when not provided
-        c = await crud.upsert_chat(s, 555, "renamed", "private")
-        assert c.name == "renamed" and c.unread_count is not None
+        c = await crud.upsert_conversation(s, account_id=acc.id, external_id="555", title="renamed", kind="direct")
+        assert c.title == "renamed" and c.unread_count is not None
 
 
 # ── keyset windows ───────────────────────────────────────────────────────────
 
-async def seed_history(db, n=10, chat_id=77):
-    await seed_chat(db, chat_id)
+async def seed_history(db, n=10, peer=77):
+    conv = await tg_conv(db, peer)
     base = datetime(2026, 1, 1, 12, 0)
-    rows = []
-    for i in range(1, n + 1):
-        # pairs share a timestamp (albums) → tg_message_id breaks the tie
-        rows.append(message_to_row(tg_msg(i, f"m{i}", peer=chat_id, date=(base + timedelta(minutes=(i + 1) // 2)).replace(tzinfo=UTC)), chat_id))
-    await crud.save_messages(db, rows)
+    # pairs share a timestamp (albums) → seq breaks the tie
+    msgs = [
+        tg_msg(i, f"m{i}", peer=peer, date=(base + timedelta(minutes=(i + 1) // 2)).replace(tzinfo=UTC))
+        for i in range(1, n + 1)
+    ]
+    await save(db, conv, *msgs)
+    return conv
 
 
-def ids(window):
-    return [r[0].tg_message_id for r in window["rows"]]
+def seqs(window):
+    return [r[0].seq for r in window["rows"]]
 
 
 @pytest.mark.asyncio
 async def test_keyset_window_pages_without_gaps_or_duplicates(db):
-    await seed_history(db)
-    w = await crud.get_message_window(db, 77, limit=4)
-    assert ids(w) == [7, 8, 9, 10] and w["has_older"] and not w["has_newer"]
-    seen = ids(w)
+    conv = await seed_history(db)
+    w = await crud.get_message_window(db, conv.id, limit=4)
+    assert seqs(w) == [7, 8, 9, 10] and w["has_older"] and not w["has_newer"]
+    seen = seqs(w)
     while w["has_older"]:
-        oldest = w["rows"][0][0]
-        w = await crud.get_message_window(db, 77, limit=4, before=(oldest.date, oldest.tg_message_id))
-        seen = ids(w) + seen
+        w = await crud.get_message_window(db, conv.id, limit=4, before=w["rows"][0][0].id)
+        seen = seqs(w) + seen
     assert seen == list(range(1, 11))
-    newest = w["rows"][-1][0]
-    w2 = await crud.get_message_window(db, 77, limit=3, after=(newest.date, newest.tg_message_id))
-    assert ids(w2) == [3, 4, 5] and w2["has_older"] and w2["has_newer"]
+    w2 = await crud.get_message_window(db, conv.id, limit=3, after=w["rows"][-1][0].id)
+    assert seqs(w2) == [3, 4, 5] and w2["has_older"] and w2["has_newer"]
 
 
 @pytest.mark.asyncio
 async def test_anchor_and_date_windows_report_both_flags(db):
-    await seed_history(db)
-    w = await crud.get_message_window(db, 77, limit=4, anchor_tg_id=5)
-    assert ids(w) == [3, 4, 5, 6] and w["has_older"] and w["has_newer"] and w["anchor_found"]
-    w = await crud.get_message_window(db, 77, limit=2, around_date=datetime(2026, 1, 1, 12, 3))
-    assert ids(w) == [4, 5]
-    w = await crud.get_message_window(db, 77, limit=2, anchor_tg_id=999)
+    conv = await seed_history(db)
+    fifth = await stored(db, conv, 5)
+    w = await crud.get_message_window(db, conv.id, limit=4, anchor=fifth.id)
+    assert seqs(w) == [3, 4, 5, 6] and w["has_older"] and w["has_newer"] and w["anchor_found"]
+    w = await crud.get_message_window(db, conv.id, limit=2, around_date=datetime(2026, 1, 1, 12, 3))
+    assert seqs(w) == [4, 5]
+    w = await crud.get_message_window(db, conv.id, limit=2, anchor=999999)
     assert not w["anchor_found"]
 
 
 @pytest.mark.asyncio
 async def test_general_topic_includes_untagged_rows(db):
-    await seed_chat(db, -100, type="group", is_forum=True)
+    conv = await tg_conv(db, -100, kind="group", is_forum=True)
     await crud.save_messages(db, [
-        {**message_to_row(tg_msg(1, "old", peer=-100), -100), "topic_id": None},
-        message_to_row(tg_msg(2, "general", peer=-100), -100, forum=True),
-        message_to_row(tg_msg(3, "t10", peer=-100, reply_to=types.MessageReplyHeader(reply_to_msg_id=10, forum_topic=True)), -100, forum=True),
+        {**message_to_row(tg_msg(1, "old", peer=-100), conv.id), "topic_id": None},
+        message_to_row(tg_msg(2, "general", peer=-100), conv.id, forum=True),
+        message_to_row(tg_msg(3, "t10", peer=-100, reply_to=types.MessageReplyHeader(reply_to_msg_id=10, forum_topic=True)), conv.id, forum=True),
     ])
-    assert ids(await crud.get_message_window(db, -100, topic_id=1)) == [1, 2]
-    assert ids(await crud.get_message_window(db, -100, topic_id=10)) == [3]
+    assert seqs(await crud.get_message_window(db, conv.id, topic_id=1)) == [1, 2]
+    assert seqs(await crud.get_message_window(db, conv.id, topic_id=10)) == [3]
 
 
 @pytest.mark.asyncio
-async def test_window_endpoint_cursors(api, db):
-    await seed_history(db)
-    chat = await crud.get_chat_by_telegram_id(db, 77)
-    chat.last_synced_at = datetime.utcnow()  # fresh: no auto-sync
+async def test_window_endpoint_pages_by_message_id(api, db):
+    conv = await seed_history(db)
+    conv.last_synced_at = datetime.utcnow()  # fresh: no auto-sync
     await db.commit()
-    r = await api.get("/api/chats/77/messages/window", params={"limit": 4})
+    url = f"/api/conversations/{conv.id}/messages/window"
+    r = await api.get(url, params={"limit": 4})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [m["tg_message_id"] for m in body["messages"]] == [7, 8, 9, 10]
-    assert body["has_older"] and not body["has_newer"]
-    r = await api.get("/api/chats/77/messages/window", params={"limit": 4, "before": body["older_cursor"]})
-    assert [m["tg_message_id"] for m in r.json()["messages"]] == [3, 4, 5, 6]
-    assert (await api.get("/api/chats/77/messages/window", params={"before": "garbage"})).status_code == 400
-    # offset endpoints are gone
-    assert (await api.get("/api/chats/77/messages", params={"limit": 3})).status_code in (404, 405)
-    assert (await api.get("/api/chats/77/messages/date-offset", params={"date": "2026-01-01"})).status_code in (404, 405)
-    assert (await api.get("/api/chats/77/topics/1/messages")).status_code in (404, 405)
+    assert [m["seq"] for m in body["messages"]] == [7, 8, 9, 10]
+    assert body["has_older"] and not body["has_newer"] and body["syncing"] is False
+    r = await api.get(url, params={"limit": 4, "before": body["messages"][0]["id"]})
+    assert [m["seq"] for m in r.json()["messages"]] == [3, 4, 5, 6]
+    assert (await api.get(url, params={"before": "garbage"})).status_code == 422
+    assert (await api.get("/api/conversations/999999/messages/window")).status_code == 404
+    # A stored message can be opened by its external id without any fetch.
+    with patch("backend.api.conversations.coordinator.fetch_around", AsyncMock()) as fetch:
+        r = await api.get(url, params={"around_external_id": "5", "limit": 2})
+    assert [m["seq"] for m in r.json()["messages"]] == [4, 5] and not fetch.called
+
+
+@pytest.mark.asyncio
+async def test_window_fetches_unstored_reply_target(api, db):
+    from backend.telegram.coordinator import SyncResult
+    conv = await seed_history(db, n=2)
+    conv.last_synced_at = datetime.utcnow()
+    await db.commit()
+
+    async def fetch(conversation_id, anchor_external_id=None, date=None, limit=50):
+        async with __import__("backend.db.database", fromlist=["x"]).AsyncSessionLocal() as s:
+            c = await crud.get_conversation(s, conversation_id)
+            await save(s, c, tg_msg(40, "old reply target", date=datetime(2025, 12, 1, tzinfo=UTC)))
+        return SyncResult("changed", conversation_id, added=1)
+
+    with patch("backend.api.conversations.coordinator.fetch_around", side_effect=fetch) as m:
+        r = await api.get(f"/api/conversations/{conv.id}/messages/window", params={"around_external_id": "40"})
+    body = r.json()
+    assert m.call_args.kwargs["anchor_external_id"] == "40"
+    assert body["anchor_found"] and "old reply target" in [x["text"] for x in body["messages"]]
 
 
 # ── coordinator ──────────────────────────────────────────────────────────────
@@ -232,8 +309,8 @@ class FakeHistoryClient:
     def is_connected(self):
         return True
 
-    async def iter_messages(self, chat_id, limit=50, offset_id=0, **kw):
-        self.calls.append((chat_id, limit, offset_id))
+    async def iter_messages(self, peer, limit=50, offset_id=0, **kw):
+        self.calls.append((peer, limit, offset_id))
         if self.flood:
             raise FloodWaitError(request=None, capture=self.flood)
         await asyncio.sleep(self.delay)
@@ -242,7 +319,7 @@ class FakeHistoryClient:
                 continue
             yield m
 
-    async def get_entity(self, chat_id):
+    async def get_entity(self, peer):
         raise ValueError("no entity")  # pinned probe: ignored
 
 
@@ -254,55 +331,90 @@ def coord():
 
 @pytest.mark.asyncio
 async def test_concurrent_syncs_share_one_fetch(db, coord):
-    await seed_chat(db)
+    conv = await tg_conv(db)
     client = FakeHistoryClient([tg_msg(i, f"m{i}") for i in range(1, 4)])
     with use_client(client):
-        r1, r2 = await asyncio.gather(coord.sync_chat(77, 50), coord.sync_chat(77, 50))
-    assert len(client.calls) == 1
+        r1, r2 = await asyncio.gather(coord.sync_conversation(conv.id, 50), coord.sync_conversation(conv.id, 50))
+    assert client.calls == [(77, 50, 0)]  # the Telegram peer, fetched once
     assert r1 is r2 and r1.status == "changed" and r1.added == 3 and r1.exhausted
+    assert len(r1.added_ids) == 3
     with use_client(client):
-        r3 = await coord.sync_chat(77, 50)
+        r3 = await coord.sync_conversation(conv.id, 50)
     assert r3.status == "unchanged"
 
 
 @pytest.mark.asyncio
 async def test_sync_removes_messages_deleted_on_telegram(db, coord):
-    await seed_chat(db)
+    conv = await tg_conv(db)
     msgs = [tg_msg(i, f"m{i}", date=datetime(2026, 1, 1, 12, i, tzinfo=UTC)) for i in range(1, 5)]
     client = FakeHistoryClient(msgs, delay=0)
-    with use_client(client):
-        await coord.sync_chat(77, 50)
+    sent = []
+
+    async def capture(data):
+        sent.append(data)
+
+    with use_client(client), patch("backend.telegram.coordinator.ws_manager.broadcast", capture):
+        await coord.sync_conversation(conv.id, 50)
+        gone = (await stored(db, conv, 2)).id
         client.msgs = [m for m in msgs if m.id != 2]
-        res = await coord.sync_chat(77, 50)
+        res = await coord.sync_conversation(conv.id, 50)
     assert res.deleted == 1 and res.status == "changed"
+    assert {"type": "messages_deleted", "conversation_id": conv.id, "message_ids": [gone]} in sent
 
 
 @pytest.mark.asyncio
 async def test_flood_wait_is_typed_and_gates_other_syncs(db, coord):
-    await seed_chat(db)
+    conv = await tg_conv(db)
+    other = await tg_conv(db, 78, title="Bob")
     client = FakeHistoryClient([], flood=30)
     with use_client(client):
-        res = await coord.sync_chat(77, 50)
+        res = await coord.sync_conversation(conv.id, 50)
         assert res.status == "error" and res.flood_wait == 30 and not res.completed
-        skipped = await coord.sync_chat(78, 50, max_wait=1)
+        skipped = await coord.sync_conversation(other.id, 50, max_wait=1)
     assert skipped.status == "skipped" and skipped.flood_wait > 0
 
 
 @pytest.mark.asyncio
-async def test_no_client_is_unavailable_not_empty(coord):
+async def test_no_client_is_unavailable_not_empty(db, coord):
+    conv = await tg_conv(db)
     with use_client(None):
-        res = await coord.sync_chat(77, 50)
+        res = await coord.sync_conversation(conv.id, 50)
     assert res.status == "unavailable" and not res.completed
 
 
 @pytest.mark.asyncio
-async def test_backfill_uses_oldest_local_id(api, db):
-    await seed_history(db, n=3)
+async def test_non_telegram_conversation_is_not_found(db, coord):
+    mail = await f.conversation(db, "thread-1", title="Hi", kind="email_thread", channel="gmail")
+    with use_client(FakeHistoryClient([])):
+        res = await coord.sync_conversation(mail.id, 50)
+    assert res.status == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_oldest_local_seq(api, db):
+    conv = await seed_history(db, n=3)
     from backend.telegram.coordinator import coordinator, SyncResult
-    with patch.object(coordinator, "sync_chat", AsyncMock(return_value=SyncResult("changed", 77, fetched=5, added=5, exhausted=True))) as m:
-        r = await api.post("/api/chats/77/backfill", params={"limit": 50})
+    with patch.object(coordinator, "sync_conversation", AsyncMock(
+        return_value=SyncResult("changed", conv.id, fetched=5, added=5, exhausted=True),
+    )) as m:
+        r = await api.post(f"/api/conversations/{conv.id}/backfill", params={"limit": 50})
     assert r.status_code == 200 and r.json() == {"added": 5, "exhausted": True, "status": "changed"}
-    assert m.call_args.kwargs["offset_id"] == 1
+    assert m.call_args.kwargs["offset_seq"] == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_only_routes_reject_other_channels(api, db):
+    mail = await f.conversation(db, "thread-1", title="Hi", kind="email_thread", channel="gmail")
+    for method, path in (
+        ("post", f"/api/conversations/{mail.id}/backfill"),
+        ("post", f"/api/conversations/{mail.id}/sync"),
+        ("get", f"/api/conversations/{mail.id}/topics"),
+        ("post", f"/api/conversations/{mail.id}/typing"),
+    ):
+        r = await getattr(api, method)(path)
+        assert r.status_code == 409 and r.json()["code"] == "unsupported_channel", path
+    r = await api.post("/api/compose/send", json={"conversation_id": mail.id, "text": "x"})
+    assert r.status_code == 409 and r.json()["channel"] == "gmail"
 
 
 # ── runtime ──────────────────────────────────────────────────────────────────
@@ -352,6 +464,22 @@ async def test_runtime_registers_handlers_once_and_stops_cleanly(db_engine):
     assert client.handlers == [] and rt.state == "stopped" and not rt.running
 
 
+@pytest.mark.asyncio
+async def test_startup_records_account_owner_as_self(db):
+    from backend.telegram.runtime import TelegramRuntime
+
+    class MeClient:
+        async def get_me(self):
+            return types.User(id=1, first_name="Me", username="me", phone="15550000", is_self=True)
+
+    await TelegramRuntime()._record_account(MeClient())
+    acc = await tg_ids.account(db)
+    await db.refresh(acc)
+    assert acc.external_id == "1" and acc.label == "@me"
+    me = await crud.get_identity(db, acc.self_identity_id)
+    assert me.is_self and (await crud.self_person(db)).id == me.person_id
+
+
 # ── live handlers ────────────────────────────────────────────────────────────
 
 class FakeEvent:
@@ -376,26 +504,54 @@ async def test_new_message_for_unknown_chat_is_saved_and_edits_propagate(db_engi
         sent.append(data)
 
     user = types.User(id=77, first_name="Ann", last_name="Lee")
-    msg = tg_msg(1, "meet at 5")
-    msg.get_sender = AsyncMock(return_value=user)
-    with patch.object(sync.ws_manager, "broadcast", capture), \
+    msg = tg_msg(1, "meet at 5", sender=user)
+    with patch.object(fanout.ws_manager, "broadcast", capture), \
          patch.object(fanout, "enqueue_scam", AsyncMock()) as scam, \
+         patch.object(fanout, "stamp_triage", AsyncMock()), \
          patch("backend.api.settings.get_notif_pref", return_value="none"):
         await handlers["on_new_message"](FakeEvent(msg, 77, user))
-        edited = tg_msg(1, "meet at 6", edit_date=datetime(2026, 1, 1, 13, tzinfo=UTC))
-        edited.get_sender = AsyncMock(return_value=user)
+        edited = tg_msg(1, "meet at 6", edit_date=datetime(2026, 1, 1, 13, tzinfo=UTC), sender=user)
         await handlers["on_message_edited"](FakeEvent(edited, 77, user))
 
     from backend.db.database import AsyncSessionLocal
     async with AsyncSessionLocal() as s:
-        chat = await crud.get_chat_by_telegram_id(s, 77)
-        row = (await s.execute(select(Message).where(Message.chat_id == 77))).scalar_one()
-    assert chat.name == "Ann Lee" and chat.type == "private"
-    assert row.text == "meet at 6" and row.sender_name == "Ann Lee"
-    types_sent = [d["type"] for d in sent]
-    assert types_sent == ["new_message", "message_edited"]
-    assert sent[1]["message"]["text"] == "meet at 6"
-    assert [c.args[2] for c in scam.call_args_list] == ["realtime", "edit"]
+        conv = await tg_ids.conversation_for(s, 77)
+        row = (await s.execute(select(Message).where(Message.conversation_id == conv.id))).scalar_one()
+        ann = await crud.get_identity_by_external(s, "telegram", "77")
+    assert conv.title == "Ann Lee" and conv.kind == "direct" and conv.peer_identity_id == ann.id
+    assert row.text == "meet at 6" and row.sender_name == "Ann Lee" and row.sender_identity_id == ann.id
+    assert [d["type"] for d in sent] == ["new_message", "message_edited"]
+    assert sent[0]["conversation_id"] == conv.id and sent[0]["message_id"] == row.id
+    assert sent[1]["message"]["text"] == "meet at 6" and sent[1]["message_id"] == row.id
+    assert [c.args for c in scam.call_args_list] == [(conv.id, [row.id], "realtime"), (conv.id, [row.id], "edit")]
+
+
+@pytest.mark.asyncio
+async def test_bare_delete_never_touches_channel_messages(db_engine):
+    """MessageDeleted without a chat id applies to private chats and basic
+    groups only; supergroup/channel message ids are per-channel."""
+    from backend.db.database import AsyncSessionLocal
+    from backend.telegram import sync
+
+    async with AsyncSessionLocal() as s:
+        dm = await tg_conv(s, 77)
+        basic = await tg_conv(s, -1001234, title="Basic group")  # basic group: chat id 1001234
+        supergroup = await tg_conv(s, -1001234567890, title="Supergroup")
+        for conv in (dm, basic, supergroup):
+            await save(s, conv, tg_msg(5, "same id", peer=tg_ids.peer_id_of(conv)))
+
+    client = FakeRuntimeClient()
+    handlers = {cb.__name__: cb for cb, _ in sync.register_event_handlers(client)}
+
+    class Deleted:
+        deleted_ids = [5]
+        chat_id = None
+
+    with patch.object(sync.ws_manager, "broadcast", AsyncMock()):
+        await handlers["on_message_deleted"](Deleted())
+    async with AsyncSessionLocal() as s:
+        left = (await s.execute(select(Message.conversation_id))).scalars().all()
+    assert left == [supergroup.id]
 
 
 # ── auth / compose / media ───────────────────────────────────────────────────
@@ -417,44 +573,72 @@ async def test_auth_mutators_require_token_and_reset_requires_confirmation(db_en
         assert r.status_code == 200 and reset.called and stop.called
 
 
+class FakeSendClient:
+    def __init__(self, peer=77):
+        self.calls = []
+        self.peer = peer
+
+    async def is_user_authorized(self):
+        return True
+
+    async def send_message(self, peer, text, reply_to=None):
+        self.calls.append((peer, reply_to))
+        await asyncio.sleep(0.02)
+        return tg_msg(500 + len(self.calls), text, peer=self.peer, out=True)
+
+
 @pytest.mark.asyncio
 async def test_send_with_same_nonce_sends_once_and_persists_topic(api, db):
-    await seed_chat(db, -100, type="group", is_forum=True)
-
-    class FakeSendClient:
-        def __init__(self):
-            self.calls = []
-
-        async def is_user_authorized(self):
-            return True
-
-        async def send_message(self, chat_id, text, reply_to=None):
-            self.calls.append(reply_to)
-            await asyncio.sleep(0.02)
-            return tg_msg(500 + len(self.calls), text, peer=-100, out=True)
-
-    client = FakeSendClient()
-    body = {"chat_id": -100, "text": "hello", "topic_id": 10, "client_nonce": "n-1"}
+    conv = await tg_conv(db, -100, kind="group", is_forum=True)
+    client = FakeSendClient(peer=-100)
+    body = {"conversation_id": conv.id, "text": "hello", "topic_id": 10, "client_nonce": "n-1"}
     with use_client(client):
         r1, r2 = await asyncio.gather(api.post("/api/compose/send", json=body), api.post("/api/compose/send", json=body))
         r3 = await api.post("/api/compose/send", json=body)
-    assert client.calls == [10]  # topic-aware: reply_to=top_msg_id, sent once
+    assert client.calls == [(-100, 10)]  # topic-aware: reply_to=top_msg_id, sent once, to the peer
     assert r1.json() == r2.json() == r3.json()
     assert r1.json()["message"]["topic_id"] == 10
+    assert r1.json()["message_id"] == r1.json()["message"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_reply_is_sent_with_telegram_id_and_stored_by_internal_id(api, db):
+    conv = await seed_history(db, n=3)
+    target = await stored(db, conv, 2)
+    client = FakeSendClient()
+    with use_client(client):
+        r = await api.post("/api/compose/send", json={
+            "conversation_id": conv.id, "text": "re", "reply_to_message_id": target.id,
+        })
+    assert client.calls == [(77, 2)]
+    msg = r.json()["message"]
+    assert msg["reply_to_message_id"] is None or msg["reply_to_message_id"] == target.id
+    row = await stored(db, conv, 501)
+    assert row.reply_to_external_id == "2"
+    other = await seed_history(db, n=1, peer=88)
+    foreign = await stored(db, other, 1)
+    with use_client(client):
+        r = await api.post("/api/compose/send", json={
+            "conversation_id": conv.id, "text": "x", "reply_to_message_id": foreign.id,
+        })
+    assert r.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_media_download_is_atomic_and_single_flight(db, tmp_path):
-    await seed_chat(db)
-    await crud.save_messages(db, [{**message_to_row(tg_msg(9, "doc"), 77), "media_type": "document", "media_filename": "a.pdf"}])
+    conv = await tg_conv(db)
+    msg = await f.message(db, conv, 9, "doc", attachments=[{"kind": "document", "filename": "a.pdf", "size": 3}])
+    att_id = msg.attachments[0].id
     from backend.telegram import media
 
     class FakeMediaClient:
         def __init__(self, fail=False):
             self.fail = fail
             self.downloads = 0
+            self.asked = []
 
-        async def get_messages(self, chat_id, ids):
+        async def get_messages(self, peer, ids):
+            self.asked.append((peer, ids))
             m = tg_msg(ids, "doc")
             m.media = types.MessageMediaDocument(document=types.Document(
                 id=1, access_hash=1, file_reference=b"", date=None, mime_type="application/pdf",
@@ -463,31 +647,30 @@ async def test_media_download_is_atomic_and_single_flight(db, tmp_path):
 
         async def download_media(self, msg, file, thumb=None):
             self.downloads += 1
-            with open(file, "wb") as f:
-                f.write(b"par")
+            with open(file, "wb") as fh:
+                fh.write(b"par")
             await asyncio.sleep(0.02)
             if self.fail:
                 raise ConnectionError("dropped")
             return file
 
+    final = tmp_path / "media" / str(conv.id) / f"{att_id}.pdf"
     with patch.object(media, "MEDIA_DIR", tmp_path / "media"), patch.object(media, "DATA_DIR", tmp_path):
         failing = FakeMediaClient(fail=True)
         with use_client(failing):
             with pytest.raises(ConnectionError):
-                await media.download_message_media(77, 9, media_type="document", media_filename="a.pdf")
-        assert not (tmp_path / "media" / "77" / "9.pdf").exists()
-        assert list((tmp_path / "media" / "77").iterdir()) == []  # no partial file left
+                await media.download_attachment(att_id)
+        assert failing.asked == [(77, 9)]  # fetched by Telegram peer + message id
+        assert not final.exists()
+        assert list(final.parent.iterdir()) == []  # no partial file left
 
         ok = FakeMediaClient()
         with use_client(ok):
-            a, b = await asyncio.gather(
-                media.download_message_media(77, 9, media_type="document", media_filename="a.pdf"),
-                media.download_message_media(77, 9, media_type="document", media_filename="a.pdf"),
-            )
-        assert a == b == "media/77/9.pdf" and ok.downloads == 1
-        assert (tmp_path / "media" / "77" / "9.pdf").read_bytes() == b"par"
-    row = (await db.execute(select(Message).where(Message.tg_message_id == 9).execution_options(populate_existing=True))).scalar_one()
-    assert row.media_path == "media/77/9.pdf"
+            a, b = await asyncio.gather(media.download_attachment(att_id), media.download_attachment(att_id))
+        assert a == b == f"media/{conv.id}/{att_id}.pdf" and ok.downloads == 1
+        assert final.read_bytes() == b"par"
+    await db.refresh(msg)
+    assert msg.attachments[0].local_path == f"media/{conv.id}/{att_id}.pdf"
 
 
 # ── message dict shape ───────────────────────────────────────────────────────
@@ -499,29 +682,21 @@ SCAM_KEYS = {"scam_score", "scam_reason", "scam_category", "scam_manual_verdict"
 @pytest.mark.asyncio
 async def test_every_message_serializer_carries_scam_fields(api, db):
     """Window lists, compose responses and WS payloads all come from
-    chats._serialize_msg, so they share one shape including the scam state."""
-    await seed_history(db, n=2)
-    row = (await db.execute(select(Message).where(Message.tg_message_id == 2))).scalar_one()
+    serializers.message_out, so they share one shape including the scam state."""
+    conv = await seed_history(db, n=2)
+    row = await stored(db, conv, 2)
     row.scam_manual_verdict = "scam"
-    await db.commit()
-    chat = await crud.get_chat_by_telegram_id(db, 77)
-    chat.last_synced_at = datetime.utcnow()
+    row.is_pinned = True
+    conv.last_synced_at = datetime.utcnow()
     await db.commit()
 
-    window = (await api.get("/api/chats/77/messages/window")).json()["messages"]
-    pinned = (await api.get("/api/chats/77/pinned")).json()
+    window = (await api.get(f"/api/conversations/{conv.id}/messages/window")).json()["messages"]
+    pinned = (await api.get(f"/api/conversations/{conv.id}/pinned")).json()
+    assert pinned
     for m in window + pinned:
         assert SCAM_KEYS <= m.keys()
     assert window[-1]["effective_is_scam"] is True and window[0]["effective_is_scam"] is False
 
-
-    class FakeSendClient:
-        async def is_user_authorized(self):
-            return True
-
-        async def send_message(self, chat_id, text, reply_to=None):
-            return tg_msg(900, text, out=True)
-
     with use_client(FakeSendClient()):
-        sent = (await api.post("/api/compose/send", json={"chat_id": 77, "text": "x"})).json()["message"]
+        sent = (await api.post("/api/compose/send", json={"conversation_id": conv.id, "text": "x"})).json()["message"]
     assert SCAM_KEYS <= sent.keys()

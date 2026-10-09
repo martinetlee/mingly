@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X, Loader2 } from 'lucide-react'
-import type { Contact, Message, RelationshipStatus } from '../api/types'
-import { syncContacts, setContactImportantByTelegram, setRelationshipStatus, resetRelationshipStatus, sendMessage, reactToMessage, syncChat } from '../api/client'
+import type { Conversation, Message, Person, RelationshipStatus } from '../api/types'
+import { syncPeople, setPersonImportant, setRelationshipStatus, resetRelationshipStatus, sendMessage, reactToMessage, syncConversation } from '../api/client'
+import { canStartConversation, openDirectConversation } from '../lib/directConversation'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import { useDebouncedValue } from '../hooks/useDebouncedQuery'
 import { usePagedContacts } from '../hooks/usePagedContacts'
@@ -10,6 +11,9 @@ import { useChatMessages } from '../hooks/useChatMessages'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { invalidatePerson, invalidateAllPeople } from '../hooks/usePersonSummary'
 import { reportError, errorMessage, toast } from '../lib/toast'
+import { can } from '../lib/capabilities'
+import { personUrl } from '../lib/routes'
+import ChannelIcon from '../components/ChannelIcon'
 import ContactInfoSection from '../components/ContactInfoSection'
 import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from '../components/PersonCard'
 import ChatMessagesView from '../components/ChatMessagesView'
@@ -21,10 +25,13 @@ function ContactCard({
   selected,
   onClick,
 }: {
-  contact: Contact
+  contact: Person
   selected: boolean
   onClick: () => void
 }) {
+  const active = (contact.positions ?? []).filter((p) => p.is_active !== false)
+  const username = contact.identities.find((i) => i.username)?.username ?? null
+  const channels = Array.from(new Set(contact.identities.map((i) => i.channel)))
   return (
     <button
       type="button"
@@ -51,12 +58,15 @@ function ContactCard({
             </span>
           )}
         </div>
-        {contact.username && (
-          <p title={`@${contact.username}`} className="truncate text-xs text-slate-500">@{contact.username}</p>
+        {(username || channels.length > 0) && (
+          <p className="flex items-center gap-1 truncate text-xs text-slate-500">
+            {channels.map((ch) => <ChannelIcon key={ch} channel={ch} />)}
+            {username && <span title={`@${username}`} className="truncate">@{username}</span>}
+          </p>
         )}
-        {contact.positions.filter((p) => p.is_active !== false).length > 0 && (
-          <p title={contact.positions.filter((p) => p.is_active !== false).map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')} className="truncate text-[10px] text-slate-500 mt-0.5">
-            {contact.positions.filter((p) => p.is_active !== false).map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')}
+        {active.length > 0 && (
+          <p title={active.map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')} className="truncate text-[10px] text-slate-500 mt-0.5">
+            {active.map((p) => p.title ? `${p.title} @ ${p.organization}` : p.organization).join(', ')}
           </p>
         )}
       </div>
@@ -74,7 +84,7 @@ export function parseContactFilter(params: URLSearchParams): ContactFilter {
 }
 
 export default function Contacts() {
-  const [selected, setSelected] = useState<Contact | null>(null)
+  const [selected, setSelected] = useState<Person | null>(null)
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebouncedValue(search.trim(), 200)
   // The filter lives in the URL so links (Home → ?filter=important), back/forward
@@ -99,13 +109,16 @@ export default function Contacts() {
   const list = usePagedContacts(debouncedSearch, importantOnly ? 'all' : statusFilter, 100, importantOnly)
   const { items: contacts, loading, hasMore: hasMoreContacts, loadMore: loadMoreContacts } = list
 
-  // Message pane, bound to the selected contact's chat
-  const selectedTid = selected?.telegram_id ?? null
+  // The selected person's direct conversation: their most recent one on any
+  // channel, else a new Telegram one (lib/directConversation)
+  const [direct, setDirect] = useState<{ personId: number; conversation: Conversation | null; error: string | null } | null>(null)
+  const conversation = direct && direct.personId === selected?.id ? direct.conversation : null
+  const conversationId = conversation?.id ?? null
   // Same message-window engine as the Chats pane (paging, backfill, live WS updates)
-  const pane = useChatMessages({ chatId: selectedTid, topicId: null, nonce: 0 })
-  // Reply target remembers its chat so it can't leak into another one
-  const [replyTo, setReplyTo] = useState<{ chatId: number; msg: Message } | null>(null)
-  const replyToMessage = replyTo && replyTo.chatId === selectedTid ? replyTo.msg : null
+  const pane = useChatMessages({ conversationId, topicId: null, nonce: 0, canBackfill: can(conversation, 'history_backfill') })
+  // Reply target remembers its conversation so it can't leak into another one
+  const [replyTo, setReplyTo] = useState<{ conversationId: number; msg: Message } | null>(null)
+  const replyToMessage = replyTo && replyTo.conversationId === conversationId ? replyTo.msg : null
   const [syncingChat, setSyncingChat] = useState<number | null>(null)
 
   // Info panel state
@@ -113,6 +126,8 @@ export default function Contacts() {
 
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  const selectedUsername = selected?.identities.find((i) => i.username)?.username ?? null
+  const selectedPosition = (selected?.positions ?? []).find((p) => p.is_active !== false) ?? null
 
   // Infinite scroll: load the next page when the end of the list is visible
   useEffect(() => {
@@ -125,71 +140,89 @@ export default function Contacts() {
     return () => io.disconnect()
   }, [hasMoreContacts, loadMoreContacts, contacts.length])
 
+  // Resolve the selected person's direct conversation
+  useEffect(() => {
+    if (!selected) return
+    const personId = selected.id
+    let cancelled = false
+    setDirect(null)
+    openDirectConversation(personId, { canStart: canStartConversation(selected.identities) })
+      .then(
+      (conv) => { if (!cancelled) setDirect({ personId, conversation: conv, error: null }) },
+      (e) => { if (!cancelled) setDirect({ personId, conversation: null, error: errorMessage(e) }) },
+    )
+    return () => { cancelled = true }
+    // Only re-resolve when a different person is selected
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id])
+
   const syncAll = useAsyncAction(async () => {
-    const r = await syncContacts()
+    const r = await syncPeople()
     invalidateAllPeople()
     await list.reload()
     toast.success(`Synced ${r.total} contact${r.total !== 1 ? 's' : ''} (${r.imported} new)`)
   }, { errorContext: 'Contact sync failed' })
 
-  const handleSelect = useCallback((c: Contact) => {
+  const handleSelect = useCallback((c: Person) => {
     if (selectedRef.current?.id === c.id) return
     setSelected(c)
     setReplyTo(null)
   }, [])
 
-  /** Adopt an updated contact everywhere — if it's still the selected one. */
-  const handleContactChange = useCallback((updated: Contact) => {
-    invalidatePerson(updated.telegram_id)
-    setSelected((cur) => (cur && cur.id === updated.id ? updated : cur))
-    list.updateItem(updated)
+  /** Adopt an updated person everywhere — if it's still the selected one. */
+  const handleContactChange = useCallback((updated: Person) => {
+    invalidatePerson(updated.id)
+    const merge = (cur: Person) => ({ ...updated, positions: updated.positions ?? cur.positions })
+    setSelected((cur) => (cur && cur.id === updated.id ? merge(cur) : cur))
+    list.updateItem(selectedRef.current?.id === updated.id ? merge(selectedRef.current) : updated)
   }, [list])
 
-  const toggleImportant = useAsyncAction(async (c: Contact) => {
-    handleContactChange(await setContactImportantByTelegram(c.telegram_id, !c.is_important))
+  const toggleImportant = useAsyncAction(async (c: Person) => {
+    handleContactChange(await setPersonImportant(c.id, !c.is_important))
   }, { errorContext: 'Couldn\'t update important' })
 
-  const changeStatus = useAsyncAction(async (contactId: number, status: RelationshipStatus | 'auto') => {
+  const changeStatus = useAsyncAction(async (personId: number, status: RelationshipStatus | 'auto') => {
     const updated = status === 'auto'
-      ? await resetRelationshipStatus(contactId)
-      : await setRelationshipStatus(contactId, status)
+      ? await resetRelationshipStatus(personId)
+      : await setRelationshipStatus(personId, status)
     handleContactChange(updated)
   }, { errorContext: 'Couldn\'t change status' })
 
+  const conversationRef = useRef(conversationId)
+  conversationRef.current = conversationId
+
   const handleSend = async (text: string) => {
-    const c = selectedRef.current
-    if (!c) return
-    const replyId = replyTo && replyTo.chatId === c.telegram_id ? replyTo.msg.tg_message_id : undefined
-    const res = await sendMessage(c.telegram_id, text, replyId)
-    setReplyTo((r) => (r && r.chatId === c.telegram_id ? null : r))
-    // applyMessage ignores a message whose chat is no longer the open one
+    const cid = conversationRef.current
+    if (cid == null) return
+    const replyId = replyTo && replyTo.conversationId === cid ? replyTo.msg.id : undefined
+    const res = await sendMessage(cid, text, replyId)
+    setReplyTo((r) => (r && r.conversationId === cid ? null : r))
+    // applyMessage ignores a message whose conversation is no longer the open one
     if (res?.message) pane.applyMessage(res.message)
-    else if (selectedRef.current?.telegram_id === c.telegram_id) await pane.refresh()
+    else if (conversationRef.current === cid) await pane.refresh()
   }
 
   const handleReact = async (msg: Message, emoji: string | null) => {
-    const c = selectedRef.current
-    if (!c) return
     try {
-      await reactToMessage(c.telegram_id, msg.tg_message_id, emoji)
-      // tg_message_id is only unique per chat: patch only if it's still open
-      if (selectedRef.current?.telegram_id === c.telegram_id) pane.patchMessage(msg.tg_message_id, (m) => applyReaction(m, emoji))
+      await reactToMessage(msg.id, emoji)
+      // patchMessage only touches the message if it's in the open window
+      pane.patchMessage(msg.id, (m) => applyReaction(m, emoji))
     } catch (e) {
       reportError(e, 'Reaction failed')
     }
   }
 
   const handleSyncChat = async () => {
-    const c = selectedRef.current
-    if (!c || syncingChat === c.telegram_id) return
-    setSyncingChat(c.telegram_id)
+    const cid = conversationRef.current
+    if (cid == null || syncingChat === cid) return
+    setSyncingChat(cid)
     try {
-      await syncChat(c.telegram_id)
-      if (selectedRef.current?.telegram_id === c.telegram_id) await pane.refresh()
+      await syncConversation(cid)
+      if (conversationRef.current === cid) await pane.refresh()
     } catch (e) {
       reportError(e, 'Sync failed')
     } finally {
-      setSyncingChat((v) => (v === c.telegram_id ? null : v))
+      setSyncingChat((v) => (v === cid ? null : v))
     }
   }
 
@@ -258,7 +291,7 @@ export default function Contacts() {
           <button
             onClick={() => syncAll.run()}
             disabled={syncAll.pending}
-            title="Sync contacts from Telegram"
+            title="Sync contacts from every connected account"
             className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             <RefreshCw size={13} className={syncAll.pending ? 'animate-spin' : ''} />
@@ -326,7 +359,7 @@ export default function Contacts() {
                 disabled={syncAll.pending}
                 className="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
               >
-                Sync from Telegram
+                Sync contacts
               </button>
             </div>
           ) : (
@@ -364,9 +397,10 @@ export default function Contacts() {
               {/* Header -- unified PersonCard */}
               <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
                 <PersonCard
-                  telegramId={selected.telegram_id}
+                  personId={selected.id}
                   name={selected.name}
-                  username={selected.username}
+                  username={selectedUsername}
+                  photoUrl={selected.avatar_url ?? null}
                   isImportant={selected.is_important}
                   status={selected.relationship_status}
                   mode="header"
@@ -384,29 +418,43 @@ export default function Contacts() {
                     <Info size={13} />
                     Info
                   </button>
-                  <button
-                    onClick={handleSyncChat}
-                    disabled={syncingChat === selected.telegram_id}
-                    title="Sync messages"
-                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-                  >
-                    <RefreshCw size={13} className={syncingChat === selected.telegram_id ? 'animate-spin' : ''} />
-                    Sync
-                  </button>
+                  {conversation && (
+                    <button
+                      onClick={handleSyncChat}
+                      disabled={syncingChat === conversation.id}
+                      title="Sync messages"
+                      className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={syncingChat === conversation.id ? 'animate-spin' : ''} />
+                      Sync
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Messages */}
-              <ChatMessagesView
-                key={selected.telegram_id}
-                msgs={pane}
-                chatType="private"
-                onReply={(msg) => setReplyTo({ chatId: selected.telegram_id, msg })}
-                onReact={handleReact}
-              />
+              {conversation ? (
+                <>
+                  {/* Messages */}
+                  <ChatMessagesView
+                    key={conversation.id}
+                    msgs={pane}
+                    conversation={conversation}
+                    onReply={can(conversation, 'reply') ? (msg) => setReplyTo({ conversationId: conversation.id, msg }) : undefined}
+                    onReact={can(conversation, 'react') ? handleReact : undefined}
+                  />
 
-              {/* Compose */}
-              <ComposeBar key={selected.telegram_id} onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyTo(null)} />
+                  {/* Compose */}
+                  {can(conversation, 'send') && (
+                    <ComposeBar key={conversation.id} onSend={handleSend} replyTo={replyToMessage} onCancelReply={() => setReplyTo(null)} />
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-500">
+                  {direct?.personId === selected.id && direct.error
+                    ? <p className="text-sm">{direct.error}</p>
+                    : <Loader2 size={16} className="animate-spin" />}
+                </div>
+              )}
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
@@ -427,16 +475,12 @@ export default function Contacts() {
             <div className="p-4 flex flex-col gap-4">
               {/* Identity -- unified PersonCard */}
               <PersonCard
-                telegramId={selected.telegram_id}
+                personId={selected.id}
                 name={selected.name}
-                username={selected.username}
+                username={selectedUsername}
                 isImportant={selected.is_important}
-                position={
-                  selected.positions.filter((p) => p.is_active !== false).length > 0
-                    ? { title: selected.positions.filter((p) => p.is_active !== false)[0].title, organization: selected.positions.filter((p) => p.is_active !== false)[0].organization }
-                    : null
-                }
-                phone={selected.phone}
+                position={selectedPosition ? { title: selectedPosition.title, organization: selectedPosition.organization } : null}
+                phone={selected.identities.find((i) => i.phone)?.phone ?? null}
                 twitterHandle={selected.twitter_handle}
                 linkedinUrl={selected.linkedin_url}
                 hasNotes={!!selected.notes}
@@ -457,11 +501,11 @@ export default function Contacts() {
                   <Star size={15} className={selected.is_important ? 'fill-amber-400' : ''} />
                 </button>
                 <Link
-                  to={`/profile/${selected.telegram_id}`}
+                  to={personUrl(selected.id)}
                   className="inline-flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                 >
                   <ExternalLink size={9} />
-                  View Telegram profile
+                  View profile
                 </Link>
               </div>
 
@@ -517,7 +561,7 @@ export default function Contacts() {
                 )}
               </div>
 
-              <ContactInfoSection key={selected.id} contact={selected} onContactChange={handleContactChange} compact />
+              <ContactInfoSection key={selected.id} person={selected} onPersonChange={handleContactChange} compact />
             </div>
           </div>
         )}

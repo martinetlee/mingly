@@ -1,6 +1,6 @@
-import type { ContactsPage, Features, PersonDetail } from './types'
-import type { BackfillResult, ChatSyncResult, MessageWindow, SendFilesResponse } from './types'
-import type { AdminActionLog, AdminPermissions, AuthStatus, BoardColumn, BoardData, BriefingJobStatus, BriefingRun, CatchUpItem, CatchUpSummaryJob, ChannelPostStats, Chat, ChatMember, Contact, ContactPosition, ConversationDetail, ConversationSummary, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, PersonSummary, PinnedMessage, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamManualVerdict, ScamVerdictResponse, ScamVerdictFilter, ScamQueueStats, CloudSyncResult, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramProfile, TelegramSearchResult, UserPresence, Workspace } from './types'
+import type { PeoplePage, Features, Person } from './types'
+import type { BackfillResult, ConversationSyncResult, MessageWindow, SendFilesResponse } from './types'
+import type { AdminActionLog, AdminPermissions, AiConversationDetail, AiConversationSummary, AuthStatus, BoardColumn, BoardData, BriefingJobStatus, BriefingRun, CatchUpItem, CatchUpSummaryJob, ChannelPostStats, ChatMember, ContactPosition, Conversation, ConversationKind, DashboardData, Folder, ForumTopic, GlobalSearchResults, GroupSettings, InviteLink, MentionGroup, Message, OrgDetail, OrgSummary, Prefs, ScamFlag, ScannedMessage, ScamCategory, ScamManualVerdict, ScamVerdictResponse, ScamVerdictFilter, ScamQueueStats, CloudSyncResult, ScamReport, ReportContextMessage, SharedMediaItem, Tag, TagSuggestion, TelegramDirectoryResult, TelegramProfile, UserPresence, Workspace } from './types'
 import { setSessionToken, clearSessionToken, notifySessionExpired } from './session'
 import { setCachedNotifPref } from '../lib/notifications'
 
@@ -175,10 +175,11 @@ export const lockVault = async (): Promise<void> => {
   notifySessionExpired()
 }
 
-// --- Chats ---
 
-export const getChats = (limit = 50, offset = 0, sortBy = 'recent', tagId?: number, workspaceId?: number, signal?: AbortSignal) =>
-  request<Chat[]>(`/api/chats?limit=${limit}&offset=${offset}&sort_by=${sortBy}${tagId != null ? `&tag_id=${tagId}` : ''}${workspaceId != null ? `&workspace_id=${workspaceId}` : ''}`, { signal })
+// --- Conversations ---
+
+export const getConversations = (limit = 50, offset = 0, sortBy = 'recent', tagId?: number, workspaceId?: number, signal?: AbortSignal) =>
+  request<Conversation[]>(`/api/conversations?limit=${limit}&offset=${offset}&sort_by=${sortBy}${tagId != null ? `&tag_id=${tagId}` : ''}${workspaceId != null ? `&workspace_id=${workspaceId}` : ''}`, { signal })
 
 // --- Workspaces ---
 
@@ -226,196 +227,198 @@ export const reorderBoardColumns = (workspaceId: number, boardId: number, tagIds
   request<BoardData>(`/api/workspaces/${workspaceId}/boards/${boardId}/columns/order`, { method: 'PUT', body: JSON.stringify({ tag_ids: tagIds }) })
 
 /** Returns the committed board for `boardId` — the newest snapshot */
-export const moveBoardChat = (workspaceId: number, boardId: number, chatId: number, toTagId: number | null) =>
-  request<BoardData>(`/api/workspaces/${workspaceId}/move`, { method: 'POST', body: JSON.stringify({ board_id: boardId, chat_id: chatId, to_tag_id: toTagId }) })
+export const moveBoardConversation = (workspaceId: number, boardId: number, conversationId: number, toTagId: number | null) =>
+  request<BoardData>(`/api/workspaces/${workspaceId}/move`, { method: 'POST', body: JSON.stringify({ board_id: boardId, conversation_id: conversationId, to_tag_id: toTagId }) })
 
-export const getChatsByIds = (ids: number[]) =>
-  request<Chat[]>('/api/chats/by-ids', {
+export const getConversation = (conversationId: number, signal?: AbortSignal) =>
+  request<Conversation>(`/api/conversations/${conversationId}`, { signal })
+
+export const getConversationsByIds = (ids: number[]) =>
+  request<Conversation[]>('/api/conversations/by-ids', {
     method: 'POST',
     body: JSON.stringify({ ids }),
   })
 
-export const searchChatsLocal = (q: string) =>
-  request<{ local: Chat[] }>(`/api/chats/search?q=${encodeURIComponent(q)}`)
+export const searchConversationsLocal = (q: string) =>
+  request<{ local: Conversation[] }>(`/api/conversations/search?q=${encodeURIComponent(q)}`)
 
-export const searchChatsTelegram = (q: string, signal?: AbortSignal) =>
-  request<Chat[]>(`/api/chats/search/telegram?q=${encodeURIComponent(q)}`, { signal })
-
+/** Telegram global message search: the conversation is stored server-side, its messages may not be yet (open by external_id) */
 export interface MessageSearchResult {
-  telegram_id: number
-  name: string
-  type: string
-  messages: { tg_message_id: number; text: string; sender_name: string | null; date: string | null }[]
+  conversation_id: number
+  conversation_title: string
+  conversation_kind: ConversationKind
+  messages: { external_id: string; text: string; sender_name: string | null; date: string | null }[]
 }
 
 export const searchMessagesGlobal = (q: string, signal?: AbortSignal) =>
-  request<MessageSearchResult[]>(`/api/chats/search/messages?q=${encodeURIComponent(q)}`, { signal })
+  request<MessageSearchResult[]>(`/api/conversations/search/messages?q=${encodeURIComponent(q)}`, { signal })
 
 export const bulkSync = () =>
-  request<{ synced: number }>('/api/chats/bulk-sync', { method: 'POST' })
-
-export const getFolders = () =>
-  request<Folder[]>('/api/chats/folders')
+  request<{ synced: number }>('/api/conversations/bulk-sync', { method: 'POST' })
 
 export interface MessageWindowParams {
   limit?: number
-  /** Cursor: the `limit` messages immediately older than it */
-  before?: string | null
-  /** Cursor: the `limit` messages immediately newer than it */
-  after?: string | null
-  /** tg_message_id to centre the window on */
+  /** Message id: the `limit` messages immediately older than it */
+  before?: number | null
+  /** Message id: the `limit` messages immediately newer than it */
+  after?: number | null
+  /** Message id to centre the window on */
   anchor?: number | null
+  /** The channel's id of a message that may not be stored yet (e.g. a reply target): fetched from the channel */
+  aroundExternalId?: string | null
   /** ISO datetime: centre on the first message at/after it */
   date?: string | null
   /** Forum topic scope (1 = General, includes untagged rows) */
   topicId?: number | null
 }
 
-/** Keyset message window (oldest → newest). Use at most one of before/after/anchor/date. */
-export const getMessageWindow = (telegram_id: number, p: MessageWindowParams = {}, signal?: AbortSignal) => {
+/** Keyset message window (oldest → newest). Use at most one of before/after/anchor/aroundExternalId/date. */
+export const getMessageWindow = (conversationId: number, p: MessageWindowParams = {}, signal?: AbortSignal) => {
   const params = new URLSearchParams()
   if (p.limit != null) params.set('limit', String(p.limit))
-  if (p.before) params.set('before', p.before)
-  if (p.after) params.set('after', p.after)
+  if (p.before != null) params.set('before', String(p.before))
+  if (p.after != null) params.set('after', String(p.after))
   if (p.anchor != null) params.set('anchor', String(p.anchor))
-  if (p.date) params.set('date', p.date)
+  if (p.aroundExternalId) params.set('around_external_id', p.aroundExternalId)
+  if (p.date) params.set('around_date', p.date)
   if (p.topicId != null) params.set('topic_id', String(p.topicId))
-  return request<MessageWindow>(`/api/chats/${telegram_id}/messages/window?${params}`, { signal })
+  return request<MessageWindow>(`/api/conversations/${conversationId}/messages/window?${params}`, { signal })
 }
 
-/** Fetch history older than the oldest stored message from Telegram. */
-export const backfillChat = (telegram_id: number, opts: { limit?: number; topicId?: number | null } = {}, signal?: AbortSignal) => {
+/** Fetch history older than the oldest stored message from the channel. */
+export const backfillConversation = (conversationId: number, opts: { limit?: number; topicId?: number | null } = {}, signal?: AbortSignal) => {
   const params = new URLSearchParams({ limit: String(opts.limit ?? 100) })
   if (opts.topicId != null) params.set('topic_id', String(opts.topicId))
-  return request<BackfillResult>(`/api/chats/${telegram_id}/backfill?${params}`, { method: 'POST', signal })
+  return request<BackfillResult>(`/api/conversations/${conversationId}/backfill?${params}`, { method: 'POST', signal })
 }
 
-export const searchChatMessages = (telegram_id: number, query: string, limit = 50, signal?: AbortSignal) =>
-  request<Message[]>(`/api/chats/${telegram_id}/messages/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
+export const searchConversationMessages = (conversationId: number, query: string, limit = 50, signal?: AbortSignal) =>
+  request<Message[]>(`/api/conversations/${conversationId}/messages/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
 
-export const syncChat = (telegram_id: number, limit?: number) =>
-  request<ChatSyncResult>(`/api/chats/${telegram_id}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
+export const syncConversation = (conversationId: number, limit?: number) =>
+  request<ConversationSyncResult>(`/api/conversations/${conversationId}/sync${limit != null ? `?limit=${limit}` : ''}`, { method: 'POST' })
 
-export const getChatMembers = (telegram_id: number, limit = 100) =>
-  request<ChatMember[]>(`/api/chats/${telegram_id}/members?limit=${limit}`)
+export const getConversationMembers = (conversationId: number, limit = 100) =>
+  request<ChatMember[]>(`/api/conversations/${conversationId}/members?limit=${limit}`)
 
-export const getSharedMedia = (telegram_id: number, mediaFilter: 'media' | 'files' | 'links' = 'media', limit = 50, offset = 0, signal?: AbortSignal) =>
-  request<SharedMediaItem[]>(`/api/chats/${telegram_id}/shared-media?media_filter=${mediaFilter}&limit=${limit}&offset=${offset}`, { signal })
+export const getSharedMedia = (conversationId: number, mediaFilter: 'media' | 'files' | 'links' = 'media', limit = 50, offset = 0, signal?: AbortSignal) =>
+  request<SharedMediaItem[]>(`/api/conversations/${conversationId}/shared-media?media_filter=${mediaFilter}&limit=${limit}&offset=${offset}`, { signal })
 
-export const markChatRead = (telegram_id: number) =>
-  request<{ success: boolean }>(`/api/chats/${telegram_id}/mark-read`, { method: 'POST' })
+export const markConversationRead = (conversationId: number) =>
+  request<{ success: boolean }>(`/api/conversations/${conversationId}/mark-read`, { method: 'POST' })
 
-export const getPinnedMessage = async (telegram_id: number, signal?: AbortSignal): Promise<PinnedMessage | null> => {
-  const msgs = await request<PinnedMessage[]>(`/api/chats/${telegram_id}/pinned`, { signal })
+export const getPinnedMessages = (conversationId: number, signal?: AbortSignal) =>
+  request<Message[]>(`/api/conversations/${conversationId}/pinned`, { signal })
+
+export const getPinnedMessage = async (conversationId: number, signal?: AbortSignal): Promise<Message | null> => {
+  const msgs = await getPinnedMessages(conversationId, signal)
   return msgs && msgs.length > 0 ? msgs[0] : null
 }
 
-export const getHiddenChats = () =>
-  request<Chat[]>('/api/chats/hidden')
+export const getHiddenConversations = () =>
+  request<Conversation[]>('/api/conversations/hidden')
 
-export const getArchivedChats = () =>
-  request<Chat[]>('/api/chats/archived')
+export const getArchivedConversations = () =>
+  request<Conversation[]>('/api/conversations/archived')
 
-export const setPinned = (telegram_id: number, pinned: boolean) =>
-  request<{ telegram_id: number; is_pinned: boolean }>(`/api/chats/${telegram_id}/pin`, {
+export const setPinned = (conversationId: number, pinned: boolean) =>
+  request<{ conversation_id: number; is_pinned: boolean }>(`/api/conversations/${conversationId}/pin`, {
     method: 'POST',
     body: JSON.stringify({ pinned }),
   })
 
-export const setArchived = (telegram_id: number, archived: boolean) =>
-  request<{ telegram_id: number; is_archived: boolean }>(`/api/chats/${telegram_id}/archive`, {
+export const setArchived = (conversationId: number, archived: boolean) =>
+  request<{ conversation_id: number; is_archived: boolean }>(`/api/conversations/${conversationId}/archive`, {
     method: 'POST',
     body: JSON.stringify({ archived }),
   })
 
-export const setMuted = (telegram_id: number, muted: boolean, duration?: string) =>
-  request<{ telegram_id: number; is_muted: boolean; muted_until: string | null }>(`/api/chats/${telegram_id}/mute`, {
+export const setMuted = (conversationId: number, muted: boolean, duration?: string) =>
+  request<{ conversation_id: number; is_muted: boolean; muted_until: string | null }>(`/api/conversations/${conversationId}/mute`, {
     method: 'POST',
     body: JSON.stringify({ muted, duration }),
   })
 
-export const setMarkedUnread = (telegram_id: number, marked_unread: boolean) =>
-  request<{ telegram_id: number; is_marked_unread: boolean }>(`/api/chats/${telegram_id}/mark-unread`, {
+export const setMarkedUnread = (conversationId: number, marked_unread: boolean) =>
+  request<{ conversation_id: number; is_marked_unread: boolean }>(`/api/conversations/${conversationId}/mark-unread`, {
     method: 'POST',
     body: JSON.stringify({ marked_unread }),
   })
 
-export const setHidden = (telegram_id: number, hidden: boolean) =>
-  request<{ telegram_id: number; is_hidden: boolean }>(`/api/chats/${telegram_id}/hide`, {
+export const setHidden = (conversationId: number, hidden: boolean) =>
+  request<{ conversation_id: number; is_hidden: boolean }>(`/api/conversations/${conversationId}/hide`, {
     method: 'POST',
     body: JSON.stringify({ hidden }),
   })
 
-export const getTrackedChats = () =>
-  request<Chat[]>('/api/chats/tracked')
+export const getTrackedConversations = () =>
+  request<Conversation[]>('/api/conversations/tracked')
 
-export const setTracked = (telegram_id: number, tracked: boolean) =>
-  request<{ telegram_id: number; is_tracked: boolean }>(`/api/chats/${telegram_id}/track`, {
+export const setTracked = (conversationId: number, tracked: boolean) =>
+  request<{ conversation_id: number; is_tracked: boolean }>(`/api/conversations/${conversationId}/track`, {
     method: 'POST',
     body: JSON.stringify({ tracked }),
   })
 
-export const getBriefingChats = () =>
-  request<Chat[]>('/api/chats/briefing')
+export const getBriefingConversations = () =>
+  request<Conversation[]>('/api/conversations/briefing')
 
-export const setBriefing = (telegram_id: number, briefing: boolean) =>
-  request<{ telegram_id: number; is_briefing: boolean }>(`/api/chats/${telegram_id}/briefing`, {
+export const setBriefing = (conversationId: number, briefing: boolean) =>
+  request<{ conversation_id: number; is_briefing: boolean }>(`/api/conversations/${conversationId}/briefing`, {
     method: 'POST',
     body: JSON.stringify({ briefing }),
   })
 
-export const reactToMessage = (chat_telegram_id: number, msg_tg_id: number, emoji: string | null) =>
-  request<{ success: boolean; my_reaction: string | null }>(`/api/chats/${chat_telegram_id}/messages/${msg_tg_id}/react`, {
+export const reactToMessage = (messageId: number, emoji: string | null) =>
+  request<{ success: boolean; my_reaction: string | null }>(`/api/messages/${messageId}/react`, {
     method: 'POST',
     body: JSON.stringify({ emoji }),
   })
 
-export const getUserPresence = (telegram_id: number, signal?: AbortSignal) =>
-  request<UserPresence>(`/api/chats/${telegram_id}/presence`, { signal })
+/** Presence of a direct conversation's peer (capability 'presence') */
+export const getPeerPresence = (conversationId: number, signal?: AbortSignal) =>
+  request<UserPresence>(`/api/conversations/${conversationId}/presence`, { signal })
 
-export const sendTypingAction = (telegram_id: number) =>
-  request<{ success: boolean }>(`/api/chats/${telegram_id}/typing`, { method: 'POST' })
+export const sendTypingAction = (conversationId: number) =>
+  request<{ success: boolean }>(`/api/conversations/${conversationId}/typing`, { method: 'POST' })
 
 // --- Forum Topics ---
 
-export const getForumTopics = (telegram_id: number) =>
-  request<ForumTopic[]>(`/api/chats/${telegram_id}/topics`)
+export const getForumTopics = (conversationId: number) =>
+  request<ForumTopic[]>(`/api/conversations/${conversationId}/topics`)
 
-export const createForumTopic = (telegram_id: number, title: string) =>
-  request<{ success: boolean; topic_id: number | null }>(`/api/chats/${telegram_id}/topics`, {
+export const createForumTopic = (conversationId: number, title: string) =>
+  request<{ success: boolean; topic_id: number | null }>(`/api/conversations/${conversationId}/topics`, {
     method: 'POST',
     body: JSON.stringify({ title }),
   })
 
-export const setTopicState = (telegram_id: number, topic_id: number, closed: boolean) =>
-  request<{ success: boolean; topic_id: number; closed: boolean }>(`/api/chats/${telegram_id}/topics/${topic_id}/state`, {
+export const setTopicState = (conversationId: number, topic_id: number, closed: boolean) =>
+  request<{ success: boolean; topic_id: number; closed: boolean }>(`/api/conversations/${conversationId}/topics/${topic_id}/state`, {
     method: 'POST',
     body: JSON.stringify({ closed }),
   })
 
 // --- Slow Mode ---
 
-export const setSlowMode = (telegram_id: number, seconds: number) =>
-  request<{ success: boolean; slow_mode_seconds: number }>(`/api/chats/${telegram_id}/slow-mode`, {
+export const setSlowMode = (conversationId: number, seconds: number) =>
+  request<{ success: boolean; slow_mode_seconds: number }>(`/api/conversations/${conversationId}/slow-mode`, {
     method: 'POST',
     body: JSON.stringify({ seconds }),
   })
 
 // --- Pin/Unpin Messages ---
 
-export const pinMessage = (telegram_id: number, msg_tg_id: number, pinned: boolean, notify = false) =>
-  request<{ success: boolean; is_pinned: boolean }>(`/api/chats/${telegram_id}/messages/${msg_tg_id}/pin`, {
+export const pinMessage = (messageId: number, pinned: boolean, notify = false) =>
+  request<{ success: boolean; is_pinned: boolean }>(`/api/messages/${messageId}/pin`, {
     method: 'POST',
     body: JSON.stringify({ pinned, notify }),
   })
 
-export const getPinnedMessages = (telegram_id: number) =>
-  request<Message[]>(`/api/chats/${telegram_id}/pinned`)
-
 // --- Channel Post Stats ---
 
-export const getPostStats = (telegram_id: number, limit = 20) =>
-  request<ChannelPostStats[]>(`/api/chats/${telegram_id}/post-stats?limit=${limit}`)
+export const getPostStats = (conversationId: number, limit = 20) =>
+  request<ChannelPostStats[]>(`/api/conversations/${conversationId}/post-stats?limit=${limit}`)
 
 // --- Tags ---
 
@@ -437,20 +440,20 @@ export const updateTag = (tag_id: number, data: { name?: string; color?: string;
 export const deleteTag = (tag_id: number) =>
   request<{ success: boolean }>(`/api/tags/${tag_id}`, { method: 'DELETE' })
 
-export const getChatTags = (telegram_id: number) =>
-  request<Tag[]>(`/api/chats/${telegram_id}/tags`)
+export const getConversationTags = (conversationId: number) =>
+  request<Tag[]>(`/api/conversations/${conversationId}/tags`)
 
-export const addTagToChat = (telegram_id: number, tag_id: number) =>
-  request<{ success: boolean }>(`/api/chats/${telegram_id}/tags`, {
+export const addTagToConversation = (conversationId: number, tag_id: number) =>
+  request<{ success: boolean }>(`/api/conversations/${conversationId}/tags`, {
     method: 'POST',
     body: JSON.stringify({ tag_id }),
   })
 
-export const removeTagFromChat = (telegram_id: number, tag_id: number) =>
-  request<{ success: boolean }>(`/api/chats/${telegram_id}/tags/${tag_id}`, { method: 'DELETE' })
+export const removeTagFromConversation = (conversationId: number, tag_id: number) =>
+  request<{ success: boolean }>(`/api/conversations/${conversationId}/tags/${tag_id}`, { method: 'DELETE' })
 
-export const suggestTags = (telegram_id: number) =>
-  request<TagSuggestion[]>(`/api/chats/${telegram_id}/tags/suggest`, { method: 'POST' })
+export const suggestTags = (conversationId: number) =>
+  request<TagSuggestion[]>(`/api/conversations/${conversationId}/tags/suggest`, { method: 'POST' })
 
 // --- Organizations ---
 
@@ -484,19 +487,14 @@ export const autoDiscoverOrgs = () =>
 export const generateOrgContext = (orgId: number) =>
   request<OrgDetail>(`/api/organizations/${orgId}/generate-context`, { method: 'POST' })
 
-// --- Contacts ---
+// --- People (the CRM entity; every identity on every channel belongs to one) ---
 
-export const syncContacts = () =>
-  request<{ imported: number; total: number }>('/api/contacts/sync', { method: 'POST' })
+/** Address-book sync of every connector that has one */
+export const syncPeople = () =>
+  request<{ imported: number; total: number }>('/api/people/sync', { method: 'POST' })
 
-export const getContactByTelegram = (telegramId: number, signal?: AbortSignal) =>
-  request<Contact>(`/api/contacts/by-telegram/${telegramId}`, { signal })
-
-export const createContact = (data: { telegram_id: number; first_name?: string; last_name?: string; username?: string }) =>
-  request<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(data) })
-
-export const getContactsPage = (
-  params: { search?: string; status?: string; important?: boolean; limit?: number; offset?: number } = {},
+export const getPeoplePage = (
+  params: { search?: string; status?: string; important?: boolean; contactsOnly?: boolean; limit?: number; offset?: number } = {},
   signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams({
@@ -506,80 +504,121 @@ export const getContactsPage = (
   })
   if (params.status && params.status !== 'all') qs.set('status', params.status)
   if (params.important) qs.set('important', 'true')
-  return request<ContactsPage>(`/api/contacts?${qs}`, { signal })
+  if (params.contactsOnly) qs.set('contacts_only', 'true')
+  return request<PeoplePage>(`/api/people?${qs}`, { signal })
 }
 
-/** First page of matches only — use getContactsPage for lists */
-export const getContacts = (search = '', limit = 100, offset = 0) =>
-  getContactsPage({ search, limit, offset }).then((page) => page.items)
+/** First page of matches only — use getPeoplePage for lists */
+export const getPeople = (search = '', limit = 100, offset = 0, contactsOnly = false) =>
+  getPeoplePage({ search, limit, offset, contactsOnly }).then((page) => page.items)
 
-export const getContact = (contactId: number) =>
-  request<Contact>(`/api/contacts/${contactId}`)
+/** Local data only (works offline) */
+export const getPerson = (personId: number, signal?: AbortSignal) =>
+  request<Person>(`/api/people/${personId}`, { signal })
 
-export const updateContact = (contactId: number, data: { twitter_handle?: string; linkedin_url?: string; phone?: string; notes?: string; is_important?: boolean }) =>
-  request<Contact>(`/api/contacts/${contactId}`, { method: 'PUT', body: JSON.stringify(data) })
+/** The person's direct conversations on every channel, most recent first */
+export const getPersonConversations = (personId: number, signal?: AbortSignal) =>
+  request<Conversation[]>(`/api/people/${personId}/conversations`, { signal })
 
-export const setContactImportantByTelegram = (telegramId: number, is_important: boolean) =>
-  request<Contact>(`/api/contacts/by-telegram/${telegramId}/important`, {
+export const updatePerson = (personId: number, data: { display_name?: string | null; twitter_handle?: string; linkedin_url?: string; notes?: string; is_important?: boolean }) =>
+  request<Person>(`/api/people/${personId}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const setPersonImportant = (personId: number, is_important: boolean) =>
+  request<Person>(`/api/people/${personId}/important`, {
     method: 'POST',
     body: JSON.stringify({ is_important }),
   })
 
-// --- People (local DB, keyed by telegram_id; works for non-contacts and offline) ---
-
-export const getPerson = (telegramId: number, signal?: AbortSignal) =>
-  request<PersonDetail>(`/api/people/${telegramId}`, { signal })
-
 export const addPosition = (
-  telegramId: number,
+  personId: number,
   organization: string,
   title?: string,
   is_active = true,
   ended_at?: string,
 ) =>
-  request<ContactPosition>(`/api/people/${telegramId}/positions`, {
+  request<ContactPosition>(`/api/people/${personId}/positions`, {
     method: 'POST',
     body: JSON.stringify({ organization, title: title || null, is_active, ended_at: ended_at || null }),
   })
 
 /** `ended_at: ""` clears the end date */
 export const updatePosition = (
-  telegramId: number,
+  personId: number,
   positionId: number,
   data: { title?: string; is_active?: boolean; ended_at?: string | null },
 ) =>
-  request<ContactPosition>(`/api/people/${telegramId}/positions/${positionId}`, {
+  request<ContactPosition>(`/api/people/${personId}/positions/${positionId}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   })
 
-export const removePosition = (telegramId: number, positionId: number) =>
-  request<{ success: boolean }>(`/api/people/${telegramId}/positions/${positionId}`, { method: 'DELETE' })
+export const removePosition = (personId: number, positionId: number) =>
+  request<{ success: boolean }>(`/api/people/${personId}/positions/${positionId}`, { method: 'DELETE' })
 
-export const getPositions = (telegramId: number, signal?: AbortSignal) =>
-  request<ContactPosition[]>(`/api/people/${telegramId}/positions`, { signal })
+export const getPositions = (personId: number, signal?: AbortSignal) =>
+  request<ContactPosition[]>(`/api/people/${personId}/positions`, { signal })
 
-export const setRelationshipStatus = (contactId: number, status: string) =>
-  request<Contact>(`/api/contacts/${contactId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
+export const setRelationshipStatus = (personId: number, status: string) =>
+  request<Person>(`/api/people/${personId}/relationship-status`, { method: 'POST', body: JSON.stringify({ status }) })
 
-export const resetRelationshipStatus = (contactId: number) =>
-  request<Contact>(`/api/contacts/${contactId}/relationship-status/auto`, { method: 'POST' })
+export const resetRelationshipStatus = (personId: number) =>
+  request<Person>(`/api/people/${personId}/relationship-status/auto`, { method: 'POST' })
 
-export const resolvePerson = (telegramId: number) =>
-  request<PersonSummary>(`/api/contacts/resolve/${telegramId}`)
+export const refreshRelationshipStatuses = () =>
+  request<{ refreshed: number }>('/api/people/refresh-statuses', { method: 'POST' })
 
-/** Up to 200 ids per call; ids are returned as string keys */
-export const resolvePeople = (telegramIds: number[]) =>
-  request<Record<string, PersonSummary>>('/api/contacts/resolve-batch', {
-    method: 'POST', body: JSON.stringify({ telegram_ids: telegramIds }),
-  })
+// --- Telegram-only operations (409 `unsupported_channel` for other channels) ---
 
-// --- Profiles ---
+/** Telegram directory search (people, groups, channels not necessarily stored) */
+export const searchTelegramDirectory = (q: string, signal?: AbortSignal) =>
+  request<TelegramDirectoryResult[]>(`/api/telegram/search?q=${encodeURIComponent(q)}`, { signal })
+
+/** Store (if needed) and return the conversation for a Telegram peer */
+export const ensureTelegramConversation = (peerId: number) =>
+  request<Conversation>('/api/telegram/conversations/ensure', { method: 'POST', body: JSON.stringify({ peer_id: peerId }) })
+
+export const getTelegramFolders = () =>
+  request<Folder[]>('/api/telegram/folders')
 
 // Single attempt: a 503 means "Telegram offline, no cached copy" — retrying
 // only delays showing the local data
-export const getProfile = (userId: number | string, signal?: AbortSignal, opts: { refresh?: boolean } = {}) =>
-  request<TelegramProfile>(`/api/profiles/${encodeURIComponent(String(userId))}${opts.refresh ? '?refresh=true' : ''}`, { signal, attempts: 1 })
+export const getTelegramProfile = (identityId: number, signal?: AbortSignal, opts: { refresh?: boolean } = {}) =>
+  request<TelegramProfile>(`/api/telegram/identities/${identityId}/profile${opts.refresh ? '?refresh=true' : ''}`, { signal, attempts: 1 })
+
+/** A public @username → the stored person and/or conversation it names */
+export const resolveTelegramUsername = (username: string, signal?: AbortSignal) =>
+  request<{ person_id: number | null; identity_id: number | null; conversation_id: number | null }>(
+    `/api/telegram/resolve?username=${encodeURIComponent(username.replace(/^@/, ''))}`, { signal, attempts: 1 },
+  )
+
+/** A Telegram user id (`tg://user?id=` link) → its person */
+export const getPersonForTelegramUser = (userId: number | string, signal?: AbortSignal) =>
+  request<{ person_id: number; identity_id: number }>(`/api/telegram/users/${encodeURIComponent(String(userId))}/person`, { signal, attempts: 1 })
+
+/** Start a Telegram direct conversation with a person (through their Telegram identity) */
+export const startPrivateChat = (personId: number) =>
+  request<Conversation>('/api/telegram/create/private', {
+    method: 'POST',
+    body: JSON.stringify({ person_id: personId }),
+  })
+
+export const createGroup = (name: string, memberPersonIds: number[]) =>
+  request<Conversation>('/api/telegram/create/group', {
+    method: 'POST',
+    body: JSON.stringify({ name, person_ids: memberPersonIds }),
+  })
+
+export const createChannel = (name: string, about: string = '', isPublic: boolean = false) =>
+  request<Conversation>('/api/telegram/create/channel', {
+    method: 'POST',
+    body: JSON.stringify({ name, about, is_public: isPublic }),
+  })
+
+export const joinViaInviteLink = (link: string) =>
+  request<Conversation>('/api/telegram/join', {
+    method: 'POST',
+    body: JSON.stringify({ link }),
+  })
 
 // --- LLM provider API keys (vault-stored, never returned) ---
 
@@ -686,46 +725,46 @@ export interface SendOptions {
   clientNonce?: string
 }
 
-export const sendMessage = (chat_id: number, text: string, reply_to_id?: number, opts: SendOptions = {}) =>
+export const sendMessage = (conversationId: number, text: string, replyToMessageId?: number, opts: SendOptions = {}) =>
   request<{ success: boolean; message_id: number; message?: Message }>('/api/compose/send', {
     method: 'POST',
     body: JSON.stringify({
-      chat_id, text, reply_to_id,
+      conversation_id: conversationId, text, reply_to_message_id: replyToMessageId,
       topic_id: opts.topicId ?? undefined,
       client_nonce: opts.clientNonce,
     }),
   })
 
-export const editMessage = (chat_id: number, message_id: number, text: string) =>
+export const editMessage = (messageId: number, text: string) =>
   request<{ success: boolean; message?: Message }>('/api/compose/edit', {
     method: 'POST',
-    body: JSON.stringify({ chat_id, message_id, text }),
+    body: JSON.stringify({ message_id: messageId, text }),
   })
 
-export const deleteMessages = (chat_id: number, message_ids: number[], revoke = false) =>
+export const deleteMessages = (conversationId: number, messageIds: number[], revoke = false) =>
   request<{ success: boolean }>('/api/compose/delete', {
     method: 'POST',
-    body: JSON.stringify({ chat_id, message_ids, revoke }),
+    body: JSON.stringify({ conversation_id: conversationId, message_ids: messageIds, revoke }),
   })
 
-export const forwardMessages = (from_chat_id: number, message_ids: number[], to_chat_id: number) =>
+export const forwardMessages = (fromConversationId: number, messageIds: number[], toConversationId: number) =>
   request<{ success: boolean }>('/api/compose/forward', {
     method: 'POST',
-    body: JSON.stringify({ from_chat_id, message_ids, to_chat_id }),
+    body: JSON.stringify({ from_conversation_id: fromConversationId, message_ids: messageIds, to_conversation_id: toConversationId }),
   })
 
 export function sendFiles(
-  chatId: number,
+  conversationId: number,
   files: File[],
   text?: string,
-  replyToId?: number,
+  replyToMessageId?: number,
   onProgress?: (fraction: number) => void,
   opts: SendOptions & { signal?: AbortSignal } = {},
 ): { promise: Promise<SendFilesResponse>; abort: () => void } {
   const formData = new FormData()
-  formData.append('chat_id', String(chatId))
+  formData.append('conversation_id', String(conversationId))
   if (text) formData.append('text', text)
-  if (replyToId != null) formData.append('reply_to_id', String(replyToId))
+  if (replyToMessageId != null) formData.append('reply_to_message_id', String(replyToMessageId))
   if (opts.topicId != null) formData.append('topic_id', String(opts.topicId))
   if (opts.clientNonce) formData.append('client_nonce', opts.clientNonce)
   for (const file of files) {
@@ -735,37 +774,38 @@ export function sendFiles(
   return upload<SendFilesResponse>('/api/compose/send-files', formData, { onProgress, signal: opts.signal })
 }
 
-// --- Conversations ---
+// --- AI conversations (LLM chat history) ---
 
-export const listConversations = () =>
-  request<ConversationSummary[]>('/api/conversations/')
+export const listAiConversations = () =>
+  request<AiConversationSummary[]>('/api/ai/conversations/')
 
-export const createConversation = () =>
-  request<ConversationDetail>('/api/conversations/', { method: 'POST' })
+export const createAiConversation = () =>
+  request<AiConversationDetail>('/api/ai/conversations/', { method: 'POST' })
 
-export const getConversation = (id: number, signal?: AbortSignal) =>
-  request<ConversationDetail>(`/api/conversations/${id}`, { signal })
+export const getAiConversation = (id: number, signal?: AbortSignal) =>
+  request<AiConversationDetail>(`/api/ai/conversations/${id}`, { signal })
 
-export const updateConversationTitle = (id: number, title: string) =>
-  request<ConversationDetail>(`/api/conversations/${id}`, {
+export const updateAiConversationTitle = (id: number, title: string) =>
+  request<AiConversationDetail>(`/api/ai/conversations/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ title }),
   })
 
-export const deleteConversation = (id: number) =>
-  request<{ success: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' })
+export const deleteAiConversation = (id: number) =>
+  request<{ success: boolean }>(`/api/ai/conversations/${id}`, { method: 'DELETE' })
 
 // Note: POST /api/intelligence/chat persists both the user message and the
 // assistant reply itself — never append turn messages from the client.
 
 /** Compare-and-set on the server: applied=false when the conversation already had a title */
-export const suggestConversationTitle = (id: number) =>
-  request<{ title: string | null; applied?: boolean }>(`/api/conversations/${id}/suggest-title`, { method: 'POST' })
+export const suggestAiConversationTitle = (id: number) =>
+  request<{ title: string | null; applied?: boolean }>(`/api/ai/conversations/${id}/suggest-title`, { method: 'POST' })
 
 // --- Mentions ---
 
-export const getMentions = (params?: { days?: number; groupName?: string; tagName?: string }, signal?: AbortSignal) => {
+export const getMentions = (params?: { days?: number; groupName?: string; tagName?: string; channel?: string }, signal?: AbortSignal) => {
   const qs = new URLSearchParams()
+  if (params?.channel) qs.set('channel', params.channel)
   if (params?.days) qs.set('days', String(params.days))
   if (params?.groupName) qs.set('group_name', params.groupName)
   if (params?.tagName) qs.set('tag_name', params.tagName)
@@ -778,48 +818,48 @@ export const getMentions = (params?: { days?: number; groupName?: string; tagNam
 export const getCatchUpItems = () =>
   request<CatchUpItem[]>('/api/catchup/items')
 
-export const snoozeCatchUpItem = (chatTelegramId: number, hours = 24) =>
-  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/snooze`, {
+export const snoozeCatchUpItem = (conversationId: number, hours = 24) =>
+  request<CatchUpItem>(`/api/catchup/${conversationId}/snooze`, {
     method: 'POST',
     body: JSON.stringify({ hours }),
   })
 
-export const markCatchUpHandled = (chatTelegramId: number) =>
-  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/handled`, {
+export const markCatchUpHandled = (conversationId: number) =>
+  request<CatchUpItem>(`/api/catchup/${conversationId}/handled`, {
     method: 'POST',
     body: JSON.stringify({}),
   })
 
-export const reopenCatchUpItem = (chatTelegramId: number) =>
-  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/reopen`, {
+export const reopenCatchUpItem = (conversationId: number) =>
+  request<CatchUpItem>(`/api/catchup/${conversationId}/reopen`, {
     method: 'POST',
     body: JSON.stringify({}),
   })
 
 /** Set the note. A blank note is a no-op on the server — use clearCatchUpNote to remove it. */
-export const addCatchUpNote = (chatTelegramId: number, note: string) =>
-  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/note`, {
+export const addCatchUpNote = (conversationId: number, note: string) =>
+  request<CatchUpItem>(`/api/catchup/${conversationId}/note`, {
     method: 'POST',
     body: JSON.stringify({ note }),
   })
 
-export const clearCatchUpNote = (chatTelegramId: number) =>
-  request<CatchUpItem>(`/api/catchup/${chatTelegramId}/note`, {
+export const clearCatchUpNote = (conversationId: number) =>
+  request<CatchUpItem>(`/api/catchup/${conversationId}/note`, {
     method: 'POST',
     body: JSON.stringify({ clear: true }),
   })
 
-export const updateCatchUpRelationship = (chatTelegramId: number, status: string) =>
-  request<{ contact_id: number; relationship_status: string }>(`/api/catchup/${chatTelegramId}/relationship-status`, {
+export const updateCatchUpRelationship = (conversationId: number, status: string) =>
+  request<{ person_id: number; relationship_status: string }>(`/api/catchup/${conversationId}/relationship-status`, {
     method: 'POST',
     body: JSON.stringify({ status }),
   })
 
 /** Starts (or joins) the background summary job; returns its status immediately (202). */
-export const triggerCatchUpSummaries = (chatIds?: number[]) =>
+export const triggerCatchUpSummaries = (conversationIds?: number[]) =>
   request<CatchUpSummaryJob>('/api/catchup/generate-summaries', {
     method: 'POST',
-    body: JSON.stringify(chatIds ? { chat_ids: chatIds } : {}),
+    body: JSON.stringify(conversationIds ? { conversation_ids: conversationIds } : {}),
   })
 
 export const getCatchUpSummaryStatus = () =>
@@ -852,104 +892,73 @@ export const getDashboard = (signal?: AbortSignal) =>
 export const globalSearch = (query: string, limit = 20, signal?: AbortSignal) =>
   request<GlobalSearchResults>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
 
-export const telegramSearch = (query: string, limit = 20, signal?: AbortSignal) =>
-  request<{ telegram_dialogs: TelegramSearchResult[] }>(`/api/search/telegram?q=${encodeURIComponent(query)}&limit=${limit}`, { signal })
-
-export const ensureChat = (telegramId: number) =>
-  request<Chat>(`/api/chats/${telegramId}/ensure`, { method: 'POST' })
-
 // --- Media Download ---
 
-export const downloadMedia = (chatTelegramId: number, msgTelegramId: number, signal?: AbortSignal) =>
-  request<{ media_url: string; media_type: string }>(`/api/media-download/${chatTelegramId}/${msgTelegramId}`, {
+/** Fetch one attachment from its channel; resolves to the served URL */
+export const downloadAttachment = (attachmentId: number, signal?: AbortSignal) =>
+  request<{ url: string; kind: string }>(`/api/media-download/${attachmentId}`, {
     method: 'POST',
     signal,
   })
 
-// --- Admin ---
+// --- Admin (capability 'admin_moderation'; target users are identities) ---
 
-export const promoteAdmin = (telegramId: number, userId: number, permissions: AdminPermissions) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/promote`, {
+export const promoteAdmin = (conversationId: number, identityId: number, permissions: AdminPermissions) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/promote`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId, permissions }),
+    body: JSON.stringify({ identity_id: identityId, permissions }),
   })
 
-export const demoteAdmin = (telegramId: number, userId: number) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/demote`, {
+export const demoteAdmin = (conversationId: number, identityId: number) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/demote`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId }),
+    body: JSON.stringify({ identity_id: identityId }),
   })
 
-export const banMember = (telegramId: number, userId: number) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/ban`, {
+export const banMember = (conversationId: number, identityId: number) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/ban`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId }),
+    body: JSON.stringify({ identity_id: identityId }),
   })
 
-export const restrictMember = (telegramId: number, userId: number, restrictions: Record<string, boolean | number | null>) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/restrict`, {
+export const restrictMember = (conversationId: number, identityId: number, restrictions: Record<string, boolean | number | null>) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/restrict`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId, ...restrictions }),
+    body: JSON.stringify({ identity_id: identityId, ...restrictions }),
   })
 
-export const approveMember = (telegramId: number, userId: number) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/approve`, {
+export const approveMember = (conversationId: number, identityId: number) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/approve`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId }),
+    body: JSON.stringify({ identity_id: identityId }),
   })
 
-export const getInviteLinks = (telegramId: number) =>
-  request<InviteLink[]>(`/api/admin/${telegramId}/invite-links`)
+export const getInviteLinks = (conversationId: number) =>
+  request<InviteLink[]>(`/api/admin/${conversationId}/invite-links`)
 
-export const createInviteLink = (telegramId: number, options?: { expire_date?: number; usage_limit?: number; title?: string; request_needed?: boolean }) =>
-  request<InviteLink>(`/api/admin/${telegramId}/invite-links`, {
+export const createInviteLink = (conversationId: number, options?: { expire_date?: number; usage_limit?: number; title?: string; request_needed?: boolean }) =>
+  request<InviteLink>(`/api/admin/${conversationId}/invite-links`, {
     method: 'POST',
     body: JSON.stringify(options ?? {}),
   })
 
-export const revokeInviteLink = (telegramId: number, link: string) =>
-  request<{ success: boolean }>(`/api/admin/${telegramId}/invite-links/revoke`, {
+export const revokeInviteLink = (conversationId: number, link: string) =>
+  request<{ success: boolean }>(`/api/admin/${conversationId}/invite-links/revoke`, {
     method: 'POST',
     body: JSON.stringify({ link }),
   })
 
-export const getGroupSettings = (telegramId: number) =>
-  request<GroupSettings>(`/api/admin/${telegramId}/settings`)
+export const getGroupSettings = (conversationId: number) =>
+  request<GroupSettings>(`/api/admin/${conversationId}/settings`)
 
-export const updateGroupSettings = (telegramId: number, settings: { title?: string; about?: string }) =>
-  request<{ success: boolean; updated: string[] }>(`/api/admin/${telegramId}/settings`, {
+export const updateGroupSettings = (conversationId: number, settings: { title?: string; about?: string }) =>
+  request<{ success: boolean; updated: string[] }>(`/api/admin/${conversationId}/settings`, {
     method: 'PUT',
     body: JSON.stringify(settings),
   })
 
-export const getAdminActionLog = (telegramId: number, limit = 50) =>
-  request<AdminActionLog[]>(`/api/admin/${telegramId}/action-log?limit=${limit}`)
-
-// --- Create Chats ---
-
-export const startPrivateChat = (telegramId: number) =>
-  request<Chat>('/api/chats/create/private', {
-    method: 'POST',
-    body: JSON.stringify({ telegram_id: telegramId }),
-  })
-
-export const createGroup = (name: string, memberIds: number[]) =>
-  request<Chat>('/api/chats/create/group', {
-    method: 'POST',
-    body: JSON.stringify({ name, member_ids: memberIds }),
-  })
-
-export const createChannel = (name: string, about: string = '', isPublic: boolean = false) =>
-  request<Chat>('/api/chats/create/channel', {
-    method: 'POST',
-    body: JSON.stringify({ name, about, is_public: isPublic }),
-  })
-
-export const joinViaInviteLink = (link: string) =>
-  request<Chat>('/api/chats/join', {
-    method: 'POST',
-    body: JSON.stringify({ link }),
-  })
+export const getAdminActionLog = (conversationId: number, limit = 50) =>
+  request<AdminActionLog[]>(`/api/admin/${conversationId}/action-log?limit=${limit}`)
 
 // ── Scam Detection ──
 
@@ -963,37 +972,37 @@ export const setScamDetectionSettings = (mode: string, apiUrl: string, apiKey: s
   })
 
 export const getScamFlags = (includeDismissed = false) =>
-  request<{ flags: ScamFlag[]; flagged_sender_ids: number[]; flagged_chat_ids: number[] }>(
+  request<{ flags: ScamFlag[]; flagged_identity_ids: number[]; flagged_person_ids: number[]; flagged_conversation_ids: number[] }>(
     `/api/scam/flags${includeDismissed ? '?include_dismissed=true' : ''}`,
   )
 
 /** Sender-scope verdict: 'scam' flags, 'not_scam' dismisses (+ marks unmarked flagged messages), null resets. */
-export const setSenderVerdict = (telegramId: number, verdict: ScamManualVerdict) =>
-  request<ScamVerdictResponse>(`/api/scam/senders/${telegramId}/verdict`, {
+export const setSenderVerdict = (identityId: number, verdict: ScamManualVerdict) =>
+  request<ScamVerdictResponse>(`/api/scam/senders/${identityId}/verdict`, {
     method: 'PUT',
     body: JSON.stringify({ verdict }),
   })
 
-export const getChatScamStatus = (chatId: number) =>
-  request<{ has_scam_flags: boolean; flagged_message_count: number; flagged_message_ids: number[]; flagged_users: { telegram_id: number; confidence: number | null; reason: string | null; source: string }[] }>(`/api/scam/status/${chatId}`)
+export const getConversationScamStatus = (conversationId: number) =>
+  request<{ has_scam_flags: boolean; flagged_message_count: number; flagged_message_ids: number[]; flagged_users: { identity_id: number; person_id: number | null; confidence: number | null; reason: string | null; source: string }[] }>(`/api/scam/status/${conversationId}`)
 
-export const checkMessagesForScam = (chatId: number, messageTelegramIds: number[]) =>
+export const checkMessagesForScam = (conversationId: number, messageIds: number[]) =>
   request<{ status: 'queued'; message_count: number; queued_ids: number[]; already_running_ids: number[]; missing_ids: number[] }>('/api/scam/check-messages', {
     method: 'POST',
-    body: JSON.stringify({ chat_id: chatId, message_telegram_ids: messageTelegramIds }),
+    body: JSON.stringify({ conversation_id: conversationId, message_ids: messageIds }),
   })
 
 export interface ScannedMessageFilters {
-  sender_id?: number
-  chat_id?: number
+  sender_identity_id?: number
+  conversation_id?: number
   min_members?: number
   verdict_filter?: ScamVerdictFilter
 }
 
 function scannedFilterParams(filters?: ScannedMessageFilters): URLSearchParams {
   const params = new URLSearchParams()
-  if (filters?.sender_id) params.set('sender_id', String(filters.sender_id))
-  if (filters?.chat_id) params.set('chat_id', String(filters.chat_id))
+  if (filters?.sender_identity_id) params.set('sender_identity_id', String(filters.sender_identity_id))
+  if (filters?.conversation_id) params.set('conversation_id', String(filters.conversation_id))
   if (filters?.min_members) params.set('min_members', String(filters.min_members))
   if (filters?.verdict_filter && filters.verdict_filter !== 'all') params.set('verdict_filter', filters.verdict_filter)
   return params
@@ -1012,10 +1021,7 @@ export const getScannedMessages = (
 }
 
 /** Message-scope verdict: 'scam' | 'not_scam' | null (null clears the manual verdict). */
-export const setMessageVerdict = (
-  messages: { chat_id: number; tg_message_id: number }[],
-  verdict: ScamManualVerdict,
-) =>
+export const setMessageVerdict = (messages: { message_id: number; conversation_id?: number }[], verdict: ScamManualVerdict) =>
   request<ScamVerdictResponse>('/api/scam/scanned-messages/verdict', {
     method: 'PUT',
     body: JSON.stringify({ messages, verdict }),
@@ -1060,12 +1066,12 @@ export const getScamPipeline = () =>
 export const reloadScamPipeline = () =>
   request<{ status: string; version: string }>('/api/scam/pipeline/reload', { method: 'POST' })
 
-export const getReportContext = (chatId: number, targetMessageId: number) =>
-  request<{ messages: ReportContextMessage[] }>(`/api/scam/reports/context?chat_id=${chatId}&target_message_id=${targetMessageId}`)
+export const getReportContext = (conversationId: number, targetMessageId: number) =>
+  request<{ messages: ReportContextMessage[] }>(`/api/scam/reports/context?conversation_id=${conversationId}&target_message_id=${targetMessageId}`)
 
 export const createScamReport = (data: {
-  reported_telegram_id: number
-  reported_in_chat_id: number
+  reported_identity_id: number
+  reported_in_conversation_id: number
   reporter_verdict: string
   scam_category?: string
   custom_category?: string
@@ -1108,9 +1114,9 @@ export const getSyncHistory = () =>
 export const submitFeedback = (data: {
   feedback_type: string
   message: string
-  related_chat_id?: number
+  related_conversation_id?: number
   related_message_id?: number
-  related_flag_telegram_id?: number
+  related_flag_identity_id?: number
 }) =>
   request<{ id: number; status: string; sync_error: string | null; created_at: string }>('/api/scam/feedback', {
     method: 'POST',
@@ -1179,29 +1185,29 @@ export const startArchive = () =>
 export const pauseArchive = () =>
   request<import('./types').ArchiveStatus>('/api/archive/pause', { method: 'POST' })
 
-/** Queue a full-history walk of one chat (DM, group or channel) */
-export const archiveChat = (telegramId: number) =>
-  request<import('./types').ChatArchiveResponse>(`/api/chats/${telegramId}/archive-history`, { method: 'POST' })
+/** Queue a full-history walk of one conversation (DM, group or channel) */
+export const archiveConversation = (conversationId: number) =>
+  request<import('./types').ChatArchiveResponse>(`/api/conversations/${conversationId}/archive-history`, { method: 'POST' })
 
 // ── Person notes ──
 
-export const getPersonNotes = (telegramId: number, signal?: AbortSignal) =>
-  request<import('./types').PersonNote[]>(`/api/people/${telegramId}/notes`, { signal })
+export const getPersonNotes = (personId: number, signal?: AbortSignal) =>
+  request<import('./types').PersonNote[]>(`/api/people/${personId}/notes`, { signal })
 
-export const createPersonNote = (telegramId: number, note: import('./types').PersonNoteInput) =>
-  request<import('./types').PersonNote>(`/api/people/${telegramId}/notes`, {
+export const createPersonNote = (personId: number, note: import('./types').PersonNoteInput) =>
+  request<import('./types').PersonNote>(`/api/people/${personId}/notes`, {
     method: 'POST',
     body: JSON.stringify(note),
   })
 
-export const updatePersonNote = (telegramId: number, noteId: number, note: Partial<import('./types').PersonNoteInput>) =>
-  request<import('./types').PersonNote>(`/api/people/${telegramId}/notes/${noteId}`, {
+export const updatePersonNote = (personId: number, noteId: number, note: Partial<import('./types').PersonNoteInput>) =>
+  request<import('./types').PersonNote>(`/api/people/${personId}/notes/${noteId}`, {
     method: 'PUT',
     body: JSON.stringify(note),
   })
 
-export const deletePersonNote = (telegramId: number, noteId: number) =>
-  request<{ success: boolean } | undefined>(`/api/people/${telegramId}/notes/${noteId}`, { method: 'DELETE' })
+export const deletePersonNote = (personId: number, noteId: number) =>
+  request<{ success: boolean } | undefined>(`/api/people/${personId}/notes/${noteId}`, { method: 'DELETE' })
 
 // ── Features ────────────────────────────────────────────────────────────────
 

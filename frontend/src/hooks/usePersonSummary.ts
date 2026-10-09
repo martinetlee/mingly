@@ -1,11 +1,47 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
-import type { PersonSummary } from '../api/types'
-import { resolvePeople } from '../api/client'
+import type { Person } from '../api/types'
+import { getPerson } from '../api/client'
+
+/** What PersonCard shows for a person (derived from GET /api/people/{person_id}) */
+export interface PersonSummary {
+  person_id: number
+  name: string
+  username: string | null
+  is_important: boolean
+  relationship_status: string | null
+  last_interaction_at: string | null
+  primary_position: { title: string | null; organization: string; organization_id?: number | null } | null
+  phone: string | null
+  twitter_handle: string | null
+  linkedin_url: string | null
+  avatar_url: string | null
+  has_notes: boolean
+}
+
+/** Summary fields of a Person payload */
+export function summarizePerson(p: Person): PersonSummary {
+  const pos = (p.positions ?? []).find((x) => x.is_active !== false) ?? null
+  return {
+    person_id: p.id,
+    name: p.name,
+    username: p.identities.find((i) => i.username)?.username ?? null,
+    is_important: p.is_important,
+    relationship_status: p.relationship_status,
+    last_interaction_at: p.last_interaction_at,
+    primary_position: pos ? { title: pos.title, organization: pos.organization, organization_id: pos.organization_id } : null,
+    phone: p.identities.find((i) => i.phone)?.phone ?? null,
+    twitter_handle: p.twitter_handle,
+    linkedin_url: p.linkedin_url,
+    avatar_url: p.avatar_url ?? p.identities.find((i) => i.avatar_url)?.avatar_url ?? null,
+    has_notes: !!p.notes,
+  }
+}
 
 /**
- * Keyed store of PersonSummary (what PersonCard shows for a telegram_id).
+ * Keyed store of PersonSummary (what PersonCard shows for a person id).
  *
- * - Lookups made in the same tick are batched into one /resolve-batch call.
+ * - Lookups made in the same tick are queued together and fetched through
+ *   GET /api/people/{person_id} with at most MAX_CONCURRENT requests in flight.
  * - Every mutation of a contact or position calls invalidatePerson(id) (or
  *   invalidateAllPeople() for org renames/merges/deletes), which drops the
  *   entry and makes mounted cards re-resolve.
@@ -24,7 +60,8 @@ const entries = new Map<number, Entry>()
 const listeners = new Map<number, Set<() => void>>()
 let queue = new Set<number>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
-const BATCH_MAX = 200
+const MAX_CONCURRENT = 6
+let running = 0
 
 function entryFor(id: number): Entry {
   let e = entries.get(id)
@@ -41,40 +78,43 @@ function notify(id: number) {
 
 function fallback(id: number): PersonSummary {
   return {
-    telegram_id: id, name: String(id), username: null, is_important: false, contact_id: null,
+    person_id: id, name: `Person ${id}`, username: null, is_important: false,
     relationship_status: null, last_interaction_at: null, primary_position: null,
-    phone: null, twitter_handle: null, linkedin_url: null, has_notes: false,
+    phone: null, twitter_handle: null, linkedin_url: null, avatar_url: null, has_notes: false,
   }
 }
 
 function flush() {
   flushTimer = null
-  const ids = Array.from(queue)
-  queue = new Set()
-  for (let i = 0; i < ids.length; i += BATCH_MAX) {
-    const chunk = ids.slice(i, i + BATCH_MAX)
-    const versions = new Map(chunk.map((id) => [id, entryFor(id).version]))
-    resolvePeople(chunk).then(
-      (result) => {
-        for (const id of chunk) {
-          const e = entryFor(id)
-          if (e.version !== versions.get(id)) continue // invalidated meanwhile
-          e.inflight = false
-          const summary = result[String(id)]
-          if (summary) { e.data = summary; e.failed = false } else { e.failed = true }
-          notify(id)
-        }
+  pump()
+}
+
+function pump() {
+  while (running < MAX_CONCURRENT && queue.size > 0) {
+    const id: number = queue.values().next().value as number
+    queue.delete(id)
+    const version = entryFor(id).version
+    running++
+    getPerson(id).then(
+      (person) => {
+        const e = entryFor(id)
+        if (e.version !== version) return // invalidated meanwhile
+        e.inflight = false
+        e.data = summarizePerson(person)
+        e.failed = false
+        notify(id)
       },
       () => {
-        for (const id of chunk) {
-          const e = entryFor(id)
-          if (e.version !== versions.get(id)) continue
-          e.inflight = false
-          e.failed = true
-          notify(id)
-        }
+        const e = entryFor(id)
+        if (e.version !== version) return
+        e.inflight = false
+        e.failed = true
+        notify(id)
       },
-    )
+    ).finally(() => {
+      running--
+      pump()
+    })
   }
 }
 
@@ -102,8 +142,8 @@ function invalidateIds(ids: Iterable<number>) {
 }
 
 /** Drop one person's cached summary (after a contact/position mutation). */
-export function invalidatePerson(telegramId: number) {
-  invalidateIds([telegramId])
+export function invalidatePerson(personId: number) {
+  invalidateIds([personId])
 }
 
 /** Drop every cached summary (org rename/merge/delete, contacts sync). */
@@ -113,11 +153,11 @@ export function invalidateAllPeople() {
 
 /** Seed the store with summaries the caller already has. */
 export function primePeople(data: Record<number, PersonSummary>) {
-  for (const [tid, summary] of Object.entries(data)) {
-    const e = entryFor(Number(tid))
+  for (const [pid, summary] of Object.entries(data)) {
+    const e = entryFor(Number(pid))
     e.data = summary
     e.failed = false
-    notify(Number(tid))
+    notify(Number(pid))
   }
 }
 
@@ -125,33 +165,34 @@ export function primePeople(data: Record<number, PersonSummary>) {
 export function resetPersonStore() {
   entries.clear()
   queue = new Set()
+  running = 0
   if (flushTimer) clearTimeout(flushTimer)
   flushTimer = null
 }
 
 /**
- * The PersonSummary for `telegramId`, resolved on demand. `enabled=false`
+ * The PersonSummary for `personId`, resolved on demand. `enabled=false`
  * (every displayed field was supplied by the caller) skips the request.
  * Returns `undefined` while loading and a name-only fallback if it fails.
  */
-export function usePersonSummary(telegramId: number, enabled = true): PersonSummary | undefined {
+export function usePersonSummary(personId: number, enabled = true): PersonSummary | undefined {
   const subscribe = useCallback((cb: () => void) => {
-    let set = listeners.get(telegramId)
-    if (!set) { set = new Set(); listeners.set(telegramId, set) }
+    let set = listeners.get(personId)
+    if (!set) { set = new Set(); listeners.set(personId, set) }
     set.add(cb)
     return () => { set!.delete(cb) }
-  }, [telegramId])
+  }, [personId])
   const getSnapshot = useCallback(() => {
-    const e = entries.get(telegramId)
+    const e = entries.get(personId)
     if (!e) return undefined
     if (e.data) return e.data
-    return e.failed ? failedSnapshot(telegramId) : undefined
-  }, [telegramId])
+    return e.failed ? failedSnapshot(personId) : undefined
+  }, [personId])
   const person = useSyncExternalStore(subscribe, getSnapshot)
 
   useEffect(() => {
-    if (enabled) request(telegramId)
-  }, [telegramId, enabled, person])
+    if (enabled) request(personId)
+  }, [personId, enabled, person])
 
   return person
 }

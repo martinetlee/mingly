@@ -1,5 +1,5 @@
 /**
- * User-initiated "Check for scam" requests, keyed by (chat, message).
+ * User-initiated "Check for scam" requests, keyed by (conversation, message).
  *
  * POST /api/scam/check-messages only queues the check; the result arrives as
  * exactly one terminal WS event per message (scam_detected / scam_check_safe /
@@ -21,7 +21,7 @@ export type ScamCheck =
 
 const checks = new Map<string, ScamCheck>()
 const listeners = new Map<string, Set<() => void>>()
-const k = (chatId: number, tgId: number) => `${chatId}:${tgId}`
+const k = (conversationId: number, messageId: number) => `${conversationId}:${messageId}`
 
 function set(key: string, v: ScamCheck | null) {
   if (v) checks.set(key, v)
@@ -29,45 +29,45 @@ function set(key: string, v: ScamCheck | null) {
   listeners.get(key)?.forEach((l) => l())
 }
 
-export function getScamCheck(chatId: number, tgId: number): ScamCheck | null {
-  return checks.get(k(chatId, tgId)) ?? null
+export function getScamCheck(conversationId: number, messageId: number): ScamCheck | null {
+  return checks.get(k(conversationId, messageId)) ?? null
 }
 
-export async function startScamCheck(chatId: number, tgId: number): Promise<void> {
-  const key = k(chatId, tgId)
+export async function startScamCheck(conversationId: number, messageId: number): Promise<void> {
+  const key = k(conversationId, messageId)
   if (checks.get(key)?.status === 'checking') return
   set(key, { status: 'checking' })
   try {
-    const res = await checkMessagesForScam(chatId, [tgId])
-    if (res.missing_ids?.includes(tgId)) set(key, { status: 'error', error: 'Message not found' })
+    const res = await checkMessagesForScam(conversationId, [messageId])
+    if (res.missing_ids?.includes(messageId)) set(key, { status: 'error', error: 'Message not found' })
     // queued or already running: the terminal WS event settles it
   } catch (e) {
     set(key, { status: 'error', error: errorMessage(e) })
   }
 }
 
-export function dismissScamCheck(chatId: number, tgId: number): void {
-  set(k(chatId, tgId), null)
+export function dismissScamCheck(conversationId: number, messageId: number): void {
+  set(k(conversationId, messageId), null)
 }
 
 /** Settle pending checks from a terminal scam WS event. Exported for tests. */
 export function applyScamEvent(e: WSEvent): void {
   if (e.type !== 'scam_detected' && e.type !== 'scam_check_safe' && e.type !== 'scam_check_error') return
-  const states = new Map<number, ScamMsgState>((e.messages ?? []).map((m) => [m.tg_message_id, m]))
-  for (const tgId of e.message_ids) {
-    const key = k(e.chat_id, tgId)
+  const states = new Map<number, ScamMsgState>((e.messages ?? []).map((m) => [m.message_id, m]))
+  for (const messageId of e.message_ids) {
+    const key = k(e.conversation_id, messageId)
     if (checks.get(key)?.status !== 'checking') continue
     if (e.type === 'scam_check_error') {
       set(key, { status: 'error', error: e.error || 'Scam check failed' })
       continue
     }
-    const st = states.get(tgId)
+    const st = states.get(messageId)
     const isScam = st ? st.effective_is_scam : e.type === 'scam_detected'
     set(key, { status: 'done', result: isScam ? 'scam' : 'safe' })
   }
 }
 
-/** Mount once where chat messages are shown: routes terminal events to pending checks. */
+/** Mount once where conversation messages are shown: routes terminal events to pending checks. */
 export function useScamCheckEvents(): void {
   const client = useWebSocketClient()
   useEffect(() => {
@@ -81,8 +81,8 @@ export function useScamCheckEvents(): void {
   }, [client])
 }
 
-export function useScamCheck(chatId: number, tgId: number): ScamCheck | null {
-  const key = k(chatId, tgId)
+export function useScamCheck(conversationId: number, messageId: number): ScamCheck | null {
+  const key = k(conversationId, messageId)
   const sub = useCallback((l: () => void) => {
     let s = listeners.get(key)
     if (!s) { s = new Set(); listeners.set(key, s) }

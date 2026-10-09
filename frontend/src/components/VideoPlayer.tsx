@@ -7,8 +7,7 @@ import { formatDuration } from '../utils/time'
 import { LightboxShell } from './ImageLightbox'
 
 interface Props {
-  chatTelegramId: number
-  msgTelegramId: number
+  attachmentId: number
   /** Pre-existing media URL if already downloaded */
   mediaUrl: string | null
   /** Whether this is a round video note */
@@ -52,9 +51,9 @@ function VideoLightbox({ src, onClose }: { src: string; onClose: () => void }) {
   )
 }
 
-export default function VideoPlayer({ chatTelegramId, msgTelegramId, mediaUrl, isVideoNote, isOut, compact }: Props) {
+export default function VideoPlayer({ attachmentId, mediaUrl, isVideoNote, isOut, compact }: Props) {
   // Click-to-load: videos are large, never auto-download every one in view
-  const media = useMediaDownload(chatTelegramId, msgTelegramId, { initialUrl: mediaUrl })
+  const media = useMediaDownload(attachmentId, { initialUrl: mediaUrl })
   const [wantPlay, setWantPlay] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const c = useMediaPlayback<HTMLVideoElement>()

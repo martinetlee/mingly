@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Pin, Clock, BarChart3, Eye, ArrowRight } from 'lucide-react'
-import type { Chat, Message, ChannelPostStats } from '../api/types'
+import type { Conversation, Message, ChannelPostStats } from '../api/types'
 import { getPinnedMessages, pinMessage, setSlowMode, getPostStats } from '../api/client'
 import { reportError } from '../lib/toast'
+import { can } from '../lib/capabilities'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { fmtShortDate } from '../utils/time'
 
@@ -17,12 +18,14 @@ const SLOW_MODE_OPTIONS = [
 ]
 
 /**
- * Mount with `key={chat.telegram_id}`: all state (pinned list, stats) belongs
- * to one chat, so switching chats can never unpin in the wrong one.
+ * Mount with `key={chat.id}`: all state (pinned list, stats) belongs
+ * to one conversation, so switching can never unpin in the wrong one.
+ * Rendered only for conversations with the 'admin_moderation' capability;
+ * the pinned list additionally needs 'pin'.
  */
 interface ModerationPanelProps {
-  chat: Chat
-  onChatUpdate?: (updates: Partial<Chat>) => void
+  chat: Conversation
+  onChatUpdate?: (updates: Partial<Conversation>) => void
 }
 
 export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelProps) {
@@ -38,7 +41,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
   const loadPinnedMessages = useCallback(async () => {
     setLoadingPinned(true)
     try {
-      const data = await getPinnedMessages(chat.telegram_id)
+      const data = await getPinnedMessages(chat.id)
       setPinnedMessages(data)
     } catch (e) {
       setPinnedMessages([])
@@ -46,12 +49,12 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
     } finally {
       setLoadingPinned(false)
     }
-  }, [chat.telegram_id])
+  }, [chat.id])
 
   const loadPostStats = useCallback(async () => {
     setLoadingStats(true)
     try {
-      const data = await getPostStats(chat.telegram_id)
+      const data = await getPostStats(chat.id)
       setPostStats(data)
     } catch (e) {
       setPostStats([])
@@ -59,7 +62,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
     } finally {
       setLoadingStats(false)
     }
-  }, [chat.telegram_id])
+  }, [chat.id])
 
   useEffect(() => {
     setSlowModeValue(chat.slow_mode_seconds ?? 0)
@@ -68,7 +71,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
   const handleSlowMode = async (seconds: number) => {
     setSettingSlowMode(true)
     try {
-      await setSlowMode(chat.telegram_id, seconds)
+      await setSlowMode(chat.id, seconds)
       setSlowModeValue(seconds)
       onChatUpdate?.({ slow_mode_seconds: seconds })
     } catch (e) {
@@ -81,8 +84,8 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
   const handleUnpin = async (msg: Message) => {
     // A pinned row always belongs to the chat it was loaded for
     try {
-      await pinMessage(msg.chat_id ?? chat.telegram_id, msg.tg_message_id, false)
-      setPinnedMessages((prev) => prev.filter((m) => m.tg_message_id !== msg.tg_message_id))
+      await pinMessage(msg.id, false)
+      setPinnedMessages((prev) => prev.filter((m) => m.id !== msg.id))
     } catch (e) {
       reportError(e, 'Unpin failed')
     }
@@ -90,10 +93,9 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
 
   // Pins changed from any device: refresh the open list
   useWsEvent('messages_pinned', (e) => {
-    if (e.chat_id === chat.telegram_id && showPinned) void loadPinnedMessages()
+    if (e.conversation_id === chat.id && showPinned) void loadPinnedMessages()
   })
 
-  const isGroupOrChannel = chat.type === 'group' || chat.type === 'channel'
 
   return (
     <div className="px-4 py-4 border-t border-slate-700/50 flex flex-col gap-3">
@@ -102,6 +104,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
       </div>
 
       {/* Pinned Messages */}
+      {can(chat, 'pin') && (
       <div>
         <button
           onClick={() => { setShowPinned((v) => !v); if (!showPinned && pinnedMessages.length === 0) loadPinnedMessages() }}
@@ -119,9 +122,9 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
               <p className="text-[11px] text-slate-500">No pinned messages</p>
             ) : (
               pinnedMessages.map((msg) => (
-                <div key={msg.tg_message_id} className="group flex items-start gap-2 rounded px-2 py-1.5 bg-slate-700/30">
+                <div key={msg.id} className="group flex items-start gap-2 rounded px-2 py-1.5 bg-slate-700/30">
                   <div className="flex-1 min-w-0">
-                    <p className="text-[10px] text-slate-400 font-medium">{msg.sender_name || 'Unknown'}</p>
+                    <p className="text-[10px] text-slate-400 font-medium">{msg.sender?.name || 'Unknown'}</p>
                     <p className="text-[11px] text-slate-300 truncate">{msg.text || '[media]'}</p>
                   </div>
                   <button
@@ -137,9 +140,10 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
           </div>
         )}
       </div>
+      )}
 
       {/* Slow Mode (groups only) */}
-      {isGroupOrChannel && chat.type === 'group' && (
+      {chat.kind === 'group' && (
         <div>
           <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-1.5">
             <Clock size={11} />
@@ -165,7 +169,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
       )}
 
       {/* Channel Post Stats */}
-      {chat.type === 'channel' && (
+      {chat.kind === 'channel' && (
         <div>
           <button
             onClick={() => { setShowStats((v) => !v); if (!showStats && postStats.length === 0) loadPostStats() }}
@@ -183,7 +187,7 @@ export default function ModerationPanel({ chat, onChatUpdate }: ModerationPanelP
                 <p className="text-[11px] text-slate-500">No post stats available</p>
               ) : (
                 postStats.map((post) => (
-                  <div key={post.telegram_id} className="rounded px-2 py-1.5 bg-slate-700/30">
+                  <div key={post.external_id} className="rounded px-2 py-1.5 bg-slate-700/30">
                     <p className="text-[11px] text-slate-300 truncate mb-1">{post.text || '[media]'}</p>
                     <div className="flex items-center gap-3 text-[10px] text-slate-500">
                       <span className="flex items-center gap-0.5">

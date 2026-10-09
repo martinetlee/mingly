@@ -1,8 +1,8 @@
-"""On-demand media download endpoint.
+"""On-demand attachment download (/api/media-download).
 
-Downloads a message's media from Telegram when the frontend asks for it
+Fetches an attachment from its channel when the frontend asks for it
 (photos not yet fetched by sync, videos, voice/audio, documents, GIFs).
-Downloads are atomic and single-flight per message (backend.telegram.media).
+Downloads are atomic and single-flight per attachment.
 """
 
 import logging
@@ -13,9 +13,10 @@ from sqlalchemy import select
 
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Message
+from backend.db.models import MessageAttachment
+from backend.serializers import media_url
 from backend.telegram.media import (
-    DOWNLOADABLE_TYPES, MediaNotFound, MediaUnavailable, download_message_media, file_is_complete,
+    DOWNLOADABLE_TYPES, MediaNotFound, MediaUnavailable, download_attachment, file_is_complete,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,44 +25,33 @@ router = APIRouter()
 
 
 class MediaDownloadResponse(BaseModel):
-    media_url: str
-    media_type: str
+    url: str
+    kind: str
 
 
-@router.post("/{chat_telegram_id}/{msg_telegram_id}")
-async def download_media(chat_telegram_id: int, msg_telegram_id: int) -> MediaDownloadResponse:
-    """Download media for a specific message and return its serving URL."""
+@router.post("/{attachment_id}")
+async def download_media(attachment_id: int) -> MediaDownloadResponse:
+    """Download an attachment and return its serving URL."""
     async with AsyncSessionLocal() as db:
-        msg_row = (await db.execute(
-            select(Message).where(
-                Message.tg_message_id == msg_telegram_id,
-                Message.chat_id == chat_telegram_id,
-            ).limit(1)
-        )).scalars().first()
-    if not msg_row:
-        raise HTTPException(status_code=404, detail="Message not found")
-    if msg_row.media_type not in DOWNLOADABLE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Media type '{msg_row.media_type}' is not downloadable",
-        )
+        att = (await db.execute(
+            select(MessageAttachment).where(MessageAttachment.id == attachment_id)
+        )).scalar_one_or_none()
+    if att is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if att.kind not in DOWNLOADABLE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Attachment kind '{att.kind}' is not downloadable")
 
-    expected = msg_row.media_size if msg_row.media_type != "photo" else None
-    if msg_row.media_path and file_is_complete(DATA_DIR / msg_row.media_path, msg_row.media_type, expected):
-        return MediaDownloadResponse(media_url=f"/api/media/{msg_row.media_path}", media_type=msg_row.media_type)
+    expected = att.size if att.kind != "photo" else None
+    if att.local_path and file_is_complete(DATA_DIR / att.local_path, att.kind, expected):
+        return MediaDownloadResponse(url=media_url(att.local_path), kind=att.kind)
 
     try:
-        rel = await download_message_media(
-            chat_telegram_id,
-            msg_telegram_id,
-            media_type=msg_row.media_type,
-            media_filename=msg_row.media_filename,
-        )
+        rel = await download_attachment(attachment_id)
     except MediaUnavailable:
-        raise HTTPException(status_code=503, detail="Telegram client not connected")
+        raise HTTPException(status_code=503, detail="Channel not connected")
     except MediaNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
-        logger.exception("Failed to download media for msg %d in chat %d", msg_telegram_id, chat_telegram_id)
+        logger.exception("Failed to download attachment %d", attachment_id)
         raise HTTPException(status_code=500, detail="Failed to download media")
-    return MediaDownloadResponse(media_url=f"/api/media/{rel}", media_type=msg_row.media_type)
+    return MediaDownloadResponse(url=media_url(rel), kind=att.kind)

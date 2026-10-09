@@ -1,6 +1,6 @@
 """Sync engine, audit round 2: one client accessor, remote jump targets,
-first-sync emptiness, coordinator keys/charging, text+preview repair, vault
-lock, packaged shutdown, partial multi-file sends, truncated media."""
+first-sync emptiness, coordinator keys/charging, vault lock, packaged
+shutdown, partial multi-file sends, truncated media."""
 
 import asyncio
 import socket
@@ -10,13 +10,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-from telethon.tl import types
 
 from backend.db import crud
-from backend.db.models import Chat, Message
-from backend.telegram.convert import message_to_row
-from tests.test_sync_engine import FakeHistoryClient, seed_chat, seed_history, tg_msg, use_client
+from tests import factories as f
+from tests.test_sync_engine import FakeHistoryClient, seed_history, stored, tg_conv, tg_msg, use_client
 
 UTC = timezone.utc
 
@@ -86,8 +83,8 @@ def test_only_the_runtime_creates_clients():
     import backend.telegram.client as client_mod
     assert not hasattr(client_mod, "init_client")
     import inspect
-    from backend.api import auth, chats, compose
-    for mod in (auth, chats, compose):
+    from backend.api import auth, compose, conversations, telegram
+    for mod in (auth, conversations, compose, telegram):
         assert "_create_client" not in inspect.getsource(mod)
 
 
@@ -95,17 +92,17 @@ def test_only_the_runtime_creates_clients():
 
 @pytest.mark.asyncio
 async def test_anchor_not_local_is_fetched_from_telegram(api, db):
-    await seed_history(db, n=3)
-    chat = await crud.get_chat_by_telegram_id(db, 77)
-    chat.last_synced_at = datetime.utcnow()
+    conv = await seed_history(db, n=3)
+    conv.last_synced_at = datetime.utcnow()
     await db.commit()
+    url = f"/api/conversations/{conv.id}/messages/window"
     remote = [tg_msg(100 + i, f"old{i}", date=datetime(2025, 6, 1, 0, i, tzinfo=UTC)) for i in range(5)]
 
     class AroundClient(FakeHistoryClient):
-        async def get_messages(self, chat_id, ids):
+        async def get_messages(self, peer, ids):
             return [next((m for m in remote if m.id == i), None) for i in ids]
 
-        async def iter_messages(self, chat_id, limit=50, offset_id=0, min_id=0, reverse=False, **kw):
+        async def iter_messages(self, peer, limit=50, offset_id=0, min_id=0, reverse=False, **kw):
             pool = sorted(remote, key=lambda m: m.id, reverse=not reverse)
             n = 0
             for m in pool:
@@ -119,35 +116,44 @@ async def test_anchor_not_local_is_fetched_from_telegram(api, db):
                 yield m
 
     with use_client(AroundClient([])):
-        r = await api.get("/api/chats/77/messages/window", params={"anchor": 102, "limit": 4})
+        r = await api.get(url, params={"around_external_id": "102", "limit": 4})
         body = r.json()
         assert body["anchor_found"] is True and body["anchor_reason"] is None
-        assert [m["tg_message_id"] for m in body["messages"]] == [100, 101, 102, 103]
+        assert [m["seq"] for m in body["messages"]] == [100, 101, 102, 103]
         assert body["has_newer"]  # local recent history is newer than the fetched window
 
-        r = await api.get("/api/chats/77/messages/window", params={"anchor": 999})
+        r = await api.get(url, params={"around_external_id": "999"})
         assert r.json()["anchor_found"] is False and r.json()["anchor_reason"] == "not_found"
 
     with use_client(None):
-        r = await api.get("/api/chats/77/messages/window", params={"anchor": 555})
+        r = await api.get(url, params={"around_external_id": "555"})
     assert r.json()["anchor_reason"] == "unavailable"
 
 
 @pytest.mark.asyncio
 async def test_anchor_view_starts_first_sync_of_never_synced_chat(api, db):
-    await seed_chat(db)  # last_synced_at NULL
-    from backend.api import chats as chats_api
-    with patch.object(chats_api, "run_single") as start, use_client(None):
-        await api.get("/api/chats/77/messages/window", params={"anchor": 5})
-    assert start.called and start.call_args.args[0] == "autosync:77"
+    conv = await tg_conv(db)  # last_synced_at NULL
+    from backend.api import conversations as conv_api
+    with patch.object(conv_api, "run_single") as start, use_client(None):
+        await api.get(f"/api/conversations/{conv.id}/messages/window", params={"around_external_id": "5"})
+    assert start.called and start.call_args.args[0] == f"autosync:{conv.id}"
+
+
+@pytest.mark.asyncio
+async def test_no_auto_sync_for_other_channels(api, db):
+    mail = await f.conversation(db, "thread-1", title="Hi", kind="email_thread", channel="gmail")
+    from backend.api import conversations as conv_api
+    with patch.object(conv_api, "run_single") as start:
+        r = await api.get(f"/api/conversations/{mail.id}/messages/window")
+    assert r.status_code == 200 and r.json()["syncing"] is False and not start.called
 
 
 # ── 3. first-sync emptiness needs a completed deep fetch ─────────────────────
 
 @pytest.mark.asyncio
 async def test_first_sync_empty_only_after_deep_fetch_completes(db):
-    await seed_chat(db)
-    from backend.api import chats as chats_api
+    conv = await tg_conv(db)
+    from backend.api import conversations as chats_api
     from backend.telegram.coordinator import SyncResult
 
     def run(results):
@@ -155,22 +161,22 @@ async def test_first_sync_empty_only_after_deep_fetch_completes(db):
         return AsyncMock(side_effect=lambda *a, **k: next(it))
 
     sent = []
-    shallow = SyncResult("unchanged", 77, fetched=100)  # full page, nothing storable
-    deep_err = SyncResult("error", 77, error="boom")
-    deep_ok = SyncResult("unchanged", 77, fetched=40, exhausted=True)
-    with patch.object(chats_api.coordinator, "sync_chat", run([shallow, deep_err, shallow, deep_ok])) as sc, \
+    shallow = SyncResult("unchanged", conv.id, fetched=100)  # full page, nothing storable
+    deep_err = SyncResult("error", conv.id, error="boom")
+    deep_ok = SyncResult("unchanged", conv.id, fetched=40, exhausted=True)
+    with patch.object(chats_api.coordinator, "sync_conversation", run([shallow, deep_err, shallow, deep_ok])) as sc, \
          patch.object(chats_api.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
          patch.object(chats_api.asyncio, "sleep", AsyncMock()):
-        await chats_api._auto_sync(77, first_sync=True)
+        await chats_api._auto_sync(conv.id, first_sync=True)
     assert [c.args[1] for c in sc.call_args_list] == [100, 500, 100, 500]
-    assert [d["type"] for d in sent] == ["chat_sync_empty"]
+    assert sent == [{"type": "conversation_sync_empty", "conversation_id": conv.id}]
 
     sent.clear()
-    with patch.object(chats_api.coordinator, "sync_chat", run([shallow, deep_err] * 4)), \
+    with patch.object(chats_api.coordinator, "sync_conversation", run([shallow, deep_err] * 4)), \
          patch.object(chats_api.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
          patch.object(chats_api.asyncio, "sleep", AsyncMock()):
-        await chats_api._auto_sync(77, first_sync=True)
-    assert [d["type"] for d in sent] == ["chat_sync_failed"]
+        await chats_api._auto_sync(conv.id, first_sync=True)
+    assert [d["type"] for d in sent] == ["conversation_sync_failed"]
 
 
 # ── 4. coordinator key and proportional charging ─────────────────────────────
@@ -179,10 +185,13 @@ async def test_first_sync_empty_only_after_deep_fetch_completes(db):
 async def test_deeper_sync_is_not_answered_by_shallow_inflight(db):
     from backend.telegram.coordinator import SyncCoordinator
     coord = SyncCoordinator()
-    await seed_chat(db)
+    conv = await tg_conv(db)
     client = FakeHistoryClient([tg_msg(i, f"m{i}") for i in range(1, 4)])
     with use_client(client):
-        await asyncio.gather(coord.sync_chat(77, 50), coord.sync_chat(77, 500), coord.sync_chat(77, 500))
+        await asyncio.gather(
+            coord.sync_conversation(conv.id, 50), coord.sync_conversation(conv.id, 500),
+            coord.sync_conversation(conv.id, 500),
+        )
     assert sorted(c[1] for c in client.calls) == [50, 500]
 
 
@@ -190,7 +199,7 @@ async def test_deeper_sync_is_not_answered_by_shallow_inflight(db):
 async def test_history_is_charged_per_page(db):
     from backend.telegram.coordinator import SyncCoordinator
     coord = SyncCoordinator()
-    await seed_chat(db)
+    conv = await tg_conv(db)
     client = FakeHistoryClient([tg_msg(i, f"m{i}") for i in range(1, 251)], delay=0)
     charged = []
     real = coord.limiter.acquire
@@ -200,54 +209,8 @@ async def test_history_is_charged_per_page(db):
         return await real(n, max_wait=max_wait)
 
     with use_client(client), patch.object(coord.limiter, "acquire", counting):
-        res = await coord.sync_chat(77, 1000, min_date=datetime(2000, 1, 1))
+        res = await coord.sync_conversation(conv.id, 1000, min_date=datetime(2000, 1, 1))
     assert res.fetched == 250 and sum(charged) == 3  # pages 1, 2, 3
-
-
-# ── 5. text repair also fixes the chat preview ───────────────────────────────
-
-@pytest.mark.asyncio
-async def test_repair_rewrites_garbled_rows_and_preview(db):
-    from sqlalchemy import text as sa_text
-    from backend.telegram import sync
-    await seed_chat(db)
-    garbled = Message(tg_message_id=1, chat_id=77, text="hello __world__", text_html="hello <em>__wor</em>ld__",
-                      date=datetime(2026, 1, 1, 12, 0))
-    sent_from_app = Message(tg_message_id=2, chat_id=77, text="**bold** now", text_html=None,
-                            date=datetime(2026, 1, 1, 12, 5), is_outgoing=True)
-    plain = Message(tg_message_id=3, chat_id=77, text="snake_case is fine", date=datetime(2026, 1, 1, 11, 0))
-    db.add_all([garbled, sent_from_app, plain])
-    chat = await crud.get_chat_by_telegram_id(db, 77)
-    chat.last_message_text = "**bold** now"
-    chat.last_message_date = datetime(2026, 1, 1, 12, 5)
-    await db.execute(sa_text("INSERT OR IGNORE INTO sync_text_repair (chat_id) VALUES (77)"))
-    await db.commit()
-
-    fresh = {
-        1: tg_msg(1, "hello world", entities=[types.MessageEntityItalic(6, 5)], date=datetime(2026, 1, 1, 12, 0, tzinfo=UTC)),
-        2: tg_msg(2, "bold now", entities=[types.MessageEntityBold(0, 4)], out=True, date=datetime(2026, 1, 1, 12, 5, tzinfo=UTC)),
-    }
-
-    class RepairClient:
-        requested = None
-
-        def is_connected(self):
-            return True
-
-        async def get_messages(self, chat_id, ids):
-            RepairClient.requested = sorted(ids)
-            return [fresh.get(i) for i in ids]
-
-    with use_client(RepairClient()):
-        assert await sync.repair_garbled_text() == 2
-    assert RepairClient.requested == [1, 2]  # "snake_case" isn't a marker hit
-    rows = {m.tg_message_id: m for m in (await db.execute(
-        select(Message).where(Message.chat_id == 77).execution_options(populate_existing=True))).scalars()}
-    assert rows[1].text == "hello world" and rows[1].text_html == "hello <em>world</em>"
-    assert rows[2].text == "bold now" and rows[2].text_html == "<strong>bold</strong> now"
-    chat = (await db.execute(select(Chat).where(Chat.telegram_id == 77).execution_options(populate_existing=True))).scalar_one()
-    assert chat.last_message_text == "bold now"
-    assert (await db.execute(sa_text("SELECT COUNT(*) FROM sync_text_repair"))).scalar() == 0
 
 
 # ── 7. packaged shutdown runs lifespan shutdown ──────────────────────────────
@@ -318,7 +281,7 @@ async def test_vault_lock_from_any_path_stops_runtime():
 
 @pytest.mark.asyncio
 async def test_send_files_reports_per_file_results_and_never_resends(api, db):
-    await seed_chat(db)
+    conv = await tg_conv(db)
 
     class FileClient:
         def __init__(self):
@@ -327,7 +290,8 @@ async def test_send_files_reports_per_file_results_and_never_resends(api, db):
         async def is_user_authorized(self):
             return True
 
-        async def send_file(self, chat_id, file, caption=None, reply_to=None, force_document=False):
+        async def send_file(self, peer, file, caption=None, reply_to=None, force_document=False):
+            assert peer == 77
             self.sends.append((file, caption, force_document))
             if force_document:
                 raise ConnectionError("upload dropped")
@@ -339,20 +303,23 @@ async def test_send_files_reports_per_file_results_and_never_resends(api, db):
     client = FileClient()
     files = [("files", ("a.jpg", b"1", "image/jpeg")), ("files", ("b.png", b"2", "image/png")),
              ("files", ("c.pdf", b"3", "application/pdf"))]
-    data = {"chat_id": "77", "text": "cap", "client_nonce": "nf-1"}
+    data = {"conversation_id": str(conv.id), "text": "cap", "client_nonce": "nf-1"}
     with use_client(client):
         r1 = await api.post("/api/compose/send-files", data=data, files=files)
         r2 = await api.post("/api/compose/send-files", data=data, files=files)
     assert r1.status_code == 207 and r2.status_code == 207 and r1.json() == r2.json()
     body = r1.json()
     assert body["partial"] is True and body["success"] is False
-    assert [(f["filename"], f["status"]) for f in body["files"]] == [("a.jpg", "sent"), ("b.png", "sent"), ("c.pdf", "failed")]
+    assert [(x["filename"], x["status"]) for x in body["files"]] == [("a.jpg", "sent"), ("b.png", "sent"), ("c.pdf", "failed")]
     assert body["files"][2]["error"] == "upload dropped"
+    # Reported ids are internal message ids of the stored rows.
+    assert body["files"][0]["message_id"] == (await stored(db, conv, 710)).id
+    assert body["message_ids"] == [m["id"] for m in body["messages"]]
     assert len(client.sends) == 2  # album + documents; the retry sent nothing
     assert client.sends[0][1] == ["cap", ""]
 
     with use_client(client):
-        r3 = await api.post("/api/compose/send-files", data={"chat_id": "77", "client_nonce": "nf-2"},
+        r3 = await api.post("/api/compose/send-files", data={"conversation_id": str(conv.id), "client_nonce": "nf-2"},
                             files=[("files", ("d.pdf", b"4", "application/pdf"))])
     assert r3.status_code == 400 and r3.json()["code"] == "send_failed"
 
@@ -375,20 +342,25 @@ def test_file_is_complete(tmp_path):
 @pytest.mark.asyncio
 async def test_audit_clears_truncated_files(db, tmp_path):
     from backend.telegram import media
-    await seed_chat(db)
-    (tmp_path / "media" / "77").mkdir(parents=True)
-    (tmp_path / "media" / "77" / "1.jpg").write_bytes(b"\xff\xd8trunc")
-    (tmp_path / "media" / "77" / "2.jpg").write_bytes(b"\xff\xd8ok\xff\xd9")
-    (tmp_path / "media" / "77" / "3.mp4").write_bytes(b"short")
-    rows = [
-        {**message_to_row(tg_msg(1, ""), 77), "media_type": "photo", "media_path": "media/77/1.jpg"},
-        {**message_to_row(tg_msg(2, ""), 77), "media_type": "photo", "media_path": "media/77/2.jpg"},
-        {**message_to_row(tg_msg(3, ""), 77), "media_type": "video", "media_size": 1000, "media_path": "media/77/3.mp4"},
+    conv = await tg_conv(db)
+    msgs = [
+        await f.message(db, conv, 1, "", attachments=[f.photo()]),
+        await f.message(db, conv, 2, "", attachments=[f.photo()]),
+        await f.message(db, conv, 3, "", attachments=[{"kind": "video", "size": 1000}]),
     ]
-    await crud.save_messages(db, rows)
+    att = [m.attachments[0].id for m in msgs]
+    folder = tmp_path / "media" / str(conv.id)
+    folder.mkdir(parents=True)
+    (folder / f"{att[0]}.jpg").write_bytes(b"\xff\xd8trunc")
+    (folder / f"{att[1]}.jpg").write_bytes(b"\xff\xd8ok\xff\xd9")
+    (folder / f"{att[2]}.mp4").write_bytes(b"short")
+    for a, ext in zip(att, (".jpg", ".jpg", ".mp4")):
+        await crud.set_attachment_local_path(db, a, f"media/{conv.id}/{a}{ext}")
     with patch.object(media, "DATA_DIR", tmp_path):
         assert await media.audit_media_files() == 2
-    got = {m.tg_message_id: m.media_path for m in (await db.execute(
-        select(Message).where(Message.chat_id == 77).execution_options(populate_existing=True))).scalars()}
-    assert got == {1: None, 2: "media/77/2.jpg", 3: None}
-    assert not (tmp_path / "media" / "77" / "1.jpg").exists()
+    got = {}
+    for m in msgs:
+        await db.refresh(m.attachments[0])
+        got[m.seq] = m.attachments[0].local_path
+    assert got == {1: None, 2: f"media/{conv.id}/{att[1]}.jpg", 3: None}
+    assert not (folder / f"{att[0]}.jpg").exists()

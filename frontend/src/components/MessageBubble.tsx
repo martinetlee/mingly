@@ -1,7 +1,8 @@
 import { memo, useRef, useState, useCallback, useEffect, useMemo } from 'react'
 import { Reply, Forward, Pencil, Trash2, MoreVertical, Check, CheckCheck, Loader2, ShieldAlert, Flag, X, Languages, ChevronDown, Copy, User, MessageSquare, AtSign, ShieldBan, Pin, PinOff, BarChart3, MapPin, Contact as ContactIcon } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
-import type { Message } from '../api/types'
+import { personUrl } from '../lib/routes'
+import type { Attachment, ChannelName, Message, MessageSender } from '../api/types'
 import { translateMessage, getPrefs, openExternalUrl } from '../api/client'
 import { reportError, toast } from '../lib/toast'
 import { fmtTime } from '../utils/time'
@@ -10,6 +11,7 @@ import { useFeatures } from '../context/FeaturesContext'
 import SenderAvatar from './SenderAvatar'
 import MediaView, { RENDERED_MEDIA } from './MediaView'
 import MediaAlbumGrid from './MediaAlbumGrid'
+import { mentionUrl } from '../lib/mentions'
 
 export type ScamVerdictScope = 'message' | 'sender'
 
@@ -27,8 +29,12 @@ interface Props {
   onDelete?: (msg: Message, album?: Message[]) => void
   onForward?: (msg: Message, album?: Message[]) => void
   onPin?: (msg: Message) => void
-  /** Clicking a reply quote */
-  onJumpToMessage?: (tgId: number) => void
+  /** Clicking a reply quote (stored target) */
+  onJumpToMessage?: (messageId: number) => void
+  /** Clicking a reply quote whose target isn't stored (fetched from the channel by its own id) */
+  onJumpToExternal?: (externalId: string) => void
+  /** The conversation's channel (channel-specific text handling such as Telegram mentions) */
+  channel?: ChannelName | null
   /** Show avatar on this message (first in a sender group) */
   showAvatar?: boolean
   /** Whether this is a group/channel chat (controls avatar indent) */
@@ -38,11 +44,11 @@ interface Props {
   onReportScam?: (msg: Message) => void
   /** "Not a scam" on this message / dismiss the sender — the parent calls the verdict API */
   onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void
-  /** Avatar context menu callbacks */
-  onOpenProfile?: (senderId: number) => void
-  onSendMessage?: (senderId: number) => void
-  onMention?: (senderId: number, senderName: string) => void
-  onRestrict?: (senderId: number, chatId: number) => void
+  /** Avatar context menu callbacks (the parent passes only what the conversation supports) */
+  onOpenProfile?: (sender: MessageSender) => void
+  onSendMessage?: (sender: MessageSender) => void
+  onMention?: (sender: MessageSender) => void
+  onRestrict?: (sender: MessageSender, conversationId: number) => void
 }
 
 // Common quick-reaction emojis (mirrors Telegram's default set)
@@ -66,7 +72,7 @@ function safeHref(url: string): string {
 function sanitizeHrefs(html: string): string {
   return html.replace(/<a\s([^>]*?)href="([^"]*)"([^>]*)>/g, (match, before, url, after) => {
     const safe = safeHref(url)
-    // Show URL tooltip on hover for http links (not for internal /profile links or mentions)
+    // Show URL tooltip on hover for http links (not for internal links or mentions)
     if (safe.startsWith('http') && !match.includes('data-mention')) {
       return `<a ${before}href="${safe}" title="${safe}"${after}>`
     }
@@ -75,7 +81,7 @@ function sanitizeHrefs(html: string): string {
 }
 
 /**
- * Plain stored text → HTML. `message.text` is the raw Telegram text (no
+ * Plain stored text → HTML. `message.text` is the raw channel text (no
  * markdown markers), so only escape, linkify bare URLs and keep newlines.
  */
 export function plainTextToHtml(text: string): string {
@@ -84,25 +90,31 @@ export function plainTextToHtml(text: string): string {
   return s.replace(/\n/g, '<br>')
 }
 
-/** Convert tg://user mention links to in-app /profile links and wrap plain @username text */
-function processMentions(html: string): string {
-  // Convert any remaining tg://user?id=X links from older syncs
+/**
+ * Telegram mentions link to /mention/telegram/<user id | @username> (the
+ * backend already renders text_html mentions that way; this covers tg://user
+ * links from older rows and plain @username text). pages/Mention resolves them.
+ */
+function processTelegramMentions(html: string): string {
   let s = html.replace(
     /href="tg:\/\/user\?id=(\d+)"/g,
-    'href="/profile/$1" data-mention="true"',
+    (_m, id: string) => `href="${mentionUrl('telegram', id)}" data-mention="true"`,
   )
   // Wrap plain @username text that isn't already inside an <a> tag
   s = s.replace(
     /(?<!["\/\w])@([A-Za-z]\w{3,})/g,
-    '<a href="/profile/@$1" data-mention="true" class="mention-link">@$1</a>',
+    (_m, name: string) => `<a href="${mentionUrl('telegram', `@${name}`)}" data-mention="true" class="mention-link">@${name}</a>`,
   )
   return s
 }
 
-const FormattedText = memo(function FormattedText({ text, html, isOut }: { text: string; html: string | null; isOut: boolean }) {
+const FormattedText = memo(function FormattedText({ text, html, isOut, channel }: { text: string; html: string | null; isOut: boolean; channel?: ChannelName | null }) {
   const navigate = useNavigate()
   // Sanitising runs several regexes — only when the content changes
-  const safe = useMemo(() => sanitizeHrefs(processMentions(html ?? plainTextToHtml(text))), [text, html])
+  const safe = useMemo(() => {
+    const raw = html ?? plainTextToHtml(text)
+    return sanitizeHrefs(channel === 'telegram' ? processTelegramMentions(raw) : raw)
+  }, [text, html, channel])
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLSpanElement>) => {
     const anchor = (e.target as HTMLElement).closest('a')
@@ -110,7 +122,7 @@ const FormattedText = memo(function FormattedText({ text, html, isOut }: { text:
     const href = anchor.getAttribute('href')
     if (!href) return
     e.preventDefault()
-    if (href.startsWith('/profile/')) {
+    if (href.startsWith('/mention/')) {
       navigate(href)
     } else if (href.startsWith('http://') || href.startsWith('https://')) {
       // Open external links in system browser via backend
@@ -232,7 +244,7 @@ export function MetaContent({ meta: raw, isOut }: { meta: Meta; isOut: boolean }
       <div className="flex items-start gap-2 px-3 py-2" data-testid="meta-contact">
         <ContactIcon size={15} className={`mt-0.5 flex-shrink-0 ${muted}`} />
         <div className="min-w-0">
-          {userId ? <Link to={`/profile/${userId}`} className="font-medium hover:underline">{name}</Link> : <p className="font-medium">{name}</p>}
+          {userId ? <SharedContactLink userId={userId} name={name} /> : <p className="font-medium">{name}</p>}
           {phone && <p className={`text-[12px] ${muted}`}>{phone.startsWith('+') ? phone : `+${phone}`}</p>}
         </div>
       </div>
@@ -241,19 +253,35 @@ export function MetaContent({ meta: raw, isOut }: { meta: Meta; isOut: boolean }
   return null
 }
 
+/** A shared Telegram contact card: links through the mention route (resolves the user to a person) */
+function SharedContactLink({ userId, name }: { userId: number; name: string }) {
+  return <Link to={mentionUrl('telegram', String(userId))} className="font-medium hover:underline">{name}</Link>
+}
+
+/** Where a reply quote / pin line points: a stored message id, or the channel's id of an unstored one */
+function replyTarget(message: Message): { messageId: number } | { externalId: string } | null {
+  if (message.reply_to_message_id != null) return { messageId: message.reply_to_message_id }
+  if (message.reply_to_external_id) return { externalId: message.reply_to_external_id }
+  return null
+}
+
 /**
  * A service message (joined, left, pinned, call, title change…): a centered
  * system line with no bubble and no actions. `text` is the backend's readable
  * description.
  */
-export const ServiceMessage = memo(function ServiceMessage({ message, highlighted, onJumpToMessage }: {
+export const ServiceMessage = memo(function ServiceMessage({ message, highlighted, onJumpToMessage, onJumpToExternal }: {
   message: Message
   highlighted?: boolean
-  /** A pin line jumps to the pinned message (its reply_to_tg_message_id) */
-  onJumpToMessage?: (tgId: number) => void
+  /** A pin line jumps to the pinned message (its reply target) */
+  onJumpToMessage?: (messageId: number) => void
+  onJumpToExternal?: (externalId: string) => void
 }) {
   const service = message.meta?.service as { action?: string } | undefined
-  const target = service?.action === 'pin_message' ? message.reply_to_tg_message_id ?? null : null
+  const pinned = service?.action === 'pin_message' ? replyTarget(message) : null
+  const jump = pinned && 'messageId' in pinned
+    ? (onJumpToMessage ? () => onJumpToMessage(pinned.messageId) : null)
+    : pinned && onJumpToExternal ? () => onJumpToExternal(pinned.externalId) : null
   const cls = `max-w-[85%] rounded-full bg-slate-800/80 px-3 py-1 text-center text-[11px] text-slate-400 ${
     highlighted ? 'ring-2 ring-amber-400/50 transition-all duration-700' : ''
   }`
@@ -265,8 +293,8 @@ export const ServiceMessage = memo(function ServiceMessage({ message, highlighte
   )
   return (
     <div className="my-1.5 flex justify-center" data-testid="service-message">
-      {target != null && onJumpToMessage ? (
-        <button type="button" onClick={() => onJumpToMessage(target)} title="Go to the pinned message" className={`${cls} hover:text-slate-200`}>
+      {jump ? (
+        <button type="button" onClick={jump} title="Go to the pinned message" className={`${cls} hover:text-slate-200`}>
           {content}
         </button>
       ) : (
@@ -324,15 +352,14 @@ function EmojiPicker({ isOut, myReaction, onSelect }: {
   )
 }
 
-function AvatarContextMenu({ x, y, senderId, senderName, onClose, onOpenProfile, onSendMessage, onMention, onRestrict }: {
+function AvatarContextMenu({ x, y, sender, onClose, onOpenProfile, onSendMessage, onMention, onRestrict }: {
   x: number
   y: number
-  senderId: number
-  senderName: string
+  sender: MessageSender
   onClose: () => void
-  onOpenProfile?: (senderId: number) => void
-  onSendMessage?: (senderId: number) => void
-  onMention?: (senderId: number, senderName: string) => void
+  onOpenProfile?: (sender: MessageSender) => void
+  onSendMessage?: (sender: MessageSender) => void
+  onMention?: (sender: MessageSender) => void
   onRestrict?: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -350,14 +377,14 @@ function AvatarContextMenu({ x, y, senderId, senderName, onClose, onOpenProfile,
   const itemCls = 'flex w-full items-center gap-2.5 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors'
   return (
     <div ref={menuRef} className="fixed z-[100] min-w-[170px] rounded-xl border border-slate-600 bg-slate-800 shadow-2xl py-1.5" style={{ left: x, top: y }}>
-      {onOpenProfile && (
-        <button onClick={() => { onClose(); onOpenProfile(senderId) }} className={itemCls}><User size={14} /> Open Profile</button>
+      {onOpenProfile && sender.person_id != null && (
+        <button onClick={() => { onClose(); onOpenProfile(sender) }} className={itemCls}><User size={14} /> Open Profile</button>
       )}
-      {onSendMessage && (
-        <button onClick={() => { onClose(); onSendMessage(senderId) }} className={itemCls}><MessageSquare size={14} /> Send Message</button>
+      {onSendMessage && sender.person_id != null && (
+        <button onClick={() => { onClose(); onSendMessage(sender) }} className={itemCls}><MessageSquare size={14} /> Send Message</button>
       )}
-      {onMention && (
-        <button onClick={() => { onClose(); onMention(senderId, senderName) }} className={itemCls}><AtSign size={14} /> Mention</button>
+      {onMention && sender.name && (
+        <button onClick={() => { onClose(); onMention(sender) }} className={itemCls}><AtSign size={14} /> Mention</button>
       )}
       {onRestrict && (
         <>
@@ -417,7 +444,7 @@ function ActionMenu({ isOut, items, onClose }: { isOut: boolean; items: MenuItem
 
 /** Scam status for a message: server verdict + any user-initiated check in progress. */
 function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void }) {
-  const check = useScamCheck(message.chat_id, message.tg_message_id)
+  const check = useScamCheck(message.conversation_id, message.id)
   const [expanded, setExpanded] = useState(false)
   // THE verdict comes from the server; never re-derived from scam_score
   const isScam = !!message.effective_is_scam
@@ -434,15 +461,15 @@ function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdi
         <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs">
           <Check size={13} className="flex-shrink-0" />
           <span className="flex-1">No scam detected</span>
-          <button onClick={() => dismissScamCheck(message.chat_id, message.tg_message_id)} aria-label="Dismiss" className="hover:text-emerald-100"><X size={11} /></button>
+          <button onClick={() => dismissScamCheck(message.conversation_id, message.id)} aria-label="Dismiss" className="hover:text-emerald-100"><X size={11} /></button>
         </div>
       )}
       {check?.status === 'error' && (
         <div className="flex items-center gap-1.5 px-3 py-1.5 border-t border-orange-500/30 bg-orange-500/10 text-orange-300 text-xs">
           <ShieldAlert size={13} className="flex-shrink-0" />
           <span className="flex-1">{check.error || 'Scam check failed'}</span>
-          <button onClick={() => void startScamCheck(message.chat_id, message.tg_message_id)} className="underline hover:text-orange-100">Retry</button>
-          <button onClick={() => dismissScamCheck(message.chat_id, message.tg_message_id)} aria-label="Dismiss" className="hover:text-orange-100"><X size={11} /></button>
+          <button onClick={() => void startScamCheck(message.conversation_id, message.id)} className="underline hover:text-orange-100">Retry</button>
+          <button onClick={() => dismissScamCheck(message.conversation_id, message.id)} aria-label="Dismiss" className="hover:text-orange-100"><X size={11} /></button>
         </div>
       )}
       {isScam && (
@@ -463,7 +490,7 @@ function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdi
                   <button onClick={(e) => { e.stopPropagation(); onScamVerdict(message, 'message') }} className="text-red-400 hover:text-red-200 underline">
                     Not a scam
                   </button>
-                  {message.sender_id != null && !message.is_outgoing && (
+                  {message.sender?.identity_id != null && !message.is_outgoing && (
                     <button onClick={(e) => { e.stopPropagation(); onScamVerdict(message, 'sender') }} className="text-red-400 hover:text-red-200 underline">
                       Dismiss sender
                     </button>
@@ -480,7 +507,7 @@ function ScamSection({ message, onScamVerdict }: { message: Message; onScamVerdi
 
 function MessageBubble({
   message, album, showSender, highlighted, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
-  showAvatar, isGroupChat, isFlaggedSender: flaggedProp, onReportScam: reportProp, onScamVerdict: verdictProp,
+  onJumpToExternal, channel, showAvatar, isGroupChat, isFlaggedSender: flaggedProp, onReportScam: reportProp, onScamVerdict: verdictProp,
   onOpenProfile, onSendMessage, onMention, onRestrict,
 }: Props) {
   // Every scam surface (banner, check, report, flagged-sender marker) follows the Shield feature
@@ -537,7 +564,7 @@ function MessageBubble({
   if (onEdit && isOut && message.text && !album) menuItems.push({ key: 'edit', label: 'Edit', icon: <Pencil size={13} />, onClick: () => onEdit(message) })
   menuItems.push({
     key: 'scam', label: 'Check for scam', icon: <ShieldAlert size={13} />, tone: 'warn',
-    onClick: () => void startScamCheck(message.chat_id, message.tg_message_id),
+    onClick: () => void startScamCheck(message.conversation_id, message.id),
   })
   if (onReportScam) menuItems.push({ key: 'report', label: 'Report scam', icon: <Flag size={13} />, tone: 'danger', onClick: () => onReportScam(message) })
   if (onDelete) menuItems.push({ key: 'delete', label: 'Delete', icon: <Trash2 size={13} />, tone: 'danger', onClick: () => onDelete(message, album) })
@@ -588,7 +615,17 @@ function MessageBubble({
   const meta = !album && structuredMeta(message.meta) ? message.meta! : null
   // Polls, locations and contacts carry no caption; `text` is only their plain fallback
   const showText = !!message.text && !meta
-  const mediaOnly = !album && !meta && message.media_type && !RENDERED_MEDIA.has(message.media_type) && !message.text
+  // An album shows every item's attachments; one message may carry several (email)
+  const attachments: Attachment[] = album ? album.flatMap((m) => m.attachments ?? []) : (meta ? [] : message.attachments ?? [])
+  const rendered = attachments.filter((a) => RENDERED_MEDIA.has(a.kind))
+  const unrendered = attachments.find((a) => !RENDERED_MEDIA.has(a.kind))
+  const mediaOnly = !album && !meta && rendered.length === 0 && unrendered && !message.text
+  const sender = message.sender
+  const senderName = sender?.name ?? null
+  const reply_to = replyTarget(message)
+  const jumpToReply = reply_to && 'messageId' in reply_to
+    ? (onJumpToMessage ? () => onJumpToMessage(reply_to.messageId) : null)
+    : reply_to && onJumpToExternal ? () => onJumpToExternal(reply_to.externalId) : null
 
   return (
     <div
@@ -607,10 +644,11 @@ function MessageBubble({
         <div className="w-7 flex-shrink-0 mr-2 self-end">
           {showAvatar ? (
             <SenderAvatar
-              senderId={message.sender_id}
-              senderName={message.sender_name}
+              avatarUrl={sender?.avatar_url}
+              name={senderName}
+              personId={sender?.person_id}
               size={28}
-              onContextMenu={message.sender_id ? (e) => {
+              onContextMenu={sender?.identity_id != null ? (e) => {
                 e.preventDefault()
                 e.stopPropagation()
                 setAvatarMenu({ x: e.clientX, y: e.clientY })
@@ -622,31 +660,30 @@ function MessageBubble({
         </div>
       )}
 
-      {avatarMenu && message.sender_id && (
+      {avatarMenu && sender && (
         <AvatarContextMenu
           x={avatarMenu.x}
           y={avatarMenu.y}
-          senderId={message.sender_id}
-          senderName={message.sender_name || `ID: ${message.sender_id}`}
+          sender={sender}
           onClose={() => setAvatarMenu(null)}
           onOpenProfile={onOpenProfile}
           onSendMessage={onSendMessage}
           onMention={onMention}
-          onRestrict={isGroupChat && onRestrict ? () => onRestrict(message.sender_id!, message.chat_id) : undefined}
+          onRestrict={isGroupChat && onRestrict && sender.identity_id != null ? () => onRestrict(sender, message.conversation_id) : undefined}
         />
       )}
 
       <div className={`max-w-[70%] ${isOut ? 'items-end' : 'items-start'} flex flex-col`}>
-        {showSender && !isOut && message.sender_name && (
-          message.sender_id ? (
-            <Link to={`/profile/${message.sender_id}`} className={`mb-0.5 ml-1 text-xs font-medium transition-colors inline-flex items-center gap-1 ${senderLabelCls}`}>
+        {showSender && !isOut && senderName && (
+          sender?.person_id != null ? (
+            <Link to={personUrl(sender.person_id)} className={`mb-0.5 ml-1 text-xs font-medium transition-colors inline-flex items-center gap-1 ${senderLabelCls}`}>
               {isFlaggedSender && <ShieldAlert size={11} className="flex-shrink-0" />}
-              {message.sender_name}
+              {senderName}
             </Link>
           ) : (
             <span className={`mb-0.5 ml-1 text-xs font-medium inline-flex items-center gap-1 ${isFlaggedSender ? 'text-red-400' : 'text-purple-400'}`}>
               {isFlaggedSender && <ShieldAlert size={11} className="flex-shrink-0" />}
-              {message.sender_name}
+              {senderName}
             </span>
           )
         )}
@@ -664,9 +701,9 @@ function MessageBubble({
           {reply && (
             <button
               type="button"
-              onClick={message.reply_to_tg_message_id != null && onJumpToMessage ? () => onJumpToMessage(message.reply_to_tg_message_id!) : undefined}
-              disabled={message.reply_to_tg_message_id == null || !onJumpToMessage}
-              title={onJumpToMessage ? 'Go to the original message' : undefined}
+              onClick={jumpToReply ?? undefined}
+              disabled={!jumpToReply}
+              title={jumpToReply ? 'Go to the original message' : undefined}
               className={`mx-2 mt-2 flex w-[calc(100%-1rem)] rounded-lg border-l-2 px-2 py-1 text-left enabled:cursor-pointer enabled:hover:brightness-110 ${
                 isOut ? 'border-indigo-300/60 bg-indigo-700/60' : 'border-purple-400/60 bg-slate-600/60'
               }`}
@@ -687,13 +724,16 @@ function MessageBubble({
               Forwarded from <span className="font-medium">{message.fwd_from_name}</span>
             </p>
           )}
-          {album
-            ? <MediaAlbumGrid messages={album} isOut={isOut} />
-            : meta ? <MetaContent meta={meta} isOut={isOut} />
-            : message.media_type && <MediaView message={message} isOut={isOut} />}
+          {message.subject && (
+            <p className="px-3 pt-2 font-semibold select-text" data-testid="message-subject">{message.subject}</p>
+          )}
+          {meta ? <MetaContent meta={meta} isOut={isOut} />
+            : rendered.length > 1 ? <MediaAlbumGrid attachments={rendered} isOut={isOut} />
+            : rendered.length === 1 ? <MediaView attachment={rendered[0]} isOut={isOut} />
+            : null}
           {showText && (
             <p className="px-3 py-2 select-text">
-              <FormattedText text={message.text!} html={message.text_html} isOut={isOut} />
+              <FormattedText text={message.text!} html={message.text_html} isOut={isOut} channel={channel} />
             </p>
           )}
           {translating && (
@@ -713,7 +753,7 @@ function MessageBubble({
             </div>
           )}
           {mediaOnly && (
-            <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>[{message.media_type}]</span>
+            <span className={`px-3 py-2 block italic ${isOut ? 'text-indigo-300' : 'text-slate-400'}`}>[{unrendered.kind}]</span>
           )}
           {shield && <ScamSection message={message} onScamVerdict={onScamVerdict} />}
         </div>
