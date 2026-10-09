@@ -22,10 +22,30 @@ const GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: 'j / ↓', description: 'Next chat' },
       { keys: 'k / ↑', description: 'Previous chat' },
-      { keys: 'Enter', description: 'Open first chat' },
       { keys: '/', description: 'Focus search' },
       { keys: 'i', description: 'Toggle info panel' },
       { keys: '⌘F', description: 'Search in chat' },
+      { keys: 'n', description: 'New Telegram conversation' },
+    ],
+  },
+  {
+    title: 'Mail',
+    shortcuts: [
+      { keys: 'j / k', description: 'Next / previous thread' },
+      { keys: '/', description: 'Filter threads' },
+      { keys: 'c', description: 'Compose' },
+      { keys: 'r', description: 'Reply' },
+      { keys: '⇧R', description: 'Reply all' },
+      { keys: 'e', description: 'Archive / move to Inbox' },
+    ],
+  },
+  {
+    title: 'Calendar',
+    shortcuts: [
+      { keys: 't', description: 'Today' },
+      { keys: '← / →', description: 'Previous / next range' },
+      { keys: 'a', description: 'Agenda view' },
+      { keys: 'w', description: 'Week view' },
     ],
   },
   {

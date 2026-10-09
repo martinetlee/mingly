@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Account, Person
+from backend.db.models import Account
 from backend.serialization import iso_utc
 
 router = APIRouter()
@@ -35,10 +35,10 @@ def parse_instant(raw: str, name: str = "date") -> datetime:
     """ISO 8601 (offset or Z; none = UTC) → naive UTC; 400 when invalid."""
     try:
         dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, OverflowError):
         raise HTTPException(status_code=400, detail=f"Invalid {name}: {raw!r}")
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
 
 
@@ -144,8 +144,9 @@ async def list_events(
 @router.get("/people/{person_id}/upcoming")
 async def person_upcoming(person_id: int, limit: int = 5, db: AsyncSession = Depends(get_db)):
     """Meetings with this person that aren't over yet, earliest first."""
-    if (await db.get(Person, person_id)) is None:
-        raise HTTPException(status_code=404, detail="Person not found")
+    from backend.api.people import person_or_404  # 404 carries merged_into for merged-away people
+
+    await person_or_404(db, person_id)
     now = local_now()
     events = await crud.person_meetings(
         db, person_id, upcoming_from=now.astimezone(timezone.utc).replace(tzinfo=None), upcoming_date=now.date(),

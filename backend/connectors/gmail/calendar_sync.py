@@ -11,6 +11,11 @@ First sync of a calendar: ``events.list`` from 30 days back to 90 days ahead
 is stored in ``accounts.sync_state_json["calendar"]`` (merged, the mail keys
 stay). Then every 5 minutes an incremental ``events.list`` with that token;
 410 Gone means the token expired — drop it and sync the window again.
+Incremental results only carry events that changed, so new instances of an
+unchanged recurring meeting (or old events that move into the window) would
+never arrive: the window is pulled again once a day (``window_synced_at``).
+A window pull drops the stored events inside the window that Google no
+longer returns; events outside it (history, far future) are kept.
 Cancelled events are deleted. Attendees and the organizer become ``gmail``
 identities (external id = lowercased email), so they land on people and
 link by email.
@@ -33,6 +38,7 @@ BACKOFF_BASE = 30.0
 BACKOFF_MAX = 30 * 60.0
 WINDOW_PAST_DAYS = 30
 WINDOW_AHEAD_DAYS = 90
+WINDOW_REFRESH = timedelta(days=1)
 PAGE_SIZE = 250
 PRIMARY = "primary"
 STATE_KEY = "calendar"
@@ -126,6 +132,14 @@ def event_fields(event: dict, calendar_id: str) -> dict:
     }
 
 
+def _window_due(synced_at: Optional[str]) -> bool:
+    """Whether the calendar's window should be pulled again."""
+    try:
+        return datetime.utcnow() - datetime.fromisoformat(synced_at or "") >= WINDOW_REFRESH
+    except (TypeError, ValueError):
+        return True
+
+
 class CalendarSync:
     """The calendar loop of one Gmail account."""
 
@@ -156,18 +170,21 @@ class CalendarSync:
             except GmailError as e:
                 failures += 1
                 self.error = str(e)
-                delay = e.retry_after or min(BACKOFF_BASE * 2 ** (failures - 1), BACKOFF_MAX)
+                delay = min(e.retry_after or BACKOFF_BASE * 2 ** (failures - 1), BACKOFF_MAX)
                 logger.info("Calendar sync for account %s failed: %s", self.account_id, e)
             except Exception as e:
                 logger.exception("Calendar sync failed for account %s", self.account_id)
                 failures += 1
                 self.error = str(e) or type(e).__name__
                 delay = min(BACKOFF_BASE * 2 ** (failures - 1), BACKOFF_MAX)
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                pass
-            self._wake.clear()
+            await self._sleep(delay)
+
+    async def _sleep(self, seconds: float) -> None:
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+        self._wake.clear()
 
     async def sync_once(self) -> bool:
         """Sync every selected calendar once. Returns whether anything changed."""
@@ -178,53 +195,64 @@ class CalendarSync:
         calendars = selected_calendars(self.account_id)
         state = (await load_sync_state(self.account_id)).get(STATE_KEY) or {}
         tokens: dict = dict(state.get("sync_tokens") or {})
+        windows: dict = dict(state.get("window_synced_at") or {})
         changed = False
         async with AsyncSessionLocal() as db:
             dropped = await crud.prune_calendar_events(db, self.account_id, keep_calendars=calendars)
             await db.commit()
         changed |= bool(dropped)
         tokens = {c: t for c, t in tokens.items() if c in calendars}
+        windows = {c: w for c, w in windows.items() if c in calendars}
         for cal in calendars:
+            token = tokens.get(cal) if not _window_due(windows.get(cal)) else None
             try:
-                token, n = await self._sync_calendar(cal, tokens.get(cal))
+                token, n, full = await self._sync_calendar(cal, token)
             except GmailNotFound:
                 logger.info("Calendar %s of account %s not found; skipped", cal, self.account_id)
                 tokens.pop(cal, None)
+                windows.pop(cal, None)
                 continue
             changed |= bool(n)
             if token:
                 tokens[cal] = token
+            if full:
+                windows[cal] = datetime.utcnow().isoformat()
             await merge_sync_state(self.account_id, calendar={
-                "sync_tokens": tokens, "last_sync_at": datetime.utcnow().isoformat(),
+                "sync_tokens": tokens, "window_synced_at": windows, "last_sync_at": datetime.utcnow().isoformat(),
             })
         self.last_sync_at = datetime.utcnow()
         await merge_sync_state(self.account_id, calendar={
-            "sync_tokens": tokens, "last_sync_at": self.last_sync_at.isoformat(),
+            "sync_tokens": tokens, "window_synced_at": windows, "last_sync_at": self.last_sync_at.isoformat(),
         })
         if changed:
             from backend.ws.manager import ws_manager
             await ws_manager.broadcast({"type": "calendar_synced", "account_id": self.account_id})
         return changed
 
-    async def _sync_calendar(self, calendar_id: str, sync_token: Optional[str]) -> "tuple[Optional[str], int]":
+    async def _sync_calendar(self, calendar_id: str, sync_token: Optional[str]) -> "tuple[Optional[str], int, bool]":
         """Incremental with ``sync_token``, else the full window. Returns the
-        new sync token and how many events were stored or removed."""
+        new sync token, how many events were stored or removed, and whether
+        the window was pulled."""
         if sync_token:
             try:
-                return await self._pull(calendar_id, {"syncToken": sync_token}, full=False)
+                token, n = await self._pull(calendar_id, {"syncToken": sync_token}, full=None)
+                return token, n, False
             except GmailError as e:
                 if e.status != 410:
                     raise
                 logger.info("Calendar sync token expired for %s (account %s); full resync",
                             calendar_id, self.account_id)
         now = datetime.utcnow()
-        window = {
-            "timeMin": (now - timedelta(days=WINDOW_PAST_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "timeMax": (now + timedelta(days=WINDOW_AHEAD_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        return await self._pull(calendar_id, window, full=True)
+        start, end = now - timedelta(days=WINDOW_PAST_DAYS), now + timedelta(days=WINDOW_AHEAD_DAYS)
+        window = {"timeMin": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "timeMax": end.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        token, n = await self._pull(calendar_id, window, full=(start, end))
+        return token, n, True
 
-    async def _pull(self, calendar_id: str, params: dict, *, full: bool) -> "tuple[Optional[str], int]":
+    async def _pull(
+        self, calendar_id: str, params: dict, *, full: "Optional[tuple[datetime, datetime]]",
+    ) -> "tuple[Optional[str], int]":
+        """Page through ``events.list``. ``full`` = the window (naive UTC) of
+        a window pull, whose stored events Google didn't return are dropped."""
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
 
@@ -256,12 +284,28 @@ class CalendarSync:
                 token = resp.get("nextSyncToken")
                 break
         if full:
-            async with AsyncSessionLocal() as db:
-                count += await crud.prune_calendar_events(
-                    db, self.account_id, calendar_id=calendar_id, keep_external_ids=seen,
-                )
-                await db.commit()
+            count += await self._prune_window(calendar_id, full, seen)
         return token, count
+
+    async def _prune_window(self, calendar_id: str, window: "tuple[datetime, datetime]", seen: set) -> int:
+        """Delete this calendar's stored events that start inside ``window``
+        but weren't in the window pull (deleted or moved out at Google)."""
+        from sqlalchemy import delete, select
+
+        from backend.db.database import AsyncSessionLocal
+        from backend.db.models import CalendarEvent
+
+        start, end = window
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(CalendarEvent.id, CalendarEvent.external_id).where(
+                CalendarEvent.account_id == self.account_id, CalendarEvent.calendar_id == calendar_id,
+                CalendarEvent.start_at >= start, CalendarEvent.start_at < end,
+            ))).all()
+            stale = [i for i, ext in rows if ext not in seen]
+            for i in range(0, len(stale), 500):
+                await db.execute(delete(CalendarEvent).where(CalendarEvent.id.in_(stale[i:i + 500])))
+            await db.commit()
+        return len(stale)
 
     async def _store(self, db, event: dict, calendar_id: str) -> None:
         from backend.db import crud

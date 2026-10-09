@@ -20,12 +20,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import select
 from telethon.errors import FloodWaitError, RPCError
 
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Message, MessageAttachment
+from backend.aio import LoopLock
 from backend.tasks import spawn
 from backend.telegram import ids
 from backend.telegram.runtime import runtime
@@ -47,7 +48,7 @@ class RateLimiter:
         self._tokens = float(burst)
         self._last = time.monotonic()
         self._blocked_until = 0.0
-        self._lock = asyncio.Lock()
+        self._lock = LoopLock()  # the coordinator singleton is built at import
 
     def flood(self, seconds: int) -> None:
         self._blocked_until = max(self._blocked_until, time.monotonic() + seconds)
@@ -262,8 +263,7 @@ class SyncCoordinator:
                 )
                 gone = {mid for mid, ext in local.all() if ext not in seen}
                 if gone:
-                    await db.execute(sa_delete(Message).where(Message.id.in_(list(gone))))
-                    await db.commit()
+                    await crud.delete_messages(db, gone)
                     result.deleted = len(gone)
                     logger.info("sync conversation %s: removed %d deleted messages", conversation_id, len(gone))
                     await ws_manager.broadcast({

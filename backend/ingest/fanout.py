@@ -12,11 +12,12 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from backend import prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import CatchUpItem, Conversation, Message
 from backend.notify import send_native_notification
-from backend.serializers import message_out
+from backend.serializers import message_out, messages_out
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,16 @@ def _channel(conv: Conversation) -> Optional[str]:
         return None
 
 
+async def _serialized(saved: Message) -> dict:
+    """``saved`` as stored reads serialize it: with its reply preview
+    (``reply_to_message_id``, ``reply_to_preview``) and participants."""
+    async with AsyncSessionLocal() as db:
+        rows = await crud.get_reply_previews(db, [saved.id])
+        if rows:
+            return (await messages_out(db, rows))[0]
+    return message_out(saved)  # deleted meanwhile: the row we have
+
+
 async def message_received(conv: Conversation, saved: Message, *, sender_profile: Optional[dict] = None) -> None:
     """Fan out a newly stored live message.
 
@@ -80,23 +91,19 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
         await stamp_triage(conv.id, saved.date)
 
     channel = _channel(conv)
-    participants = None
-    if channel not in (None, "telegram"):  # Telegram stores no participants
-        from backend.ingest.service import message_participants
-        async with AsyncSessionLocal() as db:
-            participants = (await message_participants(db, [saved.id])).get(saved.id)
-
-    # Full serialized message lets the frontend apply the event as a delta.
+    # Full serialized message (reply preview, participants — the same shape
+    # stored reads return) lets the frontend apply the event as a delta.
     await ws_manager.broadcast({
         "type": "new_message",
         "conversation_id": conv.id,
+        "channel": channel,
         "message_id": saved.id,
         "conversation_title": conv.title,
         "sender_name": saved.sender_name,
         "text": (saved.text or saved.subject or "")[:120],
         "is_tracked": conv.is_tracked,
         "is_outgoing": saved.is_outgoing,
-        "message": message_out(saved, participants),
+        "message": await _serialized(saved),
     })
 
     if saved.is_outgoing:
@@ -111,8 +118,7 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
                 pass
         await enqueue_scam(conv.id, [saved.id], "realtime")
 
-    from backend.api.settings import get_notif_pref
-    pref = get_notif_pref(channel)
+    pref = prefs.get_notif_pref(channel)
     if pref == "all" or (pref == "tracked" and conv.is_tracked):
         body_text = (saved.text or saved.subject or "")[:100]
         body = f"{saved.sender_name}: {body_text}" if saved.sender_name else body_text
@@ -125,7 +131,7 @@ async def message_edited(conversation_id: int, saved: Message, *, text_changed: 
         "type": "message_edited",
         "conversation_id": conversation_id,
         "message_id": saved.id,
-        "message": message_out(saved),
+        "message": await _serialized(saved),
     })
     if text_changed and not saved.is_outgoing and saved.text:
         await enqueue_scam(conversation_id, [saved.id], "edit")

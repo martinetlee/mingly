@@ -10,6 +10,7 @@ the vault under keys namespaced by account id (``vault_key``).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
@@ -43,12 +44,26 @@ def http_client(timeout: float = 30.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=timeout, transport=transport)
 
 
+# Token-endpoint ``error`` codes meaning the grant or the client is gone: only
+# signing in again (or fixing the client) helps.
+GRANT_LOST_ERRORS = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+
 class OAuthError(Exception):
-    """Google refused the grant (bad client, revoked or expired refresh token)."""
+    """Google refused the request; ``code`` is the token endpoint's ``error``."""
+
+    def __init__(self, message: str, code: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def grant_lost(self) -> bool:
+        """The refresh token or the OAuth client no longer works."""
+        return self.code in GRANT_LOST_ERRORS
 
 
 class OAuthUnreachable(OAuthError):
-    """Google could not be reached (network); worth retrying."""
+    """Google could not be reached or is unavailable (network, 5xx, 429); worth retrying."""
 
 
 def redirect_uri() -> str:
@@ -103,6 +118,9 @@ class PendingAuth:
     access_token: Optional[str] = None
     expires_in: int = 0
     error: Optional[str] = None
+    # The one code exchange of this consent; later callbacks (a reload, a
+    # second tab) wait for it instead of exchanging or failing it again.
+    exchange: Optional["asyncio.Future[None]"] = field(default=None, repr=False, compare=False)
 
     @property
     def finished(self) -> bool:
@@ -158,11 +176,20 @@ async def complete(state: Optional[str], code: Optional[str], error: Optional[st
     p = _pending.get(state or "")
     if p is None:
         return None
-    if p.finished:
-        return p
+    if p.exchange is None and not p.finished:
+        p.exchange = asyncio.ensure_future(_answer(p, code, error))  # set before any await
+    if p.exchange is not None:
+        # Shielded: a callback request that goes away doesn't cancel the exchange.
+        await asyncio.shield(p.exchange)
+    return p
+
+
+async def _answer(p: PendingAuth, code: Optional[str], error: Optional[str]) -> None:
+    """Record the browser's answer on ``p``: tokens, or an error (never
+    both from different callbacks; only the first callback runs this)."""
     if error or not code:
         p.error = "Access was denied in the browser" if error == "access_denied" else f"Google sign-in failed ({error or 'no code'})"
-        return p
+        return
     try:
         tokens = await _token_request({
             "grant_type": "authorization_code",
@@ -174,13 +201,15 @@ async def complete(state: Optional[str], code: Optional[str], error: Optional[st
         })
     except OAuthError as e:
         p.error = str(e)
-        return p
+        return
+    except Exception as e:  # never leave the consent unanswered (the dialog would poll forever)
+        p.error = f"Google sign-in failed ({e!r})"
+        return
     p.access_token = tokens["access_token"]
     p.refresh_token = tokens.get("refresh_token")
     p.expires_in = int(tokens.get("expires_in", 3600))
     if not p.refresh_token:
         p.error = "Google did not return a refresh token; remove Mingly's access in your Google account and try again"
-    return p
 
 
 # -- tokens --------------------------------------------------------------------
@@ -195,16 +224,21 @@ async def _token_request(data: dict) -> dict:
         body = r.json()
     except ValueError:
         body = {}
+    if not isinstance(body, dict):
+        body = {}
     if r.status_code != 200 or "access_token" not in body:
-        err = body.get("error_description") or body.get("error") or f"HTTP {r.status_code}"
-        raise OAuthError(f"Google rejected the request: {err}")
+        code = body.get("error") if isinstance(body.get("error"), str) else None
+        if r.status_code >= 500 or r.status_code == 429:
+            raise OAuthUnreachable(f"Google's sign-in service is unavailable (HTTP {r.status_code})", code)
+        err = body.get("error_description") or code or f"HTTP {r.status_code}"
+        raise OAuthError(f"Google rejected the request: {err}", code)
     return body
 
 
 async def refresh(creds: Credentials) -> "tuple[str, int]":
     """A fresh access token and its lifetime (seconds)."""
     if not creds.refresh_token:
-        raise OAuthError("Not signed in")
+        raise OAuthError("Not signed in", "invalid_grant")
     body = await _token_request({
         "grant_type": "refresh_token",
         "refresh_token": creds.refresh_token,

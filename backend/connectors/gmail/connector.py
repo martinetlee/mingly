@@ -7,6 +7,8 @@ identity and the vault credentials exist.
 
 Runtime: a background loop backfills recent threads, then polls
 ``history.list`` from the stored ``historyId`` (``accounts.sync_state_json``).
+A thread that keeps failing is set aside (``failed_threads``) and retried on
+later polls instead of holding back the cursor.
 A second loop syncs the account's Google Calendar (``calendar_sync``).
 A thread is one ``email_thread`` conversation; its messages, senders and
 recipients go through ``backend.ingest.service``.
@@ -26,6 +28,7 @@ from typing import Any, Optional
 
 from sqlalchemy import case, func, select, update
 
+from backend.aio import LoopLocal
 from backend.connectors.base import (
     AuthField, AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage,
 )
@@ -47,6 +50,10 @@ DEFAULT_BACKFILL_DAYS = 90
 MAX_BACKFILL_THREADS = 2000
 FETCH_CONCURRENCY = 5
 LABEL_REFRESH = timedelta(minutes=10)
+# A thread that fails in a way a retry of the whole pass can't fix is set
+# aside (``failed_threads`` in the sync state) and retried on later polls.
+THREAD_RETRY_LIMIT = 10
+MAX_FAILED_THREADS = 500
 
 # Gmail's tabbed categories kept out of the inbox (still synced, archived).
 HIDDEN_CATEGORIES = {"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "CATEGORY_FORUMS"}
@@ -131,7 +138,7 @@ class GmailConnector(Connector):
         self._label_names: dict[str, str] = {}
         self._labels_at: Optional[datetime] = None
         self._flows: dict[str, str] = {}  # flow_id -> stage (fields | browser)
-        self._sem: Optional[asyncio.Semaphore] = None
+        self._sem: LoopLocal[asyncio.Semaphore] = LoopLocal(lambda: asyncio.Semaphore(FETCH_CONCURRENCY))
         self.calendar: Optional[CalendarSync] = None
         self._calendar_task: Optional[asyncio.Task] = None
 
@@ -168,6 +175,15 @@ class GmailConnector(Connector):
     # -- lifecycle ---------------------------------------------------------------------
 
     async def start(self) -> bool:
+        generation = self._stop_generation
+        async with self._lifecycle():
+            return await self._start_locked(generation)
+
+    async def _start_locked(self, generation: int) -> bool:
+        """Start under the lifecycle lock; spawns nothing when a stop was
+        requested after the start (``generation``) was."""
+        if self._stop_generation != generation:
+            return False
         if self._task is not None and not self._task.done():
             return True
         creds = oauth.Credentials.load(self.account_id) if self.account_id is not None else None
@@ -179,6 +195,8 @@ class GmailConnector(Connector):
 
         async with AsyncSessionLocal() as db:
             acc = await crud.get_account(db, self.account_id)
+        if self._stop_generation != generation:
+            return False
         if acc is None:
             await self._set_state("error", "Account no longer exists")
             return False
@@ -192,6 +210,11 @@ class GmailConnector(Connector):
         return True
 
     async def stop(self) -> None:
+        self._stop_generation += 1
+        async with self._lifecycle():
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         for task in (self._task, self._calendar_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -207,8 +230,10 @@ class GmailConnector(Connector):
         await self._set_state("stopped")
 
     async def restart(self) -> None:
-        await self.stop()
-        await self.start()
+        generation = self._stop_generation
+        async with self._lifecycle():
+            await self._stop_locked()
+            await self._start_locked(generation)
 
     async def sync_now(self) -> None:
         if self._wake is not None:
@@ -304,6 +329,16 @@ class GmailConnector(Connector):
         self._restart_registered()
         return AuthStep(flow_id=flow_id, kind="done", title="Gmail connected", message=f"Signed in as {email}")
 
+    async def abandon_flow(self, flow_id: str) -> None:
+        self._flows.pop(flow_id, None)
+        pending = oauth.by_flow(flow_id)
+        if pending is not None:
+            oauth.discard(pending)  # a late browser callback then finds nothing to complete
+
+    async def close_flows(self) -> None:
+        for flow_id in list(self._flows):
+            await self.abandon_flow(flow_id)
+
     async def _finish_sign_in(self, pending: oauth.PendingAuth) -> str:
         """Create (or confirm) the account row and its self identity, then
         store the credentials under the account id."""
@@ -378,7 +413,7 @@ class GmailConnector(Connector):
                 return
             except GmailError as e:
                 failures += 1
-                delay = e.retry_after or min(BACKOFF_BASE * 2 ** (failures - 1), BACKOFF_MAX)
+                delay = min(e.retry_after or BACKOFF_BASE * 2 ** (failures - 1), BACKOFF_MAX)
                 await self._set_state("reconnecting" if e.retryable else "error", str(e))
             except Exception as e:
                 logger.exception("Gmail sync failed for account %s", self.account_id)
@@ -426,15 +461,22 @@ class GmailConnector(Connector):
         await self._refresh_labels(force=True)
         page: Optional[str] = None
         seen = 0
+        attempted: set = set()
+        failed: set = set()
         while True:
             resp = await api.list_threads(f"newer_than:{days}d", page)
             ids = [t["id"] for t in resp.get("threads") or []][: MAX_BACKFILL_THREADS - seen]
-            await asyncio.gather(*(self._sync_thread(tid) for tid in ids))
+            failed |= await self._sync_threads(ids)
+            attempted.update(ids)
             seen += len(ids)
             page = resp.get("nextPageToken")
             if not page or seen >= MAX_BACKFILL_THREADS:
                 break
-        await self._save_sync_state(history_id=history_id, last_sync_at=datetime.utcnow().isoformat())
+        previous = _failed_threads(await self._load_sync_state())
+        await self._save_sync_state(
+            history_id=history_id, last_sync_at=datetime.utcnow().isoformat(),
+            failed_threads=_next_failures(previous, attempted, failed),
+        )
 
     async def _incremental(self, state: dict) -> None:
         api = self._require_api()
@@ -464,12 +506,19 @@ class GmailConnector(Connector):
             await self._resync(state)
             return
         await self._refresh_labels()
-        for tid in [t for t in set(added) | set(deleted) if t]:
-            await self._sync_thread(tid, realtime_ids=added.get(tid) or set())
+        previous = _failed_threads(state)
+        touched = [t for t in set(added) | set(deleted) if t]
+        failed: set = set()
+        for tid in touched + [t for t in previous if t not in added and t not in deleted]:
+            if not await self._sync_thread_isolated(tid, realtime_ids=frozenset(added.get(tid) or ())):
+                failed.add(tid)
             if deleted.get(tid):
                 from backend.ingest.service import delete_messages
                 await delete_messages(self.account_id, tid, deleted[tid])
-        await self._save_sync_state(history_id=latest, last_sync_at=datetime.utcnow().isoformat())
+        await self._save_sync_state(
+            history_id=latest, last_sync_at=datetime.utcnow().isoformat(),
+            failed_threads=_next_failures(previous, set(touched) | set(previous), failed),
+        )
 
     async def _resync(self, state: dict) -> None:
         """The stored historyId is too old (Gmail keeps about a week): re-pull
@@ -483,14 +532,39 @@ class GmailConnector(Connector):
         logger.info("Gmail history expired for account %s; re-syncing %d days", self.account_id, days)
         await self._backfill(days)
 
+    async def _sync_threads(self, thread_ids: list[str]) -> set:
+        """Sync threads concurrently; returns the ids that failed for good.
+        A retryable (or auth) error is raised only after every fetch ended,
+        so no sync of this pass keeps running behind the next one."""
+        results = await asyncio.gather(*(self._sync_thread_isolated(t) for t in thread_ids), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise next((e for e in errors if isinstance(e, GmailAuthError)), errors[0])
+        return {t for t, ok in zip(thread_ids, results) if not ok}
+
+    async def _sync_thread_isolated(self, thread_id: str, realtime_ids: frozenset = frozenset()) -> bool:
+        """``_sync_thread`` for the sync loop: False (logged) when this one
+        thread fails in a way that retrying the whole pass can't fix, so it
+        never holds back the cursor; retryable and auth errors propagate."""
+        try:
+            await self._sync_thread(thread_id, realtime_ids=realtime_ids)
+            return True
+        except GmailAuthError:
+            raise
+        except GmailError as e:
+            if e.retryable:
+                raise
+            logger.warning("Gmail thread %s of account %s skipped: %s", thread_id, self.account_id, e)
+        except Exception:
+            logger.exception("Gmail thread %s of account %s could not be stored", thread_id, self.account_id)
+        return False
+
     # -- threads → normalized shapes --------------------------------------------------------
 
     async def _sync_thread(self, thread_id: str, realtime_ids: frozenset = frozenset()) -> Optional[int]:
         from backend.ingest.service import ingest
 
-        if self._sem is None:  # created on the running loop
-            self._sem = asyncio.Semaphore(FETCH_CONCURRENCY)
-        async with self._sem:
+        async with self._sem.get():
             try:
                 thread = await self._require_api().get_thread(thread_id)
             except GmailNotFound:
@@ -505,21 +579,7 @@ class GmailConnector(Connector):
             res = await ingest(self.account_id, self.channel, conv, rest, source="backfill")
         if live:
             res = await ingest(self.account_id, self.channel, conv, live, source="realtime")
-        if conv.peer is None:
-            await self._clear_peer(res.conversation_id)
         return res.conversation_id
-
-    async def _clear_peer(self, conversation_id: int) -> None:
-        """A thread that gained a second counterpart is no longer one-to-one
-        (the conversation upsert only ever sets a peer)."""
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import Conversation
-
-        async with AsyncSessionLocal() as db:
-            await db.execute(update(Conversation)
-                             .where(Conversation.id == conversation_id, Conversation.peer_identity_id.isnot(None))
-                             .values(peer_identity_id=None))
-            await db.commit()
 
     def _is_self(self, email: str) -> bool:
         return bool(self._self_email) and email == self._self_email
@@ -561,6 +621,7 @@ class GmailConnector(Connector):
             kind="email_thread",
             title=subject,
             peer=peer,
+            clear_peer=peer is None,  # a thread that gained a second counterpart is no longer one-to-one
             members_count=len(counterparts) + 1,
             unread_count=sum(1 for m in raw if "UNREAD" in (m.get("labelIds") or [])),
             is_archived="INBOX" not in label_ids or bool(label_ids & HIDDEN_CATEGORIES),
@@ -630,7 +691,8 @@ class GmailConnector(Connector):
         cc = _dedupe([a.strip().lower() for a in draft.cc], also=set(to))
         if not to:
             raise ValueError("No recipient: add an address in To")
-        raw = mime.build_raw(
+        raw = await asyncio.to_thread(  # reads and encodes the attachments
+            mime.build_raw,
             sender=self._self_email or "", to=to, cc=cc, subject=(draft.subject or "").strip(), text=draft.text,
             attachments=[mime.OutgoingAttachment(f.path, f.filename, f.mime_type) for f in draft.files],
         )
@@ -691,7 +753,8 @@ class GmailConnector(Connector):
             base = (target.subject if target is not None else None) or conversation.title or ""
             subject = base if re.match(r"^\s*re:", base, re.I) else f"Re: {base}".strip()
         rfc_id = meta.get("rfc822_message_id")
-        raw = mime.build_raw(
+        raw = await asyncio.to_thread(  # reads and encodes the attachments
+            mime.build_raw,
             sender=self._self_email or "",
             to=to,
             cc=cc,
@@ -710,7 +773,6 @@ class GmailConnector(Connector):
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
         from backend.db.models import MessageAttachment
-        from backend.fsutil import atomic_write_bytes
         from backend.telegram.media import MediaNotFound
 
         api = self._require_api()
@@ -738,14 +800,38 @@ class GmailConnector(Connector):
                 raise MediaNotFound("The attachment no longer exists")
 
         rel = f"media/{conversation.id}/{attachment.id}{_extension(attachment.filename, attachment.mime_type)}"
-        path = Path(config.DATA_DIR) / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(path, data, 0o600)
+        await asyncio.to_thread(_write_file, Path(config.DATA_DIR) / rel, data)
         async with AsyncSessionLocal() as db:
             await db.execute(update(MessageAttachment).where(MessageAttachment.id == attachment.id)
                              .values(size=len(data)))
             await crud.set_attachment_local_path(db, attachment.id, rel)
         return rel
+
+
+def _failed_threads(state: dict) -> dict:
+    failed = state.get("failed_threads")
+    return dict(failed) if isinstance(failed, dict) else {}
+
+
+def _next_failures(previous: dict, attempted: set, failed: set) -> dict:
+    """The ``failed_threads`` sync state after a pass: attempts per thread
+    that still fails; threads that synced are dropped, and so is one that
+    failed ``THREAD_RETRY_LIMIT`` times."""
+    out = {t: n for t, n in previous.items() if t not in attempted}
+    for t in failed:
+        n = int(previous.get(t) or 0) + 1
+        if n >= THREAD_RETRY_LIMIT:
+            logger.warning("Gmail thread %s failed %d times; giving up on it", t, n)
+            continue
+        out[t] = n
+    return dict(list(out.items())[-MAX_FAILED_THREADS:])
+
+
+def _write_file(path: Path, data: bytes) -> None:
+    from backend.fsutil import atomic_write_bytes
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(path, data, 0o600)
 
 
 def _dedupe(addrs: list[str], *, exclude: Optional[str] = None, also: frozenset = frozenset()) -> list[str]:

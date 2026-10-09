@@ -1,19 +1,13 @@
 /**
  * The paginated chat list for one filter key {sortBy, tagId, workspaceId,
  * channel}. Chats is the messengers space: email threads are never listed.
- *
- * - Latest-only: a response is applied only if its key is still current and
- *   no newer replace (key change / reload) started since — a slow page for
- *   workspace A can never render under workspace B, and a load-more from the
- *   previous filter can't append to the new one.
- * - Offset consistency: reload refetches as many rows as are loaded (so the
- *   pages the user scrolled through don't vanish), and load-more continues
- *   from the number of rows actually held; merges dedupe by conversation id.
+ * Latest-only paging, reloads and local patches: hooks/usePagedList.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef } from 'react'
 import type { Conversation } from '../../api/types'
-import { getConversations, isAbortError, MESSENGERS_ONLY } from '../../api/client'
-import { reportError } from '../../lib/toast'
+import { getConversations, MESSENGERS_ONLY } from '../../api/client'
+import { errorMessage, reportError } from '../../lib/toast'
+import { dedupeById, usePagedList } from '../../hooks/usePagedList'
 
 export const CHAT_PAGE = 50
 /** Upper bound for one reload request (server max is generous; keep it bounded) */
@@ -27,33 +21,14 @@ export interface ChatListKey {
   channel?: string | null
 }
 
-export interface ChatListState {
-  key: string
-  chats: Conversation[]
-  hasMore: boolean
-  /** First page for this key not loaded yet */
-  loading: boolean
-  loadingMore: boolean
-}
-
-export function dedupeChats(chats: Conversation[]): Conversation[] {
-  const seen = new Set<number>()
-  return chats.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
-}
+export const dedupeChats = (chats: Conversation[]): Conversation[] => dedupeById(chats)
 
 export function useChatList(listKey: ChatListKey) {
   const key = JSON.stringify(listKey)
-  const [state, setState] = useState<ChatListState>({ key, chats: [], hasMore: false, loading: true, loadingMore: false })
-  const stateRef = useRef(state)
-  stateRef.current = state
-  const keyRef = useRef(key)
   const paramsRef = useRef(listKey)
   paramsRef.current = listKey
-  /** Bumped by every replace (key change or reload) */
-  const genRef = useRef(0)
-  const ctlRef = useRef<AbortController | null>(null)
 
-  const fetchPage = useCallback((limit: number, offset: number, signal?: AbortSignal) => {
+  const fetchPage = useCallback((limit: number, offset: number, signal: AbortSignal) => {
     const p = paramsRef.current
     return getConversations(
       limit, offset, p.sortBy, p.tagId ?? undefined, p.workspaceId ?? undefined, signal,
@@ -61,69 +36,20 @@ export function useChatList(listKey: ChatListKey) {
     )
   }, [])
 
-  const replace = useCallback(async (limit: number) => {
-    const forKey = keyRef.current
-    const gen = ++genRef.current
-    ctlRef.current?.abort()
-    const ctl = new AbortController()
-    ctlRef.current = ctl
-    try {
-      const data = await fetchPage(limit, 0, ctl.signal)
-      if (gen !== genRef.current || forKey !== keyRef.current) return
-      setState((s) => (s.key !== forKey ? s : {
-        ...s, chats: dedupeChats(data), hasMore: data.length === limit, loading: false, loadingMore: false,
-      }))
-    } catch (e) {
-      if (isAbortError(e) || gen !== genRef.current) return
-      // Keep the current list; request() already retried transient failures
-      setState((s) => (s.key !== forKey ? s : { ...s, loading: false }))
-      reportError(e, 'Couldn’t load chats')
-    }
-  }, [fetchPage])
-
-  // Key change: start over with one page
-  useEffect(() => {
-    keyRef.current = key
-    setState({ key, chats: [], hasMore: false, loading: true, loadingMore: false })
-    void replace(CHAT_PAGE)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
-
-  useEffect(() => () => ctlRef.current?.abort(), [])
-
-  /** Refetch everything currently loaded (WS-driven; coalesce the trigger) */
-  const reload = useCallback(() => {
-    const loaded = stateRef.current.chats.length
-    const limit = Math.min(MAX_RELOAD, Math.max(CHAT_PAGE, Math.ceil(loaded / CHAT_PAGE) * CHAT_PAGE))
-    return replace(limit)
-  }, [replace])
-
-  const loadMore = useCallback(async () => {
-    const s = stateRef.current
-    if (s.loading || s.loadingMore || !s.hasMore) return
-    const forKey = keyRef.current
-    const gen = genRef.current
-    setState((st) => (st.key === forKey ? { ...st, loadingMore: true } : st))
-    try {
-      const data = await fetchPage(CHAT_PAGE, s.chats.length)
-      if (gen !== genRef.current || forKey !== keyRef.current) return
-      setState((st) => (st.key !== forKey ? st : {
-        ...st, chats: dedupeChats([...st.chats, ...data]), hasMore: data.length === CHAT_PAGE, loadingMore: false,
-      }))
-    } catch (e) {
-      if (gen !== genRef.current) return
-      setState((st) => (st.key === forKey ? { ...st, loadingMore: false } : st))
-      reportError(e, 'Couldn’t load more chats')
-    }
-  }, [fetchPage])
-
-  /** Local delta (WS new_message, optimistic flag changes) */
-  const setChats = useCallback((fn: (prev: Conversation[]) => Conversation[]) => {
-    setState((s) => {
-      const chats = fn(s.chats)
-      return chats === s.chats ? s : { ...s, chats }
-    })
-  }, [])
-
-  return { ...state, reload, loadMore, setChats }
+  const list = usePagedList<Conversation>(key, fetchPage, {
+    pageSize: CHAT_PAGE,
+    maxReload: MAX_RELOAD,
+    // A failed first page is shown in the list (`error`, with Retry); later
+    // failures keep the current rows and toast. request() already retried
+    // transient failures.
+    onError: (e, phase) => { if (phase !== 'load') reportError(e, phase === 'more' ? 'Couldn’t load more chats' : 'Couldn’t refresh chats') },
+  })
+  const { items, setItems, error, ...rest } = list
+  return {
+    ...rest,
+    chats: items,
+    setChats: setItems,
+    /** The last load/reload failed (cleared by a successful page and on a key change); load-more failures only toast */
+    error: error == null ? null : errorMessage(error),
+  }
 }

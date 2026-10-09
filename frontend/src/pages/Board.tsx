@@ -24,6 +24,7 @@ import { useConfirm } from '../components/ui'
 import { errorMessage, reportError } from '../lib/toast'
 import { ageDays as serverAgeDays } from '../utils/time'
 import WorkspaceDialog from '../components/WorkspaceDialog'
+import { readStoredId, storeId } from '../lib/idStorage'
 
 const COLUMN_ACCENTS: Record<string, string> = {
   indigo: 'border-indigo-500/40', emerald: 'border-emerald-500/40', rose: 'border-rose-500/40',
@@ -45,22 +46,9 @@ function ageDays(iso: string | null | undefined): number {
   return serverAgeDays(iso) ?? 9999
 }
 
-const storedBoardFor = (workspaceId: number): number | null => {
-  try {
-    const v = localStorage.getItem(`activeBoard:${workspaceId}`)
-    const n = v ? parseInt(v, 10) : NaN
-    return Number.isFinite(n) ? n : null
-  } catch {
-    return null
-  }
-}
+const storedBoardFor = (workspaceId: number): number | null => readStoredId(`activeBoard:${workspaceId}`)
 
-const storeBoardFor = (workspaceId: number, boardId: number | null) => {
-  try {
-    if (boardId == null) localStorage.removeItem(`activeBoard:${workspaceId}`)
-    else localStorage.setItem(`activeBoard:${workspaceId}`, String(boardId))
-  } catch { /* per-viewer convenience only */ }
-}
+const storeBoardFor = (workspaceId: number, boardId: number | null) => storeId(`activeBoard:${workspaceId}`, boardId)
 
 /** Optimistically move a card: pluck it from wherever it is and place it. */
 export function applyMove(prev: BoardData, conversationId: number, toTagId: number | null): BoardData {

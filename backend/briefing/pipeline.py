@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from backend.aio import LoopLock
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.llm.base import BaseLLMProvider, ChatMessage, LLMError
@@ -602,17 +603,14 @@ def start_briefing_job(days: int, *, trigger: str = "manual"):
     )
 
 
-_replace_lock: Optional[asyncio.Lock] = None
+_replace_lock = LoopLock()
 
 
 async def replace_briefing_job(days: int):
     """Atomically cancel any running briefing, wait for it to finish its
     cleanup, and start a ``days`` run. Serialized by a lock so concurrent
     replaces can't interleave. Returns (EventJob, replaced_job_id | None)."""
-    global _replace_lock
     from backend.briefing.events import get_event_job
-    if _replace_lock is None:
-        _replace_lock = asyncio.Lock()
     async with _replace_lock:
         old = get_event_job(BRIEFING_JOB_KEY)
         replaced = None

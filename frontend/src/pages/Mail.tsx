@@ -6,16 +6,20 @@
  * URL: ?conversationId=…&messageId=… opens a thread (links from search,
  * Home, catch-up, briefings use lib/routes mailUrl / conversationUrl).
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { Archive, Inbox, Layers, Mail as MailIcon, PenSquare, Plug, Send, Tag } from 'lucide-react'
+import { AlertTriangle, Archive, Inbox, Layers, Mail as MailIcon, PenSquare, Search, Send, Tag } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { Conversation } from '../api/types'
 import { getMailLabels } from '../api/email'
 import type { MailFolder, MailThread } from '../api/email'
 import { useAccounts } from '../hooks/useAccounts'
 import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import AccountGate from '../components/AccountGate'
 import { CONNECTIONS_PATH } from '../components/NoAccountsNotice'
+import { LoadError } from '../components/ui'
+import { errorMessage } from '../lib/toast'
 import ThreadList from './mail/ThreadList'
 import ThreadView from './mail/ThreadView'
 import MailComposer from './mail/MailComposer'
@@ -28,29 +32,16 @@ const FOLDERS: { id: MailFolder; label: string; icon: LucideIcon }[] = [
   { id: 'archive', label: 'Archive', icon: Archive },
   { id: 'all', label: 'All mail', icon: Layers },
 ]
+/** Connector states in which mail isn't syncing */
+const PROBLEM_STATES: ReadonlySet<string> = new Set(['unauthorized', 'error', 'reconnecting', 'stopped'])
+
 /** Labels already shown as folders */
 const FOLDER_LABELS = new Set(['Inbox', 'Sent'])
 
-/** Empty state while no Gmail account is connected (same pattern as NoAccountsNotice) */
-export function NoMailAccountNotice() {
-  return (
-    <div className="m-auto max-w-sm rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-5 text-center" data-testid="no-mail-account">
-      <Plug size={20} className="mx-auto mb-2 text-indigo-400" aria-hidden />
-      <p className="text-sm font-medium text-slate-200">No email account connected</p>
-      <p className="mt-1 text-xs text-slate-400">Connect a Gmail account to read and send email here.</p>
-      <Link
-        to={CONNECTIONS_PATH}
-        className="mt-4 inline-block rounded-lg bg-indigo-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-400"
-      >
-        Open Settings → Connections
-      </Link>
-    </div>
-  )
-}
-
 export default function Mail() {
   const [params, setParams] = useSearchParams()
-  const { accounts, loaded } = useAccounts()
+  const accountsState = useAccounts()
+  const { accounts, loaded } = accountsState
   const mailAccounts = useMemo(
     () => accounts.filter((a) => a.channel === 'gmail' && a.configured && a.account_id != null),
     [accounts],
@@ -94,11 +85,40 @@ export default function Mail() {
 
   const chooseFolder = (f: MailFolder) => { setFolder(f); setLabel(null) }
   const composeAccount = accountId ?? mailAccounts[0]?.account_id ?? null
+  const startCompose = () => { setComposing(true); setParams({}) }
+
+  // Filter over the loaded threads (subject, senders, preview)
+  const [filter, setFilter] = useState('')
+  const filterRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLElement>(null)
+  const shownThreads = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return list.threads
+    return list.threads.filter((t) => [t.title, t.last_message?.text, ...t.thread.senders.map((x) => x.name)]
+      .some((v) => (v ?? '').toLowerCase().includes(q)))
+  }, [list.threads, filter])
+
+  // j / k: next / previous thread (opens it, keeps it in view)
+  const moveThread = (delta: 1 | -1) => {
+    const idx = shownThreads.findIndex((t) => t.id === selectedId)
+    const next = idx === -1 ? (delta > 0 ? shownThreads[0] : undefined) : shownThreads[idx + delta]
+    if (!next) return false
+    open(next)
+    listRef.current?.querySelector<HTMLElement>(`[data-thread-id="${next.id}"]`)?.scrollIntoView?.({ block: 'nearest' })
+  }
+  useKeyboardShortcuts({
+    j: () => moveThread(1),
+    k: () => moveThread(-1),
+    '/': () => { filterRef.current?.focus() },
+    c: () => { if (composeAccount == null) return false; startCompose() },
+  })
+  // Accounts that can't sync right now (shown above the list, like Calendar's sync errors)
+  const problems = mailAccounts.filter((a) => (accountId == null || a.account_id === accountId) && PROBLEM_STATES.has(a.status.state))
   const viewTitle = label ?? FOLDERS.find((f) => f.id === folder)?.label ?? 'Mail'
   const extraLabels = (labels.data ?? []).filter((l) => !FOLDER_LABELS.has(l.label))
 
-  if (loaded && !hasAccounts) {
-    return <div className="flex flex-1 p-6"><NoMailAccountNotice /></div>
+  if (!hasAccounts) {
+    return <AccountGate state={accountsState} channels={['gmail']} title="No email account connected" body="Connect a Gmail account to read and send email here." />
   }
 
   const navCls = (active: boolean) => `flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors ${
@@ -125,7 +145,7 @@ export default function Mail() {
         )}
         <button
           type="button"
-          onClick={() => { setComposing(true); setParams({}) }}
+          onClick={startCompose}
           disabled={composeAccount == null}
           className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
         >
@@ -152,18 +172,47 @@ export default function Mail() {
         )}
       </aside>
 
-      <section className="flex w-80 flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800/60">
-        <header className="border-b border-slate-700/50 px-3 py-2.5 text-sm font-medium text-slate-200">{viewTitle}</header>
-        <ThreadList
-          threads={list.threads}
-          selectedId={composing ? null : selectedId}
-          loading={list.loading || !loaded}
-          hasMore={list.hasMore}
-          loadingMore={list.loadingMore}
-          onOpen={open}
-          onLoadMore={() => void list.loadMore()}
-          emptyText={label ? `No threads labelled ${label}` : `Nothing in ${viewTitle}`}
-        />
+      <section ref={listRef} className="flex w-80 flex-shrink-0 flex-col border-r border-slate-700/50 bg-slate-800/60">
+        <header className="flex flex-col gap-2 border-b border-slate-700/50 px-3 py-2.5">
+          <span className="text-sm font-medium text-slate-200">{viewTitle}</span>
+          <label className="flex items-center gap-1.5 rounded-lg border border-slate-600 bg-slate-700/60 px-2 py-1">
+            <Search size={12} className="flex-shrink-0 text-slate-500" />
+            <input
+              ref={filterRef}
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setFilter(''); e.currentTarget.blur() } }}
+              placeholder="Filter loaded threads  (/)"
+              aria-label="Filter threads"
+              className="min-w-0 flex-1 bg-transparent text-xs text-slate-200 placeholder-slate-500 outline-none"
+            />
+          </label>
+        </header>
+        {problems.map((a) => (
+          <p key={a.account_key} className="mx-3 mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200" data-testid="mail-account-problem">
+            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+            <span className="min-w-0 flex-1">
+              {mailAccounts.length > 1 ? `${a.label ?? a.account_key}: ` : ''}
+              {a.status.state === 'unauthorized' ? 'Signed out — new mail won’t arrive. ' : a.status.state === 'reconnecting' ? 'Reconnecting… ' : ''}
+              {a.status.error ?? (a.status.state === 'stopped' ? 'Sync is stopped.' : '')}
+              {a.status.state === 'unauthorized' && <Link to={CONNECTIONS_PATH} className="ml-1 underline hover:text-amber-100">Reconnect</Link>}
+            </span>
+          </p>
+        ))}
+        {list.error != null && list.threads.length === 0 ? (
+          <LoadError message={`Couldn’t load mail: ${errorMessage(list.error)}`} onRetry={() => { void list.reload() }} />
+        ) : (
+          <ThreadList
+            threads={shownThreads}
+            selectedId={composing ? null : selectedId}
+            loading={list.loading || !loaded}
+            hasMore={list.hasMore}
+            loadingMore={list.loadingMore}
+            onOpen={open}
+            onLoadMore={() => void list.loadMore()}
+            emptyText={filter.trim() ? 'No loaded thread matches' : label ? `No threads labelled ${label}` : `Nothing in ${viewTitle}`}
+          />
+        )}
       </section>
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-slate-900">

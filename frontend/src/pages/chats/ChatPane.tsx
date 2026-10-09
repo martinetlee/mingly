@@ -18,7 +18,7 @@ import {
   ApiError,
   deleteMessages, editMessage, forwardMessages, getPerson, getPinnedMessage, pinMessage,
   reactToMessage, restrictMember, searchConversationMessages, sendFiles, sendMessage, sendTypingAction,
-  setPersonImportant, setMessageVerdict, setSenderVerdict, syncConversation,
+  setPersonImportant, syncConversation,
 } from '../../api/client'
 import { authenticatedMediaUrl } from '../../api/session'
 import { useChatMessages } from '../../hooks/useChatMessages'
@@ -26,7 +26,7 @@ import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { useDebouncedQuery } from '../../hooks/useDebouncedQuery'
 import { useAsyncAction } from '../../hooks/useAsyncAction'
 import { useWsEvent } from '../../hooks/useWebSocket'
-import { applyFlagChanges, useFlaggedSenders } from '../../hooks/useFlaggedSenders'
+import { useFlaggedSenders } from '../../hooks/useFlaggedSenders'
 import { useFeatures } from '../../context/FeaturesContext'
 import { useConfirm } from '../../components/ui'
 import { errorMessage, reportError, toast } from '../../lib/toast'
@@ -34,7 +34,7 @@ import { fmtShortDate } from '../../utils/time'
 import { can } from '../../lib/capabilities'
 import { conversationTitle, isMultiParty } from '../../lib/conversation'
 import { personUrl } from '../../lib/routes'
-import { openDirectConversation } from '../../lib/directConversation'
+import { NoConversationError, openDirectConversation } from '../../lib/directConversation'
 import ChannelIcon from '../../components/ChannelIcon'
 import { HistoryHeader, JumpingStatus, PaneJumpNotice } from '../../components/MessageWindowStatus'
 import MessageList from '../../components/MessageList'
@@ -47,7 +47,7 @@ import ReportScamDialog from '../../components/ReportScamDialog'
 import { ChatStatusLine, TypingBar } from './PresenceTyping'
 import { getChatUi, newNonce, sendKey, updateChatUi, useChatUi, useChatUiSelect } from './chatUiStore'
 import type { ComposeDraft } from './chatUiStore'
-import { useScamCheckEvents } from './scamChecks'
+import { submitNotScamVerdict } from './scamChecks'
 
 export interface ChatPaneProps {
   chat: Conversation
@@ -102,7 +102,6 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   const syncing = useChatUiSelect(chatId, (u) => u.syncing)
   const flagged = useFlaggedSenders()
   const { shield } = useFeatures()
-  useScamCheckEvents()
 
   const canBackfill = can(chat, 'history_backfill')
   const msgs = useChatMessages({
@@ -321,18 +320,10 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
   }, [])
 
   const onScamVerdict = useCallback(async (msg: Message, scope: ScamVerdictScope) => {
-    try {
-      const senderIdentity = msg.sender?.identity_id
-      const res = scope === 'sender' && senderIdentity != null
-        ? await setSenderVerdict(senderIdentity, 'not_scam')
-        : await setMessageVerdict([{ message_id: msg.id, conversation_id: msg.conversation_id }], 'not_scam')
-      for (const st of res.messages ?? []) {
-        if (st.conversation_id === msg.conversation_id) msgsRef.current.patchMessage(st.message_id, (m) => ({ ...m, ...st }))
-      }
-      applyFlagChanges(res.flags)
-      toast.success(scope === 'sender' ? 'Sender dismissed' : 'Marked as not a scam')
-    } catch (e) {
-      reportError(e, 'Couldn’t update scam verdict')
+    const states = await submitNotScamVerdict(msg, scope)
+    if (!states) return
+    for (const st of states) {
+      if (st.conversation_id === msg.conversation_id) msgsRef.current.patchMessage(st.message_id, (m) => ({ ...m, ...st }))
     }
   }, [])
 
@@ -350,7 +341,9 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
     try {
       onOpenChat(await openDirectConversation(sender.person_id, { canStart: canStartFromHere, messengersOnly }))
     } catch (e) {
-      reportError(e, 'Couldn’t open a chat with this user')
+      // Same as Home's "Message" button: not an error, just nothing to open yet
+      if (e instanceof NoConversationError) toast.info(`No conversation with ${sender.name || 'this person'} yet`)
+      else reportError(e, 'Couldn’t open a chat with this user')
     }
   }, [onOpenChat, canStartFromHere, messengersOnly])
   const onMention = useCallback((sender: MessageSender) => {
@@ -425,15 +418,18 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
             <Info size={13} />
             Info
           </button>
-          <button
-            onClick={() => void handleSync()}
-            disabled={syncing}
-            title="Sync messages"
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-          >
-            <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-            Sync
-          </button>
+          {/* Pulling from the channel on demand: only channels that can fetch history */}
+          {canBackfill && (
+            <button
+              onClick={() => void handleSync()}
+              disabled={syncing}
+              title="Sync messages"
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+              Sync
+            </button>
+          )}
         </div>
       </div>
 

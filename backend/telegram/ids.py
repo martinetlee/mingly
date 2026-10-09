@@ -10,6 +10,7 @@ Telethon code resolves peers / users through these helpers and hands
 internal ids to everything else.
 """
 
+import json
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -184,10 +185,37 @@ async def upsert_dialog(
     )
 
 
+def sender_peer_of(message) -> Optional[int]:
+    """Marked Telegram peer id of the channel / chat a stored message was
+    posted as (``meta_json["sender_peer"]``, set by convert.message_to_row),
+    or None for user senders and messages stored before it was recorded."""
+    raw = getattr(message, "meta_json", None)
+    if not raw:
+        return None
+    try:
+        peer = json.loads(raw).get("sender_peer")
+    except (ValueError, AttributeError):
+        return None
+    return peer if isinstance(peer, int) and not isinstance(peer, bool) else None
+
+
 async def sender_identity_ids(db: AsyncSession, msgs: Iterable) -> dict[int, Optional[int]]:
     """{telegram message id: sender identity id} for a batch of messages.
     User senders get (or refresh) their identity; chats posting as
-    themselves (channel posts, anonymous admins) have none."""
+    themselves (channel posts, anonymous admins) have none. Stored
+    identities are read in one query and only written when the entity
+    carries something new."""
+    msgs = list(msgs)
+    user_ids = set()
+    for msg in msgs:
+        sender = getattr(msg, "sender", None)
+        uid = getattr(msg, "sender_id", None)
+        if isinstance(sender, User):
+            user_ids.add(sender.id)
+        elif sender is None and uid is not None and uid > 0:
+            user_ids.add(uid)
+    known = await crud.identities_by_external(db, CHANNEL, [str(u) for u in user_ids])
+
     out: dict[int, Optional[int]] = {}
     by_user: dict[int, Optional[int]] = {}
     for msg in msgs:
@@ -195,11 +223,16 @@ async def sender_identity_ids(db: AsyncSession, msgs: Iterable) -> dict[int, Opt
         uid = getattr(msg, "sender_id", None)
         if isinstance(sender, User):
             if sender.id not in by_user:
-                by_user[sender.id] = (await ensure_user_identity(db, sender)).id
+                stored = known.get(str(sender.id))
+                if stored is not None and not crud.profile_differs(stored, _user_profile(sender)):
+                    by_user[sender.id] = stored.id
+                else:
+                    by_user[sender.id] = (await ensure_user_identity(db, sender)).id
             out[msg.id] = by_user[sender.id]
         elif sender is None and uid is not None and uid > 0:
             if uid not in by_user:
-                ident = await identity_for_user_id(db, uid)
+                stored = known.get(str(uid))
+                ident = stored if stored is not None else await identity_for_user_id(db, uid)
                 by_user[uid] = ident.id if ident is not None else None
             out[msg.id] = by_user[uid]
         else:

@@ -13,7 +13,8 @@ from backend.llm.briefing_prompts import (
     DEFAULT_BRIEFING_CHAT_PROMPT,
     DEFAULT_TRACKED_CHAT_PROMPT,
 )
-from backend.prefs import get_pref, load_prefs, save_prefs
+from backend import prefs as _prefs
+from backend.prefs import NOTIF_PREFS, get_pref, load_prefs, save_prefs
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ router = APIRouter()
 
 # Kept as aliases: several modules import these names from here.
 _load_prefs = load_prefs
+get_notif_pref = _prefs.get_notif_pref  # lives in backend.prefs (the ingest layer reads it)
 _save_prefs = save_prefs
 
 # Prefs the UI may read back via GET /prefs. Everything else (API keys, sync
@@ -114,23 +116,6 @@ def on_vault_unlocked() -> None:
         logger.exception("Failed to reconfigure Shield cloud sync after unlock")
 
 
-NOTIF_PREFS = ("all", "tracked", "off")
-# Channels whose notifications are off until the user turns them on (mail
-# volume would drown chat notifications).
-NOTIF_DEFAULT_OFF_CHANNELS = ("gmail",)
-
-
-def get_notif_pref(channel: Optional[str] = None) -> str:
-    """Returns 'all', 'tracked', or 'off' — for one channel when given: its
-    own setting, else off for email channels, else the global setting."""
-    prefs = _load_prefs()
-    if channel is not None:
-        per_channel = prefs.get("notif_pref_channels") or {}
-        if isinstance(per_channel, dict) and per_channel.get(channel) in NOTIF_PREFS:
-            return per_channel[channel]
-        if channel in NOTIF_DEFAULT_OFF_CHANNELS:
-            return "off"
-    return prefs.get("notif_pref", "tracked")
 
 
 class NotifPrefRequest(BaseModel):

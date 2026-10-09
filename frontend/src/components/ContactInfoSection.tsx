@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Pencil, Twitter, Linkedin, Phone, StickyNote, Loader2 } from 'lucide-react'
 import type { Person } from '../api/types'
 import { getPerson, updatePerson } from '../api/client'
+import { ApiError } from '../lib/http'
 import { sanitizeUrl } from '../utils/sanitizeUrl'
 import { errorMessage, reportError } from '../lib/toast'
 import { invalidatePerson } from '../hooks/usePersonSummary'
@@ -165,6 +166,8 @@ export default function ContactInfoSection({ person, onPersonChange, compact }: 
       if (seq !== writeSeqRef.current) { refreshPerson(); return }
       onChangeRef.current(fresh)
     } catch (e) {
+      // Merged away or removed: the page owning this person handles it (Person: redirect / banner)
+      if (e instanceof ApiError && e.status === 404) return
       reportError(e, "Couldn't refresh person")
     }
   }, 1000)

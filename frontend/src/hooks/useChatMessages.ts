@@ -20,7 +20,7 @@ import { useWsEvent } from './useWebSocket'
 import { errorMessage } from '../lib/toast'
 import {
   MAX_WINDOW, applyLive, appendNewer, cursorOf, deletionApplies, firstUnreadId, fromPage, inScope,
-  mergeLatest, prependOlder,
+  mergeLatest, prependOlder, withKnownContext,
 } from '../pages/chats/messageWindow'
 import type { WindowSlice } from '../pages/chats/messageWindow'
 
@@ -469,7 +469,7 @@ export function useChatMessages(scope: ChatMessagesScope): ChatMessages {
   }, [update])
 
   const replaceIfPresent = useCallback((msg: Message) => {
-    patchMessage(msg.id, () => msg)
+    patchMessage(msg.id, (prev) => withKnownContext(prev, msg))
   }, [patchMessage])
 
   const removeMessages = useCallback((messageIds: number[]) => {

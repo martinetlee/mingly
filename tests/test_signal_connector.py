@@ -169,7 +169,7 @@ def events():
         stack.enter_context(patch.object(fanout, "enqueue_scam", AsyncMock()))
         stack.enter_context(patch.object(fanout, "send_native_notification", MagicMock()))
         stack.enter_context(patch.object(fanout, "stamp_triage", AsyncMock()))
-        stack.enter_context(patch("backend.api.settings.get_notif_pref", return_value="all"))
+        stack.enter_context(patch("backend.prefs.get_notif_pref", return_value="all"))
         yield capture
 
 
@@ -781,3 +781,162 @@ async def test_react_and_mark_read_through_the_api(api, fake_cli, events):
         {"recipient": [BOB], "targetTimestamp": [1002, 1003], "type": "read"},
         {"recipient": [ALICE], "targetTimestamp": [1004], "type": "read"},
     ]
+
+
+# ── lifecycle: one runtime, nothing lost on stop, flows cleaned up ──────────────
+
+def _live_tasks(name: str) -> list:
+    from backend.tasks import _background_tasks
+    return [t for t in _background_tasks if not t.done() and t.get_name() == name]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_run_one_signal_cli_that_stop_ends(db, fake_cli, events):
+    _linked()
+    _scenario(contacts=[], groups=[])
+    acc = await _account(db)
+    conn = SignalConnector(acc.id)
+    assert await asyncio.gather(conn.start(), conn.start()) == [True, True]
+    await _until(lambda: _async(conn.status().state == "ready"))
+    proc = conn._rpc._proc
+    await conn.stop()
+    assert (cli.signal_dir() / "fake_runs").read_text() == "1"  # a single jsonRpc child
+    assert proc.returncode is not None and _live_tasks(f"signal_supervise:{conn.account_key}") == []
+
+
+@pytest.mark.asyncio
+async def test_stop_while_starting_leaves_nothing_running(db, fake_cli, events):
+    _linked()
+    _scenario(contacts=[], groups=[])
+    acc = await _account(db)
+    conn = SignalConnector(acc.id)
+    starting = asyncio.ensure_future(conn.start())
+    await asyncio.sleep(0)
+    await conn.stop()
+    assert await starting is False
+    assert _live_tasks(f"signal_supervise:{conn.account_key}") == [] and conn.status().state == "stopped"
+    assert not (cli.signal_dir() / "fake_runs").exists()
+
+
+@pytest.mark.asyncio
+async def test_stop_stores_envelopes_already_received(db, fake_cli, events, monkeypatch):
+    """signal-cli has acknowledged what it handed over and a linked device
+    has no history: a stop must not drop queued envelopes."""
+    conn = await _running(db, contacts=[], groups=[])
+    handle = conn.handle_receive
+
+    async def slow(params):
+        await asyncio.sleep(0.1)
+        await handle(params)
+
+    monkeypatch.setattr(conn, "handle_receive", slow)
+    for i in range(5):
+        await conn._on_notification("receive", {"envelope": _env(1000 + i, dataMessage={
+            "timestamp": 1000 + i, "message": f"m{i}"})})
+    await asyncio.sleep(0.15)
+    await conn.stop()
+    assert [m.text for m in await _messages()] == [f"m{i}" for i in range(5)]
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_is_retried_not_dropped(db, fake_cli, events, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from backend.connectors.signal import connector as conn_mod
+
+    conn = await _running(db, contacts=[], groups=[])
+    monkeypatch.setattr(conn, "retry_delays", (0.01, 0.01, 0.01))
+    real = conn_mod.ingest_service.ingest
+    calls = []
+
+    async def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("INSERT", {}, Exception("database is locked"))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(conn_mod.ingest_service, "ingest", flaky)
+    try:
+        await conn._on_notification("receive", {"envelope": _env(1000, dataMessage={"timestamp": 1000, "message": "hi"})})
+        [msg] = await _until(lambda: _msgs_when(1), timeout=3)
+    finally:
+        await conn.stop()
+    assert msg.text == "hi" and len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_group_lookup_timeout_keeps_the_message(db, fake_cli, events):
+    conn = await _running(db, contacts=[], groups=[])
+
+    async def slow_call(method, params=None, timeout=None):
+        raise asyncio.TimeoutError
+
+    conn._rpc.call = slow_call
+    try:
+        await conn.handle_receive({"envelope": _env(1000, dataMessage={
+            "timestamp": 1000, "message": "hello group", "groupInfo": {"groupId": GROUP, "type": "DELIVER"}})})
+    finally:
+        await conn.stop()
+    [msg] = await _messages()
+    assert msg.text == "hello group"
+
+
+async def _exited(proc, timeout=5.0) -> bool:
+    try:
+        await asyncio.wait_for(proc.wait(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False
+    return True
+
+
+def _link_proc(manager, flow_id):
+    return manager._flows[flow_id]._flows[flow_id].proc
+
+
+@pytest.mark.asyncio
+async def test_abandoned_link_flows_are_ended_on_eviction_and_stop_all(db, fake_cli, events, monkeypatch):
+    from backend.connectors import manager as mgr_mod
+
+    _scenario(link_delay=30)
+    manager = ConnectorManager()
+    register(manager)
+    monkeypatch.setattr(mgr_mod, "MAX_OPEN_FLOWS", 1)
+    first = await manager.begin_auth("signal", {})
+    first_proc = _link_proc(manager, first.flow_id)
+    second = await manager.begin_auth("signal", {})  # evicts the first, never polled again
+    second_proc = _link_proc(manager, second.flow_id)
+    assert await _exited(first_proc)
+    await manager.stop_all()
+    assert await _exited(second_proc)
+
+
+@pytest.mark.asyncio
+async def test_unscanned_link_code_expires_without_polling(db, fake_cli, events, monkeypatch):
+    from backend.connectors.signal import connector as conn_mod
+
+    _scenario(link_delay=30)
+    monkeypatch.setattr(conn_mod, "LINK_TIMEOUT", 0.5)
+    conn = SignalConnector()
+    step = await conn.begin_auth({})
+    assert step.kind == "qr"
+    assert await _exited(conn._flows[step.flow_id].proc)
+    done = await conn.continue_auth(step.flow_id, {})
+    assert done.kind == "error" and "expired" in done.message
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sign_in_ends_the_link_process(db, fake_cli, events):
+    _scenario(link_delay=30)
+    manager = ConnectorManager()
+    register(manager)
+    step = await manager.begin_auth("signal", {})
+    proc = _link_proc(manager, step.flow_id)
+    await manager.cancel_auth(step.flow_id)
+    assert await _exited(proc)
+    await manager.cancel_auth(step.flow_id)  # unknown / finished: a no-op
+    await manager.cancel_auth("nope")
+    from backend.connectors.base import AuthFlowError
+    with pytest.raises(AuthFlowError):
+        await manager.continue_auth(step.flow_id, {})

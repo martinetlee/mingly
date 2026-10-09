@@ -3,7 +3,7 @@ import { RefreshCw, Bookmark, X, Info } from 'lucide-react'
 import type { Conversation } from '../api/types'
 import { getTrackedConversations, setTracked, syncConversation, sendMessage } from '../api/client'
 import { can } from '../lib/capabilities'
-import { conversationTitle } from '../lib/conversation'
+import { conversationTitle, kindLabel } from '../lib/conversation'
 import ChannelIcon from '../components/ChannelIcon'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { useLatestQuery } from '../hooks/useLatestQuery'
@@ -167,7 +167,7 @@ export default function Tracked() {
                       {chat.last_message.text || '[media]'}
                     </p>
                   ) : (
-                    <span className="text-[10px] text-slate-500">{chat.kind.replace('_', ' ')}</span>
+                    <span className="text-[10px] text-slate-500">{kindLabel(chat.kind)}</span>
                   )}
                 </div>
                 {(chat.unread_count ?? 0) > 0 && (
@@ -195,7 +195,7 @@ export default function Tracked() {
             <div className="flex items-center justify-between border-b border-slate-700/50 bg-slate-800 px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-gray-100">{conversationTitle(selectedChat)}</h2>
-                <p className="flex items-center gap-1 text-xs text-slate-500"><ChannelIcon channel={selectedChat.channel} />{selectedChat.kind.replace('_', ' ')}</p>
+                <p className="flex items-center gap-1 text-xs text-slate-500"><ChannelIcon channel={selectedChat.channel} />{kindLabel(selectedChat.kind)}</p>
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -208,14 +208,17 @@ export default function Tracked() {
                   <Info size={13} />
                   Info
                 </button>
-                <button
-                  onClick={handleSync}
-                  disabled={syncing === selectedChat.id}
-                  className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
-                >
-                  <RefreshCw size={13} className={syncing === selectedChat.id ? 'animate-spin' : ''} />
-                  Sync
-                </button>
+                {can(selectedChat, 'history_backfill') && (
+                  <button
+                    onClick={handleSync}
+                    disabled={syncing === selectedChat.id}
+                    title="Sync messages"
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={syncing === selectedChat.id ? 'animate-spin' : ''} />
+                    Sync
+                  </button>
+                )}
               </div>
             </div>
 

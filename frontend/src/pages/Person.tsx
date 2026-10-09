@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   ArrowLeft, MessageSquare, Star, CloudOff, RefreshCw, Phone, BookUser, GitMerge, Unlink, Undo2, X,
@@ -13,6 +13,7 @@ import {
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { useWsEvent } from '../hooks/useWebSocket'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { invalidatePerson } from '../hooks/usePersonSummary'
 import { errorMessage, toast } from '../lib/toast'
 import { chatUrl, personUrl } from '../lib/routes'
@@ -25,6 +26,18 @@ import UpcomingMeetings from './calendar/UpcomingMeetings'
 import ChannelIcon, { channelLabel } from '../components/ChannelIcon'
 import MergePersonDialog from '../components/MergePersonDialog'
 import { useConfirm } from '../components/ui'
+
+/** Coalescing window for person_changed refreshes */
+export const PERSON_REFRESH_MS = 1000
+
+/**
+ * The person a removed person was merged into, when the 404 says so
+ * (`{"detail", "merged_into": <person id>}`).
+ */
+export function mergedIntoOf(error: ApiError | null): number | null {
+  const v = error?.body?.merged_into
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null
+}
 
 /**
  * A person: the CRM record (local, works offline) plus every identity they
@@ -58,14 +71,25 @@ export default function Person() {
   const idRef = useRef(personId)
   idRef.current = personId
 
-  // An agent (MCP) changed this person. The editors refresh themselves in
-  // place (keeping open edits; ContactInfoSection patches the person through
-  // setPerson); refresh the summary cache for every card showing them.
+  // This person changed elsewhere (an agent over MCP, automatic linking
+  // during a sync, a merge from another person's page): refresh the summary
+  // cache for every card showing them and re-read them — identities may have
+  // moved, or the person may be gone (merged into someone else). Open edits
+  // survive: editors adopt outside values only when not editing.
+  const refreshPerson = useCoalescedRefetch(() => (validId ? personQ.refetch() : undefined), PERSON_REFRESH_MS)
   useWsEvent('person_changed', (e) => {
     if (e.person_id !== idRef.current) return
     invalidatePerson(e.person_id)
+    refreshPerson()
   })
   useWsEvent('resync', () => { if (validId) void personQ.refetch() })
+
+  // Merged into someone else (now, or before this link was followed): go there
+  const goneError = personQ.error instanceof ApiError && personQ.error.status === 404 ? personQ.error : null
+  const mergedInto = mergedIntoOf(goneError)
+  useEffect(() => {
+    if (mergedInto != null && mergedInto !== personId) navigate(personUrl(mergedInto), { replace: true })
+  }, [mergedInto, personId, navigate])
 
   /** Patch the local person — only if it's still the one on screen */
   const setPerson = useCallback((updated: PersonT) => {
@@ -93,8 +117,12 @@ export default function Person() {
     )
   }
 
+  if (mergedInto != null) {
+    return <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">Opening the merged person…</div>
+  }
+
   if (!validId || !person) {
-    const notFound = !validId || (personQ.error instanceof ApiError && personQ.error.status === 404)
+    const notFound = !validId || goneError != null
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500">
         <p className="text-sm">
@@ -110,6 +138,8 @@ export default function Person() {
     )
   }
 
+  // Merge / detach / undo change the identity set: the panels reload on it
+  const identityKey = person.identities.map((i) => i.id).sort((a, b) => a - b).join(',')
   const profileError = profileQ.error
   const profileMissing = profileError instanceof ApiError && profileError.status === 404
   const isImportant = person.is_important
@@ -129,6 +159,13 @@ export default function Person() {
           <ArrowLeft size={14} />
           Back
         </button>
+
+        {goneError && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300" data-testid="person-gone">
+            <CloudOff size={13} className="flex-shrink-0" />
+            <span className="flex-1">This person no longer exists (merged or removed). What you see is the last copy.</span>
+          </div>
+        )}
 
         {/* Telegram availability (live Telegram profile only) */}
         {tgIdentity && !profile && profileError != null && !profileMissing && (
@@ -210,13 +247,13 @@ export default function Person() {
         </div>
 
         {/* Notes timeline (agent + user) */}
-        <PersonNotes personId={person.id} />
+        <PersonNotes personId={person.id} identityKey={identityKey} />
 
         {/* Next calendar events with this person (hidden when there are none) */}
-        <UpcomingMeetings personId={person.id} />
+        <UpcomingMeetings personId={person.id} identityKey={identityKey} />
 
         {/* Messages across every channel (chats, groups, email) and past meetings */}
-        <PersonTimeline personId={person.id} />
+        <PersonTimeline personId={person.id} identityKey={identityKey} />
 
         {/* Common chats (Telegram) */}
         {profile?.common_conversations && profile.common_conversations.length > 0 && (

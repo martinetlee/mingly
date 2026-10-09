@@ -44,10 +44,14 @@ class ScanRequest:
     signature short-circuits look only at targets.
 
     Message dicts carry message_id (internal), identity_id (the sender, or
-    None), sender_name, text, date, and ``telegram_user_id`` for Telegram
-    senders (signature matching and the Telegram-shaped external API).
-    ``metadata`` describes the conversation: conversation_id, title, kind
-    (direct | group | channel | email_thread) and channel."""
+    None), sender_name, text, date, ``telegram_user_id`` for Telegram user
+    senders and, in Telegram conversations, ``telegram_message_id`` and
+    ``telegram_sender_id`` (the user, or the chat posting as itself).
+    Profiles carry ``telegram_sender_id`` likewise. ``metadata`` describes the
+    conversation: conversation_id, title, kind (direct | group | channel |
+    email_thread), channel and, on Telegram, ``telegram_peer_id``. The
+    Telegram ids feed what still speaks them: the external API's v1 request,
+    the local prompt and known-scammer signatures."""
     conversation_id: int
     targets: list
     channel: Optional[str] = None
@@ -80,11 +84,35 @@ _CONTEXT_MSG_CHARS = 500
 TARGETS_HEADER = "Messages to analyze:"
 
 
+# Telegram's v1 chat types ("private" is v2's "direct").
+_EXTERNAL_KIND = {"direct": "private"}
+
+
+def _is_telegram(req: ScanRequest) -> bool:
+    return "telegram_peer_id" in req.metadata
+
+
+def _telegram_chat_metadata(req: ScanRequest) -> dict:
+    """The pre-multichannel ``chat_metadata`` of a Telegram request."""
+    kind = req.metadata.get("kind") or "direct"
+    return {
+        "chat_id": req.metadata["telegram_peer_id"],
+        "name": req.metadata.get("title") or "Unknown",
+        "type": _EXTERNAL_KIND.get(kind, kind),
+    }
+
+
 def build_message_context(req: ScanRequest, budget: int = PROMPT_CHAR_BUDGET) -> str:
     """Render the request for the LLM. Targets come last, under
     ``Messages to analyze:``, and are never truncated."""
     head = []
-    if req.metadata:
+    telegram = _is_telegram(req)
+    if telegram:
+        # Telegram keeps the pre-multichannel header (Telegram chat types and
+        # ids), so its detection input is unchanged.
+        meta = _telegram_chat_metadata(req)
+        head.append(f"Chat: {meta['name']} ({meta['type']})")
+    elif req.metadata:
         kind = req.metadata.get("kind") or "unknown"
         channel = req.metadata.get("channel") or req.channel
         head.append(
@@ -92,10 +120,16 @@ def build_message_context(req: ScanRequest, budget: int = PROMPT_CHAR_BUDGET) ->
         )
     for profile in req.profiles[:5]:
         bio = profile.get("bio") or ""
-        head.append(
-            f"Profile - Name:{profile.get('name') or '?'}, "
-            f"Bio:{bio}, Is contact:{profile.get('is_contact', False)}"
-        )
+        if telegram:
+            head.append(
+                f"Profile - ID:{profile.get('telegram_sender_id')}, Name:{profile.get('name', '?')}, "
+                f"Bio:{bio}, Is contact:{profile.get('is_contact', False)}"
+            )
+        else:
+            head.append(
+                f"Profile - Name:{profile.get('name') or '?'}, "
+                f"Bio:{bio}, Is contact:{profile.get('is_contact', False)}"
+            )
     target_lines = [TARGETS_HEADER] + [
         f"  [{m.get('sender_name') or 'Unknown'}]: {m.get('text') or ''}" for m in req.targets
     ]
@@ -235,18 +269,20 @@ def _vault_scam_api_key() -> str:
     return get_secret_pref("scam_detection_api_key")
 
 
-# The external API's v1 contract is Telegram-shaped: message ids only need to
-# be consistent within one request (internal ids are), senders are Telegram
-# user ids (None for other channels) and "private" means direct. A server that
-# advertises contract 2 (GET /capabilities) gets the channel-neutral request
-# of docs/multichannel/SHIELD_CLOUD_CONTRACT_V2.md instead.
-_EXTERNAL_KIND = {"direct": "private"}
+# The external API's v1 contract is Telegram-shaped. Telegram requests go
+# out exactly as before the multi-channel refactor: Telegram message ids,
+# Telegram sender ids and ``chat_metadata`` {chat_id, name, type}. Other
+# channels have no such ids: their message ids are internal (consistent
+# within one request), senders null, and the metadata names the channel. A
+# server that advertises contract 2 (GET /capabilities) gets the
+# channel-neutral request of docs/multichannel/SHIELD_CLOUD_CONTRACT_V2.md.
 
 
 def _external_message(m: dict) -> dict:
+    telegram = "telegram_message_id" in m
     return {
-        "message_id": m.get("message_id"),
-        "sender_id": m.get("telegram_user_id"),
+        "message_id": m["telegram_message_id"] if telegram else m.get("message_id"),
+        "sender_id": m.get("telegram_sender_id") if telegram else m.get("telegram_user_id"),
         "sender_name": m.get("sender_name"),
         "text": m.get("text"),
         "date": m.get("date"),
@@ -255,7 +291,7 @@ def _external_message(m: dict) -> dict:
 
 def _external_profile(p: dict) -> dict:
     return {
-        "telegram_id": p.get("telegram_user_id"),
+        "telegram_id": p["telegram_sender_id"] if "telegram_sender_id" in p else p.get("telegram_user_id"),
         "name": p.get("name"),
         "bio": p.get("bio") or "",
         "is_contact": bool(p.get("is_contact")),
@@ -263,6 +299,8 @@ def _external_profile(p: dict) -> dict:
 
 
 def _external_metadata(req: ScanRequest) -> dict:
+    if _is_telegram(req):
+        return _telegram_chat_metadata(req)
     kind = req.metadata.get("kind")
     return {
         "name": req.metadata.get("title") or "Unknown",
@@ -275,7 +313,7 @@ def _external_v1_request(request_id: str, req: ScanRequest) -> dict:
     return {
         "request_id": request_id,
         "messages": [_external_message(m) for m in req.all_messages()],
-        "target_message_ids": req.target_ids,
+        "target_message_ids": [_external_message(m)["message_id"] for m in req.targets],
         "user_telegram_id": 0,
         "profiles": [_external_profile(p) for p in req.profiles],
         "chat_metadata": _external_metadata(req),

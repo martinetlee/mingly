@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 import phonenumbers
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, union, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ __all__ = [
     "PROFILE_FIELDS", "normalize_phone", "normalize_email", "upsert_identity", "get_identity",
     "get_identities", "get_identity_by_external", "identity_ids_by_external", "get_person", "get_people",
     "identities_for_person", "identities_for_people", "identity_ids_for_person", "self_person",
+    "collect_orphans_after_account_removal", "profile_differs", "identities_by_external",
 ]
 
 # Profile columns a connector may set; None = unknown, keep the stored value.
@@ -102,6 +103,8 @@ async def upsert_identity(
 
     identity = await get_identity_by_external(db, channel, external_id)
     new_username = bool(given.get("username")) and (identity is None or identity.username != given["username"])
+    created = identity is None
+    changed: set = set()
     if identity is None:
         person = Person(is_self=bool(given.get("is_self")))
         db.add(person)
@@ -122,16 +125,21 @@ async def upsert_identity(
             for k, v in given.items():
                 setattr(identity, k, v)
     else:
-        for k, v in given.items():
-            if getattr(identity, k) != v:
-                setattr(identity, k, v)
-        if given:
+        # Write (and bump updated_at) only when the channel told us something new
+        changed = {k for k, v in given.items() if getattr(identity, k) != v}
+        for k in changed:
+            setattr(identity, k, given[k])
+        if changed:
             identity.updated_at = datetime.utcnow()
-    if given.get("is_self"):
+    if given.get("is_self") and (created or "is_self" in changed):
         await db.execute(update(Person).where(Person.id == identity.person_id).values(is_self=True))
+    if not created and not changed:
+        if commit:
+            await db.commit()
+        return identity  # nothing new: no flush, contact points or linking to redo
     await db.flush()
     from backend.people import linking  # business rule, kept out of the data layer's imports
-    if await _sync_contact_points(db, identity):
+    if (created or "phone" in changed) and await _sync_contact_points(db, identity):
         await db.flush()
         await linking.on_contact_points_added(db, identity)
     elif new_username:
@@ -139,6 +147,24 @@ async def upsert_identity(
     if commit:
         await db.commit()
     return identity
+
+
+def profile_differs(identity: Identity, profile: dict) -> bool:
+    """Whether ``upsert_identity(**profile)`` would change ``identity`` (None
+    fields mean unknown and never count)."""
+    return any(v is not None and getattr(identity, k) != v for k, v in profile.items())
+
+
+async def identities_by_external(db: AsyncSession, channel: str, external_ids: Iterable[str]) -> dict[str, Identity]:
+    """``{external_id: Identity}`` of the stored ones, in one query per 500."""
+    ext = list(set(external_ids))
+    out: dict[str, Identity] = {}
+    for i in range(0, len(ext), 500):
+        res = await db.execute(
+            select(Identity).where(Identity.channel == channel, Identity.external_id.in_(ext[i:i + 500]))
+        )
+        out.update({x.external_id: x for x in res.scalars().all()})
+    return out
 
 
 async def get_identity(db: AsyncSession, identity_id: int) -> Optional[Identity]:
@@ -214,3 +240,74 @@ async def self_person(db: AsyncSession) -> Optional[Person]:
     return (await db.execute(
         select(Person).where(Person.is_self == True).order_by(Person.id).limit(1)  # noqa: E712
     )).scalar_one_or_none()
+
+
+# ── Account removal ──────────────────────────────────────────────────────────
+
+# User-entered CRM data that keeps a person even without identities.
+_PERSON_DATA_COLUMNS = (
+    "display_name", "twitter_handle", "linkedin_url", "notes", "is_important", "relationship_status_manual",
+)
+
+
+def _identity_references() -> list:
+    """Every column that points at an identity as evidence it is still in use
+    (a conversation peer, a sender, a recipient, an attendee, an account
+    owner, a Shield record…), derived from the schema so new references
+    count automatically. Contact points are the identity's own data."""
+    from backend.db.database import Base
+
+    refs = []
+    for table in Base.metadata.sorted_tables:
+        if table.name in ("identities", "contact_points"):
+            continue
+        for fk in table.foreign_keys:
+            if fk.column.table.name == "identities":
+                refs.append(fk.parent)
+    return refs
+
+
+async def collect_orphans_after_account_removal(db: AsyncSession, channel: str, account_id: int) -> dict:
+    """Call after the account row of ``channel`` was deleted (its
+    conversations, messages and events cascaded away). Deletes the
+    identities on that channel nothing references any more (another account
+    on the channel may still use them), then the people those identities
+    belonged to who were left with no identity and no user-entered data
+    (CRM fields, notes, positions, merge history). Also drops the account's
+    entries from account-keyed prefs. Commits. Returns
+    ``{"identities": n, "people": n, "prefs": [pref keys changed]}``."""
+    from backend import prefs
+    from backend.db.models import PersonMerge, PersonNote, PersonPosition
+
+    in_use = [select(col).where(col.isnot(None)) for col in _identity_references()]
+    orphan_q = select(Identity.id, Identity.person_id).where(Identity.channel == channel)
+    for q in in_use:
+        orphan_q = orphan_q.where(Identity.id.notin_(q))
+    orphans = (await db.execute(orphan_q)).all()
+    identity_ids = [iid for iid, _ in orphans]
+    person_ids = list({pid for _, pid in orphans})
+    for i in range(0, len(identity_ids), 500):
+        await db.execute(delete(Identity).where(Identity.id.in_(identity_ids[i:i + 500])))
+
+    people_deleted = 0
+    if person_ids:
+        has_data = [
+            (getattr(Person, c) == True) if c in ("is_important", "relationship_status_manual")  # noqa: E712
+            else getattr(Person, c).isnot(None)
+            for c in _PERSON_DATA_COLUMNS
+        ]
+        keep = union(
+            select(Person.id).where(Person.id.in_(person_ids), or_(*has_data)),
+            select(Identity.person_id).where(Identity.person_id.in_(person_ids)),
+            select(PersonNote.person_id).where(PersonNote.person_id.in_(person_ids)),
+            select(PersonPosition.person_id).where(PersonPosition.person_id.in_(person_ids)),
+            select(PersonMerge.into_person_id).where(PersonMerge.into_person_id.in_(person_ids)),
+        )
+        kept = set((await db.execute(keep)).scalars().all())
+        doomed = [pid for pid in person_ids if pid not in kept]
+        for i in range(0, len(doomed), 500):
+            await db.execute(delete(Person).where(Person.id.in_(doomed[i:i + 500])))
+        people_deleted = len(doomed)
+    await db.commit()
+    changed_prefs = prefs.forget_account(account_id)
+    return {"identities": len(identity_ids), "people": people_deleted, "prefs": changed_prefs}

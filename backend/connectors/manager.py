@@ -23,6 +23,7 @@ from backend.tasks import spawn
 logger = logging.getLogger(__name__)
 
 ConnectorFactory = Callable[[Optional[int]], Connector]
+MAX_OPEN_FLOWS = 32  # unfinished sign-in flows kept; older ones are abandoned
 
 
 class ConnectorManager:
@@ -120,13 +121,27 @@ class ConnectorManager:
             spawn(self._start_one(connector), name=f"connector_start:{connector.account_key}")
         return step
 
+    async def cancel_auth(self, flow_id: str) -> None:
+        """The user closed a sign-in: drop the flow and let its connector
+        release what it holds (Signal kills ``signal-cli link``). A no-op for
+        an unknown or finished flow; never raises."""
+        connector = self._flows.pop(flow_id, None)
+        if connector is None:
+            return
+        try:
+            await connector.abandon_flow(flow_id)
+        except Exception:
+            logger.warning("Cancelling sign-in flow of %s failed", connector.account_key, exc_info=True)
+
     def _track(self, step: AuthStep, connector: Connector) -> None:
         if step.kind in ("done", "error"):
             self._flows.pop(step.flow_id, None)
         else:
             self._flows[step.flow_id] = connector
-            while len(self._flows) > 32:
-                self._flows.pop(next(iter(self._flows)))
+            while len(self._flows) > MAX_OPEN_FLOWS:
+                flow_id = next(iter(self._flows))
+                owner = self._flows.pop(flow_id)
+                spawn(owner.abandon_flow(flow_id), name=f"auth_flow_abandon:{owner.channel}")
 
     async def remove(self, key: str) -> bool:
         """Disconnect an account for good (multi-account channels): log out,
@@ -141,11 +156,15 @@ class ConnectorManager:
             from backend.db.database import AsyncSessionLocal
             from backend.db.models import Account
 
+            from backend.db import crud
+
             async with AsyncSessionLocal() as db:
                 acc = await db.get(Account, connector.account_id)
                 if acc is not None:
                     await db.delete(acc)
                     await db.commit()
+                    # correspondents only this account knew, and people left empty
+                    await crud.collect_orphans_after_account_removal(db, connector.channel, connector.account_id)
         return True
 
     # -- lifecycle -------------------------------------------------------------
@@ -169,8 +188,15 @@ class ConnectorManager:
         return {c.account_key: ok for c, ok in zip(configured, results)}
 
     async def stop_all(self) -> None:
-        results = await asyncio.gather(*(c.stop() for c in self.all()), return_exceptions=True)
-        for c, res in zip(self.all(), results):
+        """Stop every connector and abandon unfinished sign-ins, including
+        those of provisional connectors that were never registered."""
+        owners = list({id(c): c for c in self._flows.values()}.values())
+        self._flows.clear()
+        connectors = self.all()
+        results = await asyncio.gather(
+            *(c.stop() for c in connectors), *(c.close_flows() for c in owners), return_exceptions=True,
+        )
+        for c, res in zip(connectors + owners, results):
             if isinstance(res, BaseException):
                 logger.warning("Connector %s failed to stop: %r", c.account_key, res)
 

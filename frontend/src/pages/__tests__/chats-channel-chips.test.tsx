@@ -25,6 +25,8 @@ const emailThread = makeConversation(333, 'Quarterly plan', { channel: 'gmail', 
 type GetConversationsArgs = [number, number, string, number?, number?, AbortSignal?, ConversationListFilter?]
 const getConversations = vi.fn(async (..._a: GetConversationsArgs): Promise<Conversation[]> => [tgChat, sigChat])
 const searchConversationsLocal = vi.fn(async (_q: string) => ({ local: [tgChat, emailThread] }))
+const searchTelegramDirectory = vi.fn(async (_q: string) => [] as Conversation[])
+const getTelegramFolders = vi.fn(async () => [])
 
 vi.mock('../../api/client', async (orig) => {
   const actual = await orig<typeof import('../../api/client')>()
@@ -33,9 +35,9 @@ vi.mock('../../api/client', async (orig) => {
     ...actual,
     getConversations: (...a: unknown[]) => getConversations(...(a as GetConversationsArgs)),
     searchConversationsLocal: (q: string) => searchConversationsLocal(q),
-    getTelegramFolders: resolve([]),
+    getTelegramFolders: () => getTelegramFolders(),
     getScamFlags: resolve({ flags: [], flagged_identity_ids: [], flagged_conversation_ids: [] }),
-    searchTelegramDirectory: resolve([]),
+    searchTelegramDirectory: (q: string) => searchTelegramDirectory(q),
     getTags: resolve([]),
   }
 })
@@ -45,9 +47,10 @@ const account = (channel: string, over: Partial<Account> = {}): Account => ({
   status: { state: 'ready', error: null }, ...over,
 })
 let accounts: Account[] = []
+const connectable = (['telegram', 'signal', 'sms', 'gmail'] as const).map((channel) => ({ channel, display_name: channel, multi_account: channel !== 'telegram' }))
 vi.mock('../../api/accounts', async (orig) => ({
   ...(await orig<typeof import('../../api/accounts')>()),
-  getAccounts: async () => ({ accounts, channels: [] }),
+  getAccounts: async () => ({ accounts, channels: connectable }),
 }))
 vi.mock('../../context/WorkspaceContext', () => ({
   useWorkspaces: () => ({ workspaces: [], activeWorkspace: null, loaded: true, setActiveWorkspaceId: () => {}, refreshWorkspaces: async () => {} }),
@@ -81,6 +84,8 @@ beforeEach(() => {
   __resetChatUiStore()
   localStorage.clear()
   getConversations.mockClear()
+  searchTelegramDirectory.mockClear()
+  getTelegramFolders.mockClear()
   accounts = [account('telegram'), account('gmail'), account('signal')]
 })
 afterEach(() => cleanup())
@@ -153,6 +158,70 @@ describe('Chats channel chips', () => {
       { channel: 'telegram', configured: true }, { channel: 'gmail', configured: true },
       { channel: 'signal', configured: false }, { channel: 'telegram', configured: true }, { channel: 'sms', configured: true },
     ])).toEqual(['telegram', 'sms'])
+  })
+})
+
+describe('Telegram-only features follow Telegram', () => {
+  const typeSearch = async (q: string) => {
+    fireEvent.change(await screen.findByPlaceholderText('Search chats…'), { target: { value: q } })
+    // past the directory search debounce
+    await act(async () => { await new Promise((r) => setTimeout(r, 350)) })
+  }
+
+  it('with Telegram connected and listed: directory + message search, new chat and folders are offered', async () => {
+    renderChats()
+    await waitFor(() => expect(chips()).not.toBeNull())
+    expect(screen.getByRole('button', { name: 'New Telegram conversation' })).toBeTruthy()
+    expect(getTelegramFolders).toHaveBeenCalled()
+    await typeSearch('ann')
+    expect(searchTelegramDirectory).toHaveBeenCalledWith('ann')
+    expect(screen.getByText('Search Telegram messages')).toBeTruthy()
+  })
+
+  it('a Signal chip hides every Telegram-only search section and the new-chat button', async () => {
+    localStorage.setItem('mingly_chats_channel', 'signal')
+    renderChats()
+    await waitFor(() => expect(chips()).not.toBeNull())
+    expect(screen.queryByRole('button', { name: 'New Telegram conversation' })).toBeNull()
+    await typeSearch('ann')
+    expect(searchTelegramDirectory).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Telegram/, { selector: 'p' })).toBeNull()
+    expect(screen.queryByText('Search Telegram messages')).toBeNull()
+  })
+
+  it('without a Telegram account: no folders, directory search, message search or new chat (n does nothing)', async () => {
+    accounts = [account('signal'), account('sms')]
+    renderChats()
+    await waitFor(() => expect(chips()).not.toBeNull())
+    expect(screen.queryByRole('button', { name: 'New Telegram conversation' })).toBeNull()
+    act(() => { fireEvent.keyDown(document.body, { key: 'n' }) })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await typeSearch('ann')
+    expect(searchTelegramDirectory).not.toHaveBeenCalled()
+    expect(screen.queryByText('Search Telegram messages')).toBeNull()
+    expect(getTelegramFolders).not.toHaveBeenCalled()
+  })
+
+  it('Gmail only: Chats points to Connections for a messenger instead of an empty "Select a chat"', async () => {
+    accounts = [account('gmail')]
+    getConversations.mockImplementation(async () => [])
+    renderChats()
+    expect(await screen.findByText('No messaging account connected')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open Settings → Connections' }).getAttribute('href')).toBe('/settings?tab=connections')
+    expect(screen.queryByText('Select a chat to start')).toBeNull()
+  })
+})
+
+describe('Chats list load failure', () => {
+  it('shows the error with Retry instead of "No chats found", and Retry reloads', async () => {
+    getConversations.mockImplementation(async () => { throw new Error('backend down') })
+    renderChats()
+    expect((await screen.findByTestId('load-error')).textContent).toContain('Couldn’t load chats: backend down')
+    expect(screen.queryByText('No chats found')).toBeNull()
+    getConversations.mockImplementation(async () => [tgChat, sigChat])
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })) })
+    expect(await screen.findByText('Telegram group')).toBeTruthy()
+    expect(screen.queryByTestId('load-error')).toBeNull()
   })
 })
 

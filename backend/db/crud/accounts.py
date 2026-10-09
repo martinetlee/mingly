@@ -1,8 +1,10 @@
 """Signed-in channel accounts."""
 
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Account
@@ -23,16 +25,24 @@ async def get_accounts(db: AsyncSession, channel: Optional[str] = None) -> list[
 
 async def get_or_create_channel_account(db: AsyncSession, channel: str) -> Account:
     """The account of a single-account channel (the oldest one), created on
-    first use. Multi-account channels look accounts up by id instead."""
-    existing = (await db.execute(
-        select(Account).where(Account.channel == channel).order_by(Account.id).limit(1)
-    )).scalar_one_or_none()
+    first use. Race-free: concurrent first calls insert against
+    ``uq_account_channel_unclaimed`` and all read back the same row. Flushes,
+    doesn't commit (the caller's transaction decides). Multi-account channels
+    look accounts up by id instead."""
+    async def _oldest() -> Optional[Account]:
+        return (await db.execute(
+            select(Account).where(Account.channel == channel).order_by(Account.id).limit(1)
+        )).scalar_one_or_none()
+
+    existing = await _oldest()
     if existing is not None:
         return existing
-    account = Account(channel=channel)
-    db.add(account)
-    await db.commit()
-    await db.refresh(account)
+    await db.execute(
+        sqlite_insert(Account).values(channel=channel, created_at=datetime.utcnow())
+        .on_conflict_do_nothing(index_elements=[Account.channel], index_where=Account.external_id.is_(None))
+    )
+    account = await _oldest()
+    assert account is not None
     return account
 
 

@@ -680,13 +680,15 @@ def _failed_result(trace: PipelineTrace, t0: float, error: str) -> EngineResult:
 
 def _signature_match(sigs, targets: list[dict], channel: Optional[str] = None) -> Optional[dict]:
     """First signature hit among the *target* messages (context never matches).
-    Known-scammer ids are Telegram user ids, so they only match Telegram senders."""
+    Known-scammer ids are Telegram sender ids (as before the multi-channel
+    refactor: the user, or a chat posting as itself), so they only match
+    Telegram senders."""
     from backend.scam.client import _extract_domains
 
     known_ids = set(sigs.telegram_ids) if channel == TELEGRAM else set()
     for msg in targets:
         text = msg.get("text") or ""
-        user_id = msg.get("telegram_user_id")
+        user_id = msg["telegram_sender_id"] if "telegram_sender_id" in msg else msg.get("telegram_user_id")
         if user_id and user_id in known_ids:
             return {"match_type": "telegram_id", "matched_value": str(user_id), "confidence": 0.95,
                     "category": "impersonation", "reason": "Sender matches known scammer ID"}

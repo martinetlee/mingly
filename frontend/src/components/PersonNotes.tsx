@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { openConversationUrl } from '../lib/routes'
 import { Bot, Loader2, MessageSquareQuote, NotebookPen, Pencil, Plus, Trash2, User } from 'lucide-react'
@@ -35,7 +35,11 @@ export function sortNotes(notes: PersonNote[]): PersonNote[] {
  * context / due diligence over MCP plus the user's own notes. The user can
  * edit or delete any note. Live via `person_notes_changed`.
  */
-export default function PersonNotes({ personId }: { personId: number }) {
+export default function PersonNotes({ personId, identityKey }: {
+  personId: number
+  /** The person's identity ids: a change (merge / undo) moved notes in or out */
+  identityKey?: string
+}) {
   const navigate = useNavigate()
   const confirm = useConfirm()
   const q = useLatestQuery(['person-notes', personId], (signal) => getPersonNotes(personId, signal))
@@ -62,6 +66,12 @@ export default function PersonNotes({ personId }: { personId: number }) {
 
   useWsEvent('person_notes_changed', (e) => { if (e.person_id === idRef.current) void q.refetch() })
   useWsEvent('resync', () => { void q.refetch() })
+  const identityRef = useRef({ personId, identityKey })
+  useEffect(() => {
+    const prev = identityRef.current
+    identityRef.current = { personId, identityKey }
+    if (prev.personId === personId && prev.identityKey !== identityKey) void q.refetch()
+  }, [personId, identityKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const create = useAsyncAction(async (pid: number, input: PersonNoteInput) => {
     const note = await createPersonNote(pid, input)

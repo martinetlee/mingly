@@ -295,7 +295,11 @@ async def join(req: JoinRequest, db: AsyncSession = Depends(get_db)):
 @router.get("/users/{user_id}/person")
 async def person_for_user(user_id: int, db: AsyncSession = Depends(get_db)):
     """The person behind a Telegram user id (from tg://user?id= links),
-    recorded on first sight."""
+    recorded on first sight. 404 when the id is neither stored nor
+    resolvable through Telegram (no placeholder person is created)."""
+    not_found = HTTPException(status_code=404, detail="Telegram user not found")
+    if user_id <= 0:
+        raise not_found
     ident = await ids.identity_for_user_id(db, user_id, create=False)
     if ident is None:
         client = await runtime.client(require=False)
@@ -305,10 +309,9 @@ async def person_for_user(user_id: int, db: AsyncSession = Depends(get_db)):
                 entity = await client.get_entity(user_id)
             except Exception:
                 entity = None
-        if isinstance(entity, User):
-            ident = await ids.ensure_user_identity(db, entity)
-        else:
-            ident = await ids.identity_for_user_id(db, user_id)
+        if not isinstance(entity, User):
+            raise not_found
+        ident = await ids.ensure_user_identity(db, entity)
         await db.commit()
     return {"person_id": ident.person_id, "identity_id": ident.id}
 

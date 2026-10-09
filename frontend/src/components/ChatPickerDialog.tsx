@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Loader2, Search } from 'lucide-react'
 import type { Conversation } from '../api/types'
 import { getConversations, MESSENGERS_ONLY, searchConversationsLocal } from '../api/client'
-import { conversationTitle, kindLabel } from '../lib/conversation'
+import { conversationTitle, kindColor, kindLabel } from '../lib/conversation'
 import ChannelIcon from './ChannelIcon'
 import ConversationAvatar from './ConversationAvatar'
 import { Modal } from './ui'
@@ -20,12 +20,6 @@ interface Props {
   busy?: boolean
 }
 
-const KIND_COLOR: Record<string, string> = {
-  direct: 'bg-indigo-500/20 text-indigo-400',
-  group: 'bg-purple-500/20 text-purple-400',
-  channel: 'bg-amber-500/20 text-amber-400',
-  email_thread: 'bg-sky-500/20 text-sky-400',
-}
 
 export default function ChatPickerDialog({ open, onClose, onSelect, filter, title = 'Forward to…', busy }: Props) {
   return (
@@ -84,7 +78,7 @@ function PickerBody({ onSelect, filter, busy }: { onSelect: (chat: Conversation)
               <div className="min-w-0 flex-1 flex items-center gap-1.5">
                 <p className="truncate text-sm text-gray-200">{conversationTitle(chat)}</p>
                 <ChannelIcon channel={chat.channel} />
-                <span className={`flex-shrink-0 rounded px-1 text-[10px] font-medium ${KIND_COLOR[chat.kind] ?? 'bg-slate-600 text-slate-400'}`}>
+                <span className={`flex-shrink-0 rounded px-1 text-[10px] font-medium ${kindColor(chat.kind)}`}>
                   {kindLabel(chat.kind)}
                 </span>
               </div>

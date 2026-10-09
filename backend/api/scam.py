@@ -718,10 +718,11 @@ async def sync_history():
             )
         )).scalar() or 0
 
-        dismissals_total = (await db.execute(select(func.count()).select_from(ScamDismissal))).scalar() or 0
-        dismissals_synced = (await db.execute(
-            select(func.count()).select_from(ScamDismissal).where(ScamDismissal.synced_at.isnot(None))
-        )).scalar() or 0
+        # Skipped dismissals left the queue without an upload (no contract carries them)
+        dismissals_by_status = dict((await db.execute(
+            select(ScamDismissal.cloud_status, func.count()).group_by(ScamDismissal.cloud_status)
+        )).all())
+        dismissals_total = sum(dismissals_by_status.values())
 
         latest_period = (await db.execute(
             select(ScamAnalytics).where(ScamAnalytics.total_scanned > 0)
@@ -759,8 +760,9 @@ async def sync_history():
         },
         "dismissals": {
             "total": dismissals_total,
-            "synced": dismissals_synced,
-            "pending": dismissals_total - dismissals_synced,
+            "synced": dismissals_by_status.get("synced", 0),
+            "pending": dismissals_by_status.get("pending", 0),
+            "skipped": dismissals_by_status.get("skipped", 0),
         },
         "analytics": {
             "total": analytics_total,

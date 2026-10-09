@@ -205,6 +205,7 @@ async def compose_new(
 
     connector = _connector(account_id)
     temp_paths: list = []
+    started = False
     try:
         outgoing = []
         for upload in files:
@@ -216,10 +217,14 @@ async def compose_new(
         draft = OutgoingMessage(text=text, subject=subject, to=to, cc=cc, files=outgoing)
 
         async def _send() -> dict:
+            nonlocal started
+            started = True
             try:
                 conv_id, ids = await connector.send_new(draft)
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            finally:
+                _cleanup(temp_paths)
             async with AsyncSessionLocal() as db:
                 rows = await crud.get_reply_previews(db, ids)
                 messages = await messages_out(db, list(rows))
@@ -229,4 +234,7 @@ async def compose_new(
 
         return await _idempotent(client_nonce, _send)
     finally:
-        _cleanup(temp_paths)
+        # Once the send started, it owns the temp files (it may outlive this
+        # request if the client disconnects); otherwise clean up here.
+        if not started:
+            _cleanup(temp_paths)

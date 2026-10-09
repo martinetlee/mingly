@@ -33,12 +33,12 @@ import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { reportError } from '../lib/toast'
 import ChatInfoPanel from '../components/ChatInfoPanel'
 import NewChatDialog from '../components/NewChatDialog'
-import NoAccountsNotice from '../components/NoAccountsNotice'
+import { NoAccountsView, hasAccountOn } from '../components/NoAccountsNotice'
 import ChatListPane from './chats/ChatListPane'
 import type { ChatActions, SortBy } from './chats/ChatListPane'
 import ChatPane from './chats/ChatPane'
 import { useChatList } from './chats/useChatList'
-import { loadChannelFilter, messengerChannels, saveChannelFilter } from './chats/channelFilter'
+import { EMAIL_CHANNELS, loadChannelFilter, messengerChannels, saveChannelFilter } from './chats/channelFilter'
 import { getChatUi, updateChatUi, useChatUiSelect } from './chats/chatUiStore'
 
 /** How long an open, focused chat waits before acknowledging new messages as read */
@@ -115,6 +115,11 @@ export default function Chats() {
   // (or is the only one); the stored value applies until accounts have loaded
   const accounts = useAccounts()
   const channels = useMemo(() => messengerChannels(accounts.accounts), [accounts.accounts])
+  // Every messenger the app supports (connected or not): what counts as "a chat account" for the empty state
+  const supportedMessengers = useMemo(
+    () => accounts.channels.map((c) => c.channel).filter((c) => !EMAIL_CHANNELS.has(c)),
+    [accounts.channels],
+  )
   const [storedChannel, setStoredChannel] = useState<string | null>(loadChannelFilter)
   const selectedChannel = !accounts.loaded ? storedChannel
     : storedChannel != null && channels.length > 1 && channels.includes(storedChannel) ? storedChannel : null
@@ -122,14 +127,20 @@ export default function Chats() {
     setStoredChannel(channel)
     saveChannelFilter(channel)
   }, [])
+  // Telegram-only features (folders, directory + message search, new chat): only
+  // while Telegram is connected (assumed until accounts load, and when they
+  // failed to load) and its chats are listed
+  const telegramConnected = !accounts.loaded || accounts.error != null || hasAccountOn(accounts.accounts, ['telegram'])
+  const telegramAvailable = telegramConnected && (selectedChannel == null || selectedChannel === 'telegram')
   const list = useChatList({ sortBy, tagId: selectedTag?.id ?? null, workspaceId: activeWorkspaceId, channel: selectedChannel })
   const chatsRef = useRef(list.chats)
   chatsRef.current = list.chats
 
   // Telegram chat folders (Telegram-only)
-  const folders = useLatestQuery(['folders'], () => getTelegramFolders())
+  // (fetched once accounts are known, so a Telegram-less setup never asks)
+  const folders = useLatestQuery(['folders'], () => getTelegramFolders(), { enabled: accounts.loaded && telegramConnected })
   // Telegram folders only apply while Telegram chats are listed
-  const shownFolders = selectedChannel == null || selectedChannel === 'telegram' ? folders.data ?? [] : []
+  const shownFolders = telegramAvailable ? folders.data ?? [] : []
   const folder = selectedFolder == null ? null : shownFolders.find((f) => f.id === selectedFolder) ?? null
   // Folder members can live beyond the loaded pages: fetched by id, kept apart from the list
   const folderMembers = useLatestQuery(
@@ -426,11 +437,12 @@ export default function Chats() {
   visibleRef.current = visible
 
   // ── Search: Telegram directory (Telegram-only) + message content ──────────
-  const tgSearch = useDebouncedQuery(search, (q, signal) => searchTelegramDirectory(q, signal), { delayMs: 300 })
+  const tgSearch = useDebouncedQuery(search, (q, signal) => searchTelegramDirectory(q, signal), { delayMs: 300, enabled: telegramAvailable })
   const telegramResults = useMemo(() => {
     const shown = new Set(visible.map((c) => c.id))
+    if (!telegramAvailable) return []
     return (tgSearch.data ?? []).filter((r) => isDirectoryHit(r) || !shown.has(r.id))
-  }, [tgSearch.data, visible])
+  }, [tgSearch.data, visible, telegramAvailable])
   // Latest-only: a new query aborts the one in flight (never silently ignored)
   const [messageResults, setMessageResults] = useState<{ q: string; results: MessageSearchResult[] } | null>(null)
   const [messageSearchPending, setMessageSearchPending] = useState<string | null>(null)
@@ -453,7 +465,7 @@ export default function Chats() {
     }
   }, [])
   useEffect(() => () => messageSearchCtl.current?.abort(), [])
-  const currentMessageResults = messageResults && messageResults.q === search.trim() ? messageResults.results : null
+  const currentMessageResults = telegramAvailable && messageResults && messageResults.q === search.trim() ? messageResults.results : null
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
   const chatListRef = useRef<HTMLDivElement>(null)
@@ -481,7 +493,7 @@ export default function Chats() {
     '/': () => searchInputRef.current?.focus(),
     i: () => { if (!selRef.current) return false; setShowInfo((v) => !v) },
     'mod+f': () => { if (!selRef.current) return false; setShowSearch((v) => !v) },
-    n: () => setShowNewChat(true),
+    n: () => { if (!telegramAvailable) return false; setShowNewChat(true) },
   })
   // Arrow keys move through the list only while the list has focus; elsewhere they scroll
   useKeyboardShortcuts({
@@ -543,6 +555,7 @@ export default function Chats() {
         onSelectFolder={setSelectedFolder}
         search={search}
         onSearchChange={setSearch}
+        telegramAvailable={telegramAvailable}
         telegramResults={telegramResults}
         searchingTelegram={tgSearch.pending}
         messageResults={currentMessageResults}
@@ -555,9 +568,11 @@ export default function Chats() {
         selectedTag={selectedTag}
         onSelectTag={setSelectedTag}
         boardButton={activeWorkspace?.view_mode === 'kanban' ? { title: `${activeWorkspace.name} board`, onClick: () => navigate('/board') } : null}
-        onNewChat={() => setShowNewChat(true)}
+        onNewChat={telegramAvailable ? () => setShowNewChat(true) : null}
         chats={visible}
         loading={list.loading}
+        error={list.error}
+        onRetry={() => void list.reload()}
         loadingMore={list.loadingMore}
         onLoadMore={list.loadMore}
         selectedId={selectedId}
@@ -589,7 +604,14 @@ export default function Chats() {
                 <p className="text-sm text-slate-400">Loading chat…</p>
               </>
             ) : (
-              <NoAccountsNotice className="max-w-sm" fallback={<p className="text-sm">Select a chat to start</p>} />
+              <NoAccountsView
+                state={accounts}
+                channels={supportedMessengers.length > 0 ? supportedMessengers : undefined}
+                title="No messaging account connected"
+                body="Chats shows your messenger conversations (Telegram, Signal, SMS…). Connect one to start; email is in Mail."
+                className="max-w-sm"
+                fallback={<p className="text-sm">Select a chat to start</p>}
+              />
             )}
           </div>
         )}

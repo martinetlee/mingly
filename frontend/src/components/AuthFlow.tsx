@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { AlertCircle, CheckCircle2, ExternalLink, Loader2 } from 'lucide-react'
-import { beginAccountAuth, continueAccountAuth } from '../api/accounts'
+import { beginAccountAuth, cancelAccountAuth, continueAccountAuth } from '../api/accounts'
 import type { AuthField, AuthStep } from '../api/accounts'
 import { openExternalUrl, resolve1Password } from '../api/client'
 import { errorMessage } from '../lib/toast'
@@ -62,8 +62,24 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
     return () => { mounted.current = false }
   }, [])
 
-  const adopt = useCallback((next: AuthStep, prev: AuthStep | null) => {
-    if (!mounted.current) return
+  // The server-side flow this component holds open. Leaving it (Cancel,
+  // unmount, "Try again", another account) cancels it, so the connector can
+  // stop what it holds — Signal keeps a `signal-cli link` process per flow.
+  const openFlow = useRef<{ key: string; flowId: string } | null>(null)
+  const release = useCallback(() => {
+    const f = openFlow.current
+    openFlow.current = null
+    if (f) cancelAccountAuth(f.key, f.flowId).catch(() => { /* already gone */ })
+  }, [])
+  const isOpen = (s: AuthStep) => s.kind !== 'done' && s.kind !== 'error'
+
+  const adopt = useCallback((key: string, next: AuthStep, prev: AuthStep | null) => {
+    if (!mounted.current) {
+      // Answered after the flow was left: let it go
+      if (isOpen(next)) cancelAccountAuth(key, next.flow_id).catch(() => {})
+      return
+    }
+    openFlow.current = isOpen(next) ? { key, flowId: next.flow_id } : null
     setMessageIsError(!!prev && !!next.message && next.kind === 'fields' && sameStep(prev, next))
     setStep(next)
     if (next.kind === 'done') onDoneRef.current?.(next)
@@ -72,14 +88,22 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
   // Begin (again on "Try again")
   useEffect(() => {
     let cancelled = false
+    release()
     setStep(null)
     setRequestError('')
     setValues({})
     beginAccountAuth(accountKey, paramsRef.current ?? {})
-      .then((s) => { if (!cancelled) adopt(s, null) })
+      .then((s) => {
+        // A begin that lost the race (StrictMode re-run, account switch) still started a flow
+        if (cancelled) { if (isOpen(s)) cancelAccountAuth(accountKey, s.flow_id).catch(() => {}); return }
+        adopt(accountKey, s, null)
+      })
       .catch((e) => { if (!cancelled) setRequestError(errorMessage(e)) })
     return () => { cancelled = true }
-  }, [accountKey, attempt, adopt])
+  }, [accountKey, attempt, adopt, release])
+
+  // Leaving the component abandons the flow
+  useEffect(() => () => release(), [release])
 
   // Poll while the step asks for it
   useEffect(() => {
@@ -87,7 +111,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
     let cancelled = false
     const timer = setTimeout(() => {
       continueAccountAuth(accountKey, step.flow_id, {})
-        .then((s) => { if (!cancelled) adopt(s, step) })
+        .then((s) => { if (!cancelled) adopt(accountKey, s, step) })
         .catch((e) => { if (!cancelled) setRequestError(errorMessage(e)) })
     }, POLL_MS)
     return () => { cancelled = true; clearTimeout(timer) }
@@ -100,7 +124,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
     setSubmitting(true)
     setRequestError('')
     try {
-      adopt(await continueAccountAuth(accountKey, step.flow_id, data), step)
+      adopt(accountKey, await continueAccountAuth(accountKey, step.flow_id, data), step)
     } catch (e) {
       if (mounted.current) setRequestError(errorMessage(e))
     } finally {
@@ -109,12 +133,13 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
   }
 
   const retry = () => setAttempt((n) => n + 1)
+  const close = onClose ? () => { release(); onClose() } : undefined
 
   if (!step) {
     return (
       <div className="py-2">
         {requestError ? (
-          <ErrorBlock message={requestError} onRetry={retry} onClose={onClose} />
+          <ErrorBlock message={requestError} onRetry={retry} onClose={close} />
         ) : (
           <p className="flex items-center gap-2 text-sm text-slate-400">
             <Loader2 size={14} className="animate-spin" /> Starting sign-in…
@@ -141,7 +166,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
     return (
       <div className="py-2">
         {step.title && <h3 className="mb-1 text-sm font-semibold text-slate-200">{step.title}</h3>}
-        <ErrorBlock message={step.message || 'Sign-in failed'} onRetry={retry} onClose={onClose} />
+        <ErrorBlock message={step.message || 'Sign-in failed'} onRetry={retry} onClose={close} />
       </div>
     )
   }
@@ -177,7 +202,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
             <p className="mb-3 text-xs text-amber-400">Resolve all 1Password references before continuing</p>
           )}
           <div className="flex items-center justify-end gap-2">
-            {onClose && <button type="button" onClick={onClose} className={secondaryButton}>Cancel</button>}
+            {close && <button type="button" onClick={close} className={secondaryButton}>Cancel</button>}
             <button type="submit" disabled={submitting || missing || blockedByOpRef} className={primaryButton}>
               {submitting ? 'Working…' : (step.submit_label || 'Continue')}
             </button>
@@ -195,7 +220,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
         <>
           {requestError && (
             <div className="mt-3">
-              <ErrorBlock message={requestError} onRetry={retry} onClose={onClose} />
+              <ErrorBlock message={requestError} onRetry={retry} onClose={close} />
             </div>
           )}
           {!requestError && (
@@ -203,14 +228,14 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
               {step.poll && step.kind !== 'progress'
                 ? <span className="flex items-center gap-2 text-xs text-slate-400"><Loader2 size={12} className="animate-spin" />Waiting…</span>
                 : <span />}
-              {onClose && <button type="button" onClick={onClose} className={secondaryButton}>Cancel</button>}
+              {close && <button type="button" onClick={close} className={secondaryButton}>Cancel</button>}
             </div>
           )}
         </>
       )}
 
       {!['fields', 'qr', 'oauth_browser', 'progress'].includes(step.kind) && (
-        <ErrorBlock message={`Unsupported sign-in step "${step.kind}"`} onRetry={retry} onClose={onClose} />
+        <ErrorBlock message={`Unsupported sign-in step "${step.kind}"`} onRetry={retry} onClose={close} />
       )}
     </div>
   )

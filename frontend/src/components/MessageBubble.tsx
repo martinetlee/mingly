@@ -14,7 +14,8 @@ import MediaAlbumGrid from './MediaAlbumGrid'
 import { mentionUrl } from '../lib/mentions'
 import EmailMessageView from './EmailMessageView'
 
-export type ScamVerdictScope = 'message' | 'sender'
+export type { ScamVerdictScope } from '../pages/chats/scamChecks'
+import type { ScamVerdictScope } from '../pages/chats/scamChecks'
 
 interface Props {
   /** The message (for an album: the item carrying the caption, else the first) */
@@ -573,13 +574,14 @@ function MessageBubble({
   if (onDelete) menuItems.push({ key: 'delete', label: 'Delete', icon: <Trash2 size={13} />, tone: 'danger', onClick: () => onDelete(message, album) })
 
   const actions = (
-    <div className={`${isOut ? 'mr-1' : 'ml-1'} flex items-center gap-0.5 self-center transition-opacity ${hovered || showMenu || showPicker ? 'opacity-100' : 'opacity-0'}`}>
+    <div className={`${isOut ? 'mr-1' : 'ml-1'} flex items-center gap-0.5 self-center transition-opacity focus-within:opacity-100 ${hovered || showMenu || showPicker ? 'opacity-100' : 'opacity-0'}`}>
       {onReact && (
         <div className="relative" ref={pickerRef}>
           <button
             onClick={() => setShowPicker((v) => !v)}
             className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-amber-400 transition-all"
             title="React with emoji"
+            aria-label="React with emoji"
           >
             <span className="text-sm leading-none">😊</span>
           </button>
@@ -593,7 +595,7 @@ function MessageBubble({
         </div>
       )}
       {onReply && (
-        <button onClick={() => onReply(message)} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all" title="Reply">
+        <button onClick={() => onReply(message)} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300 transition-all" title="Reply" aria-label="Reply">
           <Reply size={14} />
         </button>
       )}
@@ -820,6 +822,7 @@ function MessageView(props: Props) {
         highlighted={props.highlighted}
         onReply={props.onReply}
         onScamVerdict={props.onScamVerdict}
+        onReportScam={props.onReportScam}
       />
     )
   }

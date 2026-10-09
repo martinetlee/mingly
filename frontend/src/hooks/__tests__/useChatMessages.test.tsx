@@ -269,4 +269,21 @@ describe('useChatMessages', () => {
     await act(async () => { await result.current.loadOlder() })
     expect(backfillConversation).not.toHaveBeenCalled()
   })
+
+  it('a message_edited event keeps the reply quote of the stored message', async () => {
+    const preview = { sender_name: 'A', text: 'orig', media_type: null }
+    const withReply = msg(2, { conversation_id: 1, reply_to_message_id: 1, reply_to_external_id: '1', reply_to_preview: preview })
+    getMessageWindow.mockResolvedValue({ ...page([], {}, {}), messages: [msg(1, { conversation_id: 1 }), withReply] })
+    const { result } = setup({ conversationId: 1, topicId: null, nonce: 1 })
+    await waitFor(() => expect(ids(result)).toEqual([1, 2]))
+    act(() => ws.dispatch({
+      type: 'message_edited', conversation_id: 1, message_id: 2,
+      message: { ...withReply, reactions: [{ emoji: '👍', count: 1 }], reply_to_message_id: null, reply_to_preview: null },
+    }))
+    const m = result.current.messages.find((x) => x.id === 2)!
+    expect(m.reactions).toEqual([{ emoji: '👍', count: 1 }])
+    expect(m.reply_to_preview).toEqual(preview)
+    expect(m.reply_to_message_id).toBe(1)
+  })
 })
+

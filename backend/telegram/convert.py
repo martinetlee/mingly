@@ -478,6 +478,11 @@ def message_to_row(
     fwd_name, fwd_meta = forward_info(msg)
     if fwd_meta is not None:
         meta["forward"] = fwd_meta
+    # Posted "as" a channel or chat (send-as, anonymous admin): no identity,
+    # but keep the peer for Shield (read back via ids.sender_peer_of).
+    from_id = getattr(msg, "from_id", None)
+    if isinstance(from_id, (types.PeerChannel, types.PeerChat)):
+        meta["sender_peer"] = tl_utils.get_peer_id(from_id)
     return {
         "conversation_id": conversation_id,
         "external_id": str(msg.id),

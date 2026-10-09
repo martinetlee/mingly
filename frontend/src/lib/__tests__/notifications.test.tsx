@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, act, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { shouldNotify, notificationContent, setCachedNotifPref } from '../notifications'
+import { notifPrefFor, shouldNotify, notificationContent, setCachedChannelNotifPref, setCachedNotifPref } from '../notifications'
 import { WebSocketClient } from '../ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import NotificationBridge from '../../components/NotificationBridge'
@@ -23,6 +23,19 @@ describe('notification policy', () => {
     expect(shouldNotify(msg({ is_tracked: true }), 'tracked')).toBe(true)
     expect(shouldNotify(msg({ is_tracked: true }), 'off')).toBe(false)
     expect(shouldNotify(msg({ is_outgoing: true }), 'all')).toBe(false)
+  })
+
+  it('applies the per-channel pref like the backend (email off until set)', () => {
+    expect(shouldNotify(msg({ channel: 'gmail' }), 'all')).toBe(false)
+    expect(shouldNotify(msg({ channel: 'signal' }), 'all')).toBe(true)
+    expect(notifPrefFor('gmail', 'all', { gmail: 'tracked' })).toBe('tracked')
+    expect(notifPrefFor('signal', 'all', { signal: 'off' })).toBe('off')
+    expect(notifPrefFor(null, 'tracked', { signal: 'off' })).toBe('tracked')
+    setCachedNotifPref('all', { gmail: 'all' })
+    expect(shouldNotify(msg({ channel: 'gmail' }))).toBe(true)
+    setCachedChannelNotifPref('gmail', 'off')
+    expect(shouldNotify(msg({ channel: 'gmail' }))).toBe(false)
+    setCachedNotifPref('tracked', {})
   })
 
   it('formats title/body like the old Chats.tsx block', () => {

@@ -91,15 +91,32 @@ export function mergeLatest(w: WindowSlice, page: MessageWindow): WindowSlice {
 }
 
 /**
- * A live message (WS / own send). Replaces an existing copy; otherwise it is
- * appended only when the window is at latest — appending under an older
- * window would fake a contiguous history.
+ * A live copy of a message (WS new/edited event, send/edit response) is
+ * serialized without its reply preview, and some sources carry no
+ * participants: keep what the stored copy already knows, as long as it still
+ * replies to the same message.
+ */
+export function withKnownContext(prev: Message, next: Message): Message {
+  let out = next
+  if ((next.reply_to_external_id ?? null) === (prev.reply_to_external_id ?? null)) {
+    if (next.reply_to_preview == null && prev.reply_to_preview != null) out = { ...out, reply_to_preview: prev.reply_to_preview }
+    if (next.reply_to_message_id == null && prev.reply_to_message_id != null) out = { ...out, reply_to_message_id: prev.reply_to_message_id }
+  }
+  if (!next.participants?.length && prev.participants?.length) out = { ...out, participants: prev.participants }
+  return out
+}
+
+/**
+ * A live message (WS / own send). Replaces an existing copy (keeping its
+ * known context, see withKnownContext); otherwise it is appended only when
+ * the window is at latest — appending under an older window would fake a
+ * contiguous history.
  */
 export function applyLive(w: WindowSlice, msg: Message): WindowSlice {
   const idx = w.messages.findIndex((m) => m.id === msg.id)
   if (idx !== -1) {
     const messages = [...w.messages]
-    messages[idx] = msg
+    messages[idx] = withKnownContext(messages[idx], msg)
     return { ...w, messages }
   }
   if (w.hasNewer) return w

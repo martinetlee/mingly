@@ -10,7 +10,9 @@
   shared group conversation, a username equal to an email's local part.
 - ``merge`` / ``undo`` / ``detach``: the user's tools (``backend/api/people.py``).
   Undoing a merge or detaching an identity records a dismissed suggestion for
-  the pair, so neither is redone automatically.
+  the pair, so neither is redone automatically. A merge carries the removed
+  person's suggestions (dismissed ones included) over to the survivor; a
+  detach recomputes both people's open suggestions.
 
 The user themself (``is_self``) is never merged with anyone else. Nothing here
 commits; the API routes broadcast ``person_changed`` after committing, and the
@@ -23,14 +25,15 @@ import logging
 from datetime import datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import DateTime, and_, event, func, or_, select, update
+from sqlalchemy import DateTime, and_, delete as sa_delete, event, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
 from backend.db.models import (
     BriefingEntry, CatchUpItem, ContactPoint, Conversation, Identity, Message, Organization, Person,
-    PersonMerge, PersonNote, PersonPosition,
+    PersonMerge, PersonMergeSuggestion, PersonNote, PersonPosition,
 )
+from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +134,12 @@ def _notify_after_commit(db: AsyncSession, person_ids: Iterable[int]) -> None:
         ids = sorted(db.info.pop(_PENDING_KEY, set()))
         if not ids:
             return
-        from backend.api.people import broadcast_person_changed
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             return
         for pid in ids:
-            task = loop.create_task(broadcast_person_changed(pid))
+            task = loop.create_task(ws_manager.broadcast({"type": "person_changed", "person_id": pid}))
             _tasks.add(task)
             task.add_done_callback(_tasks.discard)
 
@@ -457,11 +459,31 @@ async def merge(db: AsyncSession, into_id: int, from_id: int, *, automatic: bool
     )
     db.add(record)
     await db.flush()
-    await db.delete(src)  # its suggestions go with it (FK CASCADE)
+    await _repoint_suggestions(db, from_id, into_id)
+    await db.delete(src)
     await db.flush()
     await _refresh_status(db, into)
     await db.flush()
     return record
+
+
+async def _repoint_suggestions(db: AsyncSession, from_id: int, into_id: int) -> None:
+    """Carry ``from_id``'s suggestion rows over to ``into_id`` before it is
+    deleted, so a pair the user dismissed (or split apart by undo / detach)
+    stays dismissed: on a collision dismissed wins, else the higher score.
+    The pair between the two merged people disappears."""
+    rows = list((await db.execute(
+        select(PersonMergeSuggestion).where(or_(
+            PersonMergeSuggestion.person_a_id == from_id, PersonMergeSuggestion.person_b_id == from_id,
+        ))
+    )).scalars().all())
+    for row in rows:
+        other = row.person_b_id if row.person_a_id == from_id else row.person_a_id
+        reason, score, status = row.reason, row.score, row.status
+        await db.delete(row)
+        await db.flush()
+        if other != into_id:
+            await crud.add_merge_suggestion(db, into_id, other, reason, score, status=status)
 
 
 async def undo(db: AsyncSession, merge_id: int) -> Person:
@@ -551,8 +573,16 @@ async def detach(db: AsyncSession, identity_id: int, person_id: Optional[int] = 
         .where(CatchUpItem.person_id == old.id, CatchUpItem.conversation_id.in_(peer_convs))
         .values(person_id=person.id)
     )
+    # The old person's open suggestions may rest on the identity that left:
+    # recompute them for both sides (dismissed pairs are kept).
+    await db.execute(sa_delete(PersonMergeSuggestion).where(
+        PersonMergeSuggestion.status == "pending",
+        or_(PersonMergeSuggestion.person_a_id == old.id, PersonMergeSuggestion.person_b_id == old.id),
+    ))
     await crud.add_merge_suggestion(db, old.id, person.id, DETACHED, 0.0, status="dismissed")
     await db.flush()
+    await suggest_for_person(db, old.id)
+    await suggest_for_person(db, person.id)
     await _refresh_status(db, old)
     await _refresh_status(db, person)
     await db.flush()

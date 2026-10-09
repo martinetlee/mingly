@@ -160,7 +160,7 @@ async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     monkeypatch.setattr(database, "engine", engine)
     await database.init_db()
-    [backup] = list((tmp_path / "backups").glob("mingly-pre-v2-*.db"))
+    [backup] = list((tmp_path / "backups").glob("mingly-retired-gen1-*.db"))
     with sqlite3.connect(str(backup)) as b:
         assert b.execute("SELECT telegram_id FROM chats").fetchone() == (77,)
     with sqlite3.connect(str(path)) as new:

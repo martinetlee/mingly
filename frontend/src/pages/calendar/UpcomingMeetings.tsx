@@ -3,6 +3,7 @@
  * declined), each opening its day in the Calendar space. Renders nothing
  * while there are none, so people you never meet don't get an empty box.
  */
+import { useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { CalendarDays } from 'lucide-react'
 import { getUpcomingMeetings } from '../../api/calendar'
@@ -12,10 +13,20 @@ import { errorMessage } from '../../lib/toast'
 import { calendarEventUrl, dayLabel, eventTimeLabel, parseDateKey, startOfLocalDay } from './agenda'
 import { parseServerDate } from '../../utils/time'
 
-export default function UpcomingMeetings({ personId }: { personId: number }) {
+export default function UpcomingMeetings({ personId, identityKey }: {
+  personId: number
+  /** The person's identity ids: a change (merge / detach / undo) changes whose meetings these are */
+  identityKey?: string
+}) {
   const q = useLatestQuery(['upcoming-meetings', personId], (signal) => getUpcomingMeetings(personId, { signal }))
   useWsEvent('calendar_synced', () => { void q.refetch() })
   useWsEvent('resync', () => { void q.refetch() })
+  const identityRef = useRef({ personId, identityKey })
+  useEffect(() => {
+    const prev = identityRef.current
+    identityRef.current = { personId, identityKey }
+    if (prev.personId === personId && prev.identityKey !== identityKey) void q.refetch()
+  }, [personId, identityKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const events = q.data?.events ?? []
   if (q.loading || (!q.error && events.length === 0)) return null

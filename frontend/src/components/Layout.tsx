@@ -11,6 +11,7 @@ import { LOCK_ACTION } from '../lib/nav'
 import { openConversationUrl } from '../lib/routes'
 import { useNav } from '../context/FeaturesContext'
 import { useLockVault } from '../hooks/useLockVault'
+import { useScamCheckEvents } from '../pages/chats/scamChecks'
 
 export default function Layout() {
   const [helpOpen, setHelpOpen] = useState(false)
@@ -38,6 +39,8 @@ export default function Layout() {
   }, [navigate, searchOpen, lock, navShortcuts])
 
   useKeyboardShortcuts(shortcuts)
+  // "Check for scam" can be started from any page showing messages (Chats, Mail, Contacts, Tracked)
+  useScamCheckEvents()
 
   // Native notification clicks are relayed by the backend as navigate_to_conversation
   useWsEvent('navigate_to_conversation', (event) => {

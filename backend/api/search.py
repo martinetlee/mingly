@@ -33,7 +33,7 @@ def _position_out(p: PersonPosition) -> dict:
 @router.get("")
 async def global_search(
     q: str = Query(..., min_length=2),
-    limit: int = Query(default=20, le=50),
+    limit: int = Query(default=20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
 ):
     # Messages (text or email subject), newest first

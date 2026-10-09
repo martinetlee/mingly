@@ -38,7 +38,12 @@ class SchemaMeta(Base):
 class Account(Base):
     """One signed-in account on one channel."""
     __tablename__ = "accounts"
-    __table_args__ = (UniqueConstraint("channel", "external_id", name="uq_account_channel_external"),)
+    __table_args__ = (
+        UniqueConstraint("channel", "external_id", name="uq_account_channel_external"),
+        # One not-yet-signed-in account per channel (UNIQUE above ignores NULLs);
+        # crud.get_or_create_channel_account relies on it to be race-free.
+        Index("uq_account_channel_unclaimed", "channel", unique=True, sqlite_where=text("external_id IS NULL")),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel: Mapped[str] = mapped_column(String, nullable=False)  # telegram | gmail | signal | sms
@@ -798,8 +803,14 @@ class ScamDismissal(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     dismissal_type: Mapped[str] = mapped_column(String, nullable=False)  # scammer, scan
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)  # full captured data as JSON
-    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # left the upload queue
+    # pending (queued) | synced (uploaded) | skipped (no contract can carry it; see the reason)
+    cloud_status: Mapped[str] = mapped_column(String, nullable=False, default="pending", server_default="pending")
+    cloud_skipped_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+DISMISSAL_CLOUD_STATUSES = ("pending", "synced", "skipped")
 
 
 class ScamFeedback(Base):
@@ -868,3 +879,23 @@ class ScamAnalytics(Base):
 
     # System info (JSON)
     system_info_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+# ── Ids are never reused ─────────────────────────────────────────────────────
+# Internal ids leave the database (API URLs, WebSocket events, JSON blobs such
+# as note citations, prefs keyed by account id, the frontend's caches). SQLite
+# hands a deleted row's id to the next insert unless the table is
+# AUTOINCREMENT, so every table keyed by an integer ``id`` is. Existing
+# databases are rebuilt by migration 2 (backend/db/migrations/runner.py).
+
+def _autoincrement_tables() -> tuple:
+    names = []
+    for table in Base.metadata.sorted_tables:
+        pk = list(table.primary_key.columns)
+        if len(pk) == 1 and pk[0].name == "id" and isinstance(pk[0].type, Integer):
+            table.dialect_kwargs["sqlite_autoincrement"] = True
+            names.append(table.name)
+    return tuple(names)
+
+
+AUTOINCREMENT_TABLES = _autoincrement_tables()

@@ -79,6 +79,13 @@ export const continueAccountAuth = (key: string, flowId: string, data: Record<st
     body: JSON.stringify(data),
   })
 
+/**
+ * Abandon a sign-in flow (the user left it): the connector stops what the
+ * flow holds open — e.g. Signal's `signal-cli link` process.
+ */
+export const cancelAccountAuth = (key: string, flowId: string) =>
+  request<void>(`/api/accounts/${enc(key)}/auth/${enc(flowId)}`, { method: 'DELETE' })
+
 export const logoutAccount = (key: string) =>
   request<{ success: boolean }>(`/api/accounts/${enc(key)}/logout`, { method: 'POST' })
 

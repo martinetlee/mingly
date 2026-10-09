@@ -2,7 +2,9 @@ import { useRef, useState } from 'react'
 import { Loader2, Paperclip, Send, X } from 'lucide-react'
 import type { Message } from '../../api/types'
 import { composeEmail, isValidAddress, parseAddressList, sendEmail, sendEmailFiles } from '../../api/email'
+import { ApiError } from '../../lib/http'
 import { errorMessage } from '../../lib/toast'
+import { newNonce, sendKey } from '../chats/chatUiStore'
 
 export type ComposerMode =
   | { kind: 'new'; accountId: number }
@@ -15,10 +17,6 @@ export interface ComposerInitial {
 }
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024 // Gmail's own limit per message
-
-function newNonce(): string {
-  return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
-}
 
 const fieldCls = 'min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder-slate-500 outline-none'
 
@@ -42,7 +40,10 @@ export default function MailComposer({ mode, initial, onSent, onCancel }: {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const nonce = useRef(newNonce())
+  // Same rule as chat sends (ChatPane): a retry reuses the nonce only when the
+  // previous attempt never got an answer AND nothing was changed since —
+  // an edited email is a new send, never the cached result of the old one
+  const failedSend = useRef<{ key: string; nonce: string } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
 
   const addFiles = (list: FileList | null) => {
@@ -62,16 +63,21 @@ export default function MailComposer({ mode, initial, onSent, onCancel }: {
     if (mode.kind === 'new' && !subject.trim() && !text.trim()) { setError('Write a subject or a message'); return }
     setBusy(true)
     setError(null)
+    const key = sendKey(
+      JSON.stringify([mode.kind === 'new' ? mode.accountId : mode.conversationId, subject.trim(), toList, ccList, text]),
+      files, mode.kind === 'reply' ? mode.target?.id : null,
+    )
+    const nonce = failedSend.current?.key === key ? failedSend.current.nonce : newNonce()
     try {
       let conversationId: number
       if (mode.kind === 'new') {
         const res = await composeEmail(
-          { accountId: mode.accountId, to: toList, cc: ccList, subject: subject.trim(), text, files, clientNonce: nonce.current },
+          { accountId: mode.accountId, to: toList, cc: ccList, subject: subject.trim(), text, files, clientNonce: nonce },
           files.length ? setProgress : undefined,
         ).promise
         conversationId = res.conversation_id
       } else {
-        const opts = { subject: subject.trim() || undefined, to: toList, cc: ccList, clientNonce: nonce.current }
+        const opts = { subject: subject.trim() || undefined, to: toList, cc: ccList, clientNonce: nonce }
         const replyTo = mode.target?.id
         if (files.length) {
           await sendEmailFiles(mode.conversationId, files, text || undefined, replyTo, setProgress, opts).promise
@@ -80,10 +86,13 @@ export default function MailComposer({ mode, initial, onSent, onCancel }: {
         }
         conversationId = mode.conversationId
       }
-      nonce.current = newNonce()
+      failedSend.current = null
       onSent(conversationId)
     } catch (e) {
-      setError(errorMessage(e)) // the same nonce is reused on retry: never sent twice
+      // No answer: the server may have sent it — an unchanged retry must reuse the nonce
+      const answered = e instanceof ApiError && e.status !== 0
+      failedSend.current = answered ? null : { key, nonce }
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
       setProgress(null)

@@ -108,7 +108,8 @@ export default function SyncTab({ cloudSync, settings }: { cloudSync: CloudSync;
             {(s.scans.queued ?? 0) > 0 && <span className="text-slate-400">{s.scans.queued} queued for scanning</span>}
             {s.dismissals.total > 0 && (
               <span className="flex items-center gap-1 text-slate-400">
-                {s.dismissals.synced}/{s.dismissals.total} dismissed
+                {/* Skipped ones are never uploaded: progress counts only the uploadable ones */}
+                {s.dismissals.synced}/{s.dismissals.total - (s.dismissals.skipped ?? 0)} dismissed
                 {settings.syncDismissals ? (
                   <span className="text-emerald-400" title="Dismissals are being synced">✓</span>
                 ) : (
@@ -116,6 +117,11 @@ export default function SyncTab({ cloudSync, settings }: { cloudSync: CloudSync;
                 )}
                 {s.dismissals.pending > 0 && settings.syncDismissals && (
                   <span className="text-slate-500">({s.dismissals.pending} pending)</span>
+                )}
+                {(s.dismissals.skipped ?? 0) > 0 && (
+                  <span className="text-slate-500" title="The chat or message was deleted before it could be uploaded, so these stay on this Mac">
+                    ({s.dismissals.skipped} skipped)
+                  </span>
                 )}
               </span>
             )}

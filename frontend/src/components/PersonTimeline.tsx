@@ -10,12 +10,14 @@ import { CalendarDays, Loader2 } from 'lucide-react'
 import { getPersonTimeline, type TimelineItem, type TimelineMeetingItem, type TimelineMessageItem } from '../api/timeline'
 import { calendarEventUrl, eventTimeLabel, parseDateKey } from '../pages/calendar/agenda'
 import { useLatestQuery } from '../hooks/useLatestQuery'
+import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { conversationTitle } from '../lib/conversation'
 import { conversationUrl, openConversationUrl } from '../lib/routes'
 import { errorMessage, reportError } from '../lib/toast'
 import { fmtDate } from '../utils/time'
 import ChannelIcon from './ChannelIcon'
+import { LoadError } from './ui'
 
 export const TIMELINE_PAGE = 30
 
@@ -34,24 +36,74 @@ function senderLabel(item: TimelineMessageItem): string {
   return item.message.sender?.name || 'Unknown'
 }
 
-export default function PersonTimeline({ personId }: { personId: number }) {
+/** Coalescing window for refreshes driven by the person's new messages */
+export const TIMELINE_LIVE_MS = 2000
+
+export default function PersonTimeline({ personId, identityKey }: {
+  personId: number
+  /**
+   * The person's identity ids (any stable string): a change means a merge,
+   * detach or undo moved conversations in or out — start over.
+   */
+  identityKey?: string
+}) {
   const first = useLatestQuery(
     ['person-timeline', personId],
     (signal) => getPersonTimeline(personId, { limit: TIMELINE_PAGE, signal }),
   )
-  // Older pages, appended to the first one; dropped whenever the first page reloads
+  // Older pages, appended to the first one. A *soft* refresh of the first
+  // page (new message, reconnect) keeps them: the previous first page joins
+  // them so nothing between the two falls out; any other reload drops them.
   const [older, setOlder] = useState<{ items: TimelineItem[]; hasMore: boolean } | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const genRef = useRef(0)
+  const softRef = useRef(false)
+  const prevFirstRef = useRef<{ personId: number; items: TimelineItem[] } | null>(null)
   useEffect(() => {
+    const soft = softRef.current
+    softRef.current = false
     genRef.current += 1
-    setOlder(null)
     setLoadingMore(false)
-  }, [first.data])
+    const prev = prevFirstRef.current
+    prevFirstRef.current = first.data ? { personId, items: first.data.items } : null
+    if (soft && prev && prev.personId === personId) {
+      setOlder((o) => (o ? { items: [...prev.items, ...o.items], hasMore: o.hasMore } : o))
+    } else {
+      setOlder(null)
+    }
+  }, [first.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useWsEvent('resync', () => { void first.refetch() })
+  const softRefetch = useCallback(() => {
+    softRef.current = true
+    return first.refetch()
+  }, [first.refetch]) // eslint-disable-line react-hooks/exhaustive-deps
+  useWsEvent('resync', () => { void softRefetch() })
 
-  const items = [...(first.data?.items ?? []), ...(older?.items ?? [])]
+  // A merge / detach / undo changed who this person is
+  const identityRef = useRef({ personId, identityKey })
+  useEffect(() => {
+    const prev = identityRef.current
+    identityRef.current = { personId, identityKey }
+    // Another person is loaded by its own key change
+    if (prev.personId !== personId || prev.identityKey === identityKey) return
+    softRef.current = false
+    void first.refetch()
+  }, [personId, identityKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Their new messages (sent, received in a one-to-one conversation shown here, or an email they're on)
+  const convIdsRef = useRef<Set<number>>(new Set())
+  const refreshSoon = useCoalescedRefetch(softRefetch, TIMELINE_LIVE_MS)
+  useWsEvent('new_message', (e) => {
+    const m = e.message
+    if (
+      m?.sender?.person_id === personId
+      || (m?.participants ?? []).some((p) => p.person_id === personId)
+      || convIdsRef.current.has(e.conversation_id)
+    ) refreshSoon()
+  })
+
+  const items = dedupeItems([...(first.data?.items ?? []), ...(older?.items ?? [])])
+  convIdsRef.current = new Set(items.flatMap((i) => (i.kind === 'message' ? [i.message.conversation_id] : [])))
   const hasMore = older ? older.hasMore : first.data?.has_more ?? false
 
   const loadMore = useCallback(async () => {
@@ -83,7 +135,7 @@ export default function PersonTimeline({ personId }: { personId: number }) {
       {first.loading ? (
         <p className="py-2 text-xs text-slate-500">Loading…</p>
       ) : first.error && !first.data ? (
-        <p className="py-2 text-xs text-red-400">{errorMessage(first.error)}</p>
+        <LoadError className="py-2" message={`Couldn’t load the timeline: ${errorMessage(first.error)}`} onRetry={() => { void first.refetch() }} />
       ) : items.length === 0 ? (
         <p className="py-2 text-xs text-slate-500">No messages yet</p>
       ) : (
@@ -110,6 +162,11 @@ export default function PersonTimeline({ personId }: { personId: number }) {
 }
 
 const itemKey = (item: TimelineItem) => (item.kind === 'meeting' ? `e${item.event.id}` : `m${item.message.id}`)
+
+function dedupeItems(items: TimelineItem[]): TimelineItem[] {
+  const seen = new Set<string>()
+  return items.filter((i) => { const k = itemKey(i); return seen.has(k) ? false : (seen.add(k), true) })
+}
 
 function TimelineRow({ item }: { item: TimelineMessageItem }) {
   const conv = item.conversation

@@ -8,35 +8,20 @@
  * from a person's timeline use pages/calendar/agenda calendarEventUrl).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Plug, RefreshCw } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
 import { getCalendarAccounts, getCalendarEvents, localDateKey, syncCalendars } from '../api/calendar'
 import { useAccounts } from '../hooks/useAccounts'
 import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useWsEvent } from '../hooks/useWebSocket'
-import { CONNECTIONS_PATH } from '../components/NoAccountsNotice'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+import AccountGate from '../components/AccountGate'
+import { LoadError } from '../components/ui'
 import { errorMessage, reportError } from '../lib/toast'
 import { dayLabel, groupByDay, parseDateKey, rangeLabel, shiftAnchor, startOfLocalDay, viewRange } from './calendar/agenda'
 import type { CalendarView } from './calendar/agenda'
 import EventRow from './calendar/EventRow'
 import CalendarPicker from './calendar/CalendarPicker'
-
-/** Empty state while no Gmail account is connected (same pattern as Mail's) */
-export function NoCalendarAccountNotice() {
-  return (
-    <div className="m-auto max-w-sm rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-5 text-center" data-testid="no-calendar-account">
-      <Plug size={20} className="mx-auto mb-2 text-indigo-400" aria-hidden />
-      <p className="text-sm font-medium text-slate-200">No calendar connected</p>
-      <p className="mt-1 text-xs text-slate-400">Connect a Gmail account to see its Google Calendar here.</p>
-      <Link
-        to={CONNECTIONS_PATH}
-        className="mt-4 inline-block rounded-lg bg-indigo-500 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-indigo-400"
-      >
-        Open Settings → Connections
-      </Link>
-    </div>
-  )
-}
 
 const VIEWS: { id: CalendarView; label: string }[] = [
   { id: 'agenda', label: 'Agenda' },
@@ -45,7 +30,8 @@ const VIEWS: { id: CalendarView; label: string }[] = [
 
 export default function Calendar() {
   const [params, setParams] = useSearchParams()
-  const { accounts, loaded } = useAccounts()
+  const accountsState = useAccounts()
+  const { accounts, loaded } = accountsState
   const gmailAccounts = useMemo(
     () => accounts.filter((a) => a.channel === 'gmail' && a.configured && a.account_id != null),
     [accounts],
@@ -62,17 +48,19 @@ export default function Calendar() {
 
   const events = useLatestQuery(
     ['calendar-events', from.getTime(), to.getTime(), accountId],
-    (signal) => getCalendarEvents(from, to, { accountId, signal }),
+    // Tagged with its range: while the next range loads, the previous one stays
+    // on screen laid out as it was
+    (signal) => getCalendarEvents(from, to, { accountId, signal }).then((r) => ({ ...r, from, to, view })),
     { enabled: hasAccounts, keepPreviousData: true },
   )
   const status = useLatestQuery(['calendar-accounts'], (signal) => getCalendarAccounts(signal), { enabled: hasAccounts })
   useWsEvent('calendar_synced', () => { void events.refetch(); void status.refetch() })
   useWsEvent('resync', () => { void events.refetch() })
 
-  const days = useMemo(
-    () => groupByDay(events.data?.events ?? [], from, to, view === 'week'),
-    [events.data, from, to, view],
-  )
+  const days = useMemo(() => {
+    const d = events.data
+    return d ? groupByDay(d.events, d.from, d.to, d.view === 'week') : []
+  }, [events.data])
 
   // Bring a linked event into view once it's rendered
   const highlightRef = useRef<HTMLDivElement | null>(null)
@@ -93,8 +81,18 @@ export default function Calendar() {
     }
   }
 
-  if (loaded && !hasAccounts) {
-    return <div className="flex flex-1 p-6"><NoCalendarAccountNotice /></div>
+  // t: today · ←/→: previous / next range · w / a: week / agenda view
+  // (the page never scrolls sideways, so ←/→ needn't yield to scrolling)
+  useKeyboardShortcuts({
+    t: () => goTo(null),
+    arrowleft: () => goTo(shiftAnchor(view, anchor, -1)),
+    arrowright: () => goTo(shiftAnchor(view, anchor, 1)),
+    w: () => setView('week'),
+    a: () => setView('agenda'),
+  }, { enabled: hasAccounts, yieldScrollKeys: false })
+
+  if (!hasAccounts) {
+    return <AccountGate state={accountsState} channels={['gmail']} title="No calendar connected" body="Connect a Gmail account to see its Google Calendar here." />
   }
 
   const problems = (status.data ?? []).filter((a) => a.error && (accountId == null || a.account_id === accountId))
@@ -148,6 +146,8 @@ export default function Calendar() {
             <ChevronRight size={16} />
           </button>
           <h2 className="ml-1 flex-1 truncate text-sm font-medium text-slate-200" data-testid="calendar-range">{rangeLabel(from, to)}</h2>
+          {/* The previous range stays on screen while the new one loads */}
+          {events.isStale && !events.error && <Loader2 size={13} className="animate-spin text-slate-500" aria-label="Loading" data-testid="calendar-stale" />}
           <button
             type="button"
             onClick={() => { void syncNow() }}
@@ -167,10 +167,10 @@ export default function Calendar() {
         ))}
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
-          {events.loading || !loaded ? (
+          {!loaded || (events.data == null && events.loading) ? (
             <p className="py-2 text-xs text-slate-500">Loading…</p>
-          ) : events.error && !events.data ? (
-            <p className="py-2 text-xs text-red-400">{errorMessage(events.error)}</p>
+          ) : events.error && (!events.data || events.isStale) ? (
+            <LoadError message={`Couldn’t load events: ${errorMessage(events.error)}`} onRetry={() => { void events.refetch() }} />
           ) : days.length === 0 ? (
             <p className="py-8 text-center text-sm text-slate-500" data-testid="calendar-empty">No events in these two weeks</p>
           ) : (

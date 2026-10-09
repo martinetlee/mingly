@@ -47,7 +47,7 @@ function flattenResults(results: GlobalSearchResults): ResultItem[] {
       type: 'chat',
       id: `chat-${c.id}`,
       label: conversationTitle(c),
-      sublabel: c.kind === 'direct' ? 'direct' : c.kind.replace('_', ' '),
+      sublabel: kindLabel(c.kind),
       icon: 'chat',
       navigateTo: conversationUrl(c),
       channel: c.channel,

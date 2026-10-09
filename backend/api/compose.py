@@ -15,7 +15,7 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation
 from backend.jobs import await_single
-from backend.serializers import message_out
+from backend.serializers import messages_out
 from backend.telegram import ids
 from backend.telegram.runtime import runtime
 from backend.telegram.convert import GENERAL_TOPIC_ID, rows_for
@@ -87,18 +87,19 @@ async def _reply_seq(conversation_id: int, reply_to_message_id: Optional[int]) -
 
 
 async def _persist_sent(conv: Conversation, msgs: list, reply_to_seq: Optional[int], topic_id: Optional[int]) -> list[dict]:
-    """Store sent Telegram messages; returns their Message payloads in order."""
+    """Store sent Telegram messages; returns their Message payloads in order
+    (with reply_to_message_id / reply_to_preview, like every other read)."""
     async with AsyncSessionLocal() as db:
         rows = await rows_for(db, conv.id, msgs, forum=conv.is_forum)
-        out = []
+        saved_ids = []
         for i, row in enumerate(rows):
             if topic_id is not None:
                 row["topic_id"] = topic_id
             if i == 0 and reply_to_seq:
                 row["reply_to_external_id"] = ids.message_key(reply_to_seq)
-            saved = await crud.save_message(db, **row)
-            out.append(message_out(saved))
-    return out
+            saved_ids.append((await crud.save_message(db, **row)).id)
+        by_id = {r[0].id: r for r in await crud.get_reply_previews(db, saved_ids)}
+        return await messages_out(db, [by_id[i] for i in saved_ids])
 
 
 class SendRequest(BaseModel):
@@ -336,6 +337,7 @@ async def _send_files_via_connector(conv, text, reply_to_message_id, client_nonc
     if reply_to_message_id is not None:
         await _same_conversation(conv.id, reply_to_message_id)
     temp_paths: list[str] = []
+    started = False
     try:
         outgoing = []
         for upload in files:
@@ -350,7 +352,12 @@ async def _send_files_via_connector(conv, text, reply_to_message_id, client_nonc
         )
 
         async def _send() -> dict:
-            body = await _send_via_connector(conv, draft)
+            nonlocal started
+            started = True
+            try:
+                body = await _send_via_connector(conv, draft)
+            finally:
+                _cleanup(temp_paths)
             message_id = body["message_id"]
             return {
                 "success": True, "partial": False, "message_ids": body["message_ids"], "messages": body["messages"],
@@ -359,7 +366,10 @@ async def _send_files_via_connector(conv, text, reply_to_message_id, client_nonc
 
         return _files_response(await _idempotent(client_nonce, _send))
     finally:
-        _cleanup(temp_paths)
+        # Once the send started, it owns the temp files (it may outlive this
+        # request if the client disconnects); otherwise clean up here.
+        if not started:
+            _cleanup(temp_paths)
 
 
 ALBUM_MAX = 10

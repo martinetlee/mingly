@@ -19,7 +19,8 @@ import { fmtDate } from '../../utils/time'
 import ChannelIcon, { channelLabel } from '../../components/ChannelIcon'
 import SenderAvatar from '../../components/SenderAvatar'
 import ConversationAvatar from '../../components/ConversationAvatar'
-import { conversationTitle, isDirectoryHit, kindLabel } from '../../lib/conversation'
+import { LoadError } from '../../components/ui'
+import { conversationTitle, isDirectoryHit, kindColor, kindLabel } from '../../lib/conversation'
 
 // Same tag color maps as ChatInfoPanel
 const TAG_COLORS: Record<string, string> = {
@@ -34,12 +35,6 @@ const TAG_COLORS: Record<string, string> = {
 const COLOR_DOTS: Record<string, string> = {
   indigo: 'bg-indigo-400', emerald: 'bg-emerald-400', rose: 'bg-rose-400',
   amber: 'bg-amber-400', violet: 'bg-violet-400', sky: 'bg-sky-400', slate: 'bg-slate-400',
-}
-const KIND_COLOR: Record<string, string> = {
-  direct: 'bg-indigo-500/20 text-indigo-400',
-  group: 'bg-purple-500/20 text-purple-400',
-  channel: 'bg-amber-500/20 text-amber-400',
-  email_thread: 'bg-sky-500/20 text-sky-400',
 }
 
 export type SortBy = 'recent' | 'unread' | 'alpha'
@@ -169,7 +164,7 @@ const ChatItem = memo(function ChatItem({ chat, selected, hasScamFlag, onSelect,
             {chat.is_pinned && <Pin size={11} className="flex-shrink-0 text-indigo-400" />}
             <p title={title} className={`truncate text-sm font-medium ${selected ? 'text-indigo-300' : 'text-gray-200'}`}>{title}</p>
             <ChannelIcon channel={chat.channel} />
-            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${KIND_COLOR[chat.kind] ?? 'bg-slate-600 text-slate-400'}`}>{kindLabel(chat.kind)}</span>
+            <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${kindColor(chat.kind)}`}>{kindLabel(chat.kind)}</span>
             {chat.is_forum && (
               <span className="flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium bg-purple-500/20 text-purple-400">
                 <MessageSquare size={9} className="inline" />
@@ -246,7 +241,7 @@ const DirectoryItem = memo(function DirectoryItem({ result, selected, onSelect }
         <div className="flex items-center gap-1.5">
           <p title={name} className="truncate text-sm font-medium text-gray-200">{name}</p>
           <ChannelIcon channel="telegram" />
-          <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${KIND_COLOR[result.kind] ?? 'bg-slate-600 text-slate-400'}`}>{kindLabel(result.kind)}</span>
+          <span className={`flex-shrink-0 inline-block rounded px-1 text-[10px] font-medium ${kindColor(result.kind)}`}>{kindLabel(result.kind)}</span>
         </div>
         {result.username && <p className="truncate text-xs text-slate-500 mt-0.5">@{result.username}</p>}
       </div>
@@ -419,6 +414,8 @@ export interface ChatListPaneProps {
   onSelectFolder: (id: number | null) => void
   search: string
   onSearchChange: (q: string) => void
+  /** Telegram is connected and its chats are listed: directory + message search sections show */
+  telegramAvailable: boolean
   /** Telegram directory matches not already in the list (Telegram-only) */
   telegramResults: TelegramDirectoryResult[]
   searchingTelegram: boolean
@@ -432,9 +429,13 @@ export interface ChatListPaneProps {
   selectedTag: Tag | null
   onSelectTag: (t: Tag | null) => void
   boardButton?: { title: string; onClick: () => void } | null
-  onNewChat: () => void
+  /** New conversation (a Telegram operation); null hides the button */
+  onNewChat: (() => void) | null
   chats: Conversation[]
   loading: boolean
+  /** The list failed to load (shown instead of "No chats found" while nothing is listed) */
+  error?: string | null
+  onRetry?: () => void
   loadingMore: boolean
   onLoadMore: () => void
   selectedId: number | null
@@ -450,7 +451,8 @@ export default function ChatListPane(p: ChatListPaneProps) {
   // Stable row callbacks so memoised rows don't re-render on unrelated updates
   const openMenu = useRef((chat: Conversation, x: number, y: number) => setContextMenu({ chat, x, y })).current
   const toggleTrack = useRef((chat: Conversation) => { void actionsRef.current.toggleTrack(chat) }).current
-  const searching = p.search.trim().length > 0
+  // Directory and message search are Telegram operations
+  const searching = p.telegramAvailable && p.search.trim().length > 0
   const searchExtras = (
     <>
       {searching && (
@@ -502,7 +504,7 @@ export default function ChatListPane(p: ChatListPaneProps) {
               className="w-full rounded-lg border border-slate-600 bg-slate-700/50 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors flex items-center justify-center gap-1.5"
             >
               <Search size={12} />
-              Search message content
+              Search Telegram messages
             </button>
           )}
         </div>
@@ -546,13 +548,16 @@ export default function ChatListPane(p: ChatListPaneProps) {
             onKeyDown={(e) => { if (e.key === 'Escape' && p.search) { e.stopPropagation(); p.onSearchChange('') } }}
             className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-sm text-gray-200 outline-none placeholder:text-slate-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30"
           />
-          <button
-            onClick={p.onNewChat}
-            title="New conversation"
-            className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
-          >
-            <Plus size={16} />
-          </button>
+          {p.onNewChat && (
+            <button
+              onClick={p.onNewChat}
+              title="New Telegram conversation (n)"
+              aria-label="New Telegram conversation"
+              className="flex-shrink-0 rounded-lg border border-slate-600 bg-slate-700 px-2 py-1.5 text-slate-400 hover:bg-indigo-500/20 hover:text-indigo-400 hover:border-indigo-500/30 transition-colors"
+            >
+              <Plus size={16} />
+            </button>
+          )}
           {p.boardButton && (
             <button
               onClick={p.boardButton.onClick}
@@ -593,7 +598,9 @@ export default function ChatListPane(p: ChatListPaneProps) {
       <div ref={p.listRef} className="flex min-h-0 flex-1 flex-col" data-chat-list="">
         {p.chats.length === 0 ? (
           <div className="flex-1 overflow-y-auto">
-            <p className="px-4 py-6 text-center text-sm text-slate-500">{p.loading ? 'Loading…' : 'No chats found'}</p>
+            {!p.loading && p.error
+              ? <LoadError message={`Couldn’t load chats: ${p.error}`} onRetry={p.onRetry} />
+              : <p className="px-4 py-6 text-center text-sm text-slate-500">{p.loading ? 'Loading…' : 'No chats found'}</p>}
             {searchExtras}
           </div>
         ) : (

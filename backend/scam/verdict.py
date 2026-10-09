@@ -18,8 +18,9 @@ from typing import Iterable, Optional
 from sqlalchemy import and_, or_, select
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Identity, Message, ScamDismissal, ScamFlag
+from backend.db.models import Conversation, Identity, Message, ScamDismissal, ScamFlag
 from backend.prefs import get_pref
+from backend.scam.channel_ids import telegram_scan_ids, telegram_user_ids
 from backend.serialization import iso_utc
 from backend.ws.manager import ws_manager
 
@@ -99,8 +100,9 @@ class VerdictResult:
 
 
 def _flag_snapshot(flag: ScamFlag) -> dict:
-    """Dismissal record of a sender flag. Internal ids only; cloud sync
-    resolves the channel ids when it uploads."""
+    """Dismissal record of a sender flag. Internal ids; cloud sync resolves
+    the channel ids when it uploads (``_add_cloud_v1_ids`` keeps Telegram's
+    for when the row is gone by then)."""
     return {
         "identity_id": flag.identity_id,
         "source": flag.source,
@@ -130,6 +132,33 @@ def _scan_snapshot(m: Message) -> dict:
         "llm_response": m.scam_llm_response,
         "trace": trace,
     }
+
+
+async def _add_cloud_v1_ids(db, dismissals: list[dict], messages: Iterable[Message]) -> None:
+    """Record, while the rows still exist, the Telegram ids cloud contract v1
+    identifies dismissed rows by (``cloud_v1``): scans {chat_id,
+    tg_message_id, sender_id}, sender flags {telegram_id}. An upload after
+    the message or sender was deleted (scammers delete their messages)
+    still carries them. Other channels get nothing (v2 refs only)."""
+    by_id = {m.id: m for m in messages}
+    scans = [d for d in dismissals if "message_id" in d and d["message_id"] in by_id]
+    by_conv: dict[int, list[Message]] = {}
+    for d in scans:
+        m = by_id[d["message_id"]]
+        by_conv.setdefault(m.conversation_id, []).append(m)
+    tg_ids = {
+        cid: await telegram_scan_ids(db, await db.get(Conversation, cid), msgs) for cid, msgs in by_conv.items()
+    }
+    for d in scans:
+        m = by_id[d["message_id"]]
+        tg = tg_ids.get(m.conversation_id)
+        if tg is not None:
+            d["cloud_v1"] = {"chat_id": tg.peer_id, "tg_message_id": tg.message_ids[m.id], "sender_id": tg.senders[m.id]}
+    flags = [d for d in dismissals if "message_id" not in d and d.get("identity_id")]
+    users = await telegram_user_ids(db, [d["identity_id"] for d in flags])
+    for d in flags:
+        if d["identity_id"] in users:
+            d["cloud_v1"] = {"telegram_id": users[d["identity_id"]]}
 
 
 async def set_verdict(
@@ -216,6 +245,7 @@ async def _set_message_verdict(message_ids: list, verdict: Optional[str]) -> Ver
                     result.identity_ids.append(sid)
                     result.flag_status[sid] = flag.status
 
+        await _add_cloud_v1_ids(db, dismissals, rows)
         for d in dismissals:
             is_flag = d.pop("__flag__", False)
             db.add(ScamDismissal(
@@ -253,9 +283,11 @@ async def _set_sender_verdict(identity_id: int, verdict: Optional[str]) -> Verdi
             elif flag.status == FLAG_ACTIVE:
                 dismissed = True
                 if _sync_dismissals_enabled():
+                    snapshot = _flag_snapshot(flag)
+                    await _add_cloud_v1_ids(db, [snapshot], [])
                     db.add(ScamDismissal(
                         dismissal_type="scammer",
-                        payload_json=json.dumps(_flag_snapshot(flag), default=str),
+                        payload_json=json.dumps(snapshot, default=str),
                         created_at=now,
                     ))
             _dismiss_flag(flag, now)

@@ -9,7 +9,7 @@ import ModerationPanel from './ModerationPanel'
 import ChannelIcon from './ChannelIcon'
 import ConversationAvatar from './ConversationAvatar'
 import { can } from '../lib/capabilities'
-import { conversationTitle, kindLabel } from '../lib/conversation'
+import { conversationTitle, kindColor, kindLabel } from '../lib/conversation'
 import { personUrl } from '../lib/routes'
 import { useConfirm } from './ui'
 import { reportError, toast } from '../lib/toast'
@@ -794,8 +794,8 @@ export function ArchiveHistorySection({ chat }: { chat: Conversation }) {
 }
 
 export default function ChatInfoPanel({ chat, onClose }: { chat: Conversation; onClose: () => void }) {
-  // Member lists exist for groups and channels
-  const hasMembers = chat.kind === 'group' || chat.kind === 'channel'
+  // Member lists: groups and channels whose channel can list them (capability 'members')
+  const hasMembers = (chat.kind === 'group' || chat.kind === 'channel') && can(chat, 'members')
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [chatTags, setChatTags] = useState<Tag[]>([])
   const [suggestions, setSuggestions] = useState<TagSuggestion[]>([])
@@ -898,12 +898,7 @@ export default function ChatInfoPanel({ chat, onClose }: { chat: Conversation; o
     }
   }
 
-  const typeColor = {
-    direct: 'bg-indigo-500/20 text-indigo-400',
-    group: 'bg-purple-500/20 text-purple-400',
-    channel: 'bg-amber-500/20 text-amber-400',
-    email_thread: 'bg-sky-500/20 text-sky-400',
-  }[chat.kind] ?? 'bg-slate-600 text-slate-400'
+  const typeColor = kindColor(chat.kind)
   const peerPersonId = chat.kind === 'direct' ? chat.peer?.person_id ?? null : null
   const title = conversationTitle(chat)
   const isAdmin = can(chat, 'admin_moderation')

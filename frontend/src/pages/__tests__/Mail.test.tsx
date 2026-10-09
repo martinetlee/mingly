@@ -74,20 +74,49 @@ describe('Mail space', () => {
   it('shows the connect notice without a Gmail account', () => {
     accountsState.accounts = []
     renderAt('/mail')
-    expect(screen.getByTestId('no-mail-account')).toBeTruthy()
+    expect(screen.getByTestId('no-accounts').textContent).toContain('No email account connected')
     expect(screen.getByText('Open Settings → Connections').getAttribute('href')).toBe('/settings?tab=connections')
+  })
+
+  it('a failed accounts request is an error with Retry, never "not connected"', () => {
+    accountsState.accounts = []
+    ;(accountsState as { error: unknown }).error = new Error('backend down')
+    try {
+      renderAt('/mail')
+      expect(screen.queryByTestId('no-accounts')).toBeNull()
+      expect(screen.getByTestId('load-error').textContent).toContain('backend down')
+    } finally {
+      (accountsState as { error: unknown }).error = null
+    }
+  })
+
+  it('a failed first page shows the error with Retry', async () => {
+    vi.mocked(listMailThreads).mockRejectedValueOnce(new Error('offline'))
+    renderAt('/mail')
+    const err = await screen.findByTestId('load-error')
+    expect(err.textContent).toContain('Couldn’t load mail: offline')
+    fireEvent.click(screen.getByText('Retry'))
+    await screen.findByText('Ann, me')
+  })
+
+  it('warns about an account that is signed out', async () => {
+    accountsState.accounts = [{ ...gmail, status: { state: 'unauthorized', error: null } }]
+    renderAt('/mail')
+    const warn = await screen.findByTestId('mail-account-problem')
+    expect(warn.textContent).toContain('Signed out')
+    expect(warn.querySelector('a')?.getAttribute('href')).toBe('/settings?tab=connections')
   })
 
   it('lists inbox threads with senders, and labels beyond the folders', async () => {
     renderAt('/mail')
     await screen.findByText('Ann, me')
     expect(screen.getByText('Quarterly plan')).toBeTruthy()
-    expect(listMailThreads).toHaveBeenCalledWith(expect.objectContaining({ folder: 'inbox', accountId: null, label: null }), undefined)
+    expect(listMailThreads).toHaveBeenCalledWith(expect.objectContaining({ folder: 'inbox', accountId: null, label: null }), expect.any(AbortSignal))
     await screen.findByText('Clients')
     fireEvent.click(screen.getByText('Clients'))
-    await waitFor(() => expect(listMailThreads).toHaveBeenLastCalledWith(expect.objectContaining({ label: 'Clients' }), undefined))
+    await waitFor(() => expect(listMailThreads).toHaveBeenLastCalledWith(expect.objectContaining({ label: 'Clients' }), expect.any(AbortSignal)))
     fireEvent.click(screen.getByText('Sent'))
-    await waitFor(() => expect(listMailThreads).toHaveBeenLastCalledWith(expect.objectContaining({ folder: 'sent', label: null }), undefined))
+    await waitFor(() => expect(listMailThreads).toHaveBeenLastCalledWith(expect.objectContaining({ folder: 'sent', label: null }), expect.any(AbortSignal)))
   })
 
   it('opens a thread: renders it as email, marks it read, archives it out of the inbox', async () => {
@@ -119,6 +148,49 @@ describe('Mail space', () => {
     expect((screen.getByLabelText('To') as HTMLInputElement).value).toBe('ann@example.com')
     expect((screen.getByLabelText('Cc') as HTMLInputElement).value).toBe('bob@example.com')
     expect((screen.getByLabelText('Subject') as HTMLInputElement).value).toBe('Re: Quarterly plan')
+  })
+})
+
+describe('Mail keyboard and filter', () => {
+  const key = (k: string, over: KeyboardEventInit = {}) => fireEvent.keyDown(window, { key: k, ...over })
+  const other: MailThread = { ...thread, id: 43, title: 'Invoice', thread: { ...thread.thread, senders: [{ name: 'Bob', person_id: 3, is_me: false }] } }
+
+  it('j / k open the next / previous thread; c composes; / focuses the filter', async () => {
+    vi.mocked(listMailThreads).mockResolvedValue([thread, other])
+    renderAt('/mail')
+    await screen.findByText('Invoice')
+    key('j')
+    expect(screen.getByTestId('where').textContent).toBe('/mail?conversationId=42')
+    key('j')
+    expect(screen.getByTestId('where').textContent).toBe('/mail?conversationId=43')
+    key('k')
+    expect(screen.getByTestId('where').textContent).toBe('/mail?conversationId=42')
+    key('/')
+    expect(document.activeElement).toBe(screen.getByLabelText('Filter threads'))
+    ;(document.activeElement as HTMLElement).blur()
+    key('c')
+    expect(await screen.findByTestId('mail-composer')).toBeTruthy()
+  })
+
+  it('the filter narrows the loaded threads', async () => {
+    vi.mocked(listMailThreads).mockResolvedValue([thread, other])
+    renderAt('/mail')
+    await screen.findByText('Invoice')
+    fireEvent.change(screen.getByLabelText('Filter threads'), { target: { value: 'bob' } })
+    expect(screen.getAllByTestId('mail-thread-row')).toHaveLength(1)
+    expect(screen.getByText('Invoice')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Filter threads'), { target: { value: 'zzz' } })
+    expect(screen.getByText('No loaded thread matches')).toBeTruthy()
+  })
+
+  it('r / shift+r reply in the open thread; e archives it', async () => {
+    renderAt('/mail?conversationId=42')
+    await screen.findByTestId('email-message')
+    key('r')
+    expect(await screen.findByTestId('mail-composer')).toBeTruthy()
+    ;(document.activeElement as HTMLElement)?.blur()
+    key('e')
+    await waitFor(() => expect(archiveThread).toHaveBeenCalledWith(42, true))
   })
 })
 

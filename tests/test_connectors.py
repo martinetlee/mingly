@@ -39,7 +39,7 @@ def _fanout_patches(pref="all"):
         patch.object(fanout, "send_native_notification", notify),
         patch.object(fanout, "stamp_triage", triage),
         patch("backend.scam.queue.note_sender_profile", profile),
-        patch("backend.api.settings.get_notif_pref", return_value=pref),
+        patch("backend.prefs.get_notif_pref", return_value=pref),
     ]
 
 

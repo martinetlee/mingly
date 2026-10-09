@@ -329,6 +329,11 @@ class SmsConnector(Connector):
     def status(self) -> ConnectorStatus:
         return ConnectorStatus(self._state, self._error)
 
+    def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:
+        """The account imports its history from chat.db; a conversation has
+        no older history to page in (HISTORY_BACKFILL is the account's)."""
+        return self.capabilities - {Capability.HISTORY_BACKFILL}
+
     async def _set_state(self, state: str, error: Optional[str] = None) -> None:
         if (state, error) == (self._state, self._error):
             return
@@ -354,6 +359,13 @@ class SmsConnector(Connector):
     # -- lifecycle -------------------------------------------------------------------
 
     async def start(self) -> bool:
+        generation = self._stop_generation
+        async with self._lifecycle():
+            return await self._start_locked(generation)
+
+    async def _start_locked(self, generation: int) -> bool:
+        if self._stop_generation != generation:  # a stop came after this start was asked for
+            return False
         if self._task is not None and not self._task.done():
             return True
         if self.account_id is None:
@@ -364,6 +376,11 @@ class SmsConnector(Connector):
         return True
 
     async def stop(self) -> None:
+        self._stop_generation += 1
+        async with self._lifecycle():
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         task, self._task = self._task, None
         if task is not None and not task.done():
             task.cancel()
@@ -454,7 +471,8 @@ class SmsConnector(Connector):
                 await self._apply_reactions(conv.external_id, reactions, live=realtime)
 
     async def _carry_reactions(self, conv_external_id: str, msgs: list[NormalizedMessage]) -> None:
-        """A message imported again keeps the reactions stored on it."""
+        """A message imported again keeps its per-reactor map (its meta is
+        replaced; ingest itself keeps the stored reaction summary)."""
         async with AsyncSessionLocal() as db:
             conv = await crud.get_conversation_by_external(db, self.account_id, conv_external_id)
             if conv is None:
@@ -471,8 +489,7 @@ class SmsConnector(Connector):
                 continue
             old_meta = json.loads(old.meta_json) if old.meta_json else {}
             if old_meta.get("sms_reactions"):
-                m.meta["sms_reactions"] = old_meta["sms_reactions"]
-            m.reactions_json = old.reactions_json
+                m.meta = {**(m.meta or {}), "sms_reactions": old_meta["sms_reactions"]}
 
     async def _apply_reactions(self, conv_external_id: str, reactions: list[Reaction], *, live: bool) -> None:
         changed: dict[int, Message] = {}
@@ -580,8 +597,10 @@ class SmsConnector(Connector):
         raise AuthFlowError("Unknown or expired sign-in flow")  # connecting is a single step
 
     async def _restart(self) -> None:
-        await self.stop()
-        await self.start()
+        generation = self._stop_generation
+        async with self._lifecycle():
+            await self._stop_locked()
+            await self._start_locked(generation)
 
     async def logout(self) -> None:
         """Stop reading Messages. What was imported stays; connecting again

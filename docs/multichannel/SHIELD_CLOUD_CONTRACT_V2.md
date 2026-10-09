@@ -309,6 +309,17 @@ Differences from v1:
 - `message_id` values are still only consistent within one request.
 - `GET /result/{id}` and `POST /followup/{id}` are unchanged.
 
+A v1 detection server keeps receiving Telegram scans exactly as before the
+multi-channel refactor: Telegram message ids in `message_id` /
+`target_message_ids`, Telegram sender ids in `sender_id` / `telegram_id`
+(Telethon's `sender_id`: the user, or the marked peer id of the channel or chat
+the message was posted as), and `chat_metadata` = `{chat_id, name, type}`. The
+`chat_history` follow-up answers with the same Telegram ids. Other channels have
+none of these ids, so a v1 server gets internal message ids that are consistent
+within one request, `sender_id: null`, and
+`chat_metadata` = `{name, type, channel}`. The local pipeline's prompt keeps
+the Telegram header too (`Chat: <name> (<type>)`, `Profile - ID:<telegram id>`).
+
 `POST /areFlaggedScams` is unchanged (`{"telegram_ids": [...]}`). Hashes are
 per install, so a global known-scammer lookup only makes sense for public-id
 channels.
@@ -324,6 +335,14 @@ channels.
   change during the POST. Scans are marked only if `scam_updated_at` did not
   change meanwhile. Reports, dismissals and feedback get `synced_at` or status.
 - Rows already uploaded under v1 are not sent again under v2.
+- Dismissals are queued with internal ids. For Telegram rows they also record
+  the Telegram ids when they are created (`cloud_v1`), so a dismissal uploaded
+  after its message or sender was deleted still carries them, in v1 and in v2
+  (`{"id": …}`). A dismissal whose conversation or sender is gone and has no such
+  snapshot can never be uploaded. It is retired: `cloud_status` becomes
+  `skipped` with a `cloud_skipped_reason`, and `synced_at` is set. Uploaded rows
+  get `cloud_status = synced`. Rows of other channels that still
+  exist wait for a v2 server, as described above.
 - If the vault is locked, there is no salt and v2 uploads fail for that cycle.
   Sync only runs while the vault is unlocked anyway.
 

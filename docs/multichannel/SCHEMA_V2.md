@@ -24,8 +24,14 @@ document. Where this doc and old code disagree, this doc wins.
 - `schema_meta(key TEXT PK, value TEXT)` holds `schema_generation = '2'`.
 - `init_db()`: if the DB file exists and is not generation 2 (no
   `schema_meta`, or it has the pre-v2 `chats` table), copy it to
-  `DATA_DIR/backups/mingly-pre-v2-<ts>.db` (sqlite online backup), delete the
+  `DATA_DIR/backups/mingly-retired-gen<N>-<ts>.db` (sqlite online backup; the
+  migration runner's `-pre-v*` backup rotation never touches it), delete the
   original (+ `-wal`/`-shm`), and create a fresh DB. Log the backup path.
+  A DB stamped with a NEWER generation is never touched: startup fails
+  (`NewerSchemaError`).
+- Ids are never reused: every table keyed by an integer `id` is
+  AUTOINCREMENT (`models.AUTOINCREMENT_TABLES`; migration 2 rebuilt existing
+  tables).
 - Fresh DB: `create_all`, then stamp generation 2, then run v2 migrations
   (`backend/db/migrations/runner.py`, list starts empty at version 1) and seed
   default tags.
@@ -263,13 +269,13 @@ Telegram-only operations on a non-Telegram conversation answer
 | `/api/compose/{send,edit,delete,forward,send-files}` | same paths; bodies: `conversation_id`, `reply_to_message_id`, `message_id(s)`, forward `{from_conversation_id, message_ids, to_conversation_id}` |
 | `/api/admin/{telegram_id}/…` | `/api/admin/{conversation_id}/…`; target users as `identity_id` |
 | `/api/media-download/{chat}/{msg}` | `POST /api/media-download/{attachment_id}` → `{url, kind}` |
-| `/api/contacts` (list), `/{contact_id}`, `/by-telegram/{tid}`, `/{tid}` | `GET /api/people` (`?contacts_only=`), `GET/PUT /api/people/{person_id}` |
+| `/api/contacts` (list), `/{contact_id}`, `/by-telegram/{tid}`, `/{tid}` | `GET /api/people` (`?contacts_only=`), `GET/PUT /api/people/{person_id}`. A person merged into another answers 404 `{"detail": "Person not found", "merged_into": <surviving person_id>}` on every `/api/people/{person_id}/…` route (chained merges followed, undone merges ignored) |
 | `/api/contacts/by-telegram/{tid}/important` | `POST /api/people/{person_id}/important` |
 | (new) | `GET /api/people/{person_id}/conversations` → the person's direct Conversations on every channel, most recent first |
 | `/api/contacts/{tid}/positions…` | `/api/people/{person_id}/positions…` |
 | `/api/contacts/{id}/relationship-status[/auto]`, `/refresh-statuses` | `/api/people/{person_id}/relationship-status[/auto]`, `/api/people/refresh-statuses` |
 | `/api/contacts/sync` | `POST /api/people/sync` (address-book sync of every connector that has one) |
-| `/api/contacts/resolve/{tid}`, `/resolve-batch` | removed (payloads carry person ids); `GET /api/telegram/users/{user_id}/person` → `{person_id}` for `tg://user?id=` links |
+| `/api/contacts/resolve/{tid}`, `/resolve-batch` | removed (payloads carry person ids); `GET /api/telegram/users/{user_id}/person` → `{person_id, identity_id}` for `tg://user?id=` links (404 when the user is neither stored nor resolvable through Telegram; no placeholder person is created) |
 | `/api/people/{tid}/notes…` | `/api/people/{person_id}/notes…` |
 | `/api/profiles/{user_id or @username}` | `GET /api/telegram/identities/{identity_id}/profile` (live Telegram profile); `GET /api/telegram/resolve?username=` → `{person_id?, conversation_id?}` |
 | `/api/conversations` (AI chat history) | `/api/ai/conversations` |
@@ -288,9 +294,12 @@ Telegram-only routes live in `backend/api/telegram.py` (prefix `/api/telegram`).
 ## WebSocket events (v2)
 
 ```jsonc
-{ "type": "new_message", "conversation_id", "message_id" /* null for a new-conversation ping */,
+{ "type": "new_message", "conversation_id", "channel"? /* telegram | gmail | signal | sms */,
+  "message_id" /* null for a new-conversation ping */,
   "conversation_title", "sender_name", "text", "is_tracked", "is_outgoing", "message"? }
 { "type": "message_edited", "conversation_id", "message_id", "message" }
+// "message" is the full Message payload exactly as stored reads return it
+// (reply_to_message_id / reply_to_preview, participants, attachments…)
 { "type": "messages_deleted", "conversation_id", "message_ids" }
 { "type": "messages_pinned", "conversation_id", "message_ids", "pinned" }
 { "type": "media_ready", "conversation_id", "message_id", "attachment_id", "kind", "url" }

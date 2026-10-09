@@ -67,6 +67,68 @@ def telegram_message_id(message) -> int:
     return tg_ids.tg_message_id_of(message)
 
 
+@dataclass
+class TelegramScanIds:
+    """Telegram ids of a Telegram conversation's messages, for the payloads
+    that still speak them (external detection API v1, the local prompt,
+    known-scammer signatures)."""
+    peer_id: int
+    message_ids: dict  # message_id -> Telegram message id
+    senders: dict  # message_id -> Telegram sender id (user id, or the chat posting as itself) or None
+
+
+async def telegram_scan_ids(db: AsyncSession, conversation, messages) -> Optional["TelegramScanIds"]:
+    """Telegram ids for ``messages`` of ``conversation``; None when it is not
+    a Telegram conversation.
+
+    The sender is what Telethon's ``msg.sender_id`` was: the user; else the
+    channel / chat the message was posted as (``ids.sender_peer_of``); else,
+    for a post without a recorded sender (broadcast channel posts, anonymous
+    group admins, whose sender name is the chat's title, and rows stored
+    before the sender peer was recorded), the chat itself."""
+    if conversation is None or conversation.account is None or conversation.account.channel != TELEGRAM:
+        return None
+    from backend.telegram import ids as tg_ids
+
+    users = await tg_ids.user_ids_for(db, {m.sender_identity_id for m in messages if m.sender_identity_id})
+    peer = tg_ids.peer_id_of(conversation)
+    senders = {m.id: _telegram_sender(conversation, peer, m, users) for m in messages}
+    return TelegramScanIds(peer, {m.id: tg_ids.tg_message_id_of(m) for m in messages}, senders)
+
+
+def _telegram_sender(conversation, peer: int, message, users: dict) -> Optional[int]:
+    from backend.telegram import ids as tg_ids
+
+    if message.sender_identity_id:
+        return users.get(message.sender_identity_id)
+    posted_as = tg_ids.sender_peer_of(message)
+    if posted_as is not None:
+        return posted_as
+    if conversation.kind == "channel" or (message.sender_name and message.sender_name == conversation.title):
+        return peer
+    return None
+
+
+def telegram_sender_condition(conversation, sender: int):
+    """SQL form of ``_telegram_sender`` for identity-less messages of a
+    Telegram ``conversation``: the messages whose Telegram sender is
+    ``sender`` (a channel / chat peer id; user senders have identities)."""
+    from sqlalchemy import and_, func, or_
+
+    from backend.db.models import Message
+    from backend.telegram import ids as tg_ids
+
+    posted_as = func.json_extract(Message.meta_json, "$.sender_peer")
+    no_identity = Message.sender_identity_id.is_(None)
+    match = and_(no_identity, posted_as == sender)
+    if sender != tg_ids.peer_id_of(conversation):
+        return match
+    as_chat = posted_as.is_(None) if conversation.kind == "channel" else and_(
+        posted_as.is_(None), Message.sender_name == conversation.title,
+    )
+    return or_(match, and_(no_identity, as_chat))
+
+
 # ---------------------------------------------------------------------------
 # Cloud contract v2: install salt, hashed handles, opaque refs
 # ---------------------------------------------------------------------------

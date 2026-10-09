@@ -10,6 +10,14 @@ streams envelopes, which ``envelopes.parse_envelope`` turns into events and
 this class persists through ``backend.ingest.service``. The process is
 restarted with exponential backoff when it dies; state changes are broadcast
 as ``connector_status`` events.
+
+signal-cli has already acknowledged an envelope to the Signal server when it
+hands it over, and a linked device can't fetch history, so an envelope that
+isn't stored is gone: ``stop`` first ends the child (no new input), then
+lets the consumer store what is queued (bounded by ``drain_timeout``), and
+a transient failure (a locked database, a timed-out signal-cli call) is
+retried a few times instead of dropping the envelope. Only a crash of Mingly
+itself can still lose queued envelopes.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from backend import config
 from backend.connectors.base import (
@@ -76,6 +85,16 @@ class _LinkFlow:
     stdout: list = field(default_factory=list)
     stderr: deque = field(default_factory=lambda: deque(maxlen=20))
     readers: list = field(default_factory=list)
+    watchdog: Optional[asyncio.Task] = None  # ends ``signal-cli link`` at LINK_TIMEOUT
+    expired: bool = False
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 @dataclass
@@ -116,6 +135,10 @@ class SignalConnector(Connector):
     backoff_initial = 2.0
     backoff_max = 300.0
     healthy_after = 60.0
+    # Envelope handling: waits before retrying a transient failure, and how
+    # long ``stop`` lets the consumer store what is already queued.
+    retry_delays: tuple = (0.5, 2.0, 5.0)
+    drain_timeout = 15.0
 
     def __init__(self, account_id: Optional[int] = None) -> None:
         super().__init__(account_id)
@@ -162,6 +185,15 @@ class SignalConnector(Connector):
     # -- lifecycle ---------------------------------------------------------------
 
     async def start(self) -> bool:
+        generation = self._stop_generation
+        async with self._lifecycle():
+            return await self._start_locked(generation)
+
+    async def _start_locked(self, generation: int) -> bool:
+        """Start under the lifecycle lock; spawns nothing when a stop was
+        requested after the start (``generation``) was."""
+        if self._stop_generation != generation:
+            return False
         if self._supervisor is not None and not self._supervisor.done():
             return True
         if self.account_id is None:
@@ -172,6 +204,8 @@ class SignalConnector(Connector):
                 await crud.get_identity(db, account.self_identity_id)
                 if account is not None and account.self_identity_id else None
             )
+        if self._stop_generation != generation:
+            return False
         if account is None or not account.external_id:
             await self._set_state("unauthorized")
             return False
@@ -183,12 +217,16 @@ class SignalConnector(Connector):
             await self._set_state("error", "Signal support isn't set up on this Mac. Reconnect Signal to set it up.")
             return False
         linked = await cli.list_accounts(exe)
+        if self._stop_generation != generation:
+            return False
         if linked is not None and self._number not in linked:
             await self._set_state("unauthorized", "This device is no longer linked. Link it again from Connections.")
             return False
         aci = cli.account_aci(self._number)
         if aci and aci != self._aci:
             await self._learn_aci(aci)
+        if self._stop_generation != generation:
+            return False
 
         self._stopping = False
         self._queue = asyncio.Queue()
@@ -198,17 +236,43 @@ class SignalConnector(Connector):
         return True
 
     async def stop(self) -> None:
+        self._stop_generation += 1
+        async with self._lifecycle():
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         self._stopping = True
         rpc = self._rpc
         if rpc is not None:
-            await rpc.stop()
-        tasks = [t for t in (self._supervisor, self._consumer) if t is not None and not t.done()]
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+            await rpc.stop()  # no new envelopes; the reader queued every line the child wrote
+        supervisor = self._supervisor
+        if supervisor is not None and not supervisor.done():
+            supervisor.cancel()  # the supervisor stops a child it started meanwhile
+            await asyncio.gather(supervisor, return_exceptions=True)
+        await self._drain()
+        consumer = self._consumer
+        if consumer is not None and not consumer.done():
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
         self._supervisor = self._consumer = None
         self._rpc = None
         await self._set_state("stopped")
+
+    async def _restart(self) -> None:
+        generation = self._stop_generation
+        async with self._lifecycle():
+            await self._stop_locked()
+            await self._start_locked(generation)
+
+    async def _drain(self) -> None:
+        """Let the consumer store the envelopes already received."""
+        queue, consumer = self._queue, self._consumer
+        if queue is None or consumer is None or consumer.done():
+            return
+        try:
+            await asyncio.wait_for(queue.join(), self.drain_timeout)
+        except asyncio.TimeoutError:
+            logger.error("Signal %s stopped with %d received envelopes not stored", self.account_key, queue.qsize())
 
     async def _supervise(self, exe: str) -> None:
         loop = asyncio.get_running_loop()
@@ -223,9 +287,16 @@ class SignalConnector(Connector):
                 error = f"Could not start signal-cli: {e}"
             else:
                 self._rpc = rpc
-                await self._set_state("syncing")
-                up = spawn(self._on_process_up(rpc), name=f"signal_directory:{self.account_key}")
-                code = await rpc.wait()
+                up: Optional[asyncio.Task] = None
+                try:
+                    await self._set_state("syncing")
+                    up = spawn(self._on_process_up(rpc), name=f"signal_directory:{self.account_key}")
+                    code = await rpc.wait()
+                except asyncio.CancelledError:  # stop() came while the child was starting
+                    if up is not None:
+                        up.cancel()
+                    await rpc.stop()
+                    raise
                 up.cancel()
                 self._rpc = None
                 error = rpc.last_error() or f"signal-cli exited with code {code}"
@@ -263,9 +334,26 @@ class SignalConnector(Connector):
         while True:
             params = await queue.get()
             try:
+                await self._handle_with_retry(params)
+            finally:
+                queue.task_done()
+
+    async def _handle_with_retry(self, params: dict) -> None:
+        """Store one envelope; a transient failure is retried, since the
+        envelope can't be received again."""
+        for delay in (*self.retry_delays, None):
+            try:
                 await self.handle_receive(params)
+                return
+            except (OperationalError, asyncio.TimeoutError) as e:
+                if delay is None:
+                    logger.error("Signal envelope for %s dropped after retries: %r", self.account_key, e)
+                    return
+                logger.warning("Signal envelope for %s failed (%r); retrying in %.1fs", self.account_key, e, delay)
+                await asyncio.sleep(delay)
             except Exception:
                 logger.exception("Signal envelope handling failed for %s", self.account_key)
+                return
 
     # -- address book --------------------------------------------------------------
 
@@ -375,7 +463,7 @@ class SignalConnector(Connector):
                 self._groups_looked_up.add(ref.external_id)  # joined since start: list groups again, once
                 try:
                     self._set_groups(await rpc.call("listGroups") or [])
-                except RpcError:
+                except (RpcError, asyncio.TimeoutError):  # the message is stored with a fallback title
                     logger.debug("listGroups failed", exc_info=True)
             g = self._groups.get(ref.external_id, {})
             return NormalizedConversation(
@@ -394,10 +482,9 @@ class SignalConnector(Connector):
     async def _on_message(self, ev: MessageEvent) -> None:
         conv = await self._conversation(ev.conv)
         meta = dict(ev.meta)
-        reactions_json = None
-        attachments = list(ev.attachments)
-        # Re-delivered or edited: keep what the event doesn't carry
-        # (reactions, an edit's unchanged attachments).
+        # Re-delivered or edited: ingest keeps what the event doesn't carry
+        # (reactions, an edit's unchanged attachments); the per-reactor map in
+        # meta is merged here since the event's meta replaces the stored one.
         async with AsyncSessionLocal() as db:
             stored_conv = await crud.get_conversation_by_external(db, self.account_id, ev.conv.external_id)
             stored = (await crud.get_message_by_external(db, stored_conv.id, ev.external_id)
@@ -406,15 +493,6 @@ class SignalConnector(Connector):
                 old_meta = json.loads(stored.meta_json) if stored.meta_json else {}
                 if old_meta.get("signal_reactions"):
                     meta["signal_reactions"] = old_meta["signal_reactions"]
-                reactions_json = stored.reactions_json
-                if not attachments:
-                    attachments = [
-                        NormalizedAttachment(a.kind, a.filename, a.mime_type, a.size, a.external_ref)
-                        for a in (await db.execute(
-                            select(MessageAttachment).where(MessageAttachment.message_id == stored.id)
-                            .order_by(MessageAttachment.position)
-                        )).scalars().all()
-                    ]
         msg = NormalizedMessage(
             external_id=ev.external_id,
             date=ev.date,
@@ -424,9 +502,8 @@ class SignalConnector(Connector):
             is_outgoing=ev.is_outgoing,
             is_edited=ev.is_edit or bool(stored is not None and stored.is_edited),
             reply_to_external_id=ev.reply_to_external_id,
-            attachments=attachments,
+            attachments=list(ev.attachments) or None,
             meta=meta,
-            reactions_json=reactions_json,
         )
         res = await ingest_service.ingest(self.account_id, self.channel, conv, [msg], source="realtime")
         if res.updated:
@@ -647,11 +724,29 @@ class SignalConnector(Connector):
 
     def _drop_flow(self, flow_id: str) -> None:
         flow = self._flows.pop(flow_id, None)
-        if flow is not None and flow.proc.returncode is None:
-            try:
-                flow.proc.kill()
-            except ProcessLookupError:
-                pass
+        if flow is not None:
+            _kill(flow.proc)
+            if flow.watchdog is not None:
+                flow.watchdog.cancel()
+
+    async def abandon_flow(self, flow_id: str) -> None:
+        self._drop_flow(flow_id)
+        self._setup_flows.pop(flow_id, None)
+
+    async def close_flows(self) -> None:
+        for flow_id in list(self._flows):
+            self._drop_flow(flow_id)
+        self._setup_flows.clear()
+
+    async def _expire_link(self, flow: _LinkFlow) -> None:
+        """End ``signal-cli link`` once the code expired, whether or not the
+        sign-in dialog is still polling (an abandoned one isn't)."""
+        remaining = LINK_TIMEOUT - (time.monotonic() - flow.started)
+        try:
+            await asyncio.wait_for(asyncio.shield(flow.proc.wait()), max(remaining, 0.0))
+        except asyncio.TimeoutError:
+            flow.expired = True
+            _kill(flow.proc)
 
     # -- setup (app-managed signal-cli, see install.py) -------------------------
 
@@ -754,6 +849,7 @@ class SignalConnector(Connector):
             detail = next((ln for ln in reversed(flow.stderr) if ln.strip()), None) or "no link code received"
             return self._error_step(flow_id, f"signal-cli could not start linking: {detail}")
         self._flows[flow_id] = flow
+        flow.watchdog = spawn(self._expire_link(flow), name="signal_link_watchdog")
         while len(self._flows) > MAX_OPEN_FLOWS:
             self._drop_flow(next(iter(self._flows)))
         return self._qr_step(flow_id, flow)
@@ -764,6 +860,9 @@ class SignalConnector(Connector):
         flow = self._flows.get(flow_id)
         if flow is None:
             raise AuthFlowError("Unknown or expired sign-in flow")
+        if flow.expired:
+            self._drop_flow(flow_id)
+            return self._error_step(flow_id, "The link code expired. Start again to get a new one.")
         if flow.proc.returncode is None:
             try:
                 await asyncio.wait_for(asyncio.shield(flow.proc.wait()), POLL_WAIT)
@@ -817,10 +916,6 @@ class SignalConnector(Connector):
         if was_registered:  # re-linked an account the manager already runs
             spawn(self._restart(), name=f"signal_restart:{self.account_key}")
         return AuthStep(flow_id, "done", title="Signal linked", message=f"Linked {number}. {NO_HISTORY_NOTE}")
-
-    async def _restart(self) -> None:
-        await self.stop()
-        await self.start()
 
     async def logout(self) -> None:
         """Stop, unlink this device and delete its local Signal data."""

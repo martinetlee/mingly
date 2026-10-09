@@ -22,7 +22,10 @@ Builds on `SCHEMA_V2.md` (still authoritative for ids, payloads, routes).
 - **Accounts API** (`backend/api/accounts.py`): `GET /api/accounts` →
   `{accounts: [describe()], channels: [{channel, display_name, multi_account}]}`;
   `POST /api/accounts/{key}/auth`, `POST /api/accounts/{key}/auth/{flow_id}`,
-  `POST /api/accounts/{key}/logout`, `DELETE /api/accounts/{key}`.
+  `DELETE /api/accounts/{key}/auth/{flow_id}` (cancel a sign-in flow; idempotent,
+  always 204), `POST /api/accounts/{key}/logout` (signs one account out; the
+  session and its WebSockets stay up, the change arrives as `connector_status`),
+  `DELETE /api/accounts/{key}`.
 - **Ingest** (`backend/ingest/normalized.py`, `backend/ingest/service.py`):
   connectors translate to `NormalizedConversation` / `NormalizedMessage` /
   `NormalizedIdentity` and call `ingest(account_id, channel, conversation, messages,

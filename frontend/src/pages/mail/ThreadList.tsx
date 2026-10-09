@@ -23,6 +23,7 @@ const ThreadRow = memo(function ThreadRow({ thread, selected, onOpen }: {
         selected ? 'bg-indigo-500/15' : 'hover:bg-slate-700/40'
       }`}
       aria-current={selected ? 'true' : undefined}
+      data-thread-id={thread.id}
       data-testid="mail-thread-row"
     >
       <div className="flex items-center gap-1.5">

@@ -3,9 +3,15 @@
 A connector translates its channel's objects into these and never writes
 conversations, messages or identities itself (Telegram predates this and
 writes through ``backend.telegram.ids``; new channels use the service).
+
+``None`` in an Optional field means "not known in this delivery": the stored
+value is kept (an edit or receipt that doesn't carry reactions, attachments
+or recipients leaves them alone). To clear something, pass the empty value
+explicitly: ``attachments=[]``, ``participants=[]``, ``meta={}``, or
+``NormalizedConversation.clear_peer``.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
@@ -46,10 +52,11 @@ class NormalizedMessage:
     is_edited: bool = False
     kind: str = "message"  # message | service
     reply_to_external_id: Optional[str] = None
-    participants: list[tuple[NormalizedIdentity, str]] = field(default_factory=list)  # (identity, to|cc|bcc)
-    attachments: list[NormalizedAttachment] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
-    reactions_json: Optional[str] = None
+    # (identity, to|cc|bcc); None = keep the stored recipients
+    participants: Optional[list[tuple[NormalizedIdentity, str]]] = None
+    attachments: Optional[list[NormalizedAttachment]] = None  # None = keep the stored files
+    meta: Optional[dict[str, Any]] = None  # None = keep; {} = clear
+    reactions_json: Optional[str] = None  # None = keep
     delivery_state: str = "sent"
 
 
@@ -58,7 +65,8 @@ class NormalizedConversation:
     external_id: str
     kind: str  # direct | group | channel | email_thread
     title: Optional[str] = None
-    peer: Optional[NormalizedIdentity] = None  # the other party of a one-to-one conversation
+    peer: Optional[NormalizedIdentity] = None  # the other party of a one-to-one conversation (None = keep)
+    clear_peer: bool = False  # no longer one-to-one: drop the stored peer
     members_count: Optional[int] = None
     unread_count: Optional[int] = None
     is_archived: Optional[bool] = None

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ReactNode } from 'react'
-import { render, screen, waitFor, act, fireEvent, within } from '@testing-library/react'
+import { render, screen, waitFor, act, fireEvent, within, cleanup } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { ScannedMessage, ScamVerdictResponse } from '../../api/types'
 import { WebSocketClient } from '../../lib/ws'
@@ -67,7 +67,7 @@ const history = (over: Record<string, unknown> = {}) => ({
   last_synced_at: null, last_sync_status: null, last_sync_error: null, last_sync_details: null, running: false,
   flags: { total: 0, synced: 0, pending: 0 }, reports: { total: 0, synced: 0, pending: 0 },
   scans: { total: 0, synced: 0, pending: 0, total_scanned: 0, scam_detected: 0, failed: 0 },
-  dismissals: { total: 0, synced: 0, pending: 0 }, analytics: { total: 0, synced: 0, pending: 0, latest: null },
+  dismissals: { total: 0, synced: 0, pending: 0, skipped: 0 }, analytics: { total: 0, synced: 0, pending: 0, latest: null },
   ...over,
 })
 
@@ -257,5 +257,20 @@ describe('Shield cloud sync', () => {
     fireEvent.click(screen.getByRole('button', { name: /Sync History/ }))
     const btn = await screen.findByRole('button', { name: 'Syncing…' })
     expect((btn as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('dismissals: progress counts only uploadable ones; skipped shown separately, only when > 0', async () => {
+    api.getSyncHistory.mockResolvedValue(history({ dismissals: { total: 10, synced: 6, pending: 1, skipped: 3 } }))
+    renderShield()
+    fireEvent.click(screen.getByRole('button', { name: /Sync History/ }))
+    expect(await screen.findByText('6/7 dismissed')).toBeTruthy()
+    expect(screen.getByText('(3 skipped)').getAttribute('title')).toBe('The chat or message was deleted before it could be uploaded, so these stay on this Mac')
+    cleanup()
+
+    api.getSyncHistory.mockResolvedValue(history({ dismissals: { total: 4, synced: 4, pending: 0, skipped: 0 } }))
+    renderShield()
+    fireEvent.click(screen.getByRole('button', { name: /Sync History/ }))
+    expect(await screen.findByText('4/4 dismissed')).toBeTruthy()
+    expect(screen.queryByText(/skipped/)).toBeNull()
   })
 })

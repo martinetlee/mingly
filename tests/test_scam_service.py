@@ -399,8 +399,10 @@ async def test_request_carries_channel_kind_and_telegram_user_ids(db, client, ev
     req = client.requests[0]
     sender = await _identity_id(10)
     assert req.channel == "telegram" and req.conversation_kind == "direct"
-    assert req.metadata == {"conversation_id": await _conv_id(), "title": "G", "kind": "direct", "channel": "telegram"}
+    assert req.metadata == {"conversation_id": await _conv_id(), "title": "G", "kind": "direct", "channel": "telegram",
+                            "telegram_peer_id": -100500}
     assert req.targets[0]["identity_id"] == sender and req.targets[0]["telegram_user_id"] == 10
+    assert (req.targets[0]["telegram_message_id"], req.targets[0]["telegram_sender_id"]) == (2, 10)
     assert req.context[0]["telegram_user_id"] == 10
     assert req.profiles[0]["identity_id"] == sender and req.profiles[0]["telegram_user_id"] == 10
     assert req.target_identity_ids == [sender]
@@ -413,7 +415,8 @@ async def test_non_telegram_request_has_no_telegram_ids(db, client, events):
     await _check(1)
     req = client.requests[0]
     assert req.channel == "gmail" and req.conversation_kind == "email_thread"
-    assert "telegram_user_id" not in req.targets[0]
+    assert "telegram_user_id" not in req.targets[0] and "telegram_message_id" not in req.targets[0]
+    assert "telegram_peer_id" not in req.metadata
     assert client.flag_lookups == []  # the Telegram-id lookup is skipped
     async with database.AsyncSessionLocal() as s:
         flags = (await s.execute(select(ScamFlag))).scalars().all()

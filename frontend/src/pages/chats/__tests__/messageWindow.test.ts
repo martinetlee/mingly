@@ -3,6 +3,7 @@ import type { Message } from '../../../api/types'
 import { msg, page } from './fixtures'
 import {
   applyLive, appendNewer, cursorOf, deletionApplies, firstUnreadId, fromPage, inScope, mergeLatest, mergeMessages, prependOlder,
+  withKnownContext,
 } from '../messageWindow'
 
 const ids = (ms: Message[]) => ms.map((m) => m.id)
@@ -83,5 +84,33 @@ describe('messageWindow', () => {
     expect(firstUnreadId(ms, 3)).toBe(2)
     expect(firstUnreadId(ms, 0)).toBeNull()
     expect(firstUnreadId(ms, 99)).toBe(1)
+  })
+
+  describe('live copies keep the known context', () => {
+    const preview = { sender_name: 'A', text: 'orig', media_type: null }
+    const reply = msg(2, { reply_to_message_id: 1, reply_to_external_id: '1', reply_to_preview: preview })
+    // Backend live payloads (WS, send/edit responses) carry no preview
+    const live = msg(2, { text: 'edited', reply_to_message_id: null, reply_to_external_id: '1', reply_to_preview: null })
+
+    it('applyLive keeps the reply preview and reply id of the stored copy', () => {
+      const w = applyLive({ messages: [msg(1), reply], hasOlder: false, hasNewer: false }, live)
+      const m = w.messages.find((x) => x.id === 2)!
+      expect(m.text).toBe('edited')
+      expect(m.reply_to_preview).toEqual(preview)
+      expect(m.reply_to_message_id).toBe(1)
+    })
+
+    it('drops them when the message now replies to something else', () => {
+      const m = withKnownContext(reply, { ...live, reply_to_external_id: '9' })
+      expect(m.reply_to_preview).toBeNull()
+      expect(m.reply_to_message_id).toBeNull()
+    })
+
+    it('keeps participants an edit event left out, takes new ones', () => {
+      const p = [{ identity_id: 1, person_id: 2, role: 'from' as const, display_name: 'A', external_id: 'a@x.com' }]
+      expect(withKnownContext(msg(3, { participants: p }), msg(3, { participants: [] })).participants).toEqual(p)
+      const q = [{ ...p[0], display_name: 'B' }]
+      expect(withKnownContext(msg(3, { participants: p }), msg(3, { participants: q })).participants).toEqual(q)
+    })
   })
 })

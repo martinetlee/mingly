@@ -592,3 +592,272 @@ async def test_mail_routes_require_the_session_token(db_engine):
                              ("POST", "/api/connectors/gmail/threads/1/read")):
             r = await anon.request(method, path, json={"read": True})
             assert r.status_code == 401, (path, r.status_code)
+
+
+# ── lifecycle and failure isolation ─────────────────────────────────────────────
+
+def _live_tasks(name: str) -> list:
+    from backend.tasks import _background_tasks
+    return [t for t in _background_tasks if not t.done() and t.get_name() == name]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_run_one_sync_loop_that_stop_ends(db, google, unlocked_vault, broadcasts):
+    c = await _signed_in(db, google)
+    await c._api.close()
+    c._api = None
+    assert await asyncio.gather(c.start(), c.start()) == [True, True]
+    mail, cal = f"gmail_sync:{c.account_id}", f"gcal_sync:{c.account_id}"
+    assert len(_live_tasks(mail)) == 1 and len(_live_tasks(cal)) == 1
+    await c.stop()
+    await asyncio.sleep(0)
+    assert _live_tasks(mail) == [] and _live_tasks(cal) == []
+
+
+@pytest.mark.asyncio
+async def test_stop_while_starting_leaves_nothing_running(db, google, unlocked_vault, broadcasts):
+    # e.g. the vault locks while an unlock's start is still reading the DB
+    c = await _signed_in(db, google)
+    await c._api.close()
+    c._api = None
+    starting = asyncio.ensure_future(c.start())
+    await asyncio.sleep(0)
+    await c.stop()
+    assert await starting is False
+    await asyncio.sleep(0)
+    assert _live_tasks(f"gmail_sync:{c.account_id}") == [] and _live_tasks(f"gcal_sync:{c.account_id}") == []
+    assert c.status().state == "stopped" and c._api is None
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_outage_is_retried_not_a_lost_grant(db, google, unlocked_vault, broadcasts):
+    c = await _signed_in(db, google)
+    c._wake = asyncio.Event()
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+        if len(delays) == 2:
+            raise asyncio.CancelledError
+
+    c._sleep = fake_sleep
+    outage = iter([503, 429])
+
+    def handler(request):
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(next(outage), text="Service Unavailable")
+        return google.handler(request)
+
+    c._api._token = None
+    with patch.object(oauth, "transport", httpx.MockTransport(handler)):
+        c._api._client = None
+        with pytest.raises(asyncio.CancelledError):
+            await c._run()
+    assert c.status().state == "reconnecting" and "429" in c.status().error
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_token_errors_are_classified(google):
+    creds = oauth.Credentials("cid", "secret", "rt")
+    for status, body, expected in [
+        (503, {}, oauth.OAuthUnreachable),
+        (429, {"error": "rate_limit_exceeded"}, oauth.OAuthUnreachable),
+        (400, {"error": "invalid_grant"}, oauth.OAuthError),
+    ]:
+        with patch.object(oauth, "transport", httpx.MockTransport(lambda r: httpx.Response(status, json=body))):
+            with pytest.raises(expected) as info:
+                await oauth.refresh(creds)
+        assert info.type is expected
+    from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError
+
+    for body, auth in [({"error": "invalid_grant"}, True), ({"error": "invalid_request"}, False)]:
+        api = GmailApi(creds)
+        with patch.object(oauth, "transport", httpx.MockTransport(lambda r: httpx.Response(400, json=body))):
+            with pytest.raises(GmailError) as info:
+                await api.profile()
+        assert isinstance(info.value, GmailAuthError) is auth
+        await api.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_capped_at_the_backoff_max(db, google, unlocked_vault, broadcasts):
+    from backend.connectors.gmail import connector as conn_mod
+
+    c = await _signed_in(db, google)
+    c._wake = asyncio.Event()
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+        raise asyncio.CancelledError
+
+    c._sleep = fake_sleep
+
+    def handler(request):
+        if request.url.path.endswith("/profile"):
+            return httpx.Response(429, headers={"Retry-After": "86400"}, json={"error": {"message": "quota"}})
+        return google.handler(request)
+
+    with patch.object(oauth, "transport", httpx.MockTransport(handler)):
+        c._api._client = None
+        with pytest.raises(asyncio.CancelledError):
+            await c._run()
+    assert delays == [conn_mod.BACKOFF_MAX]
+    await c._api.close()
+
+
+def _failing_thread(google, monkeypatch, *, status=400, slow=None):
+    """Make thread ``bad`` fail with ``status`` while ``failing["on"]``; a
+    ``slow`` thread answers late (records when it finished)."""
+    failing = {"on": True, "slow_done": False}
+
+    async def handler(request):
+        if request.url.path.endswith("/threads/bad") and failing["on"]:
+            return httpx.Response(status, json={"error": {"message": "Invalid id value"}})
+        if slow and request.url.path.endswith(f"/threads/{slow}"):
+            await asyncio.sleep(0.1)
+            failing["slow_done"] = True
+        return google.handler(request)
+
+    monkeypatch.setattr(oauth, "transport", httpx.MockTransport(handler))
+    return failing
+
+
+@pytest.mark.asyncio
+async def test_a_failing_thread_does_not_block_backfill_and_is_retried(db, google, unlocked_vault, broadcasts, monkeypatch):
+    from backend.connectors.gmail.connector import load_sync_state
+
+    google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")],
+                      "bad": [gmsg("mb", "bad", frm="bob@example.com")]}
+    failing = _failing_thread(google, monkeypatch)
+    c = await _signed_in(db, google)
+    await c._backfill(90)
+    state = await load_sync_state(c.account_id)
+    assert state["history_id"] == "1000" and set(state["failed_threads"]) == {"bad"}
+    assert (await db.execute(select(Message.external_id))).scalars().all() == ["m0"]
+
+    failing["on"] = False  # the next poll retries it
+    await c._incremental(state)
+    state = await load_sync_state(c.account_id)
+    assert state["failed_threads"] == {}
+    assert sorted((await db.execute(select(Message.external_id))).scalars().all()) == ["m0", "mb"]
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_thread_does_not_freeze_the_history_cursor(db, google, unlocked_vault, broadcasts, monkeypatch):
+    from backend.connectors.gmail.connector import load_sync_state, merge_sync_state
+
+    google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")]}
+    google.history_pages = [{"historyId": "2000", "history": [
+        {"messagesAdded": [{"message": {"id": "x", "threadId": "bad"}}]},
+        {"messagesAdded": [{"message": {"id": "m0", "threadId": "t0"}}]},
+    ]}]
+    _failing_thread(google, monkeypatch)
+    c = await _signed_in(db, google)
+    await merge_sync_state(c.account_id, history_id="1000")
+    await c._incremental(await load_sync_state(c.account_id))
+    state = await load_sync_state(c.account_id)
+    assert state["history_id"] == "2000" and set(state["failed_threads"]) == {"bad"}
+    assert (await db.execute(select(Message.external_id))).scalars().all() == ["m0"]
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retryable_thread_error_still_waits_for_the_other_threads(db, google, unlocked_vault, broadcasts, monkeypatch):
+    from backend.connectors.gmail.api import GmailError
+
+    google.threads = {"slow": [gmsg("ms", "slow", frm="ann@example.com")],
+                      "bad": [gmsg("mb", "bad", frm="bob@example.com")]}
+    failing = _failing_thread(google, monkeypatch, status=503, slow="slow")
+    c = await _signed_in(db, google)
+    with pytest.raises(GmailError):
+        await c._backfill(90)
+    assert failing["slow_done"]  # no fetch left running behind the failed pass
+    await c._api.close()
+
+
+# ── sign-in callback and compose races ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_concurrent_oauth_callbacks_exchange_the_code_once(google):
+    p = oauth.start("flow-race", "cid", "secret")
+    calls = []
+
+    async def slow_token(request):
+        calls.append(request)
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"access_token": "at", "expires_in": 3600, "refresh_token": "rt"})
+
+    with patch.object(oauth, "transport", httpx.MockTransport(slow_token)):
+        first = asyncio.ensure_future(oauth.complete(p.state, "code", None))
+        await asyncio.sleep(0)
+        # a reload of the callback page, and a stale "denied" from another tab
+        results = await asyncio.gather(oauth.complete(p.state, "code", None),
+                                       oauth.complete(p.state, None, "access_denied"))
+        first.cancel()  # the browser went away: the exchange still finishes
+        await asyncio.sleep(0.1)
+    assert len(calls) == 1
+    assert results == [p, p] and p.access_token == "at" and p.refresh_token == "rt" and p.error is None
+    assert (await oauth.complete(p.state, None, "access_denied")) is p and p.error is None
+
+
+@pytest.mark.asyncio
+async def test_compose_new_keeps_files_when_the_request_is_cancelled(db, monkeypatch):
+    import io
+
+    from fastapi import UploadFile
+
+    from backend.connectors.gmail import routes
+
+    seen = {}
+    started, finished = asyncio.Event(), asyncio.Event()
+
+    class _Connector:
+        async def send_new(self, draft):
+            started.set()
+            await asyncio.sleep(0.05)
+            seen["paths"] = [f.path for f in draft.files]
+            seen["exists"] = [os.path.exists(f.path) for f in draft.files]
+            finished.set()
+            return 1, []
+
+    monkeypatch.setattr(routes, "_connector", lambda account_id: _Connector())
+    request = asyncio.ensure_future(routes.compose_new(
+        account_id=1, text="hi", subject="Files", to=["ann@example.com"], cc=[], client_nonce="nonce-mail-cancel",
+        files=[UploadFile(io.BytesIO(b"data"), filename="a.pdf")],
+    ))
+    await started.wait()
+    request.cancel()  # the client went away; the shielded send carries on
+    await asyncio.wait_for(finished.wait(), 2)
+    await asyncio.sleep(0.01)
+    assert seen["exists"] == [True]
+    assert not any(os.path.exists(p) for p in seen["paths"])  # cleaned up by the send
+
+
+@pytest.mark.asyncio
+async def test_removing_an_account_collects_its_correspondents_but_keeps_annotated_people(
+    db, google, unlocked_vault, broadcasts,
+):
+    from backend.connectors.manager import ConnectorManager
+    from backend.db.models import Identity, Person, PersonNote
+
+    google.threads = {"t1": [gmsg("m1", "t1", frm="ann@example.com")],
+                      "t2": [gmsg("m2", "t2", frm="bob@example.com")]}
+    c = await _signed_in(db, google)
+    await c._backfill(90)
+    bob = (await db.execute(select(Identity).where(Identity.external_id == "bob@example.com"))).scalar_one()
+    ann = (await db.execute(select(Identity).where(Identity.external_id == "ann@example.com"))).scalar_one()
+    bob_person, ann_person = bob.person_id, ann.person_id
+    db.add(PersonNote(person_id=bob_person, kind="context", title="Met at the conference", body=""))
+    await db.commit()
+
+    m = ConnectorManager()
+    m.register(c)
+    assert await m.remove(c.account_key) is True
+    async with AsyncSessionLocal() as s:
+        emails = set((await s.execute(select(Identity.external_id).where(Identity.channel == "gmail"))).scalars())
+        assert not {"ann@example.com", "bob@example.com"} & emails
+        assert await s.get(Person, ann_person) is None  # nothing but this account's mail
+        assert await s.get(Person, bob_person) is not None  # the user wrote a note about Bob

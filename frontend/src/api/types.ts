@@ -29,6 +29,8 @@ export type Capability =
   | 'labels'
   | 'typing'
   | 'presence'
+  /** Listing a group's / channel's members */
+  | 'members'
 
 export type ConversationKind = 'direct' | 'group' | 'channel' | 'email_thread'
 
@@ -375,7 +377,8 @@ export interface SyncHistoryStats {
   flags: { total: number; synced: number; pending: number }
   reports: { total: number; synced: number; pending: number }
   scans: { total: number; synced: number; pending: number; total_scanned: number; scam_detected: number; failed: number; queued?: number }
-  dismissals: { total: number; synced: number; pending: number }
+  /** total = synced + pending + skipped; skipped = never uploaded because their chat / message / sender was deleted first (cloud_skipped_reason 'source rows deleted') */
+  dismissals: { total: number; synced: number; pending: number; skipped: number }
   /** A cloud sync is in flight (single-flight on the server) */
   running?: boolean
   analytics: {
@@ -937,7 +940,7 @@ type ScamCheckEventBase = {
 
 export type WSEvent =
   /** message_id is null for a new-conversation ping */
-  | { type: 'new_message'; conversation_id: number; message_id: number | null; conversation_title?: string | null; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean; message?: Message }
+  | { type: 'new_message'; conversation_id: number; message_id: number | null; conversation_title?: string | null; sender_name?: string | null; text?: string; is_tracked?: boolean; is_outgoing?: boolean; message?: Message; /** The conversation's channel (per-channel notification rules) */ channel?: ChannelName | null }
   | { type: 'importance_update'; message_id: number; score: number; reason: string }
   | { type: 'scan_complete'; scanned: number; flagged: number }
   | { type: 'summary_ready'; conversation_id: number }

@@ -17,7 +17,9 @@ BASE_DATE = datetime(2026, 1, 1, 12, 0)
 
 
 async def account(db, channel: str = "telegram") -> Account:
-    return await crud.get_or_create_channel_account(db, channel)
+    acc = await crud.get_or_create_channel_account(db, channel)
+    await db.commit()  # the helper only flushes; fixtures want it persisted
+    return acc
 
 
 async def identity(

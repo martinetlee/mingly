@@ -62,8 +62,9 @@ def _citations(raw: Optional[List[Citation]]):
 
 
 async def _require_person(db: AsyncSession, person_id: int) -> None:
-    if await crud.get_person(db, person_id) is None:
-        raise HTTPException(status_code=404, detail="Person not found")
+    from backend.api.people import person_or_404  # 404 carries merged_into for merged-away people
+
+    await person_or_404(db, person_id)
 
 
 async def _get_note(db: AsyncSession, person_id: int, note_id: int) -> PersonNote:

@@ -107,3 +107,53 @@ def invalidate_cache() -> None:
     global _cache, _cache_sig
     with _lock:
         _cache = _cache_sig = None
+
+
+# ── Notification preference ──────────────────────────────────────────────────
+
+NOTIF_PREFS = ("all", "tracked", "off")
+# Channels whose notifications are off until the user turns them on (mail
+# volume would drown chat notifications).
+NOTIF_DEFAULT_OFF_CHANNELS = ("gmail",)
+
+
+def get_notif_pref(channel: Optional[str] = None) -> str:
+    """Returns 'all', 'tracked', or 'off' — for one channel when given: its
+    own setting, else off for email channels, else the global setting."""
+    with _lock:
+        prefs = _read_current()
+        if channel is not None:
+            per_channel = prefs.get("notif_pref_channels") or {}
+            if isinstance(per_channel, dict) and per_channel.get(channel) in NOTIF_PREFS:
+                return per_channel[channel]
+            if channel in NOTIF_DEFAULT_OFF_CHANNELS:
+                return "off"
+        return prefs.get("notif_pref", "tracked")
+
+
+# ── Per-account prefs ────────────────────────────────────────────────────────
+
+# Prefs whose value is a dict keyed by ``str(account_id)``.
+ACCOUNT_KEYED_PREFS = ("calendar_ids",)
+
+
+def forget_account(account_id: int) -> list:
+    """Drop a removed account's entries from ACCOUNT_KEYED_PREFS (account ids
+    are never reused, but stale entries would still accumulate). Returns the
+    pref keys that changed."""
+    key = str(account_id)
+    changed: list = []
+
+    def _drop(data: dict) -> None:
+        for name in ACCOUNT_KEYED_PREFS:
+            value = data.get(name)
+            if isinstance(value, dict) and key in value:
+                del value[key]
+                changed.append(name)
+
+    with _lock:
+        current = _read_current()
+        if not any(isinstance(current.get(n), dict) and key in current[n] for n in ACCOUNT_KEYED_PREFS):
+            return []
+        update_prefs(_drop)
+    return changed

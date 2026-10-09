@@ -14,10 +14,13 @@ code to scan (Signal device linking) or a browser consent page (Google OAuth).
 
 from __future__ import annotations
 
+import asyncio
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Optional
+
+from backend.aio import LoopLocal
 
 
 class Capability(str, enum.Enum):
@@ -38,6 +41,7 @@ class Capability(str, enum.Enum):
     LABELS = "labels"
     TYPING = "typing"
     PRESENCE = "presence"
+    MEMBERS = "members"  # a group's member list can be listed
 
 
 @dataclass
@@ -110,10 +114,21 @@ class Connector(ABC):
     # then creates one connector per ``accounts`` row.
     multi_account: ClassVar[bool] = False
 
+    # Bumped by every stop request; a start that began before it spawns nothing.
+    _stop_generation: int = 0
+
     def __init__(self, account_id: Optional[int] = None) -> None:
         # The ``accounts`` row this connector serves; None until sign-in
         # created it.
         self.account_id = account_id
+
+    def _lifecycle(self) -> asyncio.Lock:
+        """The lock that serialises this connector's start / stop / restart
+        (built on the running loop: connectors may be created at import)."""
+        cell: Optional[LoopLocal[asyncio.Lock]] = getattr(self, "_lifecycle_lock", None)
+        if cell is None:
+            cell = self._lifecycle_lock = LoopLocal(asyncio.Lock)
+        return cell.get()
 
     @property
     def account_key(self) -> str:
@@ -147,6 +162,15 @@ class Connector(ABC):
     @abstractmethod
     async def logout(self) -> None:
         """Sign the account out and forget its stored session."""
+
+    async def abandon_flow(self, flow_id: str) -> None:
+        """A sign-in flow was given up (the manager evicted it): release
+        what it holds (e.g. a helper process). The default does nothing."""
+        return None
+
+    async def close_flows(self) -> None:
+        """Abandon every unfinished sign-in flow (vault lock, shutdown)."""
+        return None
 
     async def remove(self) -> None:
         """Disconnect for good: log out and forget credentials. The manager

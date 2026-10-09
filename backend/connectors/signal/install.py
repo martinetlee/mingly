@@ -218,6 +218,16 @@ async def _version_ok(home: Path) -> None:
         raise InstallError(f"signal-cli didn't run after setup ({detail[0]}).")
 
 
+def _place(staged: Path, final: Path, root: Path, work: Path) -> None:
+    """Move the checked release into place and delete older releases and
+    leftovers of interrupted setups."""
+    shutil.rmtree(final, ignore_errors=True)
+    os.replace(staged, final)
+    for other in root.iterdir():
+        if other != final and other != work:
+            shutil.rmtree(other, ignore_errors=True)
+
+
 async def _install(st: InstallState) -> None:
     root = runtime_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -237,13 +247,8 @@ async def _install(st: InstallState) -> None:
         await loop.run_in_executor(None, _extract, work / "jre.tar.gz", staged / "jre")
         st.status = "checking"
         await _version_ok(staged)
-        final = _release_dir()
-        shutil.rmtree(final, ignore_errors=True)
-        os.replace(staged, final)
-        # Older releases and leftovers of interrupted setups
-        for other in root.iterdir():
-            if other != final and other != work:
-                shutil.rmtree(other, ignore_errors=True)
+        # Deleting a previous release (a JRE: thousands of files) is slow
+        await loop.run_in_executor(None, _place, staged, _release_dir(), root, work)
         st.status = "done"
         log.info("Signal support set up: %s", RELEASE)
     except InstallError as e:
@@ -253,6 +258,6 @@ async def _install(st: InstallState) -> None:
     except OSError as e:
         st.status, st.error = "error", f"Couldn't save Signal support ({e.strerror or e})."
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, work, ignore_errors=True)
         if st.status == "error":
             log.warning("Signal support setup failed: %s", st.error)

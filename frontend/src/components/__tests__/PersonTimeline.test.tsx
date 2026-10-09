@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { TimelineMeetingItem, TimelineMessageItem, TimelinePage } from '../../api/timeline'
 import type { CalendarEvent } from '../../api/calendar'
@@ -13,7 +13,7 @@ vi.mock('../../api/timeline', async (orig) => ({
 }))
 
 import { getPersonTimeline } from '../../api/timeline'
-import PersonTimeline, { timelineSnippet } from '../PersonTimeline'
+import PersonTimeline, { TIMELINE_LIVE_MS, timelineSnippet } from '../PersonTimeline'
 
 const dm = { id: 10, title: 'Alice', kind: 'direct' as const, channel: 'telegram' }
 const group = { id: 20, title: 'Team', kind: 'group' as const, channel: 'signal' }
@@ -48,13 +48,17 @@ const firstPage: TimelinePage = {
 }
 const secondPage: TimelinePage = { items: [item(3, dm, { text: 'see you' }), item(2, dm, { text: 'hi there' })], has_more: false }
 
-function setup() {
-  const ws = new WebSocketClient({ url: () => null })
-  return render(
+let ws: WebSocketClient
+function tree(identityKey?: string) {
+  return (
     <WebSocketProvider client={ws}>
-      <MemoryRouter><PersonTimeline personId={42} /></MemoryRouter>
-    </WebSocketProvider>,
+      <MemoryRouter><PersonTimeline personId={42} identityKey={identityKey} /></MemoryRouter>
+    </WebSocketProvider>
   )
+}
+function setup(identityKey?: string) {
+  ws = new WebSocketClient({ url: () => null })
+  return render(tree(identityKey))
 }
 
 const rows = () => screen.queryAllByTestId('timeline-row')
@@ -62,7 +66,7 @@ const rows = () => screen.queryAllByTestId('timeline-row')
 beforeEach(() => {
   vi.mocked(getPersonTimeline).mockReset()
 })
-afterEach(() => cleanup())
+afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('PersonTimeline', () => {
   it('renders compact rows linking to the message where it lives', async () => {
@@ -125,6 +129,14 @@ describe('PersonTimeline', () => {
     expect(screen.getAllByTestId('timeline-meeting')).toHaveLength(1) // not duplicated
   })
 
+  it('a failed load shows the error with Retry', async () => {
+    vi.mocked(getPersonTimeline).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(firstPage)
+    setup()
+    expect((await screen.findByTestId('load-error')).textContent).toContain('offline')
+    fireEvent.click(screen.getByText('Retry'))
+    await waitFor(() => expect(rows()).toHaveLength(3))
+  })
+
   it('shows an empty state', async () => {
     vi.mocked(getPersonTimeline).mockResolvedValueOnce({ items: [], has_more: false })
     setup()
@@ -136,4 +148,42 @@ describe('PersonTimeline', () => {
     expect(timelineSnippet(item(1, thread, { subject: null, text: null }))).toBe('(no subject)')
     expect(timelineSnippet(item(1, thread, { subject: null, text: 'body\n text' }))).toBe('body text')
   })
+
+  it('their new message refreshes the first page and keeps the older pages loaded', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.mocked(getPersonTimeline).mockResolvedValueOnce(firstPage).mockResolvedValueOnce(secondPage)
+    setup()
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(rows()).toHaveLength(4))
+
+    // A new message in a conversation shown here (no sender person: an outgoing one)
+    vi.mocked(getPersonTimeline).mockResolvedValueOnce({ items: [item(6, dm, { text: 'new one' }), firstPage.items[0], firstPage.items[1]], has_more: true })
+    act(() => ws.dispatch({ type: 'new_message', conversation_id: 10, message_id: 6, message: msg(6, { conversation_id: 10, sender: null, is_outgoing: true }) }))
+    await waitFor(() => expect(rows()[0].textContent).toContain('new one'))
+    // Message 3 fell off the first page but stays; the older page stays too
+    expect(rows().map((r) => r.getAttribute('href'))).toEqual([
+      '/chats?conversationId=10&messageId=6', '/mail?conversationId=30&messageId=5', '/chats?conversationId=20&messageId=4',
+      '/chats?conversationId=10&messageId=3', '/chats?conversationId=10&messageId=2',
+    ])
+
+    // Someone else's message elsewhere: nothing
+    const calls = vi.mocked(getPersonTimeline).mock.calls.length
+    act(() => ws.dispatch({ type: 'new_message', conversation_id: 99, message_id: 50, message: msg(50, { conversation_id: 99, sender: { identity_id: 9, person_id: 9, name: 'X', avatar_url: null } }) }))
+    await act(async () => { vi.advanceTimersByTime(TIMELINE_LIVE_MS + 10) })
+    expect(vi.mocked(getPersonTimeline).mock.calls.length).toBe(calls)
+  })
+
+  it('a changed identity set (merge / detach / undo) reloads from the top', async () => {
+    vi.mocked(getPersonTimeline).mockResolvedValueOnce(firstPage).mockResolvedValueOnce(secondPage)
+    const { rerender } = setup('1')
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(rows()).toHaveLength(4))
+    vi.mocked(getPersonTimeline).mockResolvedValueOnce({ items: [item(8, group, { text: 'merged in' })], has_more: false })
+    rerender(tree('1,2'))
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(rows()[0].textContent).toContain('merged in')
+  })
 })
+

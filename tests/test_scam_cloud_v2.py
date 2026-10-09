@@ -102,12 +102,34 @@ V1_GOLDEN = [
     ('/sync/analytics',
      '{"periods":[{"period_start":"2026-01-01T00:00:00","period_end":"2026-01-02T00:00:00","detection":{"total_scanned":7,"scam_detected":2,"safe_detected":5,"short_circuited_ml":0,"short_circuited_signatures":0,"pipeline_errors":0,"avg_pipeline_ms":100},"categories":{},"ml_prefilter":{"safe":0,"borderline":0,"auto_scam":0,"unavailable":0},"tool_calls":{},"scenarios_matched":{},"safe_patterns_matched":{},"user_actions":{"flags_dismissed":0,"messages_unflagged":0,"reports_submitted":0,"manual_checks":0,"rescans":0},"chat_types":{"private":3,"group":4,"channel":0},"system":{}}]}'),
 ]
+# What fb15113 (pre-multichannel) sent for the seeds of
+# test_external_v1_server_requests_unchanged, derived from its builders:
+# scam/queue.py _msg_dict {message_id: tg id, sender_id, sender_name, text,
+# date.isoformat()}, profiles {telegram_id, name, bio: hint or "",
+# is_contact}, chat_metadata {chat_id: peer, name, type}; scam/client.py
+# is_this_scam {request_id, messages (context then targets),
+# target_message_ids, user_telegram_id: 0, profiles, chat_metadata}. A chat
+# posting as itself (channel post) had sender_id = the chat's peer id.
 EXTERNAL_V1_GOLDEN = [
     ('/isThisScam',
-     '{"request_id":"req-1","messages":[{"message_id":10,"sender_id":4242,"sender_name":"Mal","text":"hi","date":"2026-03-01T09:59:00Z"},{"message_id":11,"sender_id":4242,"sender_name":"Mal","text":"send btc","date":"2026-03-01T10:00:00Z"}],"target_message_ids":[11],"user_telegram_id":0,"profiles":[{"telegram_id":4242,"name":"Mal","bio":"trader","is_contact":false}],"chat_metadata":{"name":"G","type":"private","channel":"telegram"}}'),
+     '{"request_id":"req-1","messages":[{"message_id":30,"sender_id":4242,"sender_name":"Mal","text":"hi","date":"2026-03-01T09:59:00"},{"message_id":31,"sender_id":4242,"sender_name":"Mal","text":"send btc","date":"2026-03-01T10:00:00"}],"target_message_ids":[31],"user_telegram_id":0,"profiles":[{"telegram_id":4242,"name":"Mal","bio":"","is_contact":false}],"chat_metadata":{"chat_id":-1001234567890,"name":"G","type":"group"}}'),
+    ('/isThisScam',
+     '{"request_id":"req-2","messages":[{"message_id":6,"sender_id":-1009876543210,"sender_name":"News","text":"old promo","date":"2026-03-01T09:00:00"},{"message_id":7,"sender_id":-1009876543210,"sender_name":"News","text":"buy now","date":"2026-03-01T10:00:00"}],"target_message_ids":[7],"user_telegram_id":0,"profiles":[{"telegram_id":-1009876543210,"name":"News","bio":"","is_contact":false}],"chat_metadata":{"chat_id":-1009876543210,"name":"News","type":"channel"}}'),
+    ('/isThisScam',
+     '{"request_id":"req-3","messages":[{"message_id":5,"sender_id":4242,"sender_name":"Mal","text":"hello friend","date":"2026-03-01T10:00:00"}],"target_message_ids":[5],"user_telegram_id":0,"profiles":[{"telegram_id":4242,"name":"Mal","bio":"","is_contact":false}],"chat_metadata":{"chat_id":4242,"name":"Mal","type":"private"}}'),
     ('/areFlaggedScams',
      '{"telegram_ids":[4242]}'),
 ]
+# fb15113 build_message_context for the first seed.
+TELEGRAM_PROMPT_GOLDEN = (
+    "Chat: G (group)\n"
+    "Profile - ID:4242, Name:Mal, Bio:, Is contact:False\n"
+    "\nEarlier messages from the same sender (context only, do not judge these):\n"
+    "  [Mal]: hi\n"
+    "\n"
+    "Messages to analyze:\n"
+    "  [Mal]: send btc"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -465,14 +487,75 @@ def _external(cloud):
     return c
 
 
+async def _seed_telegram_scans(db) -> list:
+    """Three Telegram scans: a group message with context from the same
+    user, a broadcast channel post (the chat is the sender) and a DM."""
+    mal = await f.identity(db, "4242", display_name="Mal")
+    group = await f.conversation(db, "-1001234567890", title="G", kind="group")
+    await f.message(db, group, 30, "hi", sender=mal, date=datetime(2026, 3, 1, 9, 59))
+    in_group = await f.message(db, group, 31, "send btc", sender=mal, date=T)
+    news = await f.conversation(db, "-1009876543210", title="News", kind="channel")
+    old = await f.message(db, news, 6, "old promo", date=datetime(2026, 3, 1, 9, 0))
+    post = await f.message(db, news, 7, "buy now", date=T)
+    old.sender_name = post.sender_name = "News"  # stored like Telethon's channel post: no user sender
+    await db.commit()
+    dm = await f.conversation(db, "4242", title="Mal", peer=mal)
+    in_dm = await f.message(db, dm, 5, "hello friend", sender=mal, date=T)
+    return [(group, in_group), (news, post), (dm, in_dm)]
+
+
 @pytest.mark.asyncio
-async def test_external_v1_server_requests_unchanged():
+async def test_external_v1_server_requests_unchanged(db):
+    """Telegram scans reach a v1 detection server exactly as before the
+    multi-channel refactor (Telegram message / sender / chat ids)."""
+    from backend.scam.queue import build_scan_request
+
+    scans = await _seed_telegram_scans(db)
     cloud = FakeCloud(versions=None)
     c = _external(cloud)
-    await c.is_this_scam("req-1", _scan_request())
+    for n, (conv, msg) in enumerate(scans, 1):
+        await c.is_this_scam(f"req-{n}", await build_scan_request(conv.id, [msg.id]))
     await c.are_flagged_scams([4242])
     assert [(r.url.path, r.content.decode()) for r in cloud.posts] == EXTERNAL_V1_GOLDEN
     assert all("x-mingly-contract" not in r.headers for r in cloud.requests)
+
+
+@pytest.mark.asyncio
+async def test_telegram_prompt_keeps_the_pre_multichannel_header(db):
+    from backend.scam.client import build_message_context
+    from backend.scam.queue import build_scan_request
+
+    (group, msg), _, _ = await _seed_telegram_scans(db)
+    assert build_message_context(await build_scan_request(group.id, [msg.id])) == TELEGRAM_PROMPT_GOLDEN
+
+
+@pytest.mark.asyncio
+async def test_known_scammer_signature_matches_a_channel_posting_as_itself(db):
+    from backend.scam.engine import _signature_match
+    from backend.scam.pipeline import Signatures
+    from backend.scam.queue import build_scan_request
+
+    _, (news, post), _ = await _seed_telegram_scans(db)
+    req = await build_scan_request(news.id, [post.id])
+    hit = _signature_match(Signatures(telegram_ids=[-1009876543210]), req.targets, req.channel)
+    assert hit is not None and hit["matched_value"] == "-1009876543210"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_followup_sends_telegram_ids(db):
+    from unittest.mock import AsyncMock
+
+    from backend.db.models import ScamCheckRequest
+    from backend.scam.service import ScamDetectionService
+
+    (group, _), _, _ = await _seed_telegram_scans(db)
+    client = _external(FakeCloud(versions=None))
+    client.respond_to_followup = AsyncMock(return_value=None)
+    row = ScamCheckRequest(request_id="r", request_type="is_this_scam", status="pending",
+                           related_conversation_id=group.id, created_at=T, updated_at=T)
+    await ScamDetectionService(client)._handle_followup(row, {"data_type": "chat_history", "params": {}})
+    data = client.respond_to_followup.call_args.args[1]
+    assert [(d["message_id"], d["sender_id"], d["text"]) for d in data] == [(31, 4242, "send btc"), (30, 4242, "hi")]
 
 
 @pytest.mark.asyncio
@@ -497,3 +580,167 @@ async def test_external_v2_server_gets_hashed_senders(db, unlocked_vault):
     assert body["profiles"] == [{"sender": sender, "name": "Mal", "bio": "trader", "is_contact": False}]
     assert body["target_message_ids"] == [11]
     assert b"eve@example.com" not in post.content
+
+
+# ---------------------------------------------------------------------------
+# Dismissals whose rows are deleted before the upload
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sync_dismissals(monkeypatch):
+    from backend.scam import verdict as verdict_mod
+    monkeypatch.setattr(verdict_mod, "get_pref", lambda k, d=None: True if k == "shield_sync_dismissals" else d)
+
+
+async def _dismissed_telegram_scan(db):
+    """A scam-scored Telegram message from user 4242 whose sender flag and
+    scan the user dismissed (one scan and one scammer dismissal queued)."""
+    from backend.scam.verdict import set_verdict
+
+    sender = await f.identity(db, "4242", display_name="Mal")
+    conv = await f.conversation(db, "-100777", title="G", kind="group")
+    msg = await f.message(db, conv, 31, "send btc", sender=sender, date=T, scam_status="completed",
+                          scam_score=0.9, scam_updated_at=T, scam_trace_json=json.dumps(TRACE))
+    db.add(ScamFlag(identity_id=sender.id, source="local", confidence=0.9, reason="crypto ask",
+                    category="investment", flagged_at=T, updated_at=T))
+    await db.commit()
+    await set_verdict(scope="message", verdict="not_scam", messages=[msg.id])
+    return conv, msg, sender
+
+
+async def _delete(model, row_id):
+    from sqlalchemy import delete
+    async with database.AsyncSessionLocal() as s:
+        await s.execute(delete(model).where(model.id == row_id))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_v1_dismissals_keep_telegram_ids_after_the_rows_are_deleted(db, sync_dismissals):
+    from backend.db.models import Identity
+    conv, msg, sender = await _dismissed_telegram_scan(db)
+    await _delete(Message, msg.id)  # the scammer deleted it on Telegram
+    await _delete(Identity, sender.id)
+    cloud = FakeCloud(versions=None)
+    assert await _manager(cloud)._upload_pending_dismissals() == 2
+
+    (scan,) = _bodies(cloud, "/sync/scan-results")[0]["scan_results"]
+    assert (scan["chat_id"], scan["tg_message_id"], scan["sender_id"]) == (-100777, 31, 4242)
+    (dismissal,) = _bodies(cloud, "/sync/dismissals")[0]["dismissals"]
+    assert dismissal["telegram_id"] == 4242 and "cloud_v1" not in dismissal and "identity_id" not in dismissal
+    async with database.AsyncSessionLocal() as s:
+        statuses = (await s.execute(select(ScamDismissal.cloud_status))).scalars().all()
+    assert statuses == ["synced", "synced"]
+
+
+@pytest.mark.asyncio
+async def test_v2_dismissed_scan_falls_back_to_the_telegram_snapshot(db, sync_dismissals, unlocked_vault):
+    conv, msg, _ = await _dismissed_telegram_scan(db)
+    await _delete(Message, msg.id)
+    cloud = FakeCloud(versions=[1, 2])
+    await _manager(cloud)._upload_pending_dismissals()
+    (scan,) = _bodies(cloud, "/sync/scan-results")[0]["scan_results"]
+    assert scan["conversation"] == {"kind": "group", "id": "-100777"}
+    assert scan["message"] == {"id": "31"} and scan["sender"] == {"id": "4242"}
+
+
+@pytest.mark.asyncio
+async def test_dismissals_that_can_never_upload_are_skipped(db):
+    from backend.db.models import Conversation
+    rows = await seed(db)
+    for ch in ("gmail", "telegram"):  # gone, and no snapshot (recorded before snapshots existed)
+        await _delete(Conversation, rows[ch]["conv"].id)
+    from backend.db.models import Identity
+    await _delete(Identity, rows["gmail"]["sender"].id)
+    cloud = FakeCloud(versions=None)
+    await _manager(cloud)._upload_pending_dismissals()
+
+    async with database.AsyncSessionLocal() as s:
+        dismissals = (await s.execute(select(ScamDismissal))).scalars().all()
+    by_ref = {}
+    for d in dismissals:
+        data = json.loads(d.payload_json)
+        by_ref[(d.dismissal_type, data.get("conversation_id") or data.get("identity_id"))] = d
+    for key in (("scan", rows["gmail"]["conv"].id), ("scammer", rows["gmail"]["sender"].id)):
+        d = by_ref[key]
+        assert d.synced_at is not None and d.cloud_status == "skipped"
+        assert d.cloud_skipped_reason == "source rows deleted" and "cloud_skipped" not in d.payload_json
+    # Signal / SMS rows still exist: they wait for a v2 server
+    for ch in ("signal", "sms"):
+        for key in (("scan", rows[ch]["conv"].id), ("scammer", rows[ch]["sender"].id)):
+            assert by_ref[key].synced_at is None and by_ref[key].cloud_status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Messages posted "as" another channel (meta.sender_peer)
+# ---------------------------------------------------------------------------
+
+async def _posted_as_channel(db):
+    """A group where channel -1000000000777 posted twice and another channel
+    once, all without a user sender."""
+    group = await f.conversation(db, "-1001234567890", title="G", kind="group")
+    rows = []
+    for seq, text, peer, name, minute in ((40, "promo one", -1000000000777, "Promo", 1),
+                                          (41, "other channel", -1000000000888, "Other", 2),
+                                          (42, "buy my coin", -1000000000777, "Promo", 3)):
+        m = await f.message(db, group, seq, text, date=datetime(2026, 3, 1, 10, minute),
+                            meta_json=json.dumps({"sender_peer": peer}), scam_status="completed",
+                            scam_score=0.9, scam_updated_at=T, scam_trace_json=json.dumps(TRACE))
+        m.sender_name = name
+        rows.append(m)
+    await db.commit()
+    return group, rows
+
+
+@pytest.mark.asyncio
+async def test_v1_requests_send_the_channel_a_message_was_posted_as(db):
+    from backend.scam.client import build_message_context
+    from backend.scam.queue import build_scan_request
+
+    group, (first, _, target) = await _posted_as_channel(db)
+    req = await build_scan_request(group.id, [target.id])
+    cloud = FakeCloud(versions=None)
+    await _external(cloud).is_this_scam("req-p", req)
+    body = json.loads(cloud.posts[0].content)
+    # fb15113 sent Telethon's msg.sender_id: the marked peer id of the channel
+    assert [(m["message_id"], m["sender_id"]) for m in body["messages"]] == [(40, -1000000000777), (42, -1000000000777)]
+    assert body["profiles"] == [{"telegram_id": -1000000000777, "name": "Promo", "bio": "", "is_contact": False}]
+    assert "Profile - ID:-1000000000777, Name:Promo" in build_message_context(req)
+
+
+@pytest.mark.asyncio
+async def test_v1_scan_results_send_the_channel_a_message_was_posted_as(db):
+    group, rows = await _posted_as_channel(db)
+    cloud = FakeCloud(versions=None)
+    await _manager(cloud)._upload_scan_results()
+    results = [r for b in _bodies(cloud, "/sync/scan-results") for r in b["scan_results"]]
+    assert [(r["tg_message_id"], r["sender_id"]) for r in results] == [
+        (40, -1000000000777), (41, -1000000000888), (42, -1000000000777)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("posted_as", [-1000000000777, None])  # another channel / the group itself (anonymous admin)
+async def test_identity_less_context_is_exact_among_many_other_channel_posts(db, posted_as):
+    """Context for a sender without an identity is matched exactly in SQL:
+    over 10x as many unrelated identity-less posts in between can't crowd
+    out the sender's own earlier messages."""
+    from backend.scam.queue import _DEFAULT_CONTEXT, build_scan_request
+
+    group = await f.conversation(db, "-1001234567890", title="G", kind="group")
+    name = "Promo" if posted_as else "G"
+    meta = json.dumps({"sender_peer": posted_as}) if posted_as else None
+    seq, own = 100, []
+    for i in range(_DEFAULT_CONTEXT + 2):
+        for _ in range(12):  # unrelated: another channel posting
+            seq += 1
+            m = await f.message(db, group, seq, f"noise {seq}", meta_json=json.dumps({"sender_peer": -1000000000999}))
+            m.sender_name = "Noise"
+        seq += 1
+        m = await f.message(db, group, seq, f"own {i}", meta_json=meta)
+        m.sender_name = name
+        own.append(m)
+    await db.commit()
+    target = own[-1]
+    req = await build_scan_request(group.id, [target.id])
+    assert [m["text"] for m in req.context] == [m.text for m in own[-1 - _DEFAULT_CONTEXT:-1]]
+    assert {m["telegram_sender_id"] for m in req.context} == {posted_as or -1001234567890}

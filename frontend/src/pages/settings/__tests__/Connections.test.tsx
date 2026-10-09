@@ -71,7 +71,7 @@ describe('Connections', () => {
     expect(removeAccount).not.toHaveBeenCalled()
     await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' })) })
     expect(removeAccount).toHaveBeenCalledWith('gmail:2')
-    expect(getAccounts).toHaveBeenCalledTimes(2)
+    expect(getAccounts).toHaveBeenCalledTimes(3) // load, re-read after the sign-out (configured follows the server), after the removal
   })
 
   it('an unconfigured channel is offered for connecting and opens the generic sign-in', async () => {

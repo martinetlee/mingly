@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Copy, ImageOff, Paperclip, Reply, ShieldAlert } from 'lucide-react'
+import { Copy, Flag, ImageOff, Paperclip, Reply, ShieldAlert } from 'lucide-react'
 import type { Message, MessageParticipant } from '../api/types'
 import { openExternalUrl } from '../api/client'
 import { setRemoteImagesAllowed, useRemoteImageSenders } from '../api/email'
@@ -19,6 +19,8 @@ interface Props {
   highlighted?: boolean
   onReply?: (msg: Message) => void
   onScamVerdict?: (msg: Message, scope: ScamVerdictScope) => void
+  /** "Report scam" (Shield): the page opens ReportScamDialog — same action as a chat bubble's menu */
+  onReportScam?: (msg: Message) => void
 }
 
 const REMOTE_IMG = /<img\b([^>]*?)\sdata-src="/gi
@@ -122,9 +124,10 @@ function Recipients({ label, people }: { label: string; people: MessageParticipa
 }
 
 /** One email in a thread: header (from / to / cc / subject / date), body, attachments. */
-function EmailMessageView({ message, highlighted, onReply, onScamVerdict: verdictProp }: Props) {
+function EmailMessageView({ message, highlighted, onReply, onScamVerdict: verdictProp, onReportScam: reportProp }: Props) {
   const { shield } = useFeatures()
   const onScamVerdict = shield ? verdictProp : undefined
+  const onReportScam = shield ? reportProp : undefined
   const participants = message.participants ?? []
   const from = participants.find((p) => p.role === 'from')
   const senderEmail = from?.external_id ?? null
@@ -186,14 +189,14 @@ function EmailMessageView({ message, highlighted, onReply, onScamVerdict: verdic
             <p className="mt-0.5 text-[13px] font-medium text-slate-200 select-text" data-testid="message-subject">{message.subject}</p>
           )}
         </div>
-        <div className="flex flex-shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/email:opacity-100">
+        <div className="flex flex-shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/email:opacity-100 group-focus-within/email:opacity-100">
           {onReply && (
-            <button onClick={() => onReply(message)} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300" title="Reply">
+            <button onClick={() => onReply(message)} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300" title="Reply" aria-label="Reply">
               <Reply size={14} />
             </button>
           )}
           {message.text && (
-            <button onClick={copyText} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300" title="Copy text">
+            <button onClick={copyText} className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-slate-300" title="Copy text" aria-label="Copy text">
               <Copy size={14} />
             </button>
           )}
@@ -202,8 +205,19 @@ function EmailMessageView({ message, highlighted, onReply, onScamVerdict: verdic
               onClick={() => void startScamCheck(message.conversation_id, message.id)}
               className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-amber-400"
               title="Check for scam"
+              aria-label="Check for scam"
             >
               <ShieldAlert size={14} />
+            </button>
+          )}
+          {onReportScam && (
+            <button
+              onClick={() => onReportScam(message)}
+              className="rounded-full p-1 text-slate-500 hover:bg-slate-700 hover:text-red-400"
+              title="Report scam"
+              aria-label="Report scam"
+            >
+              <Flag size={14} />
             </button>
           )}
         </div>

@@ -25,8 +25,8 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import SCAM_SUCCESS_STATUSES, Message, ScamCheckRequest, ScamFlag
-from backend.scam.channel_ids import telegram_user_ids
+from backend.db.models import SCAM_SUCCESS_STATUSES, Conversation, Message, ScamCheckRequest, ScamFlag
+from backend.scam.channel_ids import telegram_scan_ids, telegram_user_ids
 from backend.scam.client import FollowUpRequest, ScamAPIClient, ScamCheckResult, ScanRequest
 from backend.scam.verdict import FLAG_ACTIVE, ws_message_entry
 from backend.ws.manager import ws_manager
@@ -455,10 +455,13 @@ class ScamDetectionService:
                     .order_by(Message.date.desc(), Message.id.desc())
                     .limit(min(int(params.get("limit", 100)), 500))
                 )).scalars().all()
-                # The external API's v1 contract: senders are Telegram user ids
-                tg_users = await telegram_user_ids(db, {m.sender_identity_id for m in msgs})
+                # The external API's v1 shape: Telegram message and sender ids
+                # (other channels have none: internal message ids, no sender)
+                conv = await db.get(Conversation, req.related_conversation_id)
+                tg = await telegram_scan_ids(db, conv, msgs)
                 gathered_data = [
-                    {"message_id": m.id, "sender_id": tg_users.get(m.sender_identity_id),
+                    {"message_id": tg.message_ids[m.id] if tg else m.id,
+                     "sender_id": tg.senders[m.id] if tg else None,
                      "sender_name": m.sender_name, "text": m.text, "date": str(m.date)}
                     for m in msgs
                 ]

@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -40,7 +41,7 @@ async def get_db():
 def _schema_generation(path: Path) -> Optional[str]:
     """The generation stamped in an existing DB file: None = no tables at
     all (new file), "1" = a pre-v2 database, else the stamped value."""
-    with sqlite3.connect(str(path)) as conn:
+    with closing(sqlite3.connect(str(path))) as conn:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if not tables:
             return None
@@ -50,18 +51,43 @@ def _schema_generation(path: Path) -> Optional[str]:
         return row[0] if row else "1"
 
 
+class NewerSchemaError(RuntimeError):
+    """The database was written by a newer build (a later schema generation)."""
+
+
+def _generation_number(gen: str) -> Optional[int]:
+    try:
+        return int(gen)
+    except ValueError:
+        return None
+
+
 async def _retire_old_database(path: Path) -> Optional[Path]:
     """A database from an older schema generation can't be upgraded in place
     (v2 re-keyed every table): back it up next to the DB and start fresh.
-    Returns the backup path, or None when the DB is current or new."""
+    Returns the backup path, or None when the DB is current or new.
+
+    The backup is named ``<stem>-retired-gen<N>-<ts>.db`` so the migration
+    runner's backup rotation (``<stem>-pre-v*.db``) never deletes it. A
+    database from a NEWER generation (or an unreadable stamp) is never
+    touched: startup fails with NewerSchemaError instead."""
     from backend.db.models import SCHEMA_GENERATION
 
-    if not path.exists() or _schema_generation(path) in (None, SCHEMA_GENERATION):
+    if not path.exists():
         return None
+    gen = _schema_generation(path)
+    if gen is None or gen == SCHEMA_GENERATION:
+        return None
+    number = _generation_number(gen)
+    if number is None or number > int(SCHEMA_GENERATION):
+        raise NewerSchemaError(
+            f"{path} has schema generation {gen!r}, newer than this build's {SCHEMA_GENERATION!r}. "
+            "Run a newer Mingly build, or move the file away to start fresh; it was left untouched."
+        )
     backups = path.parent / "backups"
     backups.mkdir(parents=True, exist_ok=True)
-    dest = backups / f"{path.stem}-pre-v{SCHEMA_GENERATION}-{datetime.utcnow():%Y%m%d%H%M%S}.db"
-    with sqlite3.connect(str(path)) as source, sqlite3.connect(str(dest)) as target:
+    dest = backups / f"{path.stem}-retired-gen{number}-{datetime.utcnow():%Y%m%d%H%M%S}.db"
+    with closing(sqlite3.connect(str(path))) as source, closing(sqlite3.connect(str(dest))) as target:
         source.backup(target)
     await engine.dispose()  # no pooled connection may keep the old file open
     for suffix in ("", "-wal", "-shm"):

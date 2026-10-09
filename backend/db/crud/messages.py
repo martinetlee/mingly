@@ -15,7 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from backend.db.crud.conversations import refresh_preview
+from backend.db.crud.conversations import recompute_preview, refresh_preview
 from backend.db.models import Conversation, Message, MessageAttachment
 
 __all__ = [
@@ -367,14 +367,27 @@ async def get_oldest_message(
 
 # ── writes ───────────────────────────────────────────────────────────────────
 
-async def _sync_attachments(db: AsyncSession, message_id: int, attachments: list[dict]) -> bool:
-    """Make the message's attachments match ``attachments`` (by position).
-    ``local_path`` is kept once set. Returns whether anything changed."""
-    current = {
-        a.position: a for a in (await db.execute(
-            select(MessageAttachment).where(MessageAttachment.message_id == message_id)
-        )).scalars().all()
-    }
+async def _stored_attachments(db: AsyncSession, message_ids: list) -> dict[int, dict[int, MessageAttachment]]:
+    """``{message_id: {position: attachment}}`` for a batch, one query per 500."""
+    out: dict[int, dict[int, MessageAttachment]] = {}
+    for i in range(0, len(message_ids), 500):
+        for a in (await db.execute(
+            select(MessageAttachment).where(MessageAttachment.message_id.in_(message_ids[i:i + 500]))
+        )).scalars().all():
+            out.setdefault(a.message_id, {})[a.position] = a
+    return out
+
+
+async def _sync_attachments(
+    db: AsyncSession, message_id: int, attachments: list[dict],
+    current: Optional[dict[int, MessageAttachment]] = None,
+) -> bool:
+    """Make the message's attachments (``current`` by position, read when
+    not given) match ``attachments``. ``local_path`` is kept once set.
+    Returns whether anything changed."""
+    if current is None:
+        current = (await _stored_attachments(db, [message_id])).get(message_id, {})
+    current = dict(current)
     changed = False
     for position, att in enumerate(attachments):
         fields = {f: att.get(f) for f in _ATTACHMENT_FIELDS}
@@ -427,6 +440,12 @@ async def save_messages(db: AsyncSession, rows: list[dict], commit: bool = True)
         for ext, mid in (await message_ids_by_external(db, conv_id, exts)).items():
             existing[(conv_id, ext)] = mid
 
+    # Stored files of the rows that carry an attachment list, in one query
+    stored_files = await _stored_attachments(db, sorted({
+        existing[(r["conversation_id"], r["external_id"])] for r in rows
+        if r.get("attachments") is not None and (r["conversation_id"], r["external_id"]) in existing
+    }))
+
     newest_created: dict[int, dict] = {}
     for raw in rows:
         row = {k: v for k, v in raw.items() if k != "attachments"}
@@ -462,7 +481,16 @@ async def save_messages(db: AsyncSession, rows: list[dict], commit: bool = True)
 
         attachments_changed = False
         if attachments is not None and message_id is not None:
-            attachments_changed = await _sync_attachments(db, message_id, attachments)
+            if existing_id is None and not attachments:
+                pass  # a new message without files: nothing stored, nothing to add
+            else:
+                if existing_id is None:
+                    current: Optional[dict] = {}
+                elif message_id in created:  # repeated in this batch: read what we just added
+                    current = None
+                else:
+                    current = stored_files.get(message_id, {})
+                attachments_changed = await _sync_attachments(db, message_id, attachments, current)
 
         if existing_id is None and written is not None:
             existing[(conv_id, ext)] = written  # a repeated row in the batch is an update
@@ -544,11 +572,30 @@ async def set_attachment_local_path(db: AsyncSession, attachment_id: int, local_
     await db.commit()
 
 
-async def delete_messages(db: AsyncSession, message_ids: Iterable[int]) -> int:
+async def delete_messages(db: AsyncSession, message_ids: Iterable[int], commit: bool = True) -> dict[int, list[int]]:
+    """Delete stored messages (attachments / participants cascade) and
+    re-derive each affected conversation's inbox preview. The one delete
+    path for every channel. Returns ``{conversation_id: [deleted message
+    ids]}`` (sorted) for the ``messages_deleted`` events."""
     ids = list(set(message_ids))
-    if not ids:
-        return 0
-    found = list((await db.execute(select(Message.id).where(Message.id.in_(ids)))).scalars())
-    await db.execute(delete(Message).where(Message.id.in_(found)))
-    await db.commit()
-    return len(found)
+    found: list = []
+    for i in range(0, len(ids), 500):
+        found.extend((await db.execute(
+            select(Message.id, Message.conversation_id, Message.date).where(Message.id.in_(ids[i:i + 500]))
+        )).all())
+    if not found:
+        return {}
+    by_conv: dict[int, list[int]] = {}
+    newest_removed: dict[int, datetime] = {}
+    for mid, conv_id, date in found:
+        by_conv.setdefault(conv_id, []).append(mid)
+        if date is not None and (conv_id not in newest_removed or date > newest_removed[conv_id]):
+            newest_removed[conv_id] = date
+    gone = [mid for mid, _, _ in found]
+    for i in range(0, len(gone), 500):
+        await db.execute(delete(Message).where(Message.id.in_(gone[i:i + 500])))
+    for conv_id in by_conv:
+        await recompute_preview(db, conv_id, newest_removed.get(conv_id))
+    if commit:
+        await db.commit()
+    return {conv_id: sorted(mids) for conv_id, mids in by_conv.items()}

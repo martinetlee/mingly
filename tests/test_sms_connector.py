@@ -705,3 +705,33 @@ async def test_heic_falls_back_to_the_original_without_sips(db, messages, heic, 
     assert rel.endswith(".heic") and (Path(config.DATA_DIR) / rel).read_bytes() == heic.read_bytes()
     await db.refresh(att)
     assert att.mime_type == "image/heic"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_run_one_poll_loop_that_stop_ends(db, messages, events, monkeypatch):
+    from backend.tasks import _background_tasks
+
+    def live():
+        return [t for t in _background_tasks if not t.done() and t.get_name() == "sms_sync"]
+
+    conn = await _connected(db, messages)
+
+    async def yielding(data):  # a real WebSocket send yields to the loop
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr("backend.ws.manager.ws_manager.broadcast", yielding)
+    assert await asyncio.gather(conn.start(), conn.start()) == [True, True]
+    assert len(live()) == 1
+    await conn.stop()
+    await asyncio.sleep(0)
+    assert live() == [] and conn.status().state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_conversations_offer_no_history_backfill(db, messages, events):
+    from backend.connectors.base import Capability
+
+    conn = await _connected(db, messages)
+    conv = await f.conversation(db, "chat-1", title="Ann", channel="sms")
+    assert Capability.HISTORY_BACKFILL in conn.capabilities  # the account imports chat.db history
+    assert Capability.HISTORY_BACKFILL not in conn.conversation_capabilities(conv)

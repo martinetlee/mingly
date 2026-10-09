@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Archive, Inbox, Loader2, MailOpen, Reply, ReplyAll } from 'lucide-react'
-import type { Conversation, Message } from '../../api/types'
+import type { Conversation, Message, ScamMsgState } from '../../api/types'
 import { getConversation, getMessageWindow, isAbortError } from '../../api/client'
 import { archiveThread, markThreadRead } from '../../api/email'
 import { useWsEvent } from '../../hooks/useWebSocket'
-import { errorMessage, reportError } from '../../lib/toast'
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
+import { errorMessage, reportError, toast } from '../../lib/toast'
+import { useFeatures } from '../../context/FeaturesContext'
+import ReportScamDialog from '../../components/ReportScamDialog'
 import EmailMessageView from '../../components/EmailMessageView'
+import { LoadError } from '../../components/ui'
+import { applyScamStatesTo, submitNotScamVerdict, useScamStateEvents } from '../chats/scamChecks'
+import type { ScamVerdictScope } from '../chats/scamChecks'
 import MailComposer from './MailComposer'
 import type { ComposerInitial } from './MailComposer'
 import { replyAllRecipients, replyRecipients, replySubject } from './recipients'
@@ -35,23 +41,55 @@ export default function ThreadView({ conversationId, messageId, me, onChanged }:
   const onChangedRef = useRef(onChanged)
   onChangedRef.current = onChanged
 
+  // Every read and every local change (action result, deletion) takes a
+  // ticket; a read applies only if nothing newer started or landed since —
+  // a read issued before an Archive / Mark read can't undo it. A read that
+  // was dropped that way is redone once the change has landed.
+  const epoch = useRef(0)
+  const reading = useRef(0)
+  const redo = useRef(false)
+
   const load = useCallback(async (signal?: AbortSignal) => {
+    const mine = ++epoch.current
+    reading.current++
     try {
       const [c, win] = await Promise.all([
         getConversation(conversationId, signal),
         getMessageWindow(conversationId, { limit: THREAD_LIMIT }, signal),
       ])
+      if (mine !== epoch.current) return null
       setConv(c)
       setMessages(win.messages)
       setError(null)
       return c
     } catch (e) {
-      if (!isAbortError(e)) setError(errorMessage(e))
+      if (mine === epoch.current && !isAbortError(e)) setError(errorMessage(e))
       return null
     } finally {
-      setLoading(false)
+      reading.current--
+      if (mine === epoch.current) setLoading(false)
     }
   }, [conversationId])
+
+  /** A local change happened: reads in flight predate it */
+  const supersede = useCallback(() => {
+    if (reading.current > 0) redo.current = true
+    epoch.current++
+  }, [])
+  /** The change landed: redo a read it dropped */
+  const settle = useCallback(() => {
+    if (!redo.current) return
+    redo.current = false
+    void load()
+  }, [load])
+
+  /** Apply an action's resulting conversation (and tell the list) */
+  const adopt = useCallback((fresh: Conversation) => {
+    supersede()
+    setConv(fresh)
+    onChangedRef.current(fresh)
+    settle()
+  }, [supersede, settle])
 
   useEffect(() => {
     const ctl = new AbortController()
@@ -64,14 +102,43 @@ export default function ThreadView({ conversationId, messageId, me, onChanged }:
       // Opening a thread reads it, like any mail client
       if (c && c.unread_count > 0 && autoRead.current !== c.id) {
         autoRead.current = c.id
-        markThreadRead(c.id, true).then((fresh) => { setConv(fresh); onChangedRef.current(fresh) }).catch(() => {})
+        supersede()
+        markThreadRead(c.id, true).then(adopt).catch(() => { settle() })
       }
     })
     return () => ctl.abort()
-  }, [load])
+  }, [load, adopt, supersede, settle])
 
   useWsEvent('new_message', (e) => { if (e.conversation_id === conversationId) void load() })
   useWsEvent('conversations_synced', (e) => { if (e.conversation_ids.includes(conversationId)) void load() })
+  useWsEvent('messages_deleted', (e) => {
+    if (e.conversation_id != null && e.conversation_id !== conversationId) return
+    const gone = new Set(e.message_ids)
+    supersede()
+    setMessages((prev) => prev.filter((m) => !gone.has(m.id)))
+    settle()
+  })
+  // Events may have been missed while disconnected
+  useWsEvent('resync', () => { void load() })
+
+  // Shield: scam checks and verdicts update the shown messages in place (like Chats)
+  const applyScam = useCallback((entries: ScamMsgState[] | null) => {
+    if (!entries?.length) return
+    supersede()
+    setMessages((prev) => applyScamStatesTo(prev, conversationId, entries))
+    settle()
+  }, [conversationId, supersede, settle])
+  useScamStateEvents(conversationId, applyScam)
+  const onScamVerdict = useCallback(async (msg: Message, scope: ScamVerdictScope) => {
+    applyScam(await submitNotScamVerdict(msg, scope))
+  }, [applyScam])
+  const { shield } = useFeatures()
+  const [reportTarget, setReportTarget] = useState<{ messageId: number; identityId: number } | null>(null)
+  const onReportScam = useCallback((msg: Message) => {
+    const identityId = msg.sender?.identity_id
+    if (identityId == null) { toast.info('This message has no reportable sender'); return }
+    setReportTarget({ messageId: msg.id, identityId })
+  }, [])
 
   // Centre the requested message once its element exists
   useEffect(() => {
@@ -92,22 +159,36 @@ export default function ThreadView({ conversationId, messageId, me, onChanged }:
 
   const act = async (fn: () => Promise<Conversation>, what: string) => {
     setBusy(true)
+    supersede()
     try {
-      const fresh = await fn()
-      setConv(fresh)
-      onChanged(fresh)
+      adopt(await fn())
     } catch (e) {
       reportError(e, what)
+      settle()
     } finally {
       setBusy(false)
     }
   }
 
+  // r: reply · shift+r: reply all · e: archive / move to Inbox
+  useKeyboardShortcuts({
+    r: () => { if (!latest) return false; startReply(latest, false) },
+    'shift+r': () => { if (!latest) return false; startReply(latest, true) },
+    e: () => {
+      if (!conv || busy) return false
+      void act(() => archiveThread(conv.id, !conv.is_archived), conv.is_archived ? 'Could not move to Inbox' : 'Could not archive')
+    },
+  })
+
   if (loading && !conv) {
     return <div className="flex flex-1 items-center justify-center text-slate-500"><Loader2 size={18} className="animate-spin" /></div>
   }
   if (error && !conv) {
-    return <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-red-400">Couldn’t load this email: {error}</div>
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <LoadError message={`Couldn’t load this email: ${error}`} onRetry={() => { setLoading(true); void load() }} />
+      </div>
+    )
   }
   if (!conv) return null
 
@@ -154,7 +235,7 @@ export default function ThreadView({ conversationId, messageId, me, onChanged }:
         {messages.length === 0 && <p className="text-center text-sm text-slate-500">No messages stored for this thread yet.</p>}
         {messages.map((m) => (
           <div key={m.id} id={`mail-msg-${m.id}`}>
-            <EmailMessageView message={m} highlighted={m.id === messageId} onReply={(target) => startReply(target, false)} />
+            <EmailMessageView message={m} highlighted={m.id === messageId} onReply={(target) => startReply(target, false)} onScamVerdict={onScamVerdict} onReportScam={onReportScam} />
           </div>
         ))}
         {reply ? (
@@ -174,6 +255,15 @@ export default function ThreadView({ conversationId, messageId, me, onChanged }:
           </div>
         )}
       </div>
+
+      {shield && reportTarget && (
+        <ReportScamDialog
+          conversationId={conv.id}
+          targetMessageId={reportTarget.messageId}
+          targetIdentityId={reportTarget.identityId}
+          onClose={() => setReportTarget(null)}
+        />
+      )}
     </div>
   )
 }

@@ -53,7 +53,7 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
       </div>
 
       {/* Workspace switcher */}
-      <div className="mb-3 flex max-h-56 flex-col items-center gap-1.5 overflow-y-auto">
+      <div className="mb-3 flex max-h-56 flex-shrink-0 flex-col items-center gap-1.5 overflow-y-auto">
         <button
           onClick={() => selectWorkspace(null)}
           title="All chats"
@@ -114,7 +114,8 @@ export default function Sidebar({ onSearchClick }: { onSearchClick?: () => void 
       />
 
       {/* Nav */}
-      <nav className="flex flex-1 flex-col gap-1">
+      {/* Scrolls on short windows so the workspaces above and Sync / Lock / Settings below stay visible */}
+      <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
         {nav.map(({ to, icon: Icon, label }) => {
           // Custom active detection for intelligence tabs
           const url = new URL(to, 'http://x')

@@ -4,6 +4,9 @@ import type { Account, ConnectableChannel } from '../api/accounts'
 import { useWsEvent } from './useWebSocket'
 import { isAbortError } from '../lib/http'
 
+/** Connector states after which an account may no longer hold credentials (logout, revoked session) */
+const CREDENTIALS_MAY_CHANGE: ReadonlySet<string> = new Set(['unauthorized', 'stopped'])
+
 export interface AccountsState {
   accounts: Account[]
   channels: ConnectableChannel[]
@@ -54,6 +57,9 @@ export function useAccounts(): AccountsState {
     setAccounts((prev) => prev.map((a) => (
       a.account_key === e.account_key ? { ...a, status: { state: e.state, error: e.error } } : a
     )))
+    // Signing out (or credentials revoked) ends in one of these states and may
+    // drop the credentials: `configured` only comes from the server, re-read it
+    if (CREDENTIALS_MAY_CHANGE.has(e.state) && current.status.state !== e.state) void refresh()
   })
   useWsEvent('resync', () => { void refresh() })
 

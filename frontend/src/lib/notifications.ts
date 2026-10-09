@@ -12,23 +12,57 @@ import type { WSEvent } from '../api/types'
 
 export type NotifPref = 'all' | 'tracked' | 'off'
 
-// Backend default (backend/api/settings.py get_notif_pref)
-let cachedPref: NotifPref = 'tracked'
+const isPref = (v: unknown): v is NotifPref => v === 'all' || v === 'tracked' || v === 'off'
 
-export function setCachedNotifPref(pref: string | null | undefined): void {
-  if (pref === 'all' || pref === 'tracked' || pref === 'off') cachedPref = pref
+// Backend defaults (backend/api/settings.py get_notif_pref)
+let cachedPref: NotifPref = 'tracked'
+let cachedChannelPrefs: Record<string, NotifPref> = {}
+/** Channels whose notifications are off until set per channel (NOTIF_DEFAULT_OFF_CHANNELS) */
+export const NOTIF_DEFAULT_OFF_CHANNELS: ReadonlySet<string> = new Set(['gmail'])
+
+/** The global pref, and (when given) every per-channel pref (`notif_pref_channels`) */
+export function setCachedNotifPref(pref: string | null | undefined, channels?: Record<string, string> | null): void {
+  if (isPref(pref)) cachedPref = pref
+  if (channels !== undefined) {
+    cachedChannelPrefs = {}
+    for (const [ch, p] of Object.entries(channels ?? {})) if (isPref(p)) cachedChannelPrefs[ch] = p
+  }
+}
+
+/** One channel's pref changed (Settings → Notifications) */
+export function setCachedChannelNotifPref(channel: string, pref: string): void {
+  if (isPref(pref)) cachedChannelPrefs = { ...cachedChannelPrefs, [channel]: pref }
 }
 
 export function getCachedNotifPref(): NotifPref {
   return cachedPref
 }
 
+/**
+ * The pref that applies to a channel — the same rule as the backend's
+ * get_notif_pref(channel): its own setting, else off for email channels,
+ * else the global one.
+ */
+export function notifPrefFor(
+  channel: string | null | undefined,
+  global: NotifPref = cachedPref,
+  perChannel: Record<string, NotifPref> = cachedChannelPrefs,
+): NotifPref {
+  if (channel) {
+    const own = perChannel[channel]
+    if (own) return own
+    if (NOTIF_DEFAULT_OFF_CHANNELS.has(channel)) return 'off'
+  }
+  return global
+}
+
 type NewMessageEvent = Extract<WSEvent, { type: 'new_message' }>
 
-/** Pure policy: should this event produce a desktop notification? */
+/** Pure policy: should this event produce a desktop notification? `pref` = the global pref */
 export function shouldNotify(event: NewMessageEvent, pref: NotifPref = cachedPref): boolean {
   if (event.is_outgoing) return false
-  return pref === 'all' || (pref === 'tracked' && !!event.is_tracked)
+  const effective = notifPrefFor(event.channel, pref)
+  return effective === 'all' || (effective === 'tracked' && !!event.is_tracked)
 }
 
 export function notificationContent(event: NewMessageEvent): { title: string; body: string } {

@@ -536,10 +536,12 @@ async def test_fetch_history_reports_archive_failure(agent, db, fake_archive):
 
 @pytest.mark.asyncio
 async def test_fetch_history_is_telegram_only(agent, db, fake_archive):
+    """Other channels aren't archived on demand: their stored history is the
+    complete history, answered at once without touching the archive."""
     await _seed(db)
     thread = await factories.conversation(db, "thread-1", title="Offsite", kind="email_thread", channel="gmail")
-    err = await agent.call_error("fetch_history", conversation_id=thread.id)
-    assert "only Telegram" in err
+    res = await agent.call("fetch_history", conversation_id=thread.id)
+    assert res["history_complete"] is True and "isn't fetched on demand" in res["note"]
     assert fake_archive.requested == []
 
 
@@ -796,3 +798,35 @@ async def test_fetch_history_archive_stopped_returns_immediately(agent, db, real
     assert out["archive_state"] == "stopped" and out["telegram_connected"] is True
     assert "isn't running" in out["note"]
     assert not real_archive.is_queued(S.DAVE)
+
+
+# ── Channels the archive doesn't walk ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_dms_on_unarchived_channels_count_complete_and_can_be_reviewed(db):
+    """An SMS/Signal DM has no on-demand archive: its stored history is all
+    there is, so the review loop (incomplete → fetch_history → mark_reviewed)
+    must be able to finish it."""
+    from unittest.mock import AsyncMock
+
+    tg = await factories.conversation(db, "77", title="Alice")
+    db.add(HistoryCoverage(conversation_id=tg.id, history_complete=True))
+    await db.commit()
+    sms = await factories.conversation(db, "chat-guid", title="Bob", channel="sms")
+    last = await factories.message(db, sms, 1_700_000_000_000, "see you", date=T0)
+
+    archive = SimpleNamespace(refresh_status=AsyncMock(return_value={}), get_status=lambda: {"state": "idle"})
+    with patch.object(mcp_tools, "_archive", return_value=archive):
+        status = await mcp_tools._tool_get_archive_status(db, {}, {})
+        assert status["dms"]["history_complete"] == 2 and status["dms"]["history_incomplete"] == 0
+        assert (await mcp_tools._tool_list_dms(db, {"filter": "incomplete"}, {}))["dms"] == []
+
+        fetched = await mcp_tools._tool_fetch_history(db, {"conversation_id": sms.id}, {})
+        assert fetched["history_complete"] is True and fetched["coverage"]["history_complete"] is True
+
+        reviewed = await mcp_tools._tool_mark_reviewed(
+            db, {"conversation_id": sms.id, "through_message_id": last.id}, {})
+        assert reviewed["review"]["up_to_date"] is True
+        unreviewed = (await mcp_tools._tool_list_dms(db, {"filter": "unreviewed"}, {}))["dms"]
+        assert [d["conversation_id"] for d in unreviewed] == [tg.id]
+        assert (await mcp_tools._tool_get_archive_status(db, {}, {}))["dms"]["reviewed_up_to_date"] == 1

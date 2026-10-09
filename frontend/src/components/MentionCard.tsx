@@ -3,7 +3,7 @@ import { AtSign, Bookmark, CheckCheck, ChevronDown, ChevronRight } from 'lucide-
 import type { MentionGroup, Message } from '../api/types'
 import { authenticatedMediaUrl } from '../api/session'
 import { fmtDate, fmtTime } from '../utils/time'
-import { conversationTitle } from '../lib/conversation'
+import { conversationTitle, kindColor, kindLabel } from '../lib/conversation'
 import ChannelIcon from './ChannelIcon'
 
 /** Shared by Home → Mentions and Intelligence → Mentions. */
@@ -61,20 +61,6 @@ const TAG_COLORS: Record<string, string> = {
   violet: 'bg-violet-500/20 text-violet-400',
   purple: 'bg-purple-500/20 text-purple-400',
   pink:   'bg-pink-500/20 text-pink-400',
-}
-
-const KIND_COLORS: Record<string, string> = {
-  group: 'bg-purple-500/20 text-purple-400',
-  channel: 'bg-amber-500/20 text-amber-400',
-  direct: 'bg-indigo-500/20 text-indigo-400',
-  email_thread: 'bg-sky-500/20 text-sky-400',
-}
-
-const KIND_LABELS: Record<string, string> = {
-  group: 'group',
-  channel: 'channel',
-  direct: 'direct',
-  email_thread: 'email',
 }
 
 /** "14:05" today, else "Yesterday 14:05" / "Mon 14:05" / "Mar 4 14:05" */
@@ -136,7 +122,7 @@ export default function MentionCard({ group, onNavigate, selected = false, onTog
   }
 
   const conversationId = group.conversation.id
-  const kindColor = KIND_COLORS[group.conversation.kind] ?? 'bg-slate-500/20 text-slate-400'
+  const kindBadge = kindColor(group.conversation.kind)
   const allMsgs = [
     ...group.context_before.map((m) => ({ msg: m, highlighted: false })),
     { msg: group.mention_msg, highlighted: true },
@@ -160,7 +146,7 @@ export default function MentionCard({ group, onNavigate, selected = false, onTog
         {expanded ? <ChevronDown size={12} className="shrink-0 text-slate-500" /> : <ChevronRight size={12} className="shrink-0 text-slate-500" />}
         {group.conversation.is_tracked && <Bookmark size={11} className="shrink-0 text-violet-400" />}
         <ChannelIcon channel={group.conversation.channel} />
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${kindColor}`}>{KIND_LABELS[group.conversation.kind] ?? group.conversation.kind}</span>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${kindBadge}`}>{kindLabel(group.conversation.kind)}</span>
         <span className="flex-1 min-w-0 truncate text-xs font-semibold text-slate-200">{conversationTitle(group.conversation)}</span>
         {group.conversation.tags.slice(0, 2).map((t) => (
           <span key={t.id} className={`rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${TAG_COLORS[t.color] ?? TAG_COLORS.slate}`}>

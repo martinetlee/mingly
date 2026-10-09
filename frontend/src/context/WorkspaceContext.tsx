@@ -5,8 +5,10 @@ import { getWorkspaces } from '../api/client'
 import { useWsEvent } from '../hooks/useWebSocket'
 import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { reportError } from '../lib/toast'
+import { dropLegacyIdKeys, readStoredId, storeId } from '../lib/idStorage'
 
-const STORAGE_KEY = 'activeWorkspaceId'
+/** Stored per browser under a schema-generation key (lib/idStorage) */
+const STORAGE_NAME = 'activeWorkspaceId'
 const REFRESH_THROTTLE_MS = 15000
 
 interface WorkspaceContextValue {
@@ -29,8 +31,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loaded, setLoaded] = useState(false)
   const [activeId, setActiveId] = useState<number | null>(() => {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? parseInt(stored, 10) : null
+    dropLegacyIdKeys()
+    return readStoredId(STORAGE_NAME)
   })
   const snapshotRef = useRef('')
   // Ordering guard: only the most recently *started* refresh may apply, so a
@@ -73,8 +75,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const setActiveWorkspaceId = useCallback((id: number | null) => {
     setActiveId(id)
-    if (id === null) localStorage.removeItem(STORAGE_KEY)
-    else localStorage.setItem(STORAGE_KEY, String(id))
+    storeId(STORAGE_NAME, id)
   }, [])
 
   const activeWorkspace = workspaces.find((w) => w.id === activeId) ?? null

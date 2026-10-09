@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X, Loader2 } from 'lucide-react'
+import { RefreshCw, Search, ExternalLink, Star, RotateCcw, Info, X, Loader2, MessageSquare } from 'lucide-react'
 import type { Conversation, Message, Person, RelationshipStatus } from '../api/types'
 import { syncPeople, setPersonImportant, setRelationshipStatus, resetRelationshipStatus, sendMessage, reactToMessage, syncConversation } from '../api/client'
-import { canStartConversation, openDirectConversation } from '../lib/directConversation'
+import { canStartConversation, NoConversationError, openDirectConversation } from '../lib/directConversation'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import { useDebouncedValue } from '../hooks/useDebouncedQuery'
 import { usePagedContacts } from '../hooks/usePagedContacts'
@@ -19,6 +19,7 @@ import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmt
 import ChatMessagesView from '../components/ChatMessagesView'
 import { applyReaction } from './chats/ChatPane'
 import ComposeBar from '../components/ComposeBar'
+import { LoadError } from '../components/ui'
 
 function ContactCard({
   contact,
@@ -109,9 +110,11 @@ export default function Contacts() {
   const list = usePagedContacts(debouncedSearch, importantOnly ? 'all' : statusFilter, 100, importantOnly)
   const { items: contacts, loading, hasMore: hasMoreContacts, loadMore: loadMoreContacts } = list
 
-  // The selected person's direct conversation: their most recent one on any
-  // channel, else a new Telegram one (lib/directConversation)
-  const [direct, setDirect] = useState<{ personId: number; conversation: Conversation | null; error: string | null } | null>(null)
+  // The selected person's chat: their most recent one-to-one messenger
+  // conversation (email lives in Mail). Selecting never creates one — with
+  // none, "Start a chat" does (lib/directConversation)
+  const [direct, setDirect] = useState<{ personId: number; conversation: Conversation | null; error: string | null; missing?: boolean } | null>(null)
+  const [directAttempt, setDirectAttempt] = useState(0)
   const conversation = direct && direct.personId === selected?.id ? direct.conversation : null
   const conversationId = conversation?.id ?? null
   // Same message-window engine as the Chats pane (paging, backfill, live WS updates)
@@ -146,15 +149,25 @@ export default function Contacts() {
     const personId = selected.id
     let cancelled = false
     setDirect(null)
-    openDirectConversation(personId, { canStart: canStartConversation(selected.identities) })
+    openDirectConversation(personId, { canStart: false, messengersOnly: true })
       .then(
       (conv) => { if (!cancelled) setDirect({ personId, conversation: conv, error: null }) },
-      (e) => { if (!cancelled) setDirect({ personId, conversation: null, error: errorMessage(e) }) },
+      (e) => {
+        if (cancelled) return
+        if (e instanceof NoConversationError) setDirect({ personId, conversation: null, error: null, missing: true })
+        else setDirect({ personId, conversation: null, error: errorMessage(e) })
+      },
     )
     return () => { cancelled = true }
-    // Only re-resolve when a different person is selected
+    // Only re-resolve when a different person is selected (or on Retry)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id])
+  }, [selected?.id, directAttempt])
+
+  /** Explicitly start a chat with the selected person (today: a Telegram one) */
+  const startChat = useAsyncAction(async (person: Person) => {
+    const conv = await openDirectConversation(person.id, { canStart: true, messengersOnly: true })
+    if (selectedRef.current?.id === person.id) setDirect({ personId: person.id, conversation: conv, error: null })
+  }, { errorContext: 'Couldn’t start a chat' })
 
   const syncAll = useAsyncAction(async () => {
     const r = await syncPeople()
@@ -418,7 +431,7 @@ export default function Contacts() {
                     <Info size={13} />
                     Info
                   </button>
-                  {conversation && (
+                  {conversation && can(conversation, 'history_backfill') && (
                     <button
                       onClick={handleSyncChat}
                       disabled={syncingChat === conversation.id}
@@ -449,10 +462,27 @@ export default function Contacts() {
                   )}
                 </>
               ) : (
-                <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-500">
-                  {direct?.personId === selected.id && direct.error
-                    ? <p className="text-sm">{direct.error}</p>
-                    : <Loader2 size={16} className="animate-spin" />}
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center text-slate-500">
+                  {direct?.personId !== selected.id ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : direct.missing ? (
+                    <>
+                      <p className="text-sm">No chat with {selected.name} yet</p>
+                      {canStartConversation(selected.identities) && (
+                        <button
+                          type="button"
+                          onClick={() => void startChat.run(selected)}
+                          disabled={startChat.pending}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-400 disabled:opacity-50"
+                        >
+                          {startChat.pending ? <Loader2 size={12} className="animate-spin" /> : <MessageSquare size={12} />}
+                          Start a Telegram chat
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <LoadError message={`Couldn’t open the chat: ${direct.error}`} onRetry={() => setDirectAttempt((n) => n + 1)} />
+                  )}
                 </div>
               )}
             </>

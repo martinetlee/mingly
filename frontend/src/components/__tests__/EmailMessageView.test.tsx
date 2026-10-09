@@ -12,6 +12,7 @@ vi.mock('../../api/email', async (importOriginal) => ({
 
 import { setRemoteImagesAllowed, useRemoteImageSenders, parseAddressList } from '../../api/email'
 import MessageBubble from '../MessageBubble'
+import { FeaturesProvider } from '../../context/FeaturesContext'
 import { emailSrcDoc, hasBlockedImages } from '../EmailMessageView'
 import { replyAllRecipients, replyRecipients, replySubject } from '../../pages/mail/recipients'
 
@@ -46,6 +47,31 @@ function renderEmail(message: Message, kind: 'email_thread' | 'direct' = 'email_
 }
 
 describe('EmailMessageView', () => {
+  it('offers "Report scam" (Shield on, handler given) like a chat bubble, and only then', () => {
+    const onReportScam = vi.fn()
+    const m = email()
+    const { unmount } = render(
+      <FeaturesProvider value={{ shield: true }}>
+        <MemoryRouter>
+          <MessageBubble message={m} showSender conversationKind="email_thread" onReportScam={onReportScam} />
+        </MemoryRouter>
+      </FeaturesProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Report scam' }))
+    expect(onReportScam).toHaveBeenCalledWith(m)
+    unmount()
+    // Shield off: no report action even with a handler
+    render(<MemoryRouter><MessageBubble message={m} showSender conversationKind="email_thread" onReportScam={onReportScam} /></MemoryRouter>)
+    expect(screen.queryByRole('button', { name: 'Report scam' })).toBeNull()
+  })
+
+  it('its hover actions are named buttons that also show on keyboard focus (not hover-only)', () => {
+    renderEmail(email())
+    const reply = screen.getByRole('button', { name: 'Reply' })
+    expect(screen.getByRole('button', { name: 'Copy text' })).toBeTruthy()
+    expect(reply.parentElement!.className).toContain('group-focus-within/email:opacity-100')
+  })
+
   it('renders an email-thread message as an email: header, recipients, sandboxed body, attachments', () => {
     const { container } = renderEmail(email())
     expect(screen.getByTestId('email-message')).toBeTruthy()

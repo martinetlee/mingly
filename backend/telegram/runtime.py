@@ -15,6 +15,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from backend.aio import LoopLock
 from backend.tasks import spawn
 from backend.telegram import client as tg_client
 from backend.telegram.client import TelegramUnavailable
@@ -28,8 +29,10 @@ RECONNECT_BACKOFF_MAX = 300
 
 class TelegramRuntime:
     def __init__(self):
-        self._lock = asyncio.Lock()
-        self._connect_lock = asyncio.Lock()
+        # Built on the server loop at first use: this singleton is created
+        # at import, before (and on another thread than) that loop.
+        self._lock = LoopLock()
+        self._connect_lock = LoopLock()
         self._client = None
         self._handlers: list = []
         self._tasks: list[asyncio.Task] = []

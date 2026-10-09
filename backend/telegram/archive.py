@@ -50,6 +50,7 @@ from sqlalchemy import and_, case, func, or_, select
 from telethon.errors import FloodWaitError
 
 from backend import prefs
+from backend.aio import LoopLocal
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Account, Conversation, HistoryCoverage
@@ -63,6 +64,10 @@ from backend.telegram.runtime import runtime
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
+
+# Channels whose history this archive walks. Every other channel's stored
+# history is all Mingly gets (its connector imports what the channel offers).
+ARCHIVED_CHANNELS = (ids.CHANNEL,)
 
 JOB_KEY = "dm_archive"
 PAGE_SIZE = 100
@@ -111,7 +116,7 @@ class DMArchive:
         self._queue: list[int] = []
         self._queue_types: dict[int, Optional[str]] = {}
         self._waiters: dict[int, list[asyncio.Future]] = {}
-        self._wake: Optional[asyncio.Event] = None
+        self._wake: LoopLocal[asyncio.Event] = LoopLocal(asyncio.Event)
         self._dialogs_enumerated_at: Optional[datetime] = None
         self._last_broadcast = 0.0
         self._trailing: Optional[asyncio.Task] = None
@@ -192,9 +197,7 @@ class DMArchive:
     # -- controls ---------------------------------------------------------------
 
     def _event(self) -> asyncio.Event:
-        if self._wake is None:
-            self._wake = asyncio.Event()
-        return self._wake
+        return self._wake.get()
 
     def _poke(self) -> None:
         self._event().set()

@@ -11,7 +11,7 @@ import {
   setBriefingPrompts,
 } from '../../api/client'
 import type { BriefingHistoryEntry, BriefingRun, Conversation, Prefs } from '../../api/types'
-import { conversationTitle } from '../../lib/conversation'
+import { conversationTitle, kindLabel } from '../../lib/conversation'
 import ChannelIcon from '../../components/ChannelIcon'
 import { BriefingEntryList, type RegenerateControls } from '../../components/BriefingEntryCard'
 import { useConfirm } from '../../components/ui'
@@ -326,7 +326,7 @@ export default function BriefingTab() {
                     </div>
                     <span className="flex-1 truncate text-[11px] text-slate-200" title={conversationTitle(chat)}>{conversationTitle(chat)}</span>
                     <ChannelIcon channel={chat.channel} />
-                    <span className="text-[9px] text-slate-500">{chat.kind}</span>
+                    <span className="text-[9px] text-slate-500">{kindLabel(chat.kind)}</span>
                     <button
                       onClick={() => void handleRemoveSource(chat)}
                       title="Remove from briefing"

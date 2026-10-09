@@ -22,7 +22,7 @@ export function page(ids: number[], over: Partial<MessageWindow> = {}, msgOver: 
 /** Everything a Telegram conversation supports today */
 export const ALL_CAPABILITIES: Capability[] = [
   'send', 'edit', 'delete', 'react', 'reply', 'media_send', 'pin', 'forward', 'read_receipts', 'forum_topics',
-  'admin_moderation', 'history_backfill', 'typing', 'presence',
+  'admin_moderation', 'history_backfill', 'typing', 'presence', 'members',
 ]
 
 export const makeConversation = (id: number, title: string, over: Partial<Conversation> = {}): Conversation => ({

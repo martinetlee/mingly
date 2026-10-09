@@ -32,10 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import crud
 from backend.db.models import (
-    AgentReview, Conversation, ConversationTag, HistoryCoverage, Message, Organization,
+    Account, AgentReview, Conversation, ConversationTag, HistoryCoverage, Message, Organization,
 )
 from backend.serialization import iso_utc
 from backend.serializers import channel_of, conversation_out, message_out
+from backend.telegram.archive import ARCHIVED_CHANNELS
 from backend.api.organizations import list_organizations as _list_organizations
 from backend.api.people import broadcast_person_changed, people_payload, position_dict
 from backend.api.person_notes import broadcast_notes_changed, note_dict
@@ -125,7 +126,20 @@ def _with_state(q):
     )
 
 
-_COMPLETE = func.coalesce(HistoryCoverage.history_complete, False) == True  # noqa: E712
+def _archived_channel():
+    """Conversations on a channel fetch_history archives; every other
+    channel's stored history counts as complete."""
+    return Conversation.account_id.in_(select(Account.id).where(Account.channel.in_(ARCHIVED_CHANNELS)))
+
+
+_COMPLETE = or_(
+    func.coalesce(HistoryCoverage.history_complete, False) == True,  # noqa: E712
+    not_(_archived_channel()),
+)
+
+
+def _review_up_to_date():
+    return crud.review_up_to_date(complete=_COMPLETE)
 
 
 async def _message_ids_at_max_seq(db: AsyncSession, per_conversation_max) -> Dict[int, int]:
@@ -145,7 +159,10 @@ async def _conversation_states(db: AsyncSession, conversation_ids: List[int]) ->
     if not conversation_ids:
         return {}
     rows = (await db.execute(
-        _with_state(select(Conversation.id, HistoryCoverage, AgentReview, crud.review_up_to_date().label("utd")))
+        _with_state(select(
+            Conversation.id, HistoryCoverage, AgentReview, _review_up_to_date().label("utd"),
+            _COMPLETE.label("complete"),
+        ))
         .where(Conversation.id.in_(conversation_ids))
     )).all()
     in_ids = Message.conversation_id.in_(conversation_ids)
@@ -171,11 +188,11 @@ async def _conversation_states(db: AsyncSession, conversation_ids: List[int]) ->
         .group_by(Message.conversation_id)
     ))
     out = {}
-    for cid, cov, review, utd in rows:
+    for cid, cov, review, utd, complete in rows:
         s = stats.get(cid)
         out[cid] = {
             "coverage": {
-                "history_complete": bool(cov and cov.history_complete),
+                "history_complete": bool(complete),
                 "message_count": s.n if s else 0,
                 "first_message_at": _iso(s.first) if s else None,
                 "last_message_at": _iso(s.last) if s else None,
@@ -352,7 +369,7 @@ async def _tool_get_archive_status(db: AsyncSession, args: dict, ctx: dict) -> d
         _with_state(select(
             func.count(),
             func.sum(case((and_(not_bot, _COMPLETE), 1), else_=0)),
-            func.sum(case((and_(not_bot, crud.review_up_to_date()), 1), else_=0)),
+            func.sum(case((and_(not_bot, _review_up_to_date()), 1), else_=0)),
             func.sum(case((not_bot, 0), else_=1)),
         )).where(_direct_filter())
     )).one()
@@ -370,6 +387,8 @@ async def _tool_get_archive_status(db: AsyncSession, args: dict, ctx: dict) -> d
             "unreviewed": people - up_to_date,
         },
         "note": ("" if connected else TELEGRAM_OFFLINE_NOTE + " ") + (
+            "'archive' is the Telegram DM archive; 'dms' covers DMs on every channel, and only Telegram "
+            "DMs can be incomplete (other channels store all the history there is). "
             "A DM counts as reviewed only when its history is complete and it was "
             "marked reviewed through its newest stored message. Use list_dms(filter='incomplete') "
             "and fetch_history to close gaps, list_dms(filter='unreviewed') for the work queue."
@@ -395,7 +414,7 @@ async def _tool_list_dms(db: AsyncSession, args: dict, ctx: dict) -> dict:
     if not include_bots:
         q = q.where(func.coalesce(Conversation.is_bot, False) == False)  # noqa: E712
     if filt == "unreviewed":
-        q = q.where(not_(crud.review_up_to_date()))
+        q = q.where(not_(_review_up_to_date()))
     elif filt == "incomplete":
         q = q.where(not_(_COMPLETE))
     if key is not None:
@@ -722,11 +741,18 @@ async def _tool_get_person(db: AsyncSession, args: dict, ctx: dict) -> dict:
 async def _tool_fetch_history(db: AsyncSession, args: dict, ctx: dict) -> dict:
     conv = await _require_visible_conversation(db, args.get("conversation_id"))
     conversation_id = conv.id
-    if channel_of(conv) != "telegram":
-        raise ToolError(
-            f"Conversation {conversation_id} is on {channel_of(conv)}; only Telegram history is "
-            "archived by fetch_history. Its stored messages are readable with get_messages."
-        )
+    if channel_of(conv) not in ARCHIVED_CHANNELS:
+        # Nothing to archive: the stored history is all there is.
+        st = (await _conversation_states(db, [conversation_id])).get(conversation_id, {})
+        return {
+            "conversation_id": conversation_id,
+            "history_complete": True,
+            "coverage": st.get("coverage") or {},
+            "note": (
+                f"{channel_of(conv)} history isn't fetched on demand: what Mingly stores is the complete "
+                "history. Read it with get_messages(order='asc')."
+            ),
+        }
     try:
         wait = float(args.get("wait_seconds", 20))
     except (TypeError, ValueError):
@@ -935,8 +961,9 @@ _READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
 TOOLS: Dict[str, Dict[str, Any]] = {
     "get_archive_status": {
         "description": (
-            "Progress of the background DM archive (state, FloodWait, DMs complete/pending/failed) "
-            "and how many DMs are reviewed. Start every review here."
+            "Progress of the background Telegram DM archive (state, FloodWait, DMs complete/pending/failed) "
+            "and how many DMs (every channel) are complete and reviewed. Only Telegram history is archived; "
+            "other channels' DMs always count as complete. Start every review here."
         ),
         "inputSchema": _schema({}),
         "access": "read",
@@ -948,7 +975,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "Every direct conversation (DM) on every channel, including archived and hidden ones, with the "
             "person (identities, CRM fields, positions, note count), archive coverage and review state. "
             "filter='unreviewed' is the review work queue; filter='incomplete' lists DMs whose history "
-            "isn't fully archived. Stable keyset paging."
+            "isn't fully archived (Telegram only: other channels count as complete). Stable keyset paging."
         ),
         "inputSchema": _schema({
             "cursor": _CURSOR_PROP,
@@ -1078,7 +1105,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     "fetch_history": {
         "description": (
             f"Ask the archive to fetch a Telegram conversation's full history now (DM or group), waiting up to "
-            f"wait_seconds (max {MAX_FETCH_WAIT_SECONDS}). Returns coverage; call again until history_complete."
+            f"wait_seconds (max {MAX_FETCH_WAIT_SECONDS}). Returns coverage; call again until history_complete. "
+            "Other channels aren't archived on demand: they answer history_complete=true at once."
         ),
         "inputSchema": _schema({
             "conversation_id": _CONVERSATION_ID_PROP,
@@ -1173,7 +1201,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Record that you reviewed a conversation through a stored message (its newest message_id after "
             "reading to the end; omit through_message_id for a conversation with no messages). Only allowed "
-            "once history is complete. Newer messages put it back in list_dms(filter='unreviewed'). "
+            "once history is complete (always the case outside Telegram). Newer messages put it back in "
+            "list_dms(filter='unreviewed'). "
             "Requires write access."
         ),
         "inputSchema": _schema({

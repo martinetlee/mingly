@@ -4,6 +4,7 @@ cancelled events, attendees → identities / people, organizer, all-day
 events, time zones → naive UTC, calendar selection, the /api/calendar
 routes, meetings on the person timeline and today's meetings in briefings."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -289,6 +290,57 @@ async def test_auth_error_stops_the_loop(db, monkeypatch, broadcasts):
     sync = _sync(acc)
     await sync.run()  # returns instead of retrying forever
     assert sync.error and "Sign in again" in sync.error
+
+
+@pytest.mark.asyncio
+async def test_window_is_pulled_again_daily_and_keeps_history_outside_it(db, gcal, broadcasts):
+    """Incremental sync only returns changed events, so new instances of an
+    unchanged recurring meeting never arrive: the window is re-pulled daily."""
+    acc = await _account(db)
+    gcal.full["primary"] = [[gevent("w1", "2026-10-12T09:00:00Z"), gevent("gone", "2026-10-14T09:00:00Z")]]
+    sync = _sync(acc)
+    await sync.sync_once()
+    gcal.incremental["primary"] = [gevent("far", "2027-06-01T09:00:00Z"), gevent("old", "2026-07-01T09:00:00Z")]
+    await sync.sync_once()  # same day: incremental
+    assert "syncToken" in gcal.requests[-1][1]
+
+    state = (await load_sync_state(acc.id))["calendar"]
+    day_ago = (datetime.utcnow() - timedelta(days=1, minutes=1)).isoformat()
+    await merge_sync_state(acc.id, calendar=dict(state, window_synced_at={"primary": day_ago}))
+    gcal.full["primary"] = [[gevent("w1", "2026-10-12T09:00:00Z"), gevent("w1_next", "2026-12-28T09:00:00Z")]]
+    gcal.requests.clear()
+    await sync.sync_once()
+    (cal, q), = gcal.requests
+    assert "syncToken" not in q and "timeMin" in q and "timeMax" in q
+    # the new instance arrived; the in-window event Google no longer returns is gone;
+    # events outside the window (history, far future) are kept
+    assert set(await _events(db)) == {"w1", "w1_next", "far", "old"}
+    state = (await load_sync_state(acc.id))["calendar"]
+    assert state["window_synced_at"]["primary"] > day_ago
+    assert state["sync_tokens"]["primary"].startswith("primary-tok-")
+
+
+@pytest.mark.asyncio
+async def test_calendar_retry_after_is_capped(db, monkeypatch, broadcasts):
+    acc = await _account(db)
+
+    def handler(request):
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        return httpx.Response(429, headers={"Retry-After": "86400"}, json={"error": {"message": "quota"}})
+
+    monkeypatch.setattr(oauth, "transport", httpx.MockTransport(handler))
+    sync = _sync(acc)
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+        raise asyncio.CancelledError
+
+    sync._sleep = fake_sleep
+    with pytest.raises(asyncio.CancelledError):
+        await sync.run()
+    assert delays == [calendar_sync.BACKOFF_MAX]
 
 
 # ── routes ────────────────────────────────────────────────────────────────────

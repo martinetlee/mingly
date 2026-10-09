@@ -36,7 +36,7 @@ import shutil
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -54,7 +54,8 @@ from backend.fsutil import atomic_write_text
 from backend.jobs import await_single
 from backend.prefs import get_pref, update_prefs
 from backend.scam.channel_ids import (
-    TELEGRAM, CloudRefs, cloud_refs, handle_salt, telegram_message_id, telegram_peer_ids, telegram_user_ids,
+    TELEGRAM, CloudRefs, cloud_refs, handle_salt, telegram_message_id, telegram_peer_ids, telegram_scan_ids,
+    telegram_user_ids,
 )
 from backend.scam.verdict import not_pending_condition
 
@@ -266,6 +267,7 @@ class _TelegramRefs:
     users: dict  # identity_id -> Telegram user id
     peers: dict  # conversation_id -> Telegram peer id
     messages: dict  # message_id -> Telegram message id
+    senders: dict = field(default_factory=dict)  # message_id -> Telegram sender id (see channel_ids.telegram_scan_ids)
 
 
 async def _telegram_refs(db, *, identity_ids=(), conversation_ids=(), message_ids=()) -> _TelegramRefs:
@@ -812,6 +814,12 @@ class CloudSyncManager:
                         db, identity_ids=[m.sender_identity_id for m in msgs],
                         conversation_ids=[m.conversation_id for m in msgs],
                     )
+                    for cid in {m.conversation_id for m in msgs if m.conversation_id in refs.peers}:
+                        tg = await telegram_scan_ids(
+                            db, await db.get(Conversation, cid), [m for m in msgs if m.conversation_id == cid]
+                        )
+                        if tg is not None:
+                            refs.senders.update(tg.senders)
                 else:
                     refs = await cloud_refs(
                         db, salt, identity_ids=[m.sender_identity_id for m in msgs],
@@ -868,18 +876,28 @@ class CloudSyncManager:
             )
             async with AsyncSessionLocal() as db:
                 refs = await (_telegram_refs(db, **ids) if salt is None else cloud_refs(db, salt, **ids))
+                existing_identities, existing_conversations = await _existing_rows(db, **ids)
             # v1: Telegram rows only (a sender flag needs its Telegram user, a
-            # scan its Telegram conversation). v2: any row still resolvable.
+            # scan its Telegram conversation), resolved now or snapshotted at
+            # dismissal time (``cloud_v1``). v2: any row still resolvable, plus
+            # Telegram rows from their snapshot. A dismissal whose rows are
+            # gone without a usable snapshot can never be uploaded: skipped.
             known_senders = refs.users if salt is None else refs.handles
             known_conversations = refs.peers if salt is None else refs.conversations
 
-            scammer_items, scan_items = [], []
+            scammer_items, scan_items, skipped = [], [], []
             for d, data in parsed:
+                v1 = _cloud_v1(data)
                 if d.dismissal_type == "scammer":
-                    if data.get("identity_id") in known_senders:
+                    if data.get("identity_id") in known_senders or v1.get("telegram_id") is not None:
                         scammer_items.append((d, data))
-                elif data.get("conversation_id") in known_conversations:
+                    elif data.get("identity_id") not in existing_identities:
+                        skipped.append(d)
+                elif data.get("conversation_id") in known_conversations or (
+                        salt is None and v1.get("chat_id") is not None):
                     scan_items.append((d, data))
+                elif data.get("conversation_id") not in existing_conversations:
+                    skipped.append(d)
 
             if scammer_items:
                 build = _v1_dismissal if salt is None else _v2_dismissal
@@ -891,13 +909,29 @@ class CloudSyncManager:
                 await self._post_items("/sync/scan-results", "scan_results",
                                        [build(data, refs) for _, data in scan_items], salt is not None)
                 await self._mark_dismissals([d.id for d, _ in scan_items])
+            if skipped:
+                await self._skip_dismissals(skipped)
             total += len(scammer_items) + len(scan_items)
         return total
+
+    async def _skip_dismissals(self, dismissals: list) -> None:
+        """Retire dismissals no contract can carry any more (their message,
+        conversation or sender was deleted and no Telegram snapshot exists),
+        so they leave the queue instead of being retried forever."""
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(ScamDismissal).where(ScamDismissal.id.in_([d.id for d in dismissals]))
+                .values(synced_at=datetime.utcnow(), cloud_status="skipped",
+                        cloud_skipped_reason="source rows deleted")
+            )
+            await db.commit()
+        logger.info("Skipped %d dismissals whose rows were deleted", len(dismissals))
 
     async def _mark_dismissals(self, ids: list) -> None:
         async with AsyncSessionLocal() as db:
             await db.execute(
-                update(ScamDismissal).where(ScamDismissal.id.in_(ids)).values(synced_at=datetime.utcnow())
+                update(ScamDismissal).where(ScamDismissal.id.in_(ids))
+                .values(synced_at=datetime.utcnow(), cloud_status="synced")
             )
             await db.commit()
 
@@ -1051,7 +1085,7 @@ def _v1_scan(m: Message, refs: _TelegramRefs) -> dict:
     return {
         "chat_id": refs.peers.get(m.conversation_id),
         "tg_message_id": telegram_message_id(m),
-        "sender_id": refs.users.get(m.sender_identity_id),
+        "sender_id": refs.senders[m.id] if m.id in refs.senders else refs.users.get(m.sender_identity_id),
         **_scan_verdict(m, trace),
         "pipeline_input": _extract_pipeline_input(trace),
         "models_used": _extract_models_used(trace),
@@ -1074,16 +1108,39 @@ def _v2_scan(m: Message, refs: CloudRefs) -> dict:
     }
 
 
+def _cloud_v1(data: dict) -> dict:
+    """The Telegram ids snapshotted when the dismissal was recorded (see
+    ``verdict._add_cloud_v1_ids``); {} for other channels and older rows."""
+    v1 = data.get("cloud_v1")
+    return v1 if isinstance(v1, dict) else {}
+
+
+async def _existing_rows(db, *, identity_ids=(), conversation_ids=(), message_ids=()) -> tuple[set, set]:
+    """(identity ids, conversation ids) among the given ones that still exist."""
+    iids = [i for i in set(identity_ids) if i]
+    cids = [c for c in set(conversation_ids) if c]
+    identities = set((await db.execute(select(Identity.id).where(Identity.id.in_(iids)))).scalars()) if iids else set()
+    conversations = set(
+        (await db.execute(select(Conversation.id).where(Conversation.id.in_(cids)))).scalars()
+    ) if cids else set()
+    return identities, conversations
+
+
 def _v1_dismissal(data: dict, refs: _TelegramRefs) -> dict:
-    return {**{k: v for k, v in data.items() if k != "identity_id"}, "telegram_id": refs.users[data["identity_id"]]}
+    telegram_id = refs.users.get(data.get("identity_id"), _cloud_v1(data).get("telegram_id"))
+    return {**{k: v for k, v in data.items() if k not in ("identity_id", "cloud_v1")}, "telegram_id": telegram_id}
 
 
 def _v2_dismissal(data: dict, refs: CloudRefs) -> dict:
-    channel = refs.identity_channels[data["identity_id"]]
+    iid = data.get("identity_id")
+    if iid in refs.handles:
+        channel, sender = refs.identity_channels[iid], refs.handles[iid]
+    else:  # sender deleted since: its Telegram snapshot
+        channel, sender = TELEGRAM, {"id": str(_cloud_v1(data)["telegram_id"])}
     content = content_upload_allowed(channel)
     return {
         "channel": channel,
-        "sender": refs.handles[data["identity_id"]],
+        "sender": sender,
         "source": data.get("source"),
         "confidence": data.get("confidence"),
         "reason": data.get("reason"),
@@ -1101,10 +1158,11 @@ def _dismissal_trace(data: dict) -> dict:
 
 def _v1_dismissed_scan(data: dict, refs: _TelegramRefs) -> dict:
     trace = data.get("trace") or {}
+    v1 = _cloud_v1(data)
     return {
-        "chat_id": refs.peers.get(data.get("conversation_id")),
-        "tg_message_id": refs.messages.get(data.get("message_id")),
-        "sender_id": refs.users.get(data.get("identity_id")),
+        "chat_id": refs.peers.get(data.get("conversation_id"), v1.get("chat_id")),
+        "tg_message_id": refs.messages.get(data.get("message_id"), v1.get("tg_message_id")),
+        "sender_id": refs.users.get(data.get("identity_id"), v1.get("sender_id")),
         "scam_score": data.get("scam_score"),
         "scam_reason": data.get("scam_reason"),
         "scam_category": data.get("scam_category"),
@@ -1124,11 +1182,18 @@ def _v2_dismissed_scan(data: dict, refs: CloudRefs) -> dict:
     cid = data.get("conversation_id")
     channel = refs.conversation_channels[cid]
     content = content_upload_allowed(channel)
+    v1 = _cloud_v1(data) if channel == TELEGRAM else {}
+    message = refs.messages.get(data.get("message_id"))
+    if message is None and v1.get("tg_message_id") is not None:  # deleted since
+        message = {"id": str(v1["tg_message_id"])}
+    sender = refs.handles.get(data.get("identity_id"))
+    if sender is None and v1.get("sender_id") is not None:
+        sender = {"id": str(v1["sender_id"])}
     return {
         "channel": channel,
         "conversation": refs.conversations[cid],
-        "message": refs.messages.get(data.get("message_id")),
-        "sender": refs.handles.get(data.get("identity_id")),
+        "message": message,
+        "sender": sender,
         "scam_score": data.get("scam_score"),
         "scam_reason": data.get("scam_reason"),
         "scam_category": data.get("scam_category"),

@@ -14,7 +14,7 @@ export default function NotificationBridge() {
 
   const loadPref = useCallback(() => {
     getPrefs()
-      .then((p) => setCachedNotifPref(p.notif_pref))
+      .then((p) => setCachedNotifPref(p.notif_pref, p.notif_pref_channels ?? {}))
       .catch(() => { /* keep the cached/default pref; Settings surfaces pref errors */ })
   }, [])
 

@@ -3,8 +3,9 @@ which rides on the same grant — over httpx.
 
 Access tokens are refreshed on demand from the stored refresh token; a 401
 forces one refresh and retry. Errors are classified so the sync loop can
-decide between backing off (429 / 5xx / network), re-syncing (404 on a
-stale historyId) and asking the user to sign in again (revoked grant).
+decide between backing off (429 / 5xx / network, also at the token
+endpoint), re-syncing (404 on a stale historyId) and asking the user to
+sign in again (only a revoked grant or a deleted client).
 """
 
 from __future__ import annotations
@@ -65,9 +66,11 @@ class GmailApi:
                 try:
                     token, ttl = await oauth.refresh(self.creds)
                 except oauth.OAuthUnreachable as e:
-                    raise GmailError(str(e)) from e
+                    raise GmailError(str(e)) from e  # retryable
                 except oauth.OAuthError as e:
-                    raise GmailAuthError(str(e), 401) from e
+                    if e.grant_lost:
+                        raise GmailAuthError(str(e), 401) from e
+                    raise GmailError(str(e), 400) from e
                 self._token = token
                 self._expires_at = time.monotonic() + ttl - 60
             return self._token

@@ -21,6 +21,7 @@ from backend.db.models import (
     PersonPosition,
 )
 from backend.db.results import affected_rows
+from backend.validators import validate_linkedin_url
 
 __all__ = [
     "VALID_STATUSES",
@@ -389,8 +390,6 @@ def apply_person_fields(
     """Set the given fields (None = leave alone, "" = clear; a cleared
     display_name falls back to the identities' names). Raises ValueError for
     an invalid LinkedIn URL before touching anything. Doesn't commit."""
-    from backend.api.validators import validate_linkedin_url
-
     linkedin = None
     if linkedin_url is not None:
         raw = linkedin_url.strip()

@@ -9,13 +9,12 @@ one until ``kind == "done"``.
 
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Response
 
 from backend.connectors.base import AuthFlowError, Connector
 from backend.connectors.manager import manager
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.ws.manager import ws_manager
 
 router = APIRouter()
 
@@ -63,12 +62,20 @@ async def continue_auth(key: str, flow_id: str, data: dict[str, Any] = Body(defa
     return step.to_dict()
 
 
+@router.delete("/{key}/auth/{flow_id}", status_code=204)
+async def cancel_auth(key: str, flow_id: str) -> Response:
+    """The user closed a sign-in: end the flow (Signal's link process, a
+    pending OAuth consent). Idempotent: 204 for unknown or finished flows too."""
+    await manager.cancel_auth(flow_id)
+    return Response(status_code=204)
+
+
 @router.post("/{key}/logout")
 async def logout(key: str):
+    """Sign one account out. The session and its WebSockets stay up (other
+    accounts keep syncing); the connector reports the change through
+    ``connector_status``."""
     await _connector(key).logout()
-    # The vault stays unlocked; drop the sockets carrying the old account's
-    # events.
-    await ws_manager.close_all(reason=f"{key} logged out")
     return {"success": True}
 
 

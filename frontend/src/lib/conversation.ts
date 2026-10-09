@@ -25,9 +25,22 @@ const KIND_LABEL: Record<ConversationKind, string> = {
   email_thread: 'email thread',
 }
 
-/** Lower-case kind label for sub-lines ("group", "email thread"…) */
-export function kindLabel(kind: ConversationKind): string {
-  return KIND_LABEL[kind] ?? kind
+/** Lower-case kind label for badges and sub-lines ("group", "email thread"…) — the one wording everywhere */
+export function kindLabel(kind: ConversationKind | string): string {
+  return KIND_LABEL[kind as ConversationKind] ?? kind.replace(/_/g, ' ')
+}
+
+/** Badge colours per conversation kind (pair with kindLabel) */
+export const KIND_COLOR: Record<ConversationKind, string> = {
+  direct: 'bg-indigo-500/20 text-indigo-400',
+  group: 'bg-purple-500/20 text-purple-400',
+  channel: 'bg-amber-500/20 text-amber-400',
+  email_thread: 'bg-sky-500/20 text-sky-400',
+}
+
+/** The badge classes for a kind (unknown kinds get a neutral badge) */
+export function kindColor(kind: ConversationKind | string): string {
+  return KIND_COLOR[kind as ConversationKind] ?? 'bg-slate-600 text-slate-400'
 }
 
 /** A Telegram directory search hit that isn't stored yet (open via ensureTelegramConversation) */

@@ -53,7 +53,7 @@ class TelegramConnector(Connector):
         Capability.PIN, Capability.FORWARD,
         Capability.MEDIA_SEND, Capability.READ_RECEIPTS, Capability.FORUM_TOPICS,
         Capability.ADMIN_MODERATION, Capability.HISTORY_BACKFILL, Capability.TYPING,
-        Capability.PRESENCE,
+        Capability.PRESENCE, Capability.MEMBERS,
     })
 
     def __init__(self) -> None:
@@ -87,6 +87,7 @@ class TelegramConnector(Connector):
             caps.discard(Capability.FORUM_TOPICS)
         if conversation.kind == "direct":
             caps.discard(Capability.ADMIN_MODERATION)
+            caps.discard(Capability.MEMBERS)
         return frozenset(caps)
 
     # -- sign-in steps --------------------------------------------------------

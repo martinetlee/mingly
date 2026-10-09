@@ -117,6 +117,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
                 await ws_manager.broadcast({
                     "type": "new_message",
                     "conversation_id": cid,
+                    "channel": ids.CHANNEL,
                     "message_id": None,
                     "conversation_title": name,
                     "sender_name": name,
@@ -543,8 +544,6 @@ def register_event_handlers(client) -> list:
         peer = getattr(event, "chat_id", None)
         if not deleted:
             return
-        from sqlalchemy import delete as sa_delete
-
         async with AsyncSessionLocal() as db:
             acc = await ids.account_id(db)
             if peer:
@@ -560,15 +559,10 @@ def register_event_handlers(client) -> list:
                 .join(Conversation, Conversation.id == Message.conversation_id)
                 .where(Conversation.account_id == acc, scope, Message.external_id.in_(deleted))
             )).all()
-            if rows:
-                await db.execute(sa_delete(Message).where(Message.id.in_([r[0] for r in rows])))
-                await db.commit()
-        by_conv: dict[int, list[int]] = {}
-        for mid, cid in rows:
-            by_conv.setdefault(cid, []).append(mid)
+            by_conv = await crud.delete_messages(db, [r[0] for r in rows]) if rows else {}
         logger.info("Deleted %d messages (peer=%s)", len(rows), peer)
         for cid, mids in by_conv.items():
-            await ws_manager.broadcast({"type": "messages_deleted", "conversation_id": cid, "message_ids": sorted(mids)})
+            await ws_manager.broadcast({"type": "messages_deleted", "conversation_id": cid, "message_ids": mids})
 
     async def on_user_update(event):
         """Typing indicators and online status changes."""

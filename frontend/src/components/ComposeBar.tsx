@@ -87,14 +87,19 @@ export default function ComposeBar({
   const isEditing = !!editingMessage && !!onSaveEdit
   const value = isEditing ? editText : text
 
-  // Focus on mount (unless told not to), after a send/upload finishes, and when a reply starts
-  const mountedRef = useRef(false)
+  // Focus on mount (unless told not to), after a send/upload finishes, and
+  // when a reply starts. Busy→idle is tracked by value, not by "first run",
+  // so StrictMode's second effect run can't take focus (autoFocus=false keeps
+  // keyboard focus in the chat list).
   useEffect(() => {
-    const first = !mountedRef.current
-    mountedRef.current = true
-    if (first && !autoFocus) return
-    if (!sending && !isUploading) textareaRef.current?.focus()
+    if (autoFocus) textareaRef.current?.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const busyRef = useRef(false)
+  useEffect(() => {
+    const wasBusy = busyRef.current
+    busyRef.current = sending || isUploading
+    if (wasBusy && !busyRef.current) textareaRef.current?.focus()
   }, [sending, isUploading])
 
   useEffect(() => {

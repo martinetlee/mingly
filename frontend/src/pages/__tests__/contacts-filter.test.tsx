@@ -106,13 +106,30 @@ describe('Contacts URL filter', () => {
     expect(api.getMessageWindow).toHaveBeenCalledWith(20, expect.objectContaining({ topicId: null }), expect.anything())
   })
 
-  it('with no direct conversation yet, starts a Telegram one for the person', async () => {
+  it('selecting someone without a chat never creates one; "Start a Telegram chat" does', async () => {
     api.getPersonConversations.mockResolvedValue([])
     api.startPrivateChat.mockResolvedValue(makeConversation(21, 'Bob', { kind: 'direct' }))
     api.getMessageWindow.mockResolvedValue({ messages: [], has_older: false, has_newer: false, anchor_found: true, syncing: false })
     renderAt('/contacts')
     const bob = await screen.findByText('Bob')
     await act(async () => { fireEvent.click(bob) })
+    expect(await screen.findByText('No chat with Bob yet')).toBeTruthy()
+    expect(api.startPrivateChat).not.toHaveBeenCalled()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Start a Telegram chat' })) })
     await waitFor(() => expect(api.startPrivateChat).toHaveBeenCalledWith(2))
+    await waitFor(() => expect(api.getMessageWindow).toHaveBeenCalledWith(21, expect.anything(), expect.anything()))
+  })
+
+  it('shows the person\'s messenger chat, never their email thread (email lives in Mail)', async () => {
+    api.getPersonConversations.mockResolvedValue([
+      makeConversation(30, 'Re: invoice', { kind: 'email_thread', channel: 'gmail' }),
+      makeConversation(20, 'Bob', { kind: 'direct' }),
+    ])
+    api.getMessageWindow.mockResolvedValue({ messages: [msg(1, { conversation_id: 20 })], has_older: false, has_newer: false, anchor_found: true, syncing: false })
+    renderAt('/contacts')
+    const bob = await screen.findByText('Bob')
+    await act(async () => { fireEvent.click(bob) })
+    await waitFor(() => expect(api.getMessageWindow).toHaveBeenCalledWith(20, expect.anything(), expect.anything()))
+    expect(api.getMessageWindow).not.toHaveBeenCalledWith(30, expect.anything(), expect.anything())
   })
 })

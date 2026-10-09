@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 
 vi.mock('../../api/accounts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/accounts')>()),
   beginAccountAuth: vi.fn(),
   continueAccountAuth: vi.fn(),
+  cancelAccountAuth: vi.fn(async () => undefined),
 }))
 vi.mock('../../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/client')>()),
@@ -12,7 +14,7 @@ vi.mock('../../api/client', async (importOriginal) => ({
   resolve1Password: vi.fn(),
 }))
 
-import { beginAccountAuth, continueAccountAuth } from '../../api/accounts'
+import { beginAccountAuth, cancelAccountAuth, continueAccountAuth } from '../../api/accounts'
 import type { AuthStep } from '../../api/accounts'
 import { openExternalUrl, resolve1Password } from '../../api/client'
 import AuthFlow, { POLL_MS } from '../AuthFlow'
@@ -181,4 +183,46 @@ describe('AuthFlow under StrictMode', () => {
     expect(screen.queryByText(/Starting sign-in/)).toBeNull()
     expect(screen.getByText(/brew install signal-cli/)).toBeTruthy()
   })
+
+  describe('abandoned flows are cancelled on the server', () => {
+    const qr = step({ flow_id: 'q1', kind: 'qr', title: 'Link Signal', qr_payload: 'sgnl://x', poll: true })
+
+    it('on unmount', async () => {
+      vi.mocked(beginAccountAuth).mockResolvedValue(qr)
+      vi.mocked(continueAccountAuth).mockResolvedValue(qr)
+      const { unmount } = render(<AuthFlow accountKey="signal" />)
+      await screen.findByText('Link Signal')
+      unmount()
+      expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'q1')
+    })
+
+    it('on Cancel', async () => {
+      vi.mocked(beginAccountAuth).mockResolvedValue(qr)
+      const onClose = vi.fn()
+      render(<AuthFlow accountKey="signal" onClose={onClose} />)
+      await screen.findByText('Link Signal')
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'q1')
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('the begin StrictMode discards is cancelled; the shown one is kept', async () => {
+      vi.mocked(beginAccountAuth)
+        .mockResolvedValueOnce({ ...qr, flow_id: 'first' })
+        .mockResolvedValueOnce({ ...qr, flow_id: 'second' })
+      render(<StrictMode><AuthFlow accountKey="signal" /></StrictMode>)
+      await screen.findByText('Link Signal')
+      await waitFor(() => expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'first'))
+      expect(cancelAccountAuth).not.toHaveBeenCalledWith('signal', 'second')
+    })
+
+    it('not after the flow finished', async () => {
+      vi.mocked(beginAccountAuth).mockResolvedValue(step({ kind: 'done', title: 'Connected' }))
+      const { unmount } = render(<AuthFlow accountKey="signal" />)
+      await screen.findByText('Connected')
+      unmount()
+      expect(cancelAccountAuth).not.toHaveBeenCalled()
+    })
+  })
 })
+

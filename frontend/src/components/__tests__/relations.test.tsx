@@ -4,7 +4,12 @@ import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-libra
 import type { ContactPosition, OrgSummary, Person, Workspace } from '../../api/types'
 import { makePerson } from '../../pages/chats/__tests__/fixtures'
 import { ConfirmProvider } from '../ui/ConfirmDialog'
-import { resetToasts } from '../../lib/toast'
+import { resetToasts, subscribeToasts } from '../../lib/toast'
+import type { ToastItem } from '../../lib/toast'
+import { ApiError } from '../../lib/http'
+import type { WSEvent } from '../../api/types'
+import { WebSocketClient } from '../../lib/ws'
+import { WebSocketProvider } from '../../context/WebSocketContext'
 
 function deferred<T>() {
   let resolve!: (v: T) => void
@@ -155,6 +160,40 @@ describe('ContactInfoSection', () => {
     const last = changes[changes.length - 1]
     expect(last.notes).toBe('new notes')
     expect((last.positions ?? []).map((p: ContactPosition) => p.organization)).toEqual(['Acme'])
+  })
+})
+
+describe('ContactInfoSection live refresh', () => {
+  const renderLive = () => {
+    api.getPositions.mockResolvedValue([])
+    const ws = new WebSocketClient({ url: () => null })
+    render(<WebSocketProvider client={ws}><ConfirmProvider><ContactInfoSection person={person()} onPersonChange={() => {}} /></ConfirmProvider></WebSocketProvider>)
+    return ws
+  }
+  const toastsSeen = () => {
+    let seen: ToastItem[] = []
+    subscribeToasts((t) => { seen = t })
+    return () => seen
+  }
+
+  it('a person merged away (404 on refresh) is left to the owning page: no error toast', async () => {
+    const seen = toastsSeen()
+    api.getPerson.mockRejectedValue(new ApiError('Not found', { status: 404, code: 'http', path: '/api/people/100' }))
+    const ws = renderLive()
+    await screen.findByText('No positions added')
+    act(() => { ws.dispatch({ type: 'person_changed', person_id: 100 } as WSEvent) })
+    await waitFor(() => expect(api.getPerson).toHaveBeenCalledWith(100), { timeout: 2000 })
+    await act(async () => { await Promise.resolve() })
+    expect(seen().filter((t) => t.kind === 'error')).toEqual([])
+  })
+
+  it('any other refresh failure is still reported', async () => {
+    const seen = toastsSeen()
+    api.getPerson.mockRejectedValue(new ApiError('Server error', { status: 500, code: 'http', path: '/api/people/100' }))
+    const ws = renderLive()
+    await screen.findByText('No positions added')
+    act(() => { ws.dispatch({ type: 'person_changed', person_id: 100 } as WSEvent) })
+    await waitFor(() => expect(seen().some((t) => t.kind === 'error')).toBe(true), { timeout: 2000 })
   })
 })
 

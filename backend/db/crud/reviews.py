@@ -21,10 +21,11 @@ def newest_stored_seq():
     )
 
 
-def review_up_to_date():
+def review_up_to_date(complete=None):
     """SQL predicate over Conversation outer-joined to HistoryCoverage and
     AgentReview: history complete, reviewed through the newest stored message,
-    and no older message has appeared since the review."""
+    and no older message has appeared since the review. ``complete`` replaces
+    the default "history complete" condition (HistoryCoverage.history_complete)."""
     newest = newest_stored_seq()
     stored_le_through = (
         select(func.count()).select_from(Message)
@@ -34,7 +35,7 @@ def review_up_to_date():
         .scalar_subquery()
     )
     return and_(
-        func.coalesce(HistoryCoverage.history_complete, False) == True,  # noqa: E712
+        complete if complete is not None else func.coalesce(HistoryCoverage.history_complete, False) == True,  # noqa: E712
         AgentReview.conversation_id.isnot(None),
         or_(newest.is_(None), AgentReview.reviewed_through_seq >= newest),
         stored_le_through <= AgentReview.reviewed_message_count,

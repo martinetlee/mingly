@@ -5,6 +5,7 @@
  */
 import { useSyncExternalStore } from 'react'
 import { request, upload } from '../lib/http'
+import { setCachedChannelNotifPref } from '../lib/notifications'
 import type { Conversation, Message, SendFilesResponse } from './types'
 
 export interface EmailFields {
@@ -103,11 +104,15 @@ export async function setRemoteImagesAllowed(sender: string, allowed: boolean): 
 export type NotifPref = 'all' | 'tracked' | 'off'
 
 /** Email notifications are off until set here; other channels follow the global setting */
-export const setChannelNotifPref = (channel: string, pref: NotifPref) =>
-  request<{ success: boolean; pref: NotifPref; channel: string }>('/api/settings/prefs/notifications', {
+export const setChannelNotifPref = async (channel: string, pref: NotifPref) => {
+  const result = await request<{ success: boolean; pref: NotifPref; channel: string }>('/api/settings/prefs/notifications', {
     method: 'POST',
     body: JSON.stringify({ pref, channel }),
   })
+  // Keep the global NotificationBridge in step with the saved value (as setNotifPref does)
+  setCachedChannelNotifPref(channel, result?.pref ?? pref)
+  return result
+}
 
 // ── Mail space (/api/connectors/gmail) ──
 

@@ -33,6 +33,7 @@ __all__ = [
     "get_pinned_message",
     "touch_synced",
     "refresh_preview",
+    "recompute_preview",
     "get_coverage",
     "get_or_create_coverage",
     "CONVERSATION_FLAGS",
@@ -246,7 +247,8 @@ async def upsert_conversation(
 ) -> Conversation:
     """Insert or update a conversation in one statement (race-free).
 
-    title/kind/username always take the new value; the channel-owned fields
+    kind/username always take the new value, title unless None (unknown:
+    keep the stored one); the channel-owned fields
     in ``_CHANNEL_OWNED`` only when passed (not None). ``last_activity_at``
     never moves backwards. Pass ``commit=False`` to batch many upserts.
     """
@@ -276,7 +278,7 @@ async def upsert_conversation(
     values.update(given)
     stmt = sqlite_insert(Conversation).values(**values)
     ex = stmt.excluded
-    set_ = {"title": ex.title, "kind": ex.kind, "username": ex.username}
+    set_ = {"title": func.coalesce(ex.title, Conversation.title), "kind": ex.kind, "username": ex.username}
     for col in given:
         set_[col] = getattr(ex, col)
     if last_message_at is not None:
@@ -373,6 +375,38 @@ async def refresh_preview(
         .where(Conversation.id == conversation_id, Conversation.last_message_at == newest.date)
         .values(last_message_text=newest.text or newest.subject, last_message_sender=newest.sender_name)
     )
+
+
+async def recompute_preview(
+    db: AsyncSession, conversation_id: int, removed_through: Optional[datetime] = None
+) -> None:
+    """Re-derive the cached last-message preview from the newest stored
+    message, unconditionally (cleared when none is left) — for after
+    messages were deleted. ``last_activity_at`` follows the newest remaining
+    message too when its current value came from a removed message (it is
+    not later than ``removed_through``, the newest removed message's date);
+    activity known from elsewhere (a channel's dialog list) is kept."""
+    newest = (await db.execute(
+        select(Message.text, Message.subject, Message.sender_name, Message.date)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.date.desc(), Message.seq.desc(), Message.id.desc())
+        .limit(1)
+    )).first()
+    values: dict = {
+        "last_message_text": (newest.text or newest.subject) if newest else None,
+        "last_message_sender": newest.sender_name if newest else None,
+        "last_message_at": newest.date if newest else None,
+    }
+    await db.execute(update(Conversation).where(Conversation.id == conversation_id).values(**values))
+    if removed_through is not None:
+        await db.execute(
+            update(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                or_(Conversation.last_activity_at.is_(None), Conversation.last_activity_at <= removed_through),
+            )
+            .values(last_activity_at=values["last_message_at"])
+        )
 
 
 # ── History coverage ─────────────────────────────────────────────────────────

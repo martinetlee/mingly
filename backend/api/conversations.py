@@ -3,6 +3,7 @@
 network client say so through ``lookups.telegram_peer`` (409 for others)."""
 
 import asyncio
+import calendar
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -92,7 +93,7 @@ async def list_conversations(
     if workspace_id is not None:
         member_ids = crud.workspace_member_ids(workspace_id)
     convs = await crud.list_conversations(
-        db, limit=limit, offset=offset, sort_by=sort_by, tag_id=tag_id, member_ids=member_ids, channel=channel,
+        db, limit=max(1, min(limit, 500)), offset=max(0, offset), sort_by=sort_by, tag_id=tag_id, member_ids=member_ids, channel=channel,
         label=label, kind=kind, exclude_kind=exclude_kind, account_id=account_id,
         archived=None if label is not None else False,
     )
@@ -342,7 +343,8 @@ async def toggle_mute(conversation_id: int, req: MuteRequest, db: AsyncSession =
     async def _mute(client, peer):
         from telethon.tl.functions.account import UpdateNotifySettingsRequest
         from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
-        until = int((muted_until or datetime(2038, 1, 1)).timestamp()) if req.muted else 0
+        # muted_until is naive UTC: timegm, not .timestamp() (which reads it as local time)
+        until = calendar.timegm((muted_until or datetime(2038, 1, 1)).timetuple()) if req.muted else 0
         await client(UpdateNotifySettingsRequest(
             peer=InputNotifyPeer(peer=await client.get_input_entity(peer)),
             settings=InputPeerNotifySettings(mute_until=until),
@@ -445,11 +447,18 @@ def _maybe_auto_sync(conv: Optional[Conversation], latest: bool = True) -> bool:
 def _parse_date(value: str) -> datetime:
     try:
         dt = datetime.fromisoformat(value.rstrip("Z"))
-    except ValueError:
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, OverflowError):
         raise HTTPException(status_code=400, detail=f"Invalid date: {value!r}")
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+def _can_fetch_around(conv: Conversation, external_id: Optional[str]) -> bool:
+    """Whether the channel can fetch an unstored message (or date) window."""
+    if not ids.is_telegram(conv):
+        return False
+    return external_id is None or (external_id.isascii() and external_id.isdigit())
 
 
 @router.get("/{conversation_id}/messages/window")
@@ -498,7 +507,11 @@ async def get_message_window(
         before_local_history = (
             date is not None and rows and not window["has_older"] and rows[0][0].date > date
         )
-        if not window["anchor_found"] or before_local_history:
+        if not _can_fetch_around(conv, around_external_id):
+            # Only Telegram fetches unstored messages, and its ids are integers
+            if not window["anchor_found"]:
+                anchor_reason = "not_found"
+        elif not window["anchor_found"] or before_local_history:
             res = await coordinator.fetch_around(
                 conversation_id,
                 anchor_external_id=around_external_id,
@@ -568,7 +581,7 @@ async def search_messages(conversation_id: int, q: str = "", limit: int = 50, db
     if not q.strip():
         return []
     await conversation_or_404(db, conversation_id)
-    rows = await crud.search_messages_in_conversation(db, conversation_id, q.strip(), limit=limit)
+    rows = await crud.search_messages_in_conversation(db, conversation_id, q.strip(), limit=max(1, min(limit, 200)))
     return await messages_out(db, list(reversed(rows)))
 
 
@@ -620,7 +633,9 @@ async def get_shared_media(
         )
     else:
         return []
-    rows = (await db.execute(query.order_by(desc(Message.date)).limit(limit).offset(offset))).scalars().all()
+    rows = (await db.execute(
+        query.order_by(desc(Message.date)).limit(max(1, min(limit, 200))).offset(max(0, offset))
+    )).scalars().all()
     kinds = _SHARED_MEDIA_KINDS.get(media_filter)
     return [
         {
@@ -893,7 +908,7 @@ async def _react_via_connector(conv: Conversation, msg: Message, emoji: Optional
     except UnsupportedOperation as e:
         raise unsupported_channel(conv, str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send reaction: {e}")
+        raise HTTPException(status_code=400, detail=f"Cannot send reaction: {e}")
 
 
 @messages_router.post("/{message_id}/react")
@@ -913,7 +928,7 @@ async def react_to_message(message_id: int, req: ReactRequest, db: AsyncSession 
         reaction = [ReactionEmoji(emoticon=req.emoji)] if req.emoji else []
         await client(SendReactionRequest(peer=peer, msg_id=ids.tg_message_id_of(msg), reaction=reaction))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send reaction: {e}")
+        raise HTTPException(status_code=400, detail=f"Cannot send reaction: {e}")
     msg = await crud.set_my_reaction(db, message_id, req.emoji)
     return {"success": True, "my_reaction": msg.my_reaction if msg else req.emoji}
 

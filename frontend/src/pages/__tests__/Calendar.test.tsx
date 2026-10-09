@@ -68,7 +68,7 @@ describe('Calendar space', () => {
   it('shows the connect notice without a Gmail account (like Mail)', () => {
     accountsState.accounts = []
     renderAt('/calendar')
-    expect(screen.getByTestId('no-calendar-account')).toBeTruthy()
+    expect(screen.getByTestId('no-accounts').textContent).toContain('No calendar connected')
     expect(screen.getByText('Open Settings → Connections').getAttribute('href')).toBe('/settings?tab=connections')
     expect(getCalendarEvents).not.toHaveBeenCalled()
   })
@@ -114,6 +114,46 @@ describe('Calendar space', () => {
     await waitFor(() => expect(vi.mocked(getCalendarEvents).mock.lastCall?.[0]).toEqual(addDays(monday, 7)))
     fireEvent.click(screen.getByText('Today'))
     expect(screen.getByTestId('where').textContent).toBe('/calendar')
+  })
+
+  it('keeps the previous range on screen while the next one loads', async () => {
+    renderAt('/calendar')
+    await screen.findByText('Standup with Ann')
+    let resolve!: (v: { events: CalendarEvent[] }) => void
+    vi.mocked(getCalendarEvents).mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    fireEvent.click(screen.getByLabelText('Next'))
+    await waitFor(() => expect(getCalendarEvents).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText('Loading…')).toBeNull()
+    expect(screen.getByText('Standup with Ann')).toBeTruthy()
+    expect(screen.getByTestId('calendar-stale')).toBeTruthy()
+    resolve({ events: [] })
+    await waitFor(() => expect(screen.queryByTestId('calendar-stale')).toBeNull())
+    expect(screen.queryByText('Standup with Ann')).toBeNull()
+  })
+
+  it('t / ← / → / w / a move the range and switch the view', async () => {
+    renderAt('/calendar')
+    await screen.findByText('Standup with Ann')
+    const key = (k: string) => fireEvent.keyDown(window, { key: k })
+    key('ArrowRight')
+    expect(screen.getByTestId('where').textContent).toBe(`/calendar?date=${localDateKey(addDays(today, 14))}`)
+    key('ArrowLeft')
+    expect(screen.getByTestId('where').textContent).toBe(`/calendar?date=${localDateKey(today)}`)
+    key('ArrowRight')
+    key('t')
+    expect(screen.getByTestId('where').textContent).toBe('/calendar')
+    key('w')
+    await waitFor(() => expect(screen.getAllByTestId('calendar-day')).toHaveLength(7))
+    key('a')
+    expect(screen.getByRole('button', { name: 'Agenda' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('a failed load shows the error with Retry', async () => {
+    vi.mocked(getCalendarEvents).mockRejectedValueOnce(new Error('offline'))
+    renderAt('/calendar')
+    expect((await screen.findByTestId('load-error')).textContent).toContain('Couldn’t load events: offline')
+    fireEvent.click(screen.getByText('Retry'))
+    await screen.findByText('Standup with Ann')
   })
 
   it('?date anchors the view and &event highlights that event', async () => {
