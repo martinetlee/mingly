@@ -16,7 +16,7 @@ export interface AuthField {
 
 export interface AuthStep {
   flow_id: string
-  kind: 'fields' | 'qr' | 'oauth_browser' | 'done' | 'error' | (string & {})
+  kind: 'fields' | 'qr' | 'oauth_browser' | 'progress' | 'done' | 'error' | (string & {})
   title: string | null
   message: string | null
   fields: AuthField[]
@@ -26,6 +26,10 @@ export interface AuthStep {
   auth_url: string | null
   /** Answer with {} every few seconds until the step changes */
   poll: boolean
+  /** 0–1 completion of a `progress` step (e.g. a one-time setup download) */
+  progress?: number | null
+  /** Button label of a `fields` step (default "Continue") */
+  submit_label?: string | null
 }
 
 /** One connector's describe() */

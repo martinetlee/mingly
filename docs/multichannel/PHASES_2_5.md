@@ -57,7 +57,7 @@ Builds on `SCHEMA_V2.md` (still authoritative for ids, payloads, routes).
   `POST /api/people/{id}/identities/{identity_id}/detach` → new Person,
   `POST /api/people/merge-suggestions/{id}/dismiss`. Broadcast `person_changed`.
 - Connections: Settings → Connections page lists accounts + connectable channels,
-  runs any channel's sign-in through one generic step renderer (`fields`, `qr`,
+  runs any channel's sign-in through one generic step renderer (`fields`, `qr`, `progress`,
   `oauth_browser` + poll, `done`, `error`), re-auth, log out, remove. Boot: vault →
   LLM setup → app; no account at all → empty state pointing to Connections. The
   Telegram-only onboarding and `/api/auth` Telegram routes (`setup`, `send-code`,
@@ -89,8 +89,13 @@ Builds on `SCHEMA_V2.md` (still authoritative for ids, payloads, routes).
 
 ## Phase 4 — Signal (`backend/connectors/signal/`)
 
-- Detect `signal-cli` (`shutil.which` + `/opt/homebrew/bin`, `/usr/local/bin`) and
-  Java; without them the sign-in step is an `error` step with install instructions.
+- signal-cli: the app-managed install (`signal/install.py`: pinned signal-cli +
+  Temurin JRE, SHA-256 and size verified while streaming, safe extraction, run
+  check, atomic placement under `DATA_DIR/signal-runtime/`) is preferred; else
+  Homebrew's (`shutil.which` + `/opt/homebrew/bin`, `/usr/local/bin`). Missing or
+  broken → a `fields` step "Set up / Repair Signal support" (`submit_label`), then a
+  `progress` step (`progress` 0–1, polled) while it installs, then the QR step in
+  the same flow.
 - Link: `signal-cli --config <DATA_DIR>/signal link -n Mingly` → `qr` step with the
   `sgnl://linkdevice` URI, poll until linked → account row (`external_id` = number).
 - Runtime: `signal-cli -a <number> jsonRpc` subprocess over stdio, supervised

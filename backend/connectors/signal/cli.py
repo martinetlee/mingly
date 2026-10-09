@@ -1,9 +1,11 @@
 """Finding and running the ``signal-cli`` executable.
 
-Mingly does not bundle signal-cli (a Java program); the user installs it
-with Homebrew. The packaged app inherits launchd's minimal PATH, so Homebrew's
-bin directories are searched explicitly and prepended to the child's PATH
-(signal-cli's launcher in turn has to find Java).
+signal-cli is a Java program. Mingly sets it up itself on first use
+(``install.py``: signal-cli plus a Java runtime under ``DATA_DIR``), and that
+install is always preferred. A Homebrew signal-cli is used when there is no
+app-managed one; the packaged app inherits launchd's minimal PATH, so
+Homebrew's bin directories are searched explicitly and prepended to the
+child's PATH (signal-cli's launcher in turn has to find Java).
 
 All of signal-cli's state for Mingly (keys, linked accounts, received
 attachments) lives in ``DATA_DIR/signal`` (mode 0700), passed as ``--config``.
@@ -21,8 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from backend import config
+from backend.connectors.signal import install
 
-INSTALL_HINT = "Install it with Homebrew: brew install signal-cli"
 HOMEBREW_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 JAVA_HOMES = ("/opt/homebrew/opt/openjdk", "/usr/local/opt/openjdk")
 VERSION_TIMEOUT = 60  # first JVM start after an install can be slow
@@ -30,7 +32,12 @@ STREAM_LIMIT = 16 * 1024 * 1024  # one JSON line (a contact list) can be large
 
 
 class SignalCliMissing(Exception):
-    """signal-cli (or the Java runtime it needs) is not usable."""
+    """signal-cli (or the Java runtime it needs) is not usable; setting up
+    the app-managed one fixes it. ``broken`` = found but failed to run."""
+
+    def __init__(self, message: str, broken: bool = False) -> None:
+        super().__init__(message)
+        self.broken = broken
 
 
 def signal_dir() -> Path:
@@ -46,6 +53,9 @@ def attachments_dir() -> Path:
 
 
 def find_signal_cli() -> Optional[str]:
+    managed = install.installed()
+    if managed is not None:
+        return managed[0]
     found = shutil.which("signal-cli")
     if found:
         return found
@@ -57,9 +67,14 @@ def find_signal_cli() -> Optional[str]:
 
 
 def child_env() -> dict[str, str]:
-    """The environment for signal-cli: Homebrew dirs on PATH so its
-    launcher finds ``java``."""
+    """The environment for signal-cli: the app-managed Java runtime when
+    Mingly set signal-cli up (it needs that exact Java, whatever JAVA_HOME
+    says), else Homebrew dirs on PATH so its launcher finds ``java``."""
     env = dict(os.environ)
+    managed = install.installed()
+    if managed is not None:
+        env["JAVA_HOME"] = managed[1]
+        return env
     parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
     for d in reversed(HOMEBREW_BIN_DIRS):
         if d not in parts:
@@ -112,19 +127,16 @@ async def check_installed() -> tuple[str, str]:
     the sign-in screen shows as is."""
     exe = find_signal_cli()
     if exe is None:
-        raise SignalCliMissing(f"Mingly talks to Signal through signal-cli, which isn't installed. {INSTALL_HINT}")
+        raise SignalCliMissing("Signal support isn't set up yet.")
     try:
         res = await run(exe, "--version", timeout=VERSION_TIMEOUT)
     except (OSError, asyncio.TimeoutError) as e:
         res = CliResult(-1, "", str(e) or type(e).__name__)
     if res.returncode != 0:
-        if not java_available():
-            raise SignalCliMissing(
-                "signal-cli is installed but no Java runtime was found. "
-                "Install one with Homebrew: brew install openjdk (or reinstall: brew reinstall signal-cli)"
-            )
+        if install.installed() is None and not java_available():
+            raise SignalCliMissing("signal-cli was found but there's no Java runtime to run it.", broken=True)
         detail = (res.stderr or res.stdout).strip().splitlines()[-1:] or ["unknown error"]
-        raise SignalCliMissing(f"signal-cli failed to run ({detail[0]}). {INSTALL_HINT}")
+        raise SignalCliMissing(f"signal-cli failed to run ({detail[0]}).", broken=True)
     return exe, res.stdout.strip()
 
 

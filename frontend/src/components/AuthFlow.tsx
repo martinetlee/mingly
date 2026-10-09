@@ -179,7 +179,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
           <div className="flex items-center justify-end gap-2">
             {onClose && <button type="button" onClick={onClose} className={secondaryButton}>Cancel</button>}
             <button type="submit" disabled={submitting || missing || blockedByOpRef} className={primaryButton}>
-              {submitting ? 'Working…' : 'Continue'}
+              {submitting ? 'Working…' : (step.submit_label || 'Continue')}
             </button>
           </div>
         </form>
@@ -189,7 +189,9 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
 
       {step.kind === 'oauth_browser' && step.auth_url && <BrowserConsent url={step.auth_url} />}
 
-      {(step.kind === 'qr' || step.kind === 'oauth_browser') && (
+      {step.kind === 'progress' && <ProgressBar value={step.progress ?? 0} />}
+
+      {(step.kind === 'qr' || step.kind === 'oauth_browser' || step.kind === 'progress') && (
         <>
           {requestError && (
             <div className="mt-3">
@@ -198,7 +200,7 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
           )}
           {!requestError && (
             <div className="mt-4 flex items-center justify-between gap-2">
-              {step.poll
+              {step.poll && step.kind !== 'progress'
                 ? <span className="flex items-center gap-2 text-xs text-slate-400"><Loader2 size={12} className="animate-spin" />Waiting…</span>
                 : <span />}
               {onClose && <button type="button" onClick={onClose} className={secondaryButton}>Cancel</button>}
@@ -207,9 +209,24 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
         </>
       )}
 
-      {!['fields', 'qr', 'oauth_browser'].includes(step.kind) && (
+      {!['fields', 'qr', 'oauth_browser', 'progress'].includes(step.kind) && (
         <ErrorBlock message={`Unsupported sign-in step "${step.kind}"`} onRetry={retry} onClose={onClose} />
       )}
+    </div>
+  )
+}
+
+function ProgressBar({ value }: { value: number }) {
+  const pct = Math.round(Math.min(Math.max(value, 0), 1) * 100)
+  return (
+    <div
+      role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}
+      className="h-1.5 w-full overflow-hidden rounded-full bg-slate-700"
+    >
+      <div
+        className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-300"
+        style={{ width: `${pct}%` }}
+      />
     </div>
   )
 }

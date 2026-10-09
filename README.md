@@ -17,7 +17,7 @@ number or email (otherwise suggested for you to merge).
 | Channel | How it connects | Notes |
 |---|---|---|
 | Telegram | Your own API credentials ([my.telegram.org](https://my.telegram.org)) + phone login | Full history, sending, reactions, admin tools |
-| Signal | [signal-cli](https://github.com/AsamK/signal-cli) linked as a secondary device (`brew install signal-cli`, scan a QR code) | Messages from the time of linking on; send, reply, react |
+| Signal | Linked as one of your devices: scan a QR code with your phone. The first time, Mingly sets up [signal-cli](https://github.com/AsamK/signal-cli) and the Java runtime it needs (one ~180 MB download, verified) | Messages from the time of linking on; send, reply, react |
 | SMS / iMessage | Reads macOS Messages' local database (needs Full Disk Access) | Read-only |
 | Gmail | Your own Google OAuth client (Desktop app) | Mail space with folders, labels, reply, compose |
 | Google Calendar | Same Google sign-in as Gmail | Calendar space, meetings on person pages and in briefings |

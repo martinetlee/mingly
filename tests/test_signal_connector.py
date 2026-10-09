@@ -251,22 +251,101 @@ GROUPS = [{"id": GROUP, "name": "Climbing crew", "members": [{"uuid": ALICE}, {"
 
 # ── detection ────────────────────────────────────────────────────────────────
 
+@pytest.fixture
+def no_install(monkeypatch):
+    """No signal-cli anywhere and a fresh setup state; returns a switch that
+    makes the fake signal-cli appear (what a finished setup does)."""
+    from backend.connectors.signal import install
+
+    monkeypatch.setattr(install, "_state", install.InstallState())
+    monkeypatch.setattr(install, "_task", None)
+    found = {"exe": None}
+    monkeypatch.setattr(cli, "find_signal_cli", lambda: found["exe"])
+
+    def appear(exe):
+        found["exe"] = str(exe)
+
+    return appear
+
+
+def _fake_exe(tmp_path) -> Path:
+    exe = tmp_path / "bin" / "signal-cli"
+    exe.parent.mkdir(exist_ok=True)
+    exe.write_text(f"#!{sys.executable}\n{FAKE_SIGNAL_CLI}")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    return exe
+
+
 @pytest.mark.asyncio
-async def test_missing_signal_cli_is_an_install_error_step(monkeypatch):
-    monkeypatch.setattr(cli.shutil, "which", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "HOMEBREW_BIN_DIRS", ())
-    assert cli.find_signal_cli() is None
+async def test_missing_signal_cli_offers_setup_then_links(no_install, tmp_path, monkeypatch):
+    from backend.connectors.signal import install
+
+    started = []
+
+    def fake_start():
+        started.append(1)
+        install._state = install.InstallState(status="downloading", downloaded=50_000_000, total=180_000_000)
+        return install._state
+
+    monkeypatch.setattr(install, "start", fake_start)
+    manager = ConnectorManager()
+    register(manager)
+
+    step = await manager.begin_auth("signal", {})
+    assert step.kind == "fields" and step.fields == [] and step.poll is False
+    assert step.title == "Set up Signal support" and step.submit_label == "Set up"
+    assert "brew" not in step.message and "MB" in step.message
+
+    step = await manager.continue_auth(step.flow_id, {})
+    assert step.kind == "progress" and step.poll is True
+    assert "50 of 180 MB" in step.message and 0 < step.progress < 0.9
+    assert started == [1]
+
+    # Polling while it downloads doesn't start another setup
+    step = await manager.continue_auth(step.flow_id, {})
+    assert step.kind == "progress" and started == [1]
+
+    # Setup done: the same flow moves on to the QR code
+    _scenario()
+    no_install(_fake_exe(tmp_path))
+    install._state.status = "done"
+    flow_id = step.flow_id
+    step = await manager.continue_auth(flow_id, {})
+    assert step.kind == "qr" and step.flow_id == flow_id
+    assert step.qr_payload == "sgnl://linkdevice?uuid=abc123&pub_key=xyz"
+
+
+@pytest.mark.asyncio
+async def test_failed_setup_is_an_error_step(no_install, monkeypatch):
+    from backend.connectors.signal import install
+
+    def fake_start():
+        install._state = install.InstallState(status="error", error="Download failed (ConnectError).")
+        return install._state
+
+    monkeypatch.setattr(install, "start", fake_start)
+    connector = SignalConnector()
+    step = await connector.begin_auth({})
+    step = await connector.continue_auth(step.flow_id, {})
+    assert step.kind == "error" and "Download failed" in step.message
+
+
+@pytest.mark.asyncio
+async def test_opening_signal_while_setup_runs_shows_progress(no_install):
+    from backend.connectors.signal import install
+
+    install._state = install.InstallState(status="unpacking", total=1)
     step = await SignalConnector().begin_auth({})
-    assert step.kind == "error"
-    assert "brew install signal-cli" in step.message
+    assert step.kind == "progress" and step.poll is True and "Unpacking" in step.message
 
 
 @pytest.mark.asyncio
-async def test_signal_cli_that_cannot_run_reports_java(fake_cli, monkeypatch):
+async def test_signal_cli_that_cannot_run_offers_repair(fake_cli, monkeypatch):
     monkeypatch.setenv("FAKE_SIGNAL_BROKEN", "1")
     monkeypatch.setattr(cli, "java_available", lambda: False)
     step = await SignalConnector().begin_auth({})
-    assert step.kind == "error" and "openjdk" in step.message
+    assert step.kind == "fields" and step.title == "Repair Signal support" and step.submit_label == "Repair"
+    assert "no Java runtime" in step.message
 
 
 def test_homebrew_dirs_are_searched_and_put_on_path(tmp_path, monkeypatch):

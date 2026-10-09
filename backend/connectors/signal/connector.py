@@ -34,7 +34,7 @@ from backend import config
 from backend.connectors.base import (
     AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage,
 )
-from backend.connectors.signal import cli
+from backend.connectors.signal import cli, install
 from backend.connectors.signal.envelopes import (
     Address, ConvRef, DeleteEvent, MessageEvent, ReactionEvent, ReceiptEvent, attachment_kind, extension_for,
     message_key, parse_envelope, split_message_key, utc,
@@ -120,6 +120,8 @@ class SignalConnector(Connector):
     def __init__(self, account_id: Optional[int] = None) -> None:
         super().__init__(account_id)
         self._flows: OrderedDict[str, _LinkFlow] = OrderedDict()
+        # Sign-in flows on the setup steps: flow id -> "setup" | "repair" | "installing"
+        self._setup_flows: OrderedDict[str, str] = OrderedDict()
         self._state = "stopped"
         self._error: Optional[str] = None
         self._number: Optional[str] = None
@@ -178,7 +180,7 @@ class SignalConnector(Connector):
             self._aci = self_ident.external_id
         exe = cli.find_signal_cli()
         if exe is None:
-            await self._set_state("error", f"signal-cli isn't installed. {cli.INSTALL_HINT}")
+            await self._set_state("error", "Signal support isn't set up on this Mac. Reconnect Signal to set it up.")
             return False
         linked = await cli.list_accounts(exe)
         if linked is not None and self._number not in linked:
@@ -651,12 +653,69 @@ class SignalConnector(Connector):
             except ProcessLookupError:
                 pass
 
+    # -- setup (app-managed signal-cli, see install.py) -------------------------
+
+    def _setup_step(self, flow_id: str, missing: cli.SignalCliMissing) -> AuthStep:
+        self._setup_flows[flow_id] = "repair" if missing.broken else "setup"
+        while len(self._setup_flows) > MAX_OPEN_FLOWS:
+            self._setup_flows.popitem(last=False)
+        try:
+            size_mb = round(install.download_size() / 1_000_000)
+        except install.InstallError as e:
+            return self._error_step(flow_id, str(e))
+        intro = (
+            f"{missing} " if missing.broken else ""
+        ) + (
+            "Mingly connects to Signal through signal-cli, an open-source Signal client, "
+            "which runs on Java. Both are downloaded once from their official releases "
+            f"(about {size_mb} MB) and checked before use."
+        )
+        return AuthStep(
+            flow_id, "fields",
+            title="Repair Signal support" if missing.broken else "Set up Signal support",
+            message=intro, submit_label="Repair" if missing.broken else "Set up",
+        )
+
+    def _install_step(self, flow_id: str) -> AuthStep:
+        self._setup_flows[flow_id] = "installing"
+        st = install.state()
+        if st.status == "downloading":
+            total = st.total or 1
+            message = f"Downloading signal-cli and Java ({st.downloaded // 1_000_000} of {total // 1_000_000} MB)…"
+            progress = min(st.downloaded / total, 1.0) * 0.9
+        elif st.status == "unpacking":
+            message, progress = "Unpacking…", 0.93
+        else:
+            message, progress = "Checking that it runs…", 0.97
+        return AuthStep(
+            flow_id, "progress", title="Setting up Signal support",
+            message=message + "\nYou can close this window; setup continues in the background.",
+            progress=progress, poll=True,
+        )
+
+    async def _continue_setup(self, flow_id: str) -> AuthStep:
+        phase = self._setup_flows[flow_id]
+        st = install.state()
+        if not st.running and (phase == "repair" or (phase == "setup" and install.installed() is None)):
+            st = install.start()
+        if st.running:
+            return self._install_step(flow_id)
+        self._setup_flows.pop(flow_id, None)
+        if st.status == "error":
+            return self._error_step(flow_id, f"Setting up Signal support failed: {st.error}", title="Signal setup failed")
+        return await self._begin_link(flow_id)
+
     async def begin_auth(self, params: dict[str, Any]) -> AuthStep:
         flow_id = secrets.token_urlsafe(12)
+        if install.state().running:
+            return self._install_step(flow_id)
+        return await self._begin_link(flow_id)
+
+    async def _begin_link(self, flow_id: str) -> AuthStep:
         try:
             exe, _version = await cli.check_installed()
         except cli.SignalCliMissing as e:
-            return self._error_step(flow_id, str(e), title="signal-cli is required")
+            return self._setup_step(flow_id, e)
         try:
             proc = await asyncio.create_subprocess_exec(
                 exe, *cli.config_args(), "link", "-n", DEVICE_NAME,
@@ -700,6 +759,8 @@ class SignalConnector(Connector):
         return self._qr_step(flow_id, flow)
 
     async def continue_auth(self, flow_id: str, data: dict[str, Any]) -> AuthStep:
+        if flow_id in self._setup_flows:
+            return await self._continue_setup(flow_id)
         flow = self._flows.get(flow_id)
         if flow is None:
             raise AuthFlowError("Unknown or expired sign-in flow")

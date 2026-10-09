@@ -52,13 +52,15 @@ class AuthField:
 @dataclass
 class AuthStep:
     flow_id: str
-    kind: str  # fields | qr | oauth_browser | done | error
+    kind: str  # fields | qr | oauth_browser | progress | done | error
     title: Optional[str] = None
     message: Optional[str] = None
     fields: list[AuthField] = field(default_factory=list)
     qr_payload: Optional[str] = None  # e.g. sgnl://linkdevice?…
     auth_url: Optional[str] = None  # consent page to open in the system browser
     poll: bool = False  # continue_auth with {} until the step changes
+    progress: Optional[float] = None  # 0–1 for a `progress` step (a setup download)
+    submit_label: Optional[str] = None  # button of a `fields` step; "Continue" when None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

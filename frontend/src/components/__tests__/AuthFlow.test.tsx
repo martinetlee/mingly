@@ -121,6 +121,35 @@ describe('AuthFlow', () => {
     expect(continueAccountAuth).toHaveBeenCalledTimes(2)
   })
 
+  it('setup: a fields step with its own button label, then a progress bar that polls, then the QR code', async () => {
+    vi.useFakeTimers()
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      title: 'Set up Signal support', message: 'About 180 MB', submit_label: 'Set up',
+    }))
+    const progress = step({ kind: 'progress', title: 'Setting up Signal support', message: 'Downloading…', progress: 0.25, poll: true })
+    vi.mocked(continueAccountAuth)
+      .mockResolvedValueOnce(progress)
+      .mockResolvedValueOnce({ ...progress, progress: 0.6 })
+      .mockResolvedValueOnce(step({ kind: 'qr', title: 'Link Signal', qr_payload: 'sgnl://linkdevice?uuid=a', poll: true }))
+    render(<AuthFlow accountKey="signal" onClose={() => {}} />)
+
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Set up' })) })
+    expect(continueAccountAuth).toHaveBeenLastCalledWith('signal', 'f1', {})
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
+    expect(screen.queryByText('Waiting…')).toBeNull()
+    expect(screen.queryByText(/Unsupported sign-in step/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('60')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    expect(screen.getByText('Link Signal')).toBeTruthy()
+  })
+
   it('resolves a 1Password reference before the form can be submitted', async () => {
     vi.mocked(beginAccountAuth).mockResolvedValue(step({
       title: 'Connect to Telegram',

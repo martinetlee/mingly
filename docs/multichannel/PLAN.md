@@ -5,7 +5,7 @@ Mingly ("Common Defense") is a Telegram-only client. Telegram's numeric ids *are
 
 Goal: add Signal and Gmail first (Google Calendar next, SMS source TBD — abstraction must allow it), in a **unified, person-centric** UX where one person merges their Telegram/Signal/email/SMS identities, and **all features** (briefings, Shield, catch-up, LLM/org context, MCP, cloud sync) work on every channel.
 
-Decisions made: internal surrogate integer ids · bring-your-own Google OAuth client (personal/small group) · signal-cli installed externally via brew.
+Decisions made: internal surrogate integer ids · bring-your-own Google OAuth client (personal/small group) · signal-cli installed externally via brew (revised 2026-10-10: the app sets up signal-cli + a Java runtime itself, so non-developers can connect Signal; Homebrew's is still used if present and no app-managed one exists).
 
 ## Architecture
 
