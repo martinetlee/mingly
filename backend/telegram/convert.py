@@ -49,6 +49,14 @@ def is_storable(msg) -> bool:
 
 
 def media_type(msg) -> Optional[str]:
+    """Kind of the message's own file, or None. Only photo/document media
+    count: Telethon's ``msg.photo`` / ``msg.document`` also return a link
+    preview's image or video and a service action's photo ("changed the
+    group photo"), neither of which is a file of the message."""
+    if is_service(msg) or not isinstance(
+        getattr(msg, "media", None), (types.MessageMediaPhoto, types.MessageMediaDocument)
+    ):
+        return None
     if getattr(msg, "photo", None):
         return "photo"
     if getattr(msg, "sticker", None):

@@ -103,6 +103,29 @@ def test_document_becomes_one_attachment():
     assert att == {"kind": "document", "filename": "a.pdf", "mime_type": "application/pdf", "size": 3, "external_ref": None}
 
 
+def _photo():
+    return types.Photo(id=1, access_hash=1, file_reference=b"", date=None, dc_id=1,
+                       sizes=[types.PhotoSize(type="x", w=800, h=600, size=1234)])
+
+
+def test_link_previews_and_service_photos_are_not_attachments():
+    preview = tg_msg(6, "read https://example.com")
+    preview.media = types.MessageMediaWebPage(webpage=types.WebPage(
+        id=1, url="https://example.com", display_url="example.com", hash=0, photo=_photo()))
+    assert preview.photo is not None  # Telethon exposes the preview's image…
+    assert message_to_row(preview, 1)["attachments"] == []  # …but it isn't the message's file
+
+    changed = types.MessageService(id=7, peer_id=types.PeerChannel(100), date=datetime(2026, 1, 1, tzinfo=UTC),
+                                   action=types.MessageActionChatEditPhoto(photo=_photo()))
+    assert changed.photo is not None
+    row = message_to_row(changed, 1)
+    assert row["attachments"] == [] and row["kind"] == "service"
+
+    real = tg_msg(8, "")
+    real.media = types.MessageMediaPhoto(photo=_photo())
+    assert [a["kind"] for a in message_to_row(real, 1)["attachments"]] == ["photo"]
+
+
 # ── identities from senders ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
