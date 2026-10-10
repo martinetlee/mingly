@@ -1,0 +1,844 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mingly Module Map</title>
+<style>
+:root{
+  --bg:#f6f5f2; --surface:#fff; --surface-2:#f0eee9; --border:#dcd8cf; --text:#1d1c1a; --muted:#6b675f;
+  --accent:#3b5bdb; --accent-soft:#e8ecff; --warn:#c2410c; --warn-soft:#fdeee5;
+  --edge:#a9a49a; --edge-up:#7c6fc4;
+  --t0:#8a6d3b; --t1:#3b5bdb; --t2:#b5523b; --t3:#a1611a; --t4:#2f7d6d; --t5:#6b5ca5; --t6:#4a6a8a;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#151513; --surface:#1e1e1b; --surface-2:#272723; --border:#3a3933; --text:#ecebe6; --muted:#9d998f;
+  --accent:#8ea2ff; --accent-soft:#252b45; --warn:#f08a5d; --warn-soft:#3a2418;
+  --edge:#5d5a53; --edge-up:#a597f0;
+  --t0:#d0a865; --t1:#8ea2ff; --t2:#ec8f78; --t3:#e2a456; --t4:#5cc2ad; --t5:#a99be0; --t6:#8fb2d6;
+}}
+:root[data-theme="dark"]{
+  --bg:#151513; --surface:#1e1e1b; --surface-2:#272723; --border:#3a3933; --text:#ecebe6; --muted:#9d998f;
+  --accent:#8ea2ff; --accent-soft:#252b45; --warn:#f08a5d; --warn-soft:#3a2418;
+  --edge:#5d5a53; --edge-up:#a597f0;
+  --t0:#d0a865; --t1:#8ea2ff; --t2:#ec8f78; --t3:#e2a456; --t4:#5cc2ad; --t5:#a99be0; --t6:#8fb2d6;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;background:var(--surface-2);border:1px solid var(--border);border-radius:4px;padding:0 4px}
+.page{max-width:1180px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-.01em}
+h2{font-size:20px;margin:48px 0 6px}
+.lede,.intro{color:var(--muted);max-width:800px;margin:0 0 14px}
+.topbar{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+button.theme{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit;font-size:13px}
+nav.toc{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0 0}
+nav.toc a{color:var(--muted);text-decoration:none;padding:4px 11px;border:1px solid var(--border);border-radius:999px;background:var(--surface);font-size:13px}
+nav.toc a:hover{color:var(--text)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
+
+/* overview svg */
+.overview{padding:12px}
+.overview svg{width:100%;height:auto;display:block}
+.overview text{fill:var(--text);font-family:inherit}
+.overview .m{fill:var(--muted)}
+
+/* repos */
+.repos{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.repo{padding:14px}
+.repo h3{margin:0 0 4px;font-size:15px}
+.repo p{margin:0;color:var(--muted);font-size:13.5px}
+.repo .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);color:var(--muted);margin-left:6px;font-weight:400;vertical-align:2px}
+
+/* graph */
+.graph-wrap{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:start}
+@media (max-width:960px){.graph-wrap{grid-template-columns:1fr}}
+.graph{padding:6px;overflow-x:auto}
+.graph > svg{display:block;width:100%;min-width:760px;height:auto}
+.graph text{font-family:inherit;fill:var(--text);pointer-events:none}
+.graph .tierlbl{fill:var(--muted);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+.graph .band{fill:var(--surface-2);opacity:.55}
+.node rect{fill:var(--surface);stroke:var(--border);stroke-width:1;transition:opacity .15s}
+.node .bar{stroke:none}
+.node .sub{fill:var(--muted);font-size:10.5px}
+.node{cursor:pointer}
+.node:hover rect.body{stroke:var(--accent)}
+.edge{fill:none;stroke:var(--edge);opacity:.3;transition:opacity .15s}
+.edge.up{stroke:var(--edge-up);stroke-dasharray:5 4}
+.edge.flag{stroke:var(--warn);stroke-dasharray:2 3;opacity:.8}
+svg.focus .edge{opacity:.05}
+svg.focus .edge.on{opacity:1}
+svg.focus .node{opacity:.25}
+svg.focus .node.on,svg.focus .node.sel{opacity:1}
+.node.sel rect.body{stroke:var(--accent);stroke-width:2.5}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:8px 2px 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend svg{width:30px;height:8px;flex:none}
+
+.panel{position:sticky;top:12px;padding:16px;min-height:220px}
+.panel h3{margin:0;font-size:17px}
+.panel .path{color:var(--muted);font-size:12.5px;margin:2px 0 10px;font-family:ui-monospace,Menlo,monospace}
+.panel p{margin:8px 0}
+.panel .k{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px}
+.panel ul{margin:0;padding-left:18px}
+.panel li{margin:2px 0;font-size:13.5px}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chips button{background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:999px;padding:1px 9px;font:inherit;font-size:12.5px;cursor:pointer}
+.chips button.flag{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+.chips button small{color:var(--muted);margin-left:3px}
+.panel .empty{color:var(--muted)}
+
+/* bridge */
+.bridge{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
+.br{padding:14px}
+.br h3{margin:0 0 8px;font-size:15px}
+.br .row{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center;font-size:13px}
+.br .row div{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:6px 8px;word-break:break-word}
+.br .row .arr{background:none;border:0;color:var(--muted);padding:0}
+.br p{margin:8px 0 0;color:var(--muted);font-size:13px}
+
+/* couplings */
+.coupl{display:flex;flex-direction:column;gap:8px}
+.cp{padding:12px 14px;border-left:3px solid var(--warn)}
+.cp.ok{border-left-color:var(--edge-up)}
+.cp b{display:block;font-size:14px}
+.cp p{margin:4px 0 0;font-size:13.5px;color:var(--muted)}
+footer{color:var(--muted);font-size:12.5px;margin-top:40px}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topbar">
+    <div>
+      <h1>Mingly: how the codebase fits together</h1>
+      <p class="lede">A map of the submodules in <code>mingly/</code>: what each one does and which ones it imports. The arrows come from the actual <code>import</code> statements in the code, not from the docs.</p>
+    </div>
+    <button class="theme" id="themeBtn" type="button">Toggle theme</button>
+  </div>
+  <nav class="toc">
+    <a href="#big">1 · Big picture</a><a href="#backend">2 · Backend modules</a><a href="#frontend">3 · Frontend modules</a><a href="#bridge">4 · Where they meet</a><a href="#coupling">5 · How it stays layered</a>
+  </nav>
+
+  <!-- 1 BIG PICTURE -->
+  <h2 id="big">1 · Big picture</h2>
+  <p class="intro">Mingly is a single desktop app with two halves that run together on your Mac. The <b>frontend</b> (React) draws the screens. The <b>backend</b> (Python, FastAPI) does everything else: it talks to Telegram, Signal, SMS and Gmail, stores the data in SQLite, and calls the LLMs.</p>
+  <div class="card overview">
+    <svg viewBox="0 0 980 360" role="img" aria-label="Overview: window containing frontend and backend, backend connects to the database and external services">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+      </defs>
+      <rect x="10" y="10" width="610" height="340" rx="14" fill="none" stroke="var(--t0)" stroke-dasharray="6 4"/>
+      <text x="26" y="34" font-size="13" font-weight="600" fill="var(--t0)" style="fill:var(--t0)">Mingly.app — one macOS window (pywebview)</text>
+
+      <rect x="30" y="56" width="250" height="270" rx="12" fill="var(--surface-2)" stroke="var(--t4)"/>
+      <text x="46" y="84" font-size="16" font-weight="700">Frontend</text>
+      <text x="46" y="104" font-size="12" class="m">frontend/src · React + TypeScript</text>
+      <text x="46" y="136" font-size="13">pages → the screens</text>
+      <text x="46" y="158" font-size="13">components → UI pieces</text>
+      <text x="46" y="180" font-size="13">hooks → data loading</text>
+      <text x="46" y="202" font-size="13">api/ + lib/ → talk to backend</text>
+      <text x="46" y="300" font-size="12" class="m">~32k lines · 203 files</text>
+
+      <rect x="350" y="56" width="250" height="270" rx="12" fill="var(--surface-2)" stroke="var(--t1)"/>
+      <text x="366" y="84" font-size="16" font-weight="700">Backend</text>
+      <text x="366" y="104" font-size="12" class="m">backend/ · Python FastAPI</text>
+      <text x="366" y="136" font-size="13">api → HTTP endpoints</text>
+      <text x="366" y="158" font-size="13">features → briefing, catch-up,</text>
+      <text x="366" y="176" font-size="13">            Shield, AI chat</text>
+      <text x="366" y="198" font-size="13">channels → Telegram, Signal,</text>
+      <text x="366" y="216" font-size="13">            SMS, Gmail</text>
+      <text x="366" y="238" font-size="13">db → SQLite access</text>
+      <text x="366" y="300" font-size="12" class="m">~38k lines · 171 files</text>
+
+      <line x1="282" y1="150" x2="346" y2="150" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="290" y="142" font-size="11" class="m">REST</text>
+      <line x1="346" y1="190" x2="282" y2="190" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="286" y="208" font-size="11" class="m">WebSocket</text>
+      <text x="286" y="222" font-size="11" class="m">+ SSE</text>
+
+      <rect x="680" y="40" width="280" height="120" rx="12" fill="var(--surface)" stroke="var(--t6)"/>
+      <text x="696" y="66" font-size="15" font-weight="700">Local data folder</text>
+      <text x="696" y="88" font-size="12.5">mingly.db (SQLite)</text>
+      <text x="696" y="106" font-size="12.5">vault.enc (encrypted secrets)</text>
+      <text x="696" y="124" font-size="12.5">prefs.json · llm_config.json</text>
+      <text x="696" y="142" font-size="12.5">media/ (downloaded files)</text>
+
+      <rect x="680" y="190" width="280" height="150" rx="12" fill="var(--surface)" stroke="var(--t3)"/>
+      <text x="696" y="216" font-size="15" font-weight="700">Outside world</text>
+      <text x="696" y="238" font-size="12.5">Telegram (Telethon)</text>
+      <text x="696" y="256" font-size="12.5">Signal (signal-cli child process)</text>
+      <text x="696" y="274" font-size="12.5">macOS Messages chat.db</text>
+      <text x="696" y="292" font-size="12.5">Gmail + Google Calendar APIs</text>
+      <text x="696" y="310" font-size="12.5">LLMs: Ollama · Anthropic · OpenAI</text>
+      <text x="696" y="328" font-size="12.5">MCP clients (e.g. Claude Desktop)</text>
+
+      <line x1="602" y1="110" x2="676" y2="100" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="602" y1="250" x2="676" y2="262" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ah)" marker-start="url(#ah)"/>
+    </svg>
+  </div>
+
+  <h3 style="margin:22px 0 8px;font-size:15px">The folders around it (<code>mingly-all/</code>)</h3>
+  <div class="repos">
+    <div class="card repo"><h3>mingly/<span class="tag">the app</span></h3><p>Everything on this page. <code>backend/</code>, <code>frontend/</code>, <code>tests/</code>, <code>build_app.sh</code> + <code>mingly.spec</code> (PyInstaller packaging).</p></div>
+    <div class="card repo"><h3>ScamDetectionPoC/<span class="tag">research</span></h3><p>Trains the LightGBM scam models. Mingly doesn't import it: it ships the trained files in <code>backend/scam/ml_models/</code> and repeats the feature extraction in <code>scam/tools/ml_prefilter.py</code>.</p></div>
+    <div class="card repo"><h3>mingly-cloud/<span class="tag">empty</span></h3><p>Git repo with a single "Initial commit" and no code yet. The <code>*_SPEC.md</code> files in <code>mingly-all/</code> are the design docs for it and for Shield.</p></div>
+  </div>
+
+  <!-- 2 BACKEND -->
+  <h2 id="backend">2 · Backend modules</h2>
+  <p class="intro">Each box is a package or top-level file under <code>backend/</code>. Higher rows depend on lower rows. An arrow <b>A → B</b> means “A imports B”, and thicker arrows mean more imports. <b>Click a box</b> to show only its arrows and read what it does.</p>
+  <div class="graph-wrap">
+    <div class="card graph"><svg id="g-back"></svg>
+      <div class="legend">
+        <span><svg viewBox="0 0 30 8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--edge)" stroke-width="2"/></svg>imports (downward)</span>
+        <span><svg viewBox="0 0 30 8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--edge-up)" stroke-width="2" stroke-dasharray="5 4"/></svg>imports upward / sideways (by design)</span>
+      </div>
+    </div>
+    <aside class="card panel" id="p-back"></aside>
+  </div>
+
+  <!-- 3 FRONTEND -->
+  <h2 id="frontend">3 · Frontend modules</h2>
+  <p class="intro">Each box is a folder under <code>frontend/src/</code>. Big screens have their own sub-folder under <code>pages/</code>. Data flows up: <code>api/</code> fetches it, <code>hooks/</code> keeps it live, and <code>components/</code> and <code>pages/</code> display it.</p>
+  <div class="graph-wrap">
+    <div class="card graph"><svg id="g-front"></svg>
+      <div class="legend">
+        <span><svg viewBox="0 0 30 8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--edge)" stroke-width="2"/></svg>imports</span>
+        <span><svg viewBox="0 0 30 8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--edge-up)" stroke-width="2" stroke-dasharray="5 4"/></svg>sideways / upward</span>
+      </div>
+    </div>
+    <aside class="card panel" id="p-front"></aside>
+  </div>
+
+  <!-- 4 BRIDGE -->
+  <h2 id="bridge">4 · Where frontend and backend meet</h2>
+  <p class="intro">The two halves share no code. They connect through four contracts. Changing one side of a contract means changing the other.</p>
+  <div class="bridge">
+    <div class="card br"><h3>Requests (REST)</h3>
+      <div class="row"><div><code>api/client.ts</code>, <code>email.ts</code>, <code>calendar.ts</code>…</div><span class="arr">→</span><div><code>backend/api/*.py</code> routers, wired in <code>router.py</code></div></div>
+      <p>Every call carries the <code>X-Session-Token</code> header. It's checked in <code>api/dependencies.py</code>.</p></div>
+    <div class="card br"><h3>Data shapes</h3>
+      <div class="row"><div><code>backend/serializers.py</code></div><span class="arr">=</span><div><code>frontend/src/api/types/</code></div></div>
+      <p>The JSON shape of Conversation, Message, Person and Identity. The two files must agree.</p></div>
+    <div class="card br"><h3>Live updates (WebSocket)</h3>
+      <div class="row"><div><code>backend/ws/manager.py</code> broadcast</div><span class="arr">→</span><div><code>lib/ws.ts</code> → <code>context/WebSocketContext</code> → hooks</div></div>
+      <p>Events such as <code>new_message</code>, <code>person_changed</code> and <code>connector_status</code> arrive on <code>/api/ws</code>.</p></div>
+    <div class="card br"><h3>Streams (SSE) &amp; packaging</h3>
+      <div class="row"><div><code>briefing/events.py</code></div><span class="arr">→</span><div><code>pages/intelligence/useBriefingJob.ts</code></div></div>
+      <p>For the release build, <code>vite build</code> outputs <code>frontend/dist</code>, which <code>api/router.py</code> serves. In dev, Vite on :5173 proxies <code>/api</code> to :8765.</p></div>
+  </div>
+
+  <!-- 5 LAYERING -->
+  <h2 id="coupling">5 · How it stays layered</h2>
+  <p class="intro">Every arrow above points down a layer or sideways within one, with no cycles. That's checked by tests, so it can't drift back.</p>
+  <div class="coupl">
+    <div class="card cp ok"><b>tests/test_architecture.py (backend)</b><p>Every <code>backend.*</code> import, including ones inside functions, must point to the same or a lower layer. The module graph must be acyclic. <code>fastapi</code>/<code>starlette</code> may appear only in <code>api/</code>, <code>ws/</code> and <code>main.py</code>. Telethon and the Telegram client/runtime may appear only in <code>backend/telegram/</code>.</p></div>
+    <div class="card cp ok"><b>frontend/src/__tests__/architecture.test.ts</b><p><code>api/</code> and <code>lib/</code> never import UI. <code>hooks/</code> never imports components or pages. Nothing outside <code>pages/</code> imports a page, and no screen folder imports another. Every relative import and <code>vi.mock</code> path must resolve.</p></div>
+    <div class="card cp ok"><b>Ports instead of upward imports</b><p>Ingest exposes a <code>MessageInspector</code> port and Shield plugs into it through <code>backend/wiring.py</code>. Sessions notify revocation listeners and the WebSocket manager subscribes. The connector manager tells a connector <code>on_reauthorized</code>.</p></div>
+    <div class="card cp ok"><b>Connector roles</b><p>Routes ask <code>connector_with(conv, Role, …)</code> and never branch on the channel. Telegram's code (send, albums, edit/delete/forward, pins, dialogs, members, topics, admin, history, search, address book, directory) lives in <code>backend/telegram/</code>. <code>tests/test_telegram_routes.py</code> pins every Telegram route's calls and responses; it passed unchanged before and after the move.</p></div>
+    <div class="card cp ok"><b>Domain errors</b><p>Lower layers raise <code>backend.errors</code> types (503, 401, 404, 400, 429), and one API handler maps them. No HTTP types appear below the API.</p></div>
+    <div class="card cp"><b>Deliberate exceptions</b><p>MCP tool handlers (<code>api/mcp_tools.py</code>) keep their own paginated queries: they're the resolvers of an external read API. Telegram converts Telethon messages itself, then shares the same <code>crud.save_messages</code>, <code>people.identities</code> and <code>ingest.fanout</code> as every channel. 44 imports stay inside functions, all on purpose: late binding for patched singletons, optional dependencies, and Shield-only startup.</p></div>
+  </div>
+
+  <footer>Built from <code>mingly/</code> (branch refactor/modularization) on 2026-10-11 by parsing every <code>import</code>/<code>from</code> in <code>backend/**/*.py</code> and every relative import in <code>frontend/src/**/*.ts(x)</code>, tests excluded. Line counts are approximate. Open locally via file://.</footer>
+</div>
+
+<script>
+/* ---------- data ---------- */
+const BACK = {
+  tiers: ['Entry point','HTTP API + wiring','Features','Channels','Domain core','Infrastructure','Database'],
+  nodes: [
+ {
+  "id": "main",
+  "t": 0,
+  "n": "main",
+  "path": "main.py, instance.py",
+  "loc": 157,
+  "d": "Starts everything: opens the DB (db/startup.init_db), restores LLMs, starts the schedulers (and Shield if enabled), runs uvicorn on a thread and opens the pywebview window.",
+  "k": [
+   "backend/main.py",
+   "backend/instance.py"
+  ]
+ },
+ {
+  "id": "api",
+  "t": 1,
+  "n": "api",
+  "path": "api/ + wiring.py",
+  "loc": 8280,
+  "d": "HTTP / WebSocket / MCP surface. Routers parse requests and shape responses; queries are crud, behaviour is in services and connector roles. lookups.connector_with resolves a conversation's connector (409 unsupported_channel), channel_call maps its errors. wiring.py is the composition root: create_app() plugs features into core extension points.",
+  "k": [
+   "router.py — app factory, DomainError handler",
+   "lookups.py — path ids, connector_with / channel_call",
+   "views.py — conversation_json (adds live capabilities)",
+   "dependencies.py — session / origin / Shield guards",
+   "mcp.py + mcp_tools.py — MCP endpoint and tools",
+   "../wiring.py — composition root"
+  ]
+ },
+ {
+  "id": "briefing",
+  "t": 2,
+  "n": "briefing",
+  "path": "briefing/, briefing_scheduler.py",
+  "loc": 1119,
+  "d": "Daily briefings: targets → transcript within the token budget → LLM summaries → saved incrementally, progress as SSE events. settings.py owns the briefing prefs.",
+  "k": [
+   "pipeline.py",
+   "events.py — EventJob + SSE wire format",
+   "settings.py — time, budget, prompt overrides",
+   "../briefing_scheduler.py"
+  ]
+ },
+ {
+  "id": "catchup",
+  "t": 2,
+  "n": "catch-up",
+  "path": "catchup_summary_scheduler.py",
+  "loc": 420,
+  "d": "Every 30 minutes, an LLM summary for each conversation that needs a reply.",
+  "k": [
+   "catchup_summary_scheduler.py"
+  ]
+ },
+ {
+  "id": "scam",
+  "t": 2,
+  "n": "scam (Shield)",
+  "path": "scam/",
+  "loc": 6298,
+  "off": true,
+  "d": "Scam detection, off by default. queue → service → client (scan.ScamAPIClient: local DAG pipeline or external API). views.py / reports.py are the Shield screens' read models and writes; inspector.py plugs Shield into ingest; settings.py builds the client.",
+  "k": [
+   "scan.py — request/result shapes, client interface, retry policy",
+   "requests.py — ScanRequest from stored rows",
+   "queue.py, service.py, client.py, engine.py",
+   "views.py, reports.py — read models / writes",
+   "inspector.py — the MessageInspector",
+   "tools/registry.py"
+  ]
+ },
+ {
+  "id": "ai",
+  "t": 2,
+  "n": "ai",
+  "path": "ai/",
+  "loc": 783,
+  "d": "The in-app AI chat: agent.py runs the tool-calling loop (history window, context budget, persistence) over chat_tools.py; translate.py.",
+  "k": [
+   "agent.py",
+   "chat_tools.py",
+   "translate.py"
+  ]
+ },
+ {
+  "id": "orgctx",
+  "t": 2,
+  "n": "org context",
+  "path": "org_context.py, user_orgs.py",
+  "loc": 385,
+  "d": "Colleague / organization context for LLM prompts; the user's own organizations.",
+  "k": [
+   "org_context.py",
+   "user_orgs.py"
+  ]
+ },
+ {
+  "id": "connectors",
+  "t": 3,
+  "n": "connectors",
+  "path": "connectors/ (base, roles, manager…)",
+  "loc": 859,
+  "d": "The channel plug-in system. base.py: what every channel has (lifecycle, sign-in, send / send_files, react, mark_read, attachments, on_reauthorized). roles.py: optional interfaces (MessageActions, DialogActions, GroupMembers, ForumTopics, GroupAdmin, HistorySync, GlobalSearch, AddressBook). manager.py: lifecycles, sign-in flows, capabilities_for, with_role. autosync.py: open-time history sync over HistorySync.",
+  "k": [
+   "base.py",
+   "roles.py",
+   "manager.py",
+   "autosync.py",
+   "sync_state.py"
+  ]
+ },
+ {
+  "id": "telegram",
+  "t": 3,
+  "n": "telegram",
+  "path": "telegram/",
+  "loc": 4634,
+  "d": "Everything Telethon. connector.py implements every role by delegating to outgoing.py (send, albums, edit, delete, forward, pin, react), dialogs.py (dialog state, members, topics, search, address book), admin.py (moderation, invites, slow mode, post stats) and directory.py (folders, directory search, create / join, profiles). client.py owns connected_client(); runtime.py orchestrates sync, archive and media.",
+  "k": [
+   "connector.py",
+   "outgoing.py, dialogs.py, admin.py, directory.py",
+   "client.py — connected_client()",
+   "runtime.py, coordinator.py, sync.py, archive.py",
+   "media.py, ids.py, convert.py"
+  ]
+ },
+ {
+  "id": "gmail",
+  "t": 3,
+  "n": "gmail",
+  "path": "connectors/gmail/",
+  "loc": 1849,
+  "d": "Gmail + Google Calendar, one connector per Google account; OAuth, history.list polling, calendar loop. Its HTTP routes live in api/gmail.py.",
+  "k": [
+   "connector.py",
+   "oauth.py, api.py, mime.py",
+   "calendar_sync.py"
+  ]
+ },
+ {
+  "id": "signal",
+  "t": 3,
+  "n": "signal",
+  "path": "connectors/signal/",
+  "loc": 1847,
+  "d": "Signal via a supervised signal-cli child linked by QR code; envelopes go through ingest.service.",
+  "k": [
+   "connector.py",
+   "rpc.py, cli.py, envelopes.py",
+   "install.py"
+  ]
+ },
+ {
+  "id": "sms",
+  "t": 3,
+  "n": "sms",
+  "path": "connectors/sms/",
+  "loc": 1098,
+  "d": "SMS / iMessage, read-only, polling macOS Messages' chat.db.",
+  "k": [
+   "connector.py",
+   "chatdb.py",
+   "typedstream.py"
+  ]
+ },
+ {
+  "id": "ingest",
+  "t": 4,
+  "n": "ingest",
+  "path": "ingest/",
+  "loc": 447,
+  "d": "service.py stores normalized conversations / messages / identities; fanout.py runs after every save on every channel (WS delta, catch-up reopen, triage, notification) and exposes the MessageInspector port features plug into.",
+  "k": [
+   "service.py",
+   "normalized.py",
+   "fanout.py — post-save + inspector port"
+  ]
+ },
+ {
+  "id": "people",
+  "t": 4,
+  "n": "people",
+  "path": "people/",
+  "loc": 628,
+  "d": "identities.upsert_identity: how every connector records a handle (crud.store_identity + cross-channel linking). linking.py: merge / suggestions / undo / detach.",
+  "k": [
+   "identities.py",
+   "linking.py"
+  ]
+ },
+ {
+  "id": "serializers",
+  "t": 4,
+  "n": "serializers",
+  "path": "serializers.py",
+  "loc": 212,
+  "d": "The JSON shapes (Conversation, Message, Person, Identity, scam fields). conversation_out takes capabilities explicitly. Must match frontend/src/api/types/.",
+  "k": [
+   "serializers.py"
+  ]
+ },
+ {
+  "id": "llm",
+  "t": 4,
+  "n": "llm",
+  "path": "llm/",
+  "loc": 1163,
+  "d": "Provider registry (Ollama, Anthropic, OpenAI), role-based resolve, token budgets.",
+  "k": [
+   "registry.py, resolve.py",
+   "base.py",
+   "ollama.py, anthropic.py, openai.py"
+  ]
+ },
+ {
+  "id": "ws",
+  "t": 5,
+  "n": "ws · notify · media",
+  "path": "ws/, notify.py, media.py",
+  "loc": 277,
+  "d": "WebSocket broadcaster (validates against sessions, evicts on revocation), native notifications, channel-neutral media storage / errors / audit.",
+  "k": [
+   "ws/manager.py",
+   "notify.py",
+   "media.py"
+  ]
+ },
+ {
+  "id": "secrets",
+  "t": 5,
+  "n": "vault · sessions",
+  "path": "secrets.py, sessions.py, secret_prefs.py",
+  "loc": 424,
+  "d": "Fernet vault, the session-token store (shared by HTTP and WS) and vault-held API keys.",
+  "k": [
+   "secrets.py",
+   "sessions.py",
+   "secret_prefs.py"
+  ]
+ },
+ {
+  "id": "core",
+  "t": 5,
+  "n": "core",
+  "path": "config, errors, prefs, tasks, jobs…",
+  "loc": 717,
+  "d": "config, errors.py (DomainError family the API maps to HTTP), prefs.py, tasks / jobs / aio, features (Shield switch), validators, serialization.",
+  "k": [
+   "config.py",
+   "errors.py",
+   "prefs.py",
+   "tasks.py, jobs.py, aio.py",
+   "features.py"
+  ]
+ },
+ {
+  "id": "db",
+  "t": 6,
+  "n": "db",
+  "path": "db/",
+  "loc": 6599,
+  "d": "All database access. models.py, database.py (engine, Base), startup.py (init_db, schema generations), crud/ (queries per area, incl. search, catchup, admin, ai), migrations/.",
+  "k": [
+   "models.py",
+   "crud/ — queries per area",
+   "startup.py — init_db",
+   "migrations/runner.py"
+  ]
+ }
+],
+  edges: [["ai", "briefing", 1], ["ai", "db", 5], ["ai", "llm", 13], ["ai", "orgctx", 1], ["ai", "telegram", 3], ["api", "ai", 2], ["api", "briefing", 13], ["api", "catchup", 2], ["api", "connectors", 35], ["api", "core", 35], ["api", "db", 73], ["api", "gmail", 5], ["api", "ingest", 1], ["api", "llm", 24], ["api", "orgctx", 3], ["api", "people", 1], ["api", "scam", 15], ["api", "secrets", 31], ["api", "serializers", 16], ["api", "telegram", 6], ["api", "ws", 10], ["briefing", "core", 7], ["briefing", "db", 4], ["briefing", "llm", 16], ["briefing", "orgctx", 3], ["briefing", "serializers", 1], ["briefing", "telegram", 1], ["catchup", "core", 4], ["catchup", "db", 4], ["catchup", "llm", 5], ["catchup", "orgctx", 1], ["catchup", "serializers", 2], ["catchup", "ws", 1], ["connectors", "core", 4], ["connectors", "db", 9], ["connectors", "secrets", 1], ["connectors", "telegram", 1], ["connectors", "ws", 1], ["db", "core", 3], ["gmail", "connectors", 11], ["gmail", "core", 8], ["gmail", "db", 8], ["gmail", "ingest", 6], ["gmail", "people", 2], ["gmail", "secrets", 1], ["gmail", "ws", 4], ["ingest", "core", 1], ["ingest", "db", 8], ["ingest", "people", 1], ["ingest", "serializers", 3], ["ingest", "ws", 3], ["llm", "core", 2], ["llm", "secrets", 2], ["main", "api", 1], ["main", "briefing", 1], ["main", "catchup", 1], ["main", "connectors", 1], ["main", "core", 9], ["main", "db", 1], ["main", "llm", 2], ["main", "scam", 5], ["main", "secrets", 1], ["main", "ws", 2], ["orgctx", "core", 3], ["orgctx", "db", 6], ["people", "db", 15], ["people", "ws", 1], ["scam", "core", 24], ["scam", "db", 52], ["scam", "llm", 5], ["scam", "secrets", 5], ["scam", "serializers", 2], ["scam", "telegram", 1], ["scam", "ws", 3], ["secrets", "core", 4], ["serializers", "core", 1], ["serializers", "db", 6], ["signal", "connectors", 6], ["signal", "core", 5], ["signal", "db", 6], ["signal", "ingest", 7], ["signal", "serializers", 1], ["signal", "ws", 2], ["sms", "connectors", 5], ["sms", "core", 3], ["sms", "db", 4], ["sms", "ingest", 6], ["sms", "ws", 2], ["telegram", "connectors", 21], ["telegram", "core", 27], ["telegram", "db", 38], ["telegram", "ingest", 3], ["telegram", "people", 1], ["telegram", "secrets", 3], ["telegram", "serializers", 2], ["telegram", "ws", 11], ["ws", "core", 2], ["ws", "db", 2], ["ws", "secrets", 1]],
+};
+
+const FRONT = {
+  tiers: ['Entry','Route pages','Screen folders','Shared UI','State, data & features','Plumbing'],
+  nodes: [
+ {
+  "id": "app",
+  "t": 0,
+  "n": "App",
+  "path": "main.tsx, App.tsx",
+  "loc": 226,
+  "d": "Boots React, providers and routes; Unlock / Onboarding gates.",
+  "k": [
+   "main.tsx",
+   "App.tsx"
+  ]
+ },
+ {
+  "id": "pages",
+  "t": 1,
+  "n": "pages",
+  "path": "pages/*.tsx",
+  "loc": 5744,
+  "d": "One file per screen; big screens delegate to their folder.",
+  "k": [
+   "Home.tsx, Chats.tsx, Board.tsx",
+   "Person.tsx, Contacts.tsx",
+   "Intelligence.tsx, Settings.tsx, Shield.tsx"
+  ]
+ },
+ {
+  "id": "chats",
+  "t": 2,
+  "n": "pages/chats",
+  "path": "pages/chats/",
+  "loc": 1455,
+  "d": "Chat list pane, message pane, presence/typing, chat list hook.",
+  "k": [
+   "ChatListPane.tsx, ChatPane.tsx",
+   "useChatList.ts"
+  ]
+ },
+ {
+  "id": "mail",
+  "t": 2,
+  "n": "pages/mail",
+  "path": "pages/mail/",
+  "loc": 593,
+  "d": "Thread list, thread view, composer.",
+  "k": [
+   "ThreadList.tsx, ThreadView.tsx",
+   "MailComposer.tsx"
+  ]
+ },
+ {
+  "id": "calendar",
+  "t": 2,
+  "n": "pages/calendar",
+  "path": "pages/calendar/",
+  "loc": 218,
+  "d": "Calendar picker, event rows, upcoming meetings.",
+  "k": [
+   "CalendarPicker.tsx",
+   "EventRow.tsx"
+  ]
+ },
+ {
+  "id": "intelligence",
+  "t": 2,
+  "n": "pages/intelligence",
+  "path": "pages/intelligence/",
+  "loc": 1781,
+  "d": "AI chat, briefings (SSE job hook), mentions.",
+  "k": [
+   "ChatTab.tsx",
+   "BriefingTab.tsx, useBriefingJob.ts",
+   "MentionsTab.tsx"
+  ]
+ },
+ {
+  "id": "settings",
+  "t": 2,
+  "n": "pages/settings",
+  "path": "pages/settings/",
+  "loc": 2028,
+  "d": "Connections, models, MCP, tags, organizations, archive, preferences, Shield.",
+  "k": [
+   "Connections.tsx",
+   "ModelSection.tsx",
+   "McpSection.tsx"
+  ]
+ },
+ {
+  "id": "shield",
+  "t": 2,
+  "n": "pages/shield",
+  "path": "pages/shield/",
+  "loc": 1949,
+  "off": true,
+  "d": "Shield dashboard; hidden while Shield is disabled.",
+  "k": [
+   "FlaggedTab.tsx",
+   "ScannedTable.tsx",
+   "PipelineTab.tsx"
+  ]
+ },
+ {
+  "id": "components",
+  "t": 3,
+  "n": "components",
+  "path": "components/<domain>/",
+  "loc": 10045,
+  "d": "Reusable UI grouped by domain: layout, chat, mail, media, people, channels, intelligence, shield, ui.",
+  "k": [
+   "layout/",
+   "chat/",
+   "people/",
+   "ui/"
+  ]
+ },
+ {
+  "id": "hooks",
+  "t": 4,
+  "n": "hooks",
+  "path": "hooks/",
+  "loc": 2491,
+  "d": "Data hooks: fetch via api/ and stay live through WebSocket events.",
+  "k": [
+   "useChatMessages.ts",
+   "usePagedList.ts",
+   "useMentions.ts"
+  ]
+ },
+ {
+  "id": "features",
+  "t": 4,
+  "n": "features",
+  "path": "features/<domain>/",
+  "loc": 606,
+  "d": "Logic shared across screens, by domain: chat (scam checks, UI store, message window), calendar (agenda), mail (recipients), briefing (schedule).",
+  "k": [
+   "chat/",
+   "calendar/agenda.ts",
+   "mail/recipients.ts"
+  ]
+ },
+ {
+  "id": "context",
+  "t": 4,
+  "n": "context",
+  "path": "context/",
+  "loc": 261,
+  "d": "Features, Theme, WebSocket, Workspace providers.",
+  "k": [
+   "FeaturesContext.tsx",
+   "WebSocketContext.tsx"
+  ]
+ },
+ {
+  "id": "api",
+  "t": 5,
+  "n": "api",
+  "path": "api/",
+  "loc": 2999,
+  "d": "client.ts barrel over per-domain modules (base.ts request helper); types/ per domain behind index.ts.",
+  "k": [
+   "client.ts, base.ts",
+   "conversations.ts, people.ts, …",
+   "types/"
+  ]
+ },
+ {
+  "id": "lib",
+  "t": 5,
+  "n": "lib",
+  "path": "lib/",
+  "loc": 1267,
+  "d": "Framework-free plumbing: http, ws, capabilities, routes, toasts.",
+  "k": [
+   "http.ts",
+   "ws.ts",
+   "capabilities.ts"
+  ]
+ },
+ {
+  "id": "utils",
+  "t": 5,
+  "n": "utils",
+  "path": "utils/",
+  "loc": 188,
+  "d": "Time formatting, URL sanitizing.",
+  "k": [
+   "time.ts",
+   "sanitizeUrl.ts"
+  ]
+ }
+],
+  edges: [["api", "lib", 32], ["app", "api", 2], ["app", "components", 4], ["app", "context", 4], ["app", "lib", 2], ["app", "pages", 17], ["calendar", "api", 3], ["calendar", "features", 2], ["calendar", "hooks", 3], ["calendar", "lib", 3], ["calendar", "utils", 1], ["chats", "api", 12], ["chats", "components", 14], ["chats", "context", 1], ["chats", "features", 3], ["chats", "hooks", 10], ["chats", "lib", 10], ["chats", "utils", 3], ["components", "api", 62], ["components", "context", 6], ["components", "features", 7], ["components", "hooks", 52], ["components", "lib", 57], ["components", "utils", 16], ["context", "api", 6], ["context", "hooks", 2], ["context", "lib", 6], ["features", "api", 6], ["features", "context", 1], ["features", "hooks", 2], ["features", "lib", 1], ["features", "utils", 2], ["hooks", "api", 16], ["hooks", "context", 4], ["hooks", "features", 2], ["hooks", "lib", 16], ["intelligence", "api", 7], ["intelligence", "components", 6], ["intelligence", "features", 1], ["intelligence", "hooks", 5], ["intelligence", "lib", 5], ["intelligence", "utils", 2], ["lib", "api", 9], ["mail", "api", 8], ["mail", "components", 3], ["mail", "context", 1], ["mail", "features", 4], ["mail", "hooks", 4], ["mail", "lib", 4], ["mail", "utils", 1], ["pages", "api", 32], ["pages", "calendar", 3], ["pages", "chats", 6], ["pages", "components", 39], ["pages", "context", 5], ["pages", "features", 3], ["pages", "hooks", 46], ["pages", "intelligence", 3], ["pages", "lib", 29], ["pages", "mail", 5], ["pages", "settings", 8], ["pages", "shield", 14], ["pages", "utils", 5], ["settings", "api", 15], ["settings", "components", 7], ["settings", "features", 1], ["settings", "hooks", 11], ["settings", "lib", 8], ["settings", "utils", 2], ["shield", "api", 19], ["shield", "components", 1], ["shield", "hooks", 18], ["shield", "lib", 13], ["shield", "utils", 4]],
+};
+
+const TIER_COLORS = ['--t0','--t1','--t2','--t3','--t4','--t5','--t6'];
+
+/* ---------- renderer ---------- */
+function render(svgId, panelId, G){
+  const svg = document.getElementById(svgId), panel = document.getElementById(panelId);
+  const NS = 'http://www.w3.org/2000/svg';
+  const W = 900, LBL = 0, rowH = 104, top = 26, boxH = 50;
+  const byId = {};
+  G.nodes.forEach(n => byId[n.id] = n);
+  const rows = G.tiers.map((_, i) => G.nodes.filter(n => n.t === i));
+  const H = top + rows.length * rowH;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); (parent||svg).appendChild(e); return e; };
+
+  const defs = el('defs', {});
+  [['a', 'var(--edge)'], ['u', 'var(--edge-up)'], ['f', 'var(--warn)']].forEach(([k, c]) => {
+    const m = el('marker', {id: svgId + k, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto'}, defs);
+    el('path', {d: 'M0,0 L10,5 L0,10 z', fill: c}, m);
+  });
+
+  // bands + layout
+  rows.forEach((row, i) => {
+    const y = top + i * rowH;
+    el('rect', {class: 'band', x: 0, y: y - 18, width: W, height: rowH - 10, rx: 8});
+    const lbl = el('text', {class: 'tierlbl', x: 10, y: y - 4});
+    lbl.textContent = G.tiers[i];
+    const maxW = 170, gap = 14, avail = W - 20;
+    const bw = Math.min(maxW, (avail - gap * (row.length - 1)) / row.length);
+    const total = bw * row.length + gap * (row.length - 1);
+    let x = (W - total) / 2;
+    row.forEach(n => { n.x = x; n.y = y + 6; n.w = bw; n.h = boxH; n.cx = x + bw / 2; x += bw + gap; });
+  });
+
+  // edges
+  const edgeG = el('g', {});
+  const maxC = Math.max(...G.edges.map(e => e[2]));
+  const edges = G.edges.map(([a, b, c, kind]) => {
+    const A = byId[a], B = byId[b];
+    let d, cls = 'edge';
+    if (B.t > A.t) {
+      const x1 = A.cx + (B.cx - A.cx) * 0.12, y1 = A.y + A.h, x2 = B.cx - (B.cx - A.cx) * 0.12, y2 = B.y - 2;
+      const my = (y2 - y1) * 0.5;
+      d = `M${x1},${y1} C${x1},${y1 + my} ${x2},${y2 - my} ${x2},${y2}`;
+    } else if (B.t < A.t) {
+      cls += ' up';
+      const x1 = A.cx + 14, y1 = A.y, x2 = B.cx + 14, y2 = B.y + B.h + 2;
+      const my = (y1 - y2) * 0.5;
+      d = `M${x1},${y1} C${x1},${y1 - my} ${x2},${y2 + my} ${x2},${y2}`;
+    } else {
+      cls += ' up';
+      const x1 = A.cx, x2 = B.cx, y = A.y + A.h, sag = 26 + Math.abs(x2 - x1) * 0.06;
+      d = `M${x1},${y} C${x1},${y + sag} ${x2},${y + sag} ${x2},${y + 2}`;
+    }
+    if (kind === 'flag') cls = 'edge flag';
+    const marker = kind === 'flag' ? 'f' : (cls.includes('up') ? 'u' : 'a');
+    const sw = 1 + 3.2 * Math.sqrt(c / maxC);
+    const p = el('path', {d, class: cls, 'stroke-width': sw.toFixed(2), 'marker-end': `url(#${svgId + marker})`}, edgeG);
+    const ttl = el('title', {}, p); ttl.textContent = `${A.n} → ${B.n} (${c} import${c > 1 ? 's' : ''})`;
+    return {a, b, c, kind, p};
+  });
+
+  // nodes
+  G.nodes.forEach(n => {
+    const g = el('g', {class: 'node', tabindex: 0, role: 'button', 'aria-label': n.n});
+    const color = `var(${TIER_COLORS[n.t]})`;
+    el('rect', {class: 'body', x: n.x, y: n.y, width: n.w, height: n.h, rx: 8, 'stroke-dasharray': n.off ? '4 3' : ''}, g);
+    el('rect', {class: 'bar', x: n.x, y: n.y, width: 4, height: n.h, rx: 2, fill: color}, g);
+    const t1 = el('text', {x: n.x + 12, y: n.y + 21, 'font-size': 13.5, 'font-weight': 600}, g); t1.textContent = n.n;
+    const t2 = el('text', {class: 'sub', x: n.x + 12, y: n.y + 38}, g);
+    t2.textContent = `${n.loc.toLocaleString()} lines${n.off ? ' · off by default' : ''}`;
+    n.g = g;
+    g.addEventListener('click', e => { e.stopPropagation(); select(n.id); });
+    g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(n.id); } });
+  });
+
+  const intro = `<h3>Click a module</h3><p class="empty">Pick any box to see what it does, its key files, what it imports and what imports it. Click empty space or press Esc to reset.</p>
+    <div class="k">Biggest modules</div><ul>${[...G.nodes].sort((a,b)=>b.loc-a.loc).slice(0,5).map(n=>`<li><b>${n.n}</b> — ${n.loc.toLocaleString()} lines</li>`).join('')}</ul>`;
+  panel.innerHTML = intro;
+
+  function chips(list, dir){
+    if (!list.length) return '<span class="empty">nothing</span>';
+    return '<div class="chips">' + list.sort((x,y)=>y.c-x.c).map(e => {
+      const other = dir === 'out' ? e.b : e.a;
+      return `<button type="button" data-go="${other}" class="${e.kind==='flag'?'flag':''}">${byId[other].n}<small>${e.c}</small></button>`;
+    }).join('') + '</div>';
+  }
+  function select(id){
+    const n = byId[id];
+    svg.classList.add('focus');
+    const out = edges.filter(e => e.a === id), inn = edges.filter(e => e.b === id);
+    const on = new Set([id, ...out.map(e => e.b), ...inn.map(e => e.a)]);
+    G.nodes.forEach(m => { m.g.classList.toggle('on', on.has(m.id)); m.g.classList.toggle('sel', m.id === id); });
+    edges.forEach(e => e.p.classList.toggle('on', e.a === id || e.b === id));
+    panel.innerHTML = `<h3>${n.n}</h3><div class="path">${n.path}</div>
+      <p>${n.d}</p>
+      <div class="k">Key files</div><ul>${n.k.map(f => `<li><code>${f.split(' — ')[0]}</code>${f.includes(' — ') ? ' — ' + f.split(' — ')[1] : ''}</li>`).join('')}</ul>
+      <div class="k">Imports (uses) →</div>${chips(out, 'out')}
+      <div class="k">Imported by ←</div>${chips(inn, 'in')}`;
+    panel.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => select(b.dataset.go)));
+  }
+  function reset(){
+    svg.classList.remove('focus');
+    G.nodes.forEach(m => m.g.classList.remove('on', 'sel'));
+    edges.forEach(e => e.p.classList.remove('on'));
+    panel.innerHTML = intro;
+  }
+  svg.addEventListener('click', reset);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') reset(); });
+}
+
+render('g-back', 'p-back', BACK);
+render('g-front', 'p-front', FRONT);
+
+/* theme toggle */
+try { const t = localStorage.getItem('mingly-arch-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('mingly-arch-theme', next); } catch (e) {}
+});
+</script>
+</body>
+</html>

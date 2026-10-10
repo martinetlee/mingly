@@ -38,21 +38,30 @@ A desktop app (macOS) for managing relationships across channels — Telegram, S
 ## Project Structure
 
 ```
-backend/
-  api/          # FastAPI routers (one per domain: conversations, people, organizations, telegram, …)
-  connectors/   # Channel connector contract + manager; gmail/ (+ Calendar), signal/, sms/ packages
-  people/       # linking.py: cross-channel person merge / undo / detach
-  ingest/       # fanout.py: what every channel's new/edited message triggers (WS, Shield, catch-up, notify)
-  db/           # models.py, crud/ (one module per area), migrations/runner.py
+backend/                       (layers, lowest first — see "Layering" below)
+  config, errors, prefs, secrets, secret_prefs, sessions, tasks, jobs, aio, …   # core
+  db/           # models.py, database.py (engine/Base), startup.py (init_db), crud/ (one module per area), migrations/
   serializers.py# The JSON shapes of Conversation / Message / Person / Identity
+  ws/, notify.py, media.py                                   # shared: WS broadcaster, notifications, media storage
   llm/          # Provider registry, base class, ollama/anthropic/openai providers
-  telegram/     # Telethon runtime, sync, archive, media; ids.py maps Telegram ids ↔ internal ids
-  ai/           # Message importance scoring
+  people/       # identities.py (upsert + linking), linking.py (merge / undo / detach)
+  ingest/       # service.py (normalized writer), fanout.py (post-save side effects + MessageInspector port)
+  connectors/   # base.py (Connector contract), roles.py (optional roles), manager.py, autosync.py,
+                # sync_state.py; gmail/ (+ Calendar), signal/, sms/ packages
+  telegram/     # Telethon: client (connected_client), runtime, sync/coordinator/archive, media, ids.py,
+                # connector.py + outgoing/dialogs/admin/directory (the role implementations)
+  briefing/, scam/, ai/ (chat agent + tools), org_context, user_orgs, *_scheduler   # features
+  api/          # FastAPI routers (thin), lookups.py, views.py, sse.py, idempotency.py, mcp*.py
+  wiring.py     # composition root: plugs features into core extension points
+  main.py       # entry point (uvicorn thread + pywebview window)
 
 frontend/src/
-  pages/        # Route pages (Home, Chats, Contacts, Intelligence, Settings, Profile)
-  components/   # Reusable UI (PersonCard, MessageBubble, CatchUpQueue, etc.)
-  api/          # client.ts (typed fetch wrapper), types.ts (all interfaces), session.ts
+  pages/        # Route pages; big screens have a sub-folder (pages/chats, mail, calendar, intelligence, settings, shield)
+  features/     # Logic shared across screens, by domain (chat, calendar, mail, briefing)
+  components/   # Reusable UI by domain: layout, chat, mail, media, people, channels, intelligence, shield, ui
+  hooks/, context/
+  api/          # client.ts (barrel over per-domain modules + base.ts request helper), types/ (per domain, index.ts)
+  lib/          # framework-free plumbing: http.ts, ws.ts, capabilities, routes, toast…
 ```
 
 ## Dev Commands
@@ -75,10 +84,37 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 
 ## Architecture
 
+### Layering (enforced by tests/test_architecture.py and frontend/src/__tests__/architecture.test.ts)
+- Backend layers, lowest first: **core** → **data** (`db`) → **shared** (`serializers`, `ws`, `notify`, `media`) →
+  **llm** → **domain** (`people`, `ingest`) → **channels** (`connectors`, `telegram`) → **features**
+  (`briefing`, `scam`, `ai`, schedulers, `org_context`) → **api** (+ `wiring`) → **entry** (`main`).
+  Every import (function-level included) points to the same or a lower layer; the module graph is acyclic.
+  A new top-level module must be added to `LAYERS` in the test.
+- `fastapi` / `starlette` only in `api/`, `ws/` and `main.py`. Lower layers raise `backend.errors.DomainError`
+  subclasses (`ServiceUnavailable` 503, `NotAuthenticated` 401, `NotFound` 404, `InvalidRequest` 400,
+  `RateLimited` 429) which the API maps in one handler.
+- Telethon and the Telegram client/runtime are imported only inside `backend/telegram/`.
+- Lower layers never import features: they expose ports and `backend/wiring.py` (run by `create_app()`)
+  connects them (e.g. Shield is an `ingest.fanout.MessageInspector`).
+- Prefer module access (`prefs.load_prefs()`, `cloud_sync.get_cloud_sync_manager()`) for singletons and
+  functions that tests patch; a `from x import f` binds before the patch.
+
+### Channels & connectors
+- `connectors/base.py`: what every channel has (lifecycle, sign-in steps, send / send_files, react,
+  mark_read, fetch_attachment, capabilities, `on_reauthorized`).
+- `connectors/roles.py`: optional roles a connector also inherits — `MessageActions`, `DialogActions`,
+  `GroupMembers`, `ForumTopics`, `GroupAdmin`, `HistorySync`, `GlobalSearch`, `AddressBook`.
+- Routes resolve `api.lookups.connector_with(conv, Role, "What", Capability?)` (409 `unsupported_channel`
+  otherwise) and wrap calls in `channel_call(...)` for the HTTP error mapping. Never branch on
+  `channel == "telegram"` in a route.
+- `ConnectorManager` owns lifecycles and sign-in flows; `manager.with_role(Role)` lists connectors with a role.
+
 ### API Routes
-- One router per domain in `backend/api/`, registered in `router.py`
+- One router per domain in `backend/api/`, registered in `router.py`; routers parse requests and shape
+  responses — queries live in `db/crud`, behaviour in services (`scam/views.py`, `scam/reports.py`,
+  `ai/agent.py`, …). Exception: MCP tool handlers (`api/mcp_tools.py`) own their paginated queries.
 - All routes (except `/api/auth/*`) require `X-Session-Token` header
-- Auth dependency: `require_session_token()` in `dependencies.py`
+- Auth dependency: `require_session_token()` in `dependencies.py`; the token store is `backend/sessions.py`
 
 ### Database
 - Schema v2 contract: `docs/multichannel/SCHEMA_V2.md` (tables, id rules, payload shapes, route map, WS events). Read it before touching ids.
@@ -87,10 +123,10 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 - **Migrations**: `create_all` builds the full schema on a fresh DB; later changes are append-only numbered steps in `backend/db/migrations/runner.py` `MIGRATIONS` (SQL strings or async callables). An existing DB is backed up to `DATA_DIR/backups/` before pending migrations run. A DB from an older schema generation is backed up and replaced on startup (`init_db`).
 
 ### LLM Integration
-- Provider registry singleton in `backend/llm/registry.py`
+- Provider registry singleton in `backend/llm/registry.py`; `backend/llm/resolve.py` picks a provider by role
 - `BaseLLMProvider` with `complete()` and `stream()` methods
 - Config stored in `data/llm_config.json` (instances + orchestrator name)
-- Tool-calling orchestrator in `backend/llm/orchestrator.py`
+- In-app AI chat: `backend/ai/agent.py` (tool-calling loop) + `backend/ai/chat_tools.py`
 
 ### Auth Flow
 1. Master password → Fernet vault (`vault.enc`) with PBKDF2 key derivation
@@ -99,16 +135,17 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 4. WebSocket auth via `?token=` query param
 
 ### Frontend Data Flow
-- `api/client.ts`: typed `request<T>()` wrapper with session token header
-- `api/types.ts`: single source of truth for all API response interfaces
+- `api/client.ts`: barrel over per-domain modules; typed `request<T>()` (`api/base.ts`) adds the session token header.
+  Import API functions from `api/client` (tests mock that module).
+- `api/types/`: single source of truth for all API response interfaces (import from `api/types`)
 - `api/session.ts`: token storage + expiry notification
 
 ## Key Conventions
 
 - **Python**: snake_case everywhere. **TypeScript**: camelCase vars, PascalCase components/types.
-- API response shapes must match TypeScript interfaces in `frontend/src/api/types.ts`
+- API response shapes must match TypeScript interfaces in `frontend/src/api/types/`
 - APIs, WS events and the frontend only carry internal ids (`conversation_id`, `message_id`, `person_id`, `identity_id`); never Telegram ids
-- Telegram-only operations go through `backend/api/lookups.telegram_peer()`, which answers 409 `unsupported_channel` for other channels; the frontend gates such UI on `conversation.capabilities`
+- Channel operations go through the conversation's connector (`api/lookups.connector_with`), which answers 409 `unsupported_channel` when the channel lacks the role; the frontend gates such UI on `conversation.capabilities`
 - Preferences: `data/prefs.json` (notification, briefing, user orgs, etc.)
 - LLM config: `data/llm_config.json`
 - Org context: `backend/org_context.py` provides shared helpers for injecting colleague/org context into LLM prompts

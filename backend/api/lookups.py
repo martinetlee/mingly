@@ -63,9 +63,11 @@ def connector_with(conv: Conversation, role: Type[R], what: str,
     interface, or ``Connector`` itself), or 409 ``unsupported_channel`` when
     it has no such role / ``capability`` in this conversation."""
     connector = connector_for(conv)
-    if not isinstance(connector, role):
+    if connector is None:
         raise unsupported_channel(conv, what)
     if capability is not None and capability not in connector.conversation_capabilities(conv):
+        raise unsupported_channel(conv, what)
+    if not isinstance(connector, role):
         raise unsupported_channel(conv, what)
     return connector
 
