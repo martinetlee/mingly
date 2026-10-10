@@ -166,7 +166,7 @@ def events():
     capture = _Capture()
     with ExitStack() as stack:
         stack.enter_context(patch("backend.ws.manager.ws_manager.broadcast", capture))
-        stack.enter_context(patch.object(fanout, "enqueue_scam", AsyncMock()))
+        stack.enter_context(patch.object(fanout, "inspect_messages", AsyncMock()))
         stack.enter_context(patch.object(fanout, "send_native_notification", MagicMock()))
         stack.enter_context(patch.object(fanout, "stamp_triage", AsyncMock()))
         stack.enter_context(patch("backend.prefs.get_notif_pref", return_value="all"))

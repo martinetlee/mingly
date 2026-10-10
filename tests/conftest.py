@@ -37,6 +37,12 @@ def _import_all_backend_modules():
 
 _import_all_backend_modules()
 
+# Connect optional features to the core's extension points, as create_app()
+# does, so tests that drive lower layers directly see the production wiring.
+from backend import wiring  # noqa: E402
+
+wiring.wire()
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "shield: run with the Shield (scam detection) switch on")

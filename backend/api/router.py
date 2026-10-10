@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.features import features_payload, require_shield
-from backend import instance
+from backend import instance, wiring
 from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
@@ -111,6 +111,9 @@ def create_app() -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, _http_error_handler)
     app.add_exception_handler(vault.VaultCorruptError, _vault_corrupt_handler)
     app.add_exception_handler(Exception, _unhandled_error_handler)
+
+    # Optional features plug into the core's extension points.
+    wiring.wire()
 
     # Vault-held API keys reach the services configured while it was locked.
     vault.add_unlock_listener(settings.on_vault_unlocked)

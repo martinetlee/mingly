@@ -569,7 +569,7 @@ async def test_live_events_carry_reply_preview_and_channel(db_engine, sent, monk
     async def _no_scan(*a, **k):
         return None
 
-    monkeypatch.setattr(fanout, "enqueue_scam", _no_scan)
+    monkeypatch.setattr(fanout, "inspect_messages", _no_scan)
     account_id = await _signal_account()
     conv = NormalizedConversation("c1", "direct", title="Bob", peer=NormalizedIdentity("aci-b"))
     d = datetime(2026, 1, 1)

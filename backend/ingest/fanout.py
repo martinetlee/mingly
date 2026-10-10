@@ -2,13 +2,17 @@
 
 Connectors save the row, then call into here so every channel gets the same
 follow-up: catch-up reopen, workspace triage, a WebSocket delta for the
-frontend, Shield scanning and native notifications. Nothing here talks to a
-channel's network client; everything is keyed by internal ids.
+frontend, message inspection and native notifications. Nothing here talks to
+a channel's network client; everything is keyed by internal ids.
+
+Inspection is an extension point: features that judge incoming text (Shield)
+register a ``MessageInspector`` (see ``backend/wiring.py``); this module never
+imports them.
 """
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Protocol
 
 from sqlalchemy import select
 
@@ -23,16 +27,55 @@ from backend.ws.manager import ws_manager
 logger = logging.getLogger(__name__)
 
 
-async def enqueue_scam(conversation_id: int, message_ids: list[int], source: str) -> None:
-    try:
-        from backend.scam.queue import enqueue_targets
-    except ImportError:
-        logger.debug("backend.scam.queue not available; skipping scam enqueue")
-        return
-    try:
-        await enqueue_targets(conversation_id, message_ids, source=source)
-    except Exception:
-        logger.exception("Scam enqueue failed for conversation %s msgs %s", conversation_id, message_ids)
+class MessageInspector(Protocol):
+    """A feature that inspects stored incoming messages (e.g. Shield)."""
+
+    async def inspect(self, conversation_id: int, message_ids: list[int], source: str) -> None:
+        """Judge these messages; ``source`` is realtime | edit."""
+
+    def note_sender_profile(self, identity_id: int, *, bio: Optional[str] = None,
+                            is_contact: Optional[bool] = None) -> None:
+        """Channel hints about a sender, for the next inspection of their message."""
+
+    async def inspect_backlog(self) -> None:
+        """A channel caught up: inspect recent messages that were missed."""
+
+
+_inspectors: list[MessageInspector] = []
+
+
+def add_message_inspector(inspector: MessageInspector) -> None:
+    if inspector not in _inspectors:
+        _inspectors.append(inspector)
+
+
+def remove_message_inspector(inspector: MessageInspector) -> None:
+    if inspector in _inspectors:
+        _inspectors.remove(inspector)
+
+
+async def inspect_messages(conversation_id: int, message_ids: list[int], source: str) -> None:
+    for inspector in list(_inspectors):
+        try:
+            await inspector.inspect(conversation_id, message_ids, source)
+        except Exception:
+            logger.exception("Message inspection failed for conversation %s msgs %s", conversation_id, message_ids)
+
+
+def note_sender_profile(identity_id: int, profile: dict) -> None:
+    for inspector in list(_inspectors):
+        try:
+            inspector.note_sender_profile(identity_id, **profile)
+        except Exception:
+            logger.exception("Sender profile hint failed for identity %s", identity_id)
+
+
+async def inspect_backlog() -> None:
+    for inspector in list(_inspectors):
+        try:
+            await inspector.inspect_backlog()
+        except Exception:
+            logger.exception("Backlog inspection failed")
 
 
 async def stamp_triage(conversation_id: int, date: datetime) -> None:
@@ -111,12 +154,8 @@ async def message_received(conv: Conversation, saved: Message, *, sender_profile
 
     if saved.text:
         if sender_profile is not None and saved.sender_identity_id:
-            try:
-                from backend.scam.queue import note_sender_profile
-                note_sender_profile(saved.sender_identity_id, **sender_profile)
-            except ImportError:
-                pass
-        await enqueue_scam(conv.id, [saved.id], "realtime")
+            note_sender_profile(saved.sender_identity_id, sender_profile)
+        await inspect_messages(conv.id, [saved.id], "realtime")
 
     pref = prefs.get_notif_pref(channel)
     if pref == "all" or (pref == "tracked" and conv.is_tracked):
@@ -134,4 +173,4 @@ async def message_edited(conversation_id: int, saved: Message, *, text_changed: 
         "message": await _serialized(saved),
     })
     if text_changed and not saved.is_outgoing and saved.text:
-        await enqueue_scam(conversation_id, [saved.id], "edit")
+        await inspect_messages(conversation_id, [saved.id], "edit")

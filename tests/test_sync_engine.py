@@ -529,7 +529,7 @@ async def test_new_message_for_unknown_chat_is_saved_and_edits_propagate(db_engi
     user = types.User(id=77, first_name="Ann", last_name="Lee")
     msg = tg_msg(1, "meet at 5", sender=user)
     with patch.object(fanout.ws_manager, "broadcast", capture), \
-         patch.object(fanout, "enqueue_scam", AsyncMock()) as scam, \
+         patch.object(fanout, "inspect_messages", AsyncMock()) as scam, \
          patch.object(fanout, "stamp_triage", AsyncMock()), \
          patch("backend.prefs.get_notif_pref", return_value="none"):
         await handlers["on_new_message"](FakeEvent(msg, 77, user))

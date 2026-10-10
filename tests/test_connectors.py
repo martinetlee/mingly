@@ -35,7 +35,7 @@ def _fanout_patches(pref="all"):
     triage = AsyncMock()
     return capture, scam, notify, profile, triage, [
         patch.object(fanout.ws_manager, "broadcast", capture),
-        patch.object(fanout, "enqueue_scam", scam),
+        patch.object(fanout, "inspect_messages", scam),
         patch.object(fanout, "send_native_notification", notify),
         patch.object(fanout, "stamp_triage", triage),
         patch("backend.scam.queue.note_sender_profile", profile),

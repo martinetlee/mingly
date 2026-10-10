@@ -158,7 +158,7 @@ def broadcasts(monkeypatch):
 
     for mod in (fanout, service, conn_mod):
         monkeypatch.setattr(mod.ws_manager, "broadcast", capture)
-    monkeypatch.setattr(fanout, "enqueue_scam", AsyncMock())
+    monkeypatch.setattr(fanout, "inspect_messages", AsyncMock())
     monkeypatch.setattr(fanout, "stamp_triage", AsyncMock())
     monkeypatch.setattr(fanout, "send_native_notification", MagicMock())
     return events

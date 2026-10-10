@@ -16,6 +16,7 @@ import logging
 from typing import Optional
 
 from backend.aio import LoopLock
+from backend.ingest import fanout
 from backend.tasks import spawn
 from backend.telegram import client as tg_client
 from backend.telegram.client import TelegramUnavailable
@@ -233,12 +234,7 @@ class TelegramRuntime:
             )
 
     async def _scan_unscanned(self) -> None:
-        try:
-            from backend.scam.queue import scan_unscanned_messages
-        except ImportError:
-            logger.info("backend.scam.queue not available; skipping startup scan")
-            return
-        await scan_unscanned_messages(max_messages=200, max_age_hours=48)
+        await fanout.inspect_backlog()
 
     async def _periodic_dialog_sync(self) -> None:
         from backend.telegram.sync import sync_dialogs
