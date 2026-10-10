@@ -16,7 +16,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.lookups import person_or_404
@@ -167,9 +166,7 @@ async def calendar_accounts(db: AsyncSession = Depends(get_db)):
     calendar_ids, syncing, last_sync_at, error}]``."""
     from backend.connectors.gmail.calendar_sync import selected_calendars
 
-    accounts = (await db.execute(
-        select(Account).where(Account.channel == "gmail").order_by(Account.id)
-    )).scalars().all()
+    accounts = await crud.get_accounts(db, channel="gmail")
     out = []
     for acc in accounts:
         _, sync = _sync_of(acc.id)

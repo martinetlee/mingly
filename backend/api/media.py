@@ -9,7 +9,6 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from backend.config import DATA_DIR
 from backend.connectors.base import UnsupportedOperation
@@ -49,9 +48,7 @@ class MediaDownloadResponse(BaseModel):
 async def download_media(attachment_id: int) -> MediaDownloadResponse:
     """Download an attachment and return its serving URL."""
     async with AsyncSessionLocal() as db:
-        att = (await db.execute(
-            select(MessageAttachment).where(MessageAttachment.id == attachment_id)
-        )).scalar_one_or_none()
+        att = await crud.get_attachment(db, attachment_id)
     if att is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     if att.kind not in DOWNLOADABLE_TYPES:

@@ -1,13 +1,18 @@
 """Local search across every channel (⌘K and the conversation finder):
 case-insensitive substring matches, newest / most relevant first."""
 
+from typing import Optional
+
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.crud.text import contains_ci
 from backend.db.models import Conversation, Identity, Message, Organization, Person
 
-__all__ = ["search_message_text", "search_conversations", "search_people", "search_organizations"]
+__all__ = [
+    "search_message_text", "search_conversations", "search_account_conversations", "search_people",
+    "search_organizations",
+]
 
 
 async def search_message_text(db: AsyncSession, q: str, limit: int) -> list:
@@ -41,6 +46,22 @@ async def search_conversations(db: AsyncSession, q: str, limit: int) -> list[Con
             or_(contains_ci(Conversation.title, q), contains_ci(Conversation.username, q)),
         )
         .order_by(desc(Conversation.last_activity_at), Conversation.title)
+        .limit(limit)
+    )).scalars().all())
+
+
+async def search_account_conversations(db: AsyncSession, account_id: Optional[int], q: str, limit: int) -> list[Conversation]:
+    """One account's conversations by title or handle (hidden ones included —
+    it's the account's dialog list), most recently active first."""
+    pattern = f"%{q}%"
+    return list((await db.execute(
+        select(Conversation)
+        .where(
+            Conversation.account_id == account_id,
+            or_(Conversation.title.ilike(pattern), Conversation.username.ilike(pattern)),
+            Conversation.is_deactivated == False,  # noqa: E712
+        )
+        .order_by(Conversation.last_activity_at.desc().nullslast())
         .limit(limit)
     )).scalars().all())
 

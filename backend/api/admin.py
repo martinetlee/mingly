@@ -11,13 +11,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.lookups import channel_call, connector_with, conversation_or_404
 from backend.connectors.roles import GroupAdmin
+from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import AdminActionLog, Conversation, Identity
+from backend.db.models import Conversation
 from backend.serialization import iso_utc
 
 router = APIRouter()
@@ -98,20 +98,6 @@ async def _require_group(conversation_id: int, db: AsyncSession) -> tuple[Conver
     return conv, connector
 
 
-async def _log_admin_action(
-    db: AsyncSession,
-    conversation_id: int,
-    action: str,
-    target_identity_id: Optional[int] = None,
-    details: Optional[str] = None,
-):
-    db.add(AdminActionLog(
-        conversation_id=conversation_id, action=action, target_identity_id=target_identity_id,
-        details=details, created_at=datetime.utcnow(),
-    ))
-    await db.commit()
-
-
 # ── Promote / Demote ─────────────────────────────────────────────────────
 
 @router.post("/{conversation_id}/promote")
@@ -124,7 +110,7 @@ async def promote_admin(
     conv, connector = await _require_group(conversation_id, db)
     await channel_call(conv, connector.promote(conv, req.identity_id, req.permissions.model_dump()),
                        "Failed to promote user", status=500)
-    await _log_admin_action(db, conversation_id, "promote", req.identity_id)
+    await crud.log_admin_action(db, conversation_id, "promote", req.identity_id)
     return {"success": True}
 
 
@@ -137,7 +123,7 @@ async def demote_admin(
     """Demote an admin back to regular member."""
     conv, connector = await _require_group(conversation_id, db)
     await channel_call(conv, connector.demote(conv, req.identity_id), "Failed to demote user", status=500)
-    await _log_admin_action(db, conversation_id, "demote", req.identity_id)
+    await crud.log_admin_action(db, conversation_id, "demote", req.identity_id)
     return {"success": True}
 
 
@@ -152,7 +138,7 @@ async def ban_member(
     """Ban a user from the group/channel."""
     conv, connector = await _require_group(conversation_id, db)
     await channel_call(conv, connector.ban(conv, req.identity_id), "Failed to ban user", status=500)
-    await _log_admin_action(db, conversation_id, "ban", req.identity_id)
+    await crud.log_admin_action(db, conversation_id, "ban", req.identity_id)
     return {"success": True}
 
 
@@ -168,7 +154,7 @@ async def restrict_member(
     until = datetime.fromtimestamp(req.until_date) if req.until_date else None
     await channel_call(conv, connector.restrict(conv, req.identity_id, allowed, until),
                        "Failed to restrict user", status=500)
-    await _log_admin_action(db, conversation_id, "restrict", req.identity_id)
+    await crud.log_admin_action(db, conversation_id, "restrict", req.identity_id)
     return {"success": True}
 
 
@@ -181,7 +167,7 @@ async def approve_member(
     """Remove all restrictions from a user (unban/unrestrict)."""
     conv, connector = await _require_group(conversation_id, db)
     await channel_call(conv, connector.approve(conv, req.identity_id), "Failed to approve user", status=500)
-    await _log_admin_action(db, conversation_id, "approve", req.identity_id)
+    await crud.log_admin_action(db, conversation_id, "approve", req.identity_id)
     return {"success": True}
 
 
@@ -210,7 +196,7 @@ async def create_invite_link(
         expire=datetime.fromtimestamp(req.expire_date) if req.expire_date else None,
         usage_limit=req.usage_limit, title=req.title, request_needed=req.request_needed,
     ), "Failed to create invite link", status=500)
-    await _log_admin_action(db, conversation_id, "create_invite_link", details=link_data["link"])
+    await crud.log_admin_action(db, conversation_id, "create_invite_link", details=link_data["link"])
     return link_data
 
 
@@ -223,7 +209,7 @@ async def revoke_invite_link(
     """Revoke an existing invite link."""
     conv, connector = await _require_group(conversation_id, db)
     await channel_call(conv, connector.revoke_invite_link(conv, req.link), "Failed to revoke invite link", status=500)
-    await _log_admin_action(db, conversation_id, "revoke_invite_link", details=req.link)
+    await crud.log_admin_action(db, conversation_id, "revoke_invite_link", details=req.link)
     return {"success": True}
 
 
@@ -249,7 +235,7 @@ async def update_group_settings(
     conv, connector = await _require_group(conversation_id, db)
     changes = await channel_call(conv, connector.update_group_settings(conv, title=req.title, about=req.about),
                                  "Failed to update settings", status=500)
-    await _log_admin_action(db, conversation_id, "update_settings", details=", ".join(changes))
+    await crud.log_admin_action(db, conversation_id, "update_settings", details=", ".join(changes))
     return {"success": True, "updated": changes}
 
 
@@ -263,13 +249,6 @@ async def get_admin_action_log(
 ):
     """Recent admin actions taken from the app in a group/channel."""
     await _require_group(conversation_id, db)
-    rows = (await db.execute(
-        select(AdminActionLog, Identity.person_id)
-        .outerjoin(Identity, Identity.id == AdminActionLog.target_identity_id)
-        .where(AdminActionLog.conversation_id == conversation_id)
-        .order_by(AdminActionLog.created_at.desc())
-        .limit(limit)
-    )).all()
     return [
         {
             "id": log.id,
@@ -280,5 +259,5 @@ async def get_admin_action_log(
             "details": log.details,
             "created_at": iso_utc(log.created_at),
         }
-        for log, person_id in rows
+        for log, person_id in await crud.admin_action_log(db, conversation_id, limit)
     ]

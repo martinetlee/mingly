@@ -14,7 +14,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from backend.errors import DomainError
 from backend.api.dependencies import require_session_token
@@ -25,7 +24,6 @@ from backend.connectors.gmail import oauth
 from backend.connectors.manager import manager
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import Identity, Message, MessageAttachment
 from backend.serializers import channel_of, messages_out
 from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
@@ -88,24 +86,14 @@ async def _thread_summaries(db, conversation_ids: list) -> dict:
     out: dict = {cid: {"senders": [], "message_count": 0, "has_attachments": False} for cid in conversation_ids}
     if not conversation_ids:
         return out
-    rows = (await db.execute(
-        select(Message.conversation_id, Message.sender_name, Message.is_outgoing, Identity.person_id, Identity.external_id)
-        .outerjoin(Identity, Identity.id == Message.sender_identity_id)
-        .where(Message.conversation_id.in_(conversation_ids))
-        .order_by(Message.conversation_id, Message.seq)
-    )).all()
-    for cid, name, outgoing, person_id, email in rows:
+    for cid, name, outgoing, person_id, email in await crud.message_senders(db, conversation_ids):
         entry = out[cid]
         entry["message_count"] += 1
         key = "me" if outgoing else (email or name)
         if all(s["key"] != key for s in entry["senders"]):
             entry["senders"].append({"key": key, "name": "me" if outgoing else (name or email), "person_id": person_id,
                                      "is_me": bool(outgoing)})
-    with_files = (await db.execute(
-        select(Message.conversation_id).join(MessageAttachment, MessageAttachment.message_id == Message.id)
-        .where(Message.conversation_id.in_(conversation_ids)).distinct()
-    )).scalars().all()
-    for cid in with_files:
+    for cid in await crud.conversations_with_attachments(db, conversation_ids):
         out[cid]["has_attachments"] = True
     for entry in out.values():
         for s in entry["senders"]:

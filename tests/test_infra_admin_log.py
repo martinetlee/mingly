@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.api.admin import _log_admin_action
+from backend.db.crud import log_admin_action
 from tests import factories as f
 
 
@@ -12,7 +12,7 @@ from tests import factories as f
 async def test_action_log_returns_utc_iso_and_target_person(api, db):
     group = await f.conversation(db, "-100777", title="Admins", kind="group")
     spammer = await f.identity(db, "42", display_name="Spammer")
-    await _log_admin_action(db, group.id, "ban", target_identity_id=spammer.id, details="spam")
+    await log_admin_action(db, group.id, "ban", target_identity_id=spammer.id, details="spam")
 
     r = await api.get(f"/api/admin/{group.id}/action-log")
     assert r.status_code == 200

@@ -11,7 +11,6 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.views import conversation_json
@@ -65,18 +64,7 @@ async def search_directory(q: str, db: AsyncSession = Depends(get_db)):
     q = q.strip()
     if not q:
         return []
-    acc = await ids.account_id(db)
-    pattern = f"%{q}%"
-    local = (await db.execute(
-        select(Conversation)
-        .where(
-            Conversation.account_id == acc,
-            or_(Conversation.title.ilike(pattern), Conversation.username.ilike(pattern)),
-            Conversation.is_deactivated == False,  # noqa: E712
-        )
-        .order_by(Conversation.last_activity_at.desc().nullslast())
-        .limit(20)
-    )).scalars().all()
+    local = await crud.search_account_conversations(db, await ids.account_id(db), q, 20)
     found = [conversation_json(c) for c in local]
     if len(q) < 2:
         return found

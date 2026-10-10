@@ -9,7 +9,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.lookups import (
@@ -24,7 +23,7 @@ from backend.connectors.roles import (
 )
 from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Conversation, Message, MessageAttachment
+from backend.db.models import Conversation, Message
 from backend.errors import DomainError
 from backend.serialization import iso_utc
 from backend.serializers import attachment_out, messages_out
@@ -447,22 +446,13 @@ async def get_shared_media(
     """Shared items of a conversation: 'media' (photos, videos, GIFs),
     'files' (documents) or 'links' (messages containing URLs)."""
     await conversation_or_404(db, conversation_id)
-    query = select(Message).where(Message.conversation_id == conversation_id)
-    if media_filter in _SHARED_MEDIA_KINDS:
-        query = query.where(Message.id.in_(
-            select(MessageAttachment.message_id).where(MessageAttachment.kind.in_(_SHARED_MEDIA_KINDS[media_filter]))
-        ))
-    elif media_filter == "links":
-        query = query.where(
-            Message.text.isnot(None),
-            or_(Message.text.contains("http://"), Message.text.contains("https://")),
-        )
-    else:
+    if media_filter not in _SHARED_MEDIA_KINDS and media_filter != "links":
         return []
-    rows = (await db.execute(
-        query.order_by(desc(Message.date)).limit(max(1, min(limit, 200))).offset(max(0, offset))
-    )).scalars().all()
     kinds = _SHARED_MEDIA_KINDS.get(media_filter)
+    rows = await crud.shared_messages(
+        db, conversation_id, kinds=kinds, links=media_filter == "links",
+        limit=max(1, min(limit, 200)), offset=max(0, offset),
+    )
     return [
         {
             "id": m.id,

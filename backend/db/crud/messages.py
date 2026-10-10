@@ -45,6 +45,10 @@ __all__ = [
     "stored_topics",
     "count_relevant_incoming_since",
     "latest_messages",
+    "shared_messages",
+    "get_attachment",
+    "message_senders",
+    "conversations_with_attachments",
 ]
 
 
@@ -678,3 +682,50 @@ async def latest_messages(db: AsyncSession, conversation_ids: Iterable[int]) -> 
     )
     rows = (await db.execute(select(Message).join(ranked, ranked.c.id == Message.id).where(ranked.c.rn == 1))).scalars()
     return {m.conversation_id: m for m in rows.all()}
+
+
+async def shared_messages(db: AsyncSession, conversation_id: int, *, kinds: Optional[Iterable[str]] = None,
+                          links: bool = False, limit: int, offset: int) -> list[Message]:
+    """Messages of a conversation carrying attachments of ``kinds``, or (with
+    ``links``) whose text contains a URL; newest first."""
+    query = select(Message).where(Message.conversation_id == conversation_id)
+    if links:
+        query = query.where(
+            Message.text.isnot(None),
+            or_(Message.text.contains("http://"), Message.text.contains("https://")),
+        )
+    else:
+        query = query.where(Message.id.in_(
+            select(MessageAttachment.message_id).where(MessageAttachment.kind.in_(list(kinds or ())))
+        ))
+    return list((await db.execute(query.order_by(desc(Message.date)).limit(limit).offset(offset))).scalars().all())
+
+
+async def get_attachment(db: AsyncSession, attachment_id: int) -> Optional[MessageAttachment]:
+    return (await db.execute(
+        select(MessageAttachment).where(MessageAttachment.id == attachment_id)
+    )).scalar_one_or_none()
+
+
+async def message_senders(db: AsyncSession, conversation_ids: Iterable[int]) -> list:
+    """Every message's sender of these conversations, in channel order:
+    rows of ``(conversation_id, sender_name, is_outgoing, person_id, external_id)``."""
+    ids = list(conversation_ids)
+    if not ids:
+        return []
+    return list((await db.execute(
+        select(Message.conversation_id, Message.sender_name, Message.is_outgoing, Identity.person_id, Identity.external_id)
+        .outerjoin(Identity, Identity.id == Message.sender_identity_id)
+        .where(Message.conversation_id.in_(ids))
+        .order_by(Message.conversation_id, Message.seq)
+    )).all())
+
+
+async def conversations_with_attachments(db: AsyncSession, conversation_ids: Iterable[int]) -> set[int]:
+    ids = list(conversation_ids)
+    if not ids:
+        return set()
+    return set((await db.execute(
+        select(Message.conversation_id).join(MessageAttachment, MessageAttachment.message_id == Message.id)
+        .where(Message.conversation_id.in_(ids)).distinct()
+    )).scalars().all())
