@@ -27,7 +27,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import SCAM_SUCCESS_STATUSES, Conversation, Message, ScamCheckRequest, ScamFlag
 from backend.scam.channel_ids import telegram_scan_ids, telegram_user_ids
-from backend.scam.client import FollowUpRequest, ScamAPIClient, ScamCheckResult, ScanRequest
+from backend.scam.requests import build_scan_request
+from backend.scam.scan import (
+    MAX_AUTO_ATTEMPTS, RETRY_BACKOFF, FollowUpRequest, ScamAPIClient, ScamCheckResult, ScanRequest,
+)
 from backend.scam.verdict import FLAG_ACTIVE, ws_message_entry
 from backend.ws.manager import ws_manager
 from backend.db.results import affected_rows
@@ -39,10 +42,6 @@ _EXPIRY_HOURS = 24
 # Finished requests are pruned after this many days (payloads are compact, but
 # the table would still grow by one row per scanned message forever)
 _PRUNE_DAYS = 7
-# Backoff before a failed scan is retried automatically; after the last step
-# the message is left 'failed' until the user rescans it.
-RETRY_BACKOFF = [timedelta(minutes=5), timedelta(minutes=30), timedelta(hours=2), timedelta(hours=12)]
-MAX_AUTO_ATTEMPTS = len(RETRY_BACKOFF) + 1
 
 _service: Optional["ScamDetectionService"] = None
 
@@ -341,8 +340,6 @@ class ScamDetectionService:
     # ------------------------------------------------------------------
 
     async def _request_from_row(self, req: ScamCheckRequest) -> Optional[ScanRequest]:
-        from backend.scam.queue import build_scan_request
-
         target_ids = json.loads(req.related_message_ids_json or "[]")
         if req.related_conversation_id is None or not target_ids:
             return None
@@ -389,9 +386,12 @@ class ScamDetectionService:
             return
         await self._apply_result(request_id, scan_req, check_result, source=self._source_of(req))
 
-    async def resume_pending_requests(self) -> None:
-        """On startup: prune old finished requests, expire stale ones, and
-        resume recent unfinished checks (through the scan queue)."""
+    async def resume_pending_requests(self) -> list[tuple[int, list[int]]]:
+        """On startup: prune old finished requests, expire stale ones and
+        settle what can be settled here (external results that arrived,
+        flagged-user lookups). Returns the message checks to run again as
+        ``(conversation_id, message_ids)``; the scan queue re-enqueues them
+        (``queue.resume_pending_checks``)."""
         now = datetime.utcnow()
         cutoff = now - timedelta(hours=_EXPIRY_HOURS)
 
@@ -419,8 +419,7 @@ class ScamDetectionService:
                 )
             )).scalars().all()
 
-        from backend.scam.queue import enqueue_targets
-
+        requeue: list[tuple[int, list[int]]] = []
         for req in pending:
             try:
                 # Fallback if an external callback was missed
@@ -437,13 +436,11 @@ class ScamDetectionService:
                     await self.check_flagged_users(payload.get("identity_ids") or [])
                 elif req.related_conversation_id is not None:
                     await self._mark_request(req.request_id, "superseded")
-                    await enqueue_targets(
-                        req.related_conversation_id, json.loads(req.related_message_ids_json or "[]"),
-                        source="resume",
-                    )
+                    requeue.append((req.related_conversation_id, json.loads(req.related_message_ids_json or "[]")))
             except Exception as e:
                 logger.error("Failed to resume scam check %s: %s", req.request_id, e)
                 await self._mark_request(req.request_id, "failed")
+        return requeue
 
     async def _handle_followup(self, req: ScamCheckRequest, followup: dict) -> None:
         """Gather data requested by external API and respond."""

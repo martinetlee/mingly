@@ -29,8 +29,9 @@ def _start_shield() -> None:
     init_cloud_sync_manager()
 
     from backend.scam.settings import build_scam_client
-    scam_svc = init_scam_service(build_scam_client())
-    spawn(scam_svc.resume_pending_requests(), name="resume_pending_scam_requests")
+    init_scam_service(build_scam_client())
+    from backend.scam.queue import resume_pending_checks
+    spawn(resume_pending_checks(), name="resume_pending_scam_requests")
 
 
 @app.on_event("startup")

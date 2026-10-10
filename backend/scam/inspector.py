@@ -3,7 +3,7 @@ queued for scam checks (the queue itself is a no-op while Shield is off)."""
 
 from typing import Optional
 
-from backend.scam import queue
+from backend.scam import queue, requests
 
 
 class ShieldInspector:
@@ -12,7 +12,7 @@ class ShieldInspector:
 
     def note_sender_profile(self, identity_id: int, *, bio: Optional[str] = None,
                             is_contact: Optional[bool] = None) -> None:
-        queue.note_sender_profile(identity_id, bio=bio, is_contact=is_contact)
+        requests.note_sender_profile(identity_id, bio=bio, is_contact=is_contact)
 
     async def inspect_backlog(self) -> None:
         await queue.scan_unscanned_messages(max_messages=200, max_age_hours=48)

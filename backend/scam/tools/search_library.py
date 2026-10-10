@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from backend.config import DATA_DIR
-from backend.scam.tools import register_script
+from backend.scam.tools.registry import register_script
 
 logger = logging.getLogger(__name__)
 

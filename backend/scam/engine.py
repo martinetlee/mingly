@@ -17,7 +17,7 @@ from typing import Any, Optional
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMUnavailable, get_provider_for_model
 from backend.scam.channel_ids import TELEGRAM
-from backend.scam.client import ScamCheckResult
+from backend.scam.scan import ScamCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -683,7 +683,7 @@ def _signature_match(sigs, targets: list[dict], channel: Optional[str] = None) -
     Known-scammer ids are Telegram sender ids (as before the multi-channel
     refactor: the user, or a chat posting as itself), so they only match
     Telegram senders."""
-    from backend.scam.client import _extract_domains
+    from backend.scam.scan import extract_domains
 
     known_ids = set(sigs.telegram_ids) if channel == TELEGRAM else set()
     for msg in targets:
@@ -695,7 +695,7 @@ def _signature_match(sigs, targets: list[dict], channel: Optional[str] = None) -
         if not text:
             continue
         if sigs.domains:
-            for domain in _extract_domains(text):
+            for domain in extract_domains(text):
                 if domain in sigs.domains:
                     return {"match_type": "domain", "matched_value": domain, "confidence": 0.95,
                             "category": "malware_link", "reason": f"Known malicious domain: {domain}"}

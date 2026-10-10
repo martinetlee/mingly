@@ -9,7 +9,7 @@ import pytest
 from backend.llm.base import CompletionResponse, LLMError, LLMUnavailable, ToolCall
 from backend.llm.ollama import OllamaProvider
 from backend.scam import engine
-from backend.scam.client import ScanRequest, build_message_context
+from backend.scam.scan import ScanRequest, build_message_context
 from backend.scam.engine import _evaluate_short_circuit, parse_llm_response
 from backend.scam.pipeline import _parse_pipeline
 

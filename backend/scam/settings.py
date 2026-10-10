@@ -3,7 +3,8 @@
 from typing import Optional
 
 from backend import prefs
-from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient, ScamAPIClient
+from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
+from backend.scam.scan import ScamAPIClient
 from backend.secret_prefs import get_secret_pref
 
 SCAM_API_KEY = "scam_detection_api_key"

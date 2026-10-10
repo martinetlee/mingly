@@ -14,7 +14,7 @@ from typing import Optional
 
 import numpy as np
 
-from backend.scam.tools import register_script
+from backend.scam.tools.registry import register_script
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ def _extract_text(args: dict) -> str:
     if text or "$message" not in args:
         return text
     # Legacy fallback: parse the rendered prompt (targets are the last section)
-    from backend.scam.client import TARGETS_HEADER
+    from backend.scam.scan import TARGETS_HEADER
 
     msg = args["$message"]
     if TARGETS_HEADER not in msg:

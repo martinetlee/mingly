@@ -26,7 +26,7 @@ async def test_new_message_reaches_the_scan_queue():
 @pytest.mark.asyncio
 async def test_backlog_and_sender_hints_reach_the_scan_queue():
     with patch("backend.scam.queue.scan_unscanned_messages", AsyncMock(return_value=0)) as scan, \
-         patch("backend.scam.queue.note_sender_profile") as note:
+         patch("backend.scam.requests.note_sender_profile") as note:
         await fanout.inspect_backlog()
         fanout.note_sender_profile(5, {"bio": "hi", "is_contact": False})
     scan.assert_awaited_once_with(max_messages=200, max_age_hours=48)

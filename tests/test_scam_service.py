@@ -10,8 +10,9 @@ from sqlalchemy import select
 from backend.db import crud, database
 from backend.db.models import Conversation, Message, ScamCheckRequest, ScamFlag
 from backend.scam import queue as scan_queue
+from backend.scam import requests as scan_requests
 from backend.scam import service as service_mod
-from backend.scam.client import ScamAPIClient, ScamCheckResult
+from backend.scam.scan import ScamAPIClient, ScamCheckResult
 from backend.ws.manager import ws_manager
 from tests import factories as f
 
@@ -292,7 +293,7 @@ async def test_resume_requeues_pending_requests(db, client, events):
                             related_message_ids_json=json.dumps([await _mid(1)]),
                             created_at=datetime.utcnow(), updated_at=datetime.utcnow()))
     await db.commit()
-    await service_mod.get_scam_service().resume_pending_requests()
+    await scan_queue.resume_pending_checks()
     await scan_queue.get_scan_queue().join()
     assert await _seqs(client.requests) == [[1]]
     async with database.AsyncSessionLocal() as s:
@@ -427,11 +428,11 @@ async def test_non_telegram_request_has_no_telegram_ids(db, client, events):
 async def test_sender_profile_hints_override_the_stored_identity(db, client, events):
     await _seed(db, (1, 10, "hi"))
     sender = await _identity_id(10)
-    scan_queue.note_sender_profile(sender, bio="crypto coach", is_contact=True)
+    scan_requests.note_sender_profile(sender, bio="crypto coach", is_contact=True)
     try:
         await _check(1)
     finally:
-        scan_queue._profile_hints.clear()
+        scan_requests._profile_hints.clear()
     assert client.requests[0].profiles[0]["bio"] == "crypto coach"
     assert client.requests[0].profiles[0]["is_contact"] is True
 

@@ -16,7 +16,8 @@ from backend.db import database
 from backend.db.models import Message, ScamAnalytics, ScamDismissal, ScamFeedback, ScamFlag, ScamReport
 from backend.prefs import update_prefs
 from backend.scam import channel_ids, cloud_sync
-from backend.scam.client import ExternalScamAPIClient, ScanRequest
+from backend.scam.client import ExternalScamAPIClient
+from backend.scam.scan import ScanRequest
 from tests import factories as f
 
 T = datetime(2026, 3, 1, 10, 0)
@@ -508,7 +509,7 @@ async def _seed_telegram_scans(db) -> list:
 async def test_external_v1_server_requests_unchanged(db):
     """Telegram scans reach a v1 detection server exactly as before the
     multi-channel refactor (Telegram message / sender / chat ids)."""
-    from backend.scam.queue import build_scan_request
+    from backend.scam.requests import build_scan_request
 
     scans = await _seed_telegram_scans(db)
     cloud = FakeCloud(versions=None)
@@ -522,8 +523,8 @@ async def test_external_v1_server_requests_unchanged(db):
 
 @pytest.mark.asyncio
 async def test_telegram_prompt_keeps_the_pre_multichannel_header(db):
-    from backend.scam.client import build_message_context
-    from backend.scam.queue import build_scan_request
+    from backend.scam.scan import build_message_context
+    from backend.scam.requests import build_scan_request
 
     (group, msg), _, _ = await _seed_telegram_scans(db)
     assert build_message_context(await build_scan_request(group.id, [msg.id])) == TELEGRAM_PROMPT_GOLDEN
@@ -533,7 +534,7 @@ async def test_telegram_prompt_keeps_the_pre_multichannel_header(db):
 async def test_known_scammer_signature_matches_a_channel_posting_as_itself(db):
     from backend.scam.engine import _signature_match
     from backend.scam.pipeline import Signatures
-    from backend.scam.queue import build_scan_request
+    from backend.scam.requests import build_scan_request
 
     _, (news, post), _ = await _seed_telegram_scans(db)
     req = await build_scan_request(news.id, [post.id])
@@ -694,8 +695,8 @@ async def _posted_as_channel(db):
 
 @pytest.mark.asyncio
 async def test_v1_requests_send_the_channel_a_message_was_posted_as(db):
-    from backend.scam.client import build_message_context
-    from backend.scam.queue import build_scan_request
+    from backend.scam.scan import build_message_context
+    from backend.scam.requests import build_scan_request
 
     group, (first, _, target) = await _posted_as_channel(db)
     req = await build_scan_request(group.id, [target.id])
@@ -724,7 +725,7 @@ async def test_identity_less_context_is_exact_among_many_other_channel_posts(db,
     """Context for a sender without an identity is matched exactly in SQL:
     over 10x as many unrelated identity-less posts in between can't crowd
     out the sender's own earlier messages."""
-    from backend.scam.queue import _DEFAULT_CONTEXT, build_scan_request
+    from backend.scam.requests import _DEFAULT_CONTEXT, build_scan_request
 
     group = await f.conversation(db, "-1001234567890", title="G", kind="group")
     name = "Promo" if posted_as else "G"
