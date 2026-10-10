@@ -10,11 +10,11 @@ import { useFeatures } from '../../context/FeaturesContext'
 import ReportScamDialog from '../../components/ReportScamDialog'
 import EmailMessageView from '../../components/EmailMessageView'
 import { LoadError } from '../../components/ui'
-import { applyScamStatesTo, submitNotScamVerdict, useScamStateEvents } from '../chats/scamChecks'
-import type { ScamVerdictScope } from '../chats/scamChecks'
+import { applyScamStatesTo, submitNotScamVerdict, useScamStateEvents } from '../../features/chat/scamChecks'
+import type { ScamVerdictScope } from '../../features/chat/scamChecks'
 import MailComposer from './MailComposer'
 import type { ComposerInitial } from './MailComposer'
-import { replyAllRecipients, replyRecipients, replySubject } from './recipients'
+import { replyAllRecipients, replyRecipients, replySubject } from '../../features/mail/recipients'
 
 const THREAD_LIMIT = 200
 

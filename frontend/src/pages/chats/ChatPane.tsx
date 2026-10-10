@@ -45,9 +45,9 @@ import ForumTopicsPanel from '../../components/ForumTopicsPanel'
 import ChatPickerDialog from '../../components/ChatPickerDialog'
 import ReportScamDialog from '../../components/ReportScamDialog'
 import { ChatStatusLine, TypingBar } from './PresenceTyping'
-import { getChatUi, newNonce, sendKey, updateChatUi, useChatUi, useChatUiSelect } from './chatUiStore'
-import type { ComposeDraft } from './chatUiStore'
-import { submitNotScamVerdict } from './scamChecks'
+import { getChatUi, newNonce, sendKey, updateChatUi, useChatUi, useChatUiSelect } from '../../features/chat/chatUiStore'
+import type { ComposeDraft } from '../../features/chat/chatUiStore'
+import { submitNotScamVerdict } from '../../features/chat/scamChecks'
 
 export interface ChatPaneProps {
   chat: Conversation

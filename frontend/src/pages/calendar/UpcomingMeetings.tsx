@@ -10,7 +10,7 @@ import { getUpcomingMeetings } from '../../api/calendar'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { useWsEvent } from '../../hooks/useWebSocket'
 import { errorMessage } from '../../lib/toast'
-import { calendarEventUrl, dayLabel, eventTimeLabel, parseDateKey, startOfLocalDay } from './agenda'
+import { calendarEventUrl, dayLabel, eventTimeLabel, parseDateKey, startOfLocalDay } from '../../features/calendar/agenda'
 import { parseServerDate } from '../../utils/time'
 
 export default function UpcomingMeetings({ personId, identityKey }: {

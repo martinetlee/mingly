@@ -22,7 +22,7 @@ vi.mock('../../api/client', async (orig) => ({
 }))
 
 import Layout from '../Layout'
-import { __resetScamChecks, getScamCheck, startScamCheck } from '../../pages/chats/scamChecks'
+import { __resetScamChecks, getScamCheck, startScamCheck } from '../../features/chat/scamChecks'
 
 afterEach(() => { cleanup(); __resetScamChecks() })
 

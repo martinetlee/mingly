@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
-import { msg } from '../chats/__tests__/fixtures'
+import { msg } from '../../test/fixtures'
 import type { Conversation } from '../../api/types'
 import type { MailThread } from '../../api/email'
 

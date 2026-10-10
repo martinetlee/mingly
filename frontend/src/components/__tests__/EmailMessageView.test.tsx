@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { msg } from '../../pages/chats/__tests__/fixtures'
+import { msg } from '../../test/fixtures'
 import type { Message } from '../../api/types'
 
 vi.mock('../../api/email', async (importOriginal) => ({
@@ -14,7 +14,7 @@ import { setRemoteImagesAllowed, useRemoteImageSenders, parseAddressList } from 
 import MessageBubble from '../MessageBubble'
 import { FeaturesProvider } from '../../context/FeaturesContext'
 import { emailSrcDoc, hasBlockedImages } from '../EmailMessageView'
-import { replyAllRecipients, replyRecipients, replySubject } from '../../pages/mail/recipients'
+import { replyAllRecipients, replyRecipients, replySubject } from '../../features/mail/recipients'
 
 afterEach(() => {
   cleanup()

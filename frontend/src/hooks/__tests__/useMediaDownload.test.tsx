@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { ApiError } from '../../lib/http'
-import { deferred } from '../../pages/chats/__tests__/fixtures'
+import { deferred } from '../../test/fixtures'
 
 const downloadAttachment = vi.fn()
 vi.mock('../../api/client', async (orig) => ({

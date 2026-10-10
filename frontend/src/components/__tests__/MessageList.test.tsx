@@ -2,9 +2,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { VirtuosoMockContext } from 'react-virtuoso'
-import { msg } from '../../pages/chats/__tests__/fixtures'
+import { msg } from '../../test/fixtures'
 
-vi.mock('react-virtuoso', () => import('../../pages/chats/__tests__/virtuosoTestShim'))
+vi.mock('react-virtuoso', () => import('../../test/virtuosoTestShim'))
 
 import MessageList, { BASE_INDEX, buildItems, rebaseFirstIndex } from '../MessageList'
 

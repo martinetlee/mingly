@@ -12,16 +12,13 @@ import {
 import { setChannelNotifPref } from '../../api/email'
 import type { Prefs } from '../../api/types'
 import { channelLabel } from '../../components/ChannelIcon'
+import { WEEKDAYS, dayLabel } from '../../features/briefing/schedule'
 import { useAccounts } from '../../hooks/useAccounts'
 import { useSettingField } from '../../hooks/useSettingField'
 import { Card, FieldStatus, Section, inputClass, labelClass, selectClass } from './shared'
 
 type NotifPref = 'all' | 'tracked' | 'off'
 type BriefingSchedule = 'daily' | 'weekly'
-
-export const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
-
-export const dayLabel = (day: string) => day.charAt(0).toUpperCase() + day.slice(1)
 
 /** Strict 24-hour HH:MM (00:00–23:59), as the backend requires. */
 export const BRIEFING_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/

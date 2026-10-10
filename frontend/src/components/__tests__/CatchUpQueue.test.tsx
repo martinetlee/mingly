@@ -5,7 +5,7 @@ import type { CatchUpItem, DashboardData, DashboardNeedsReply } from '../../api/
 vi.mock('../../api/client', () => ({}))
 
 import { applyTriageUpdate, NoteEditor, TriageCard } from '../CatchUpQueue'
-import { makeConversation } from '../../pages/chats/__tests__/fixtures'
+import { makeConversation } from '../../test/fixtures'
 
 const item = (id: number, date: string, triage: CatchUpItem | null = null): DashboardNeedsReply => ({
   conversation: makeConversation(id, `Chat ${id}`, { kind: 'direct' }),

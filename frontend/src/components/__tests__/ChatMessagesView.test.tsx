@@ -5,7 +5,7 @@ import type { ChatMessages } from '../../hooks/useChatMessages'
 vi.mock('../MessageList', () => ({ default: () => <div data-testid="message-list" /> }))
 
 import ChatMessagesView from '../ChatMessagesView'
-import { makeConversation } from '../../pages/chats/__tests__/fixtures'
+import { makeConversation } from '../../test/fixtures'
 
 const base = {
   messages: [{ id: 1, conversation_id: 1 }], loading: false, error: null, hasOlder: true, hasNewer: false,

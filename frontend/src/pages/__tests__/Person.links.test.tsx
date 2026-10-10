@@ -3,7 +3,7 @@ import { render, screen, cleanup, act, waitFor, fireEvent, within } from '@testi
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { Person as PersonT } from '../../api/types'
 import type { MergeSuggestion, PersonMergeRecord } from '../../api/peopleLinks'
-import { makePerson } from '../chats/__tests__/fixtures'
+import { makePerson } from '../../test/fixtures'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import { ConfirmProvider } from '../../components/ui'

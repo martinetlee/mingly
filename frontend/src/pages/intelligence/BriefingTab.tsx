@@ -17,7 +17,7 @@ import { BriefingEntryList, type RegenerateControls } from '../../components/Bri
 import { useConfirm } from '../../components/ui'
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { useSettingField } from '../../hooks/useSettingField'
-import { WEEKDAYS, dayLabel } from '../settings/PreferenceSections'
+import { WEEKDAYS, dayLabel } from '../../features/briefing/schedule'
 import { useWsEvent } from '../../hooks/useWebSocket'
 import { reportError, toast } from '../../lib/toast'
 import { fmtDateTime } from '../../utils/time'

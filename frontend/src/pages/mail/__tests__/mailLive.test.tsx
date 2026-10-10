@@ -9,7 +9,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { WebSocketClient } from '../../../lib/ws'
 import { WebSocketProvider } from '../../../context/WebSocketContext'
 import { FeaturesProvider } from '../../../context/FeaturesContext'
-import { deferred, msg } from '../../chats/__tests__/fixtures'
+import { deferred, msg } from '../../../test/fixtures'
 import type { Conversation, MessageWindow } from '../../../api/types'
 import type { MailThread } from '../../../api/email'
 

@@ -5,7 +5,7 @@ import type { TimelineMeetingItem, TimelineMessageItem, TimelinePage } from '../
 import type { CalendarEvent } from '../../api/calendar'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
-import { msg } from '../../pages/chats/__tests__/fixtures'
+import { msg } from '../../test/fixtures'
 
 vi.mock('../../api/timeline', async (orig) => ({
   ...(await orig<typeof import('../../api/timeline')>()),

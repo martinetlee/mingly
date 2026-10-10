@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { deferred } from '../../pages/chats/__tests__/fixtures'
+import { deferred } from '../../test/fixtures'
 import { FOLLOW_UP_MS, usePagedList } from '../usePagedList'
 
 type Row = { id: number }

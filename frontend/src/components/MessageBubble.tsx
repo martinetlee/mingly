@@ -6,7 +6,7 @@ import type { Attachment, ChannelName, ConversationKind, Message, MessageSender 
 import { translateMessage, getPrefs, openExternalUrl } from '../api/client'
 import { reportError, toast } from '../lib/toast'
 import { fmtTime } from '../utils/time'
-import { dismissScamCheck, startScamCheck, useScamCheck } from '../pages/chats/scamChecks'
+import { dismissScamCheck, startScamCheck, useScamCheck } from '../features/chat/scamChecks'
 import { useFeatures } from '../context/FeaturesContext'
 import SenderAvatar from './SenderAvatar'
 import MediaView, { RENDERED_MEDIA } from './MediaView'
@@ -14,8 +14,8 @@ import MediaAlbumGrid from './MediaAlbumGrid'
 import { mentionUrl } from '../lib/mentions'
 import EmailMessageView from './EmailMessageView'
 
-export type { ScamVerdictScope } from '../pages/chats/scamChecks'
-import type { ScamVerdictScope } from '../pages/chats/scamChecks'
+export type { ScamVerdictScope } from '../features/chat/scamChecks'
+import type { ScamVerdictScope } from '../features/chat/scamChecks'
 
 interface Props {
   /** The message (for an album: the item carrying the caption, else the first) */

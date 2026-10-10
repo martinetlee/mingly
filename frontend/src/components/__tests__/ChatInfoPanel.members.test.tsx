@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { makeConversation } from '../../pages/chats/__tests__/fixtures'
+import { makeConversation } from '../../test/fixtures'
 
 const getConversationMembers = vi.fn(async () => [])
 vi.mock('../../api/client', async (orig) => {

@@ -11,7 +11,7 @@ import { LOCK_ACTION } from '../lib/nav'
 import { openConversationUrl } from '../lib/routes'
 import { useNav } from '../context/FeaturesContext'
 import { useLockVault } from '../hooks/useLockVault'
-import { useScamCheckEvents } from '../pages/chats/scamChecks'
+import { useScamCheckEvents } from '../features/chat/scamChecks'
 
 export default function Layout() {
   const [helpOpen, setHelpOpen] = useState(false)

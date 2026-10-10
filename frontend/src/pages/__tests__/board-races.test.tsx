@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, within, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { BoardData, Conversation, Workspace } from '../../api/types'
-import { makeConversation } from '../chats/__tests__/fixtures'
+import { makeConversation } from '../../test/fixtures'
 import { ConfirmProvider } from '../../components/ui/ConfirmDialog'
 import { resetToasts } from '../../lib/toast'
 

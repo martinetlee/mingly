@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, KeyboardEvent, DragEvent, Cli
 import { Send, X, CornerUpLeft, Pencil, Paperclip, FileIcon, Image, Loader2, AlertCircle } from 'lucide-react'
 import type { Message } from '../api/types'
 import { errorMessage, toast } from '../lib/toast'
-import type { AttachedFile, ComposeDraft } from '../pages/chats/chatUiStore'
+import type { AttachedFile, ComposeDraft } from '../features/chat/chatUiStore'
 
 export type { AttachedFile, ComposeDraft }
 

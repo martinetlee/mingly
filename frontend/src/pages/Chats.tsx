@@ -39,7 +39,7 @@ import type { ChatActions, SortBy } from './chats/ChatListPane'
 import ChatPane from './chats/ChatPane'
 import { useChatList } from './chats/useChatList'
 import { EMAIL_CHANNELS, loadChannelFilter, messengerChannels, saveChannelFilter } from './chats/channelFilter'
-import { getChatUi, updateChatUi, useChatUiSelect } from './chats/chatUiStore'
+import { getChatUi, updateChatUi, useChatUiSelect } from '../features/chat/chatUiStore'
 
 /** How long an open, focused chat waits before acknowledging new messages as read */
 export const READ_ACK_MS = 1500

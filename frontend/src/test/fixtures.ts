@@ -1,4 +1,4 @@
-import type { Capability, Conversation, Message, MessageWindow, Person } from '../../../api/types'
+import type { Capability, Conversation, Message, MessageWindow, Person } from '../api/types'
 
 /** Message `n` (id = seq = external id) in conversation 100 by default, one second apart by n. */
 export function msg(n: number, over: Partial<Message> = {}): Message {

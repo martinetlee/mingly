@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { Message } from '../../../api/types'
-import { msg, page } from './fixtures'
+import { msg, page } from '../../../test/fixtures'
 import {
   applyLive, appendNewer, cursorOf, deletionApplies, firstUnreadId, fromPage, inScope, mergeLatest, mergeMessages, prependOlder,
   withKnownContext,

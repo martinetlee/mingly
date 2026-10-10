@@ -3,9 +3,9 @@ import { render, screen, cleanup, within, fireEvent, act } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom'
 import { VirtuosoMockContext } from 'react-virtuoso'
 import type { Attachment, Message } from '../../api/types'
-import { msg, makeConversation } from '../../pages/chats/__tests__/fixtures'
+import { msg, makeConversation } from '../../test/fixtures'
 
-vi.mock('react-virtuoso', () => import('../../pages/chats/__tests__/virtuosoTestShim'))
+vi.mock('react-virtuoso', () => import('../../test/virtuosoTestShim'))
 vi.mock('../../api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/client')>()),
   archiveConversation: vi.fn(),

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import type { PeoplePage, Person } from '../../api/types'
-import { makePerson } from '../../pages/chats/__tests__/fixtures'
+import { makePerson } from '../../test/fixtures'
 
 /** A promise you resolve/reject by hand. */
 function deferred<T>() {
