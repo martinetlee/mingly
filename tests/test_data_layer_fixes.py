@@ -25,6 +25,7 @@ from backend.ingest.normalized import (
 )
 from backend.people import linking
 from tests import factories as f
+from backend.people import identities as person_identities
 
 
 @pytest.fixture
@@ -92,7 +93,7 @@ async def test_newer_schema_generation_refuses_to_start_and_keeps_the_file(tmp_p
 @pytest.mark.asyncio
 async def test_ids_are_not_reused_after_merge_or_delete(db):
     tg = await f.identity(db, "5", display_name="Ann", phone="15551234567")
-    await crud.upsert_identity(db, channel="signal", external_id="aci-1", display_name="Ann S", phone="+15551234567")
+    await person_identities.upsert_identity(db, channel="signal", external_id="aci-1", display_name="Ann S", phone="+15551234567")
     gone = (await db.execute(select(PersonMerge))).scalar_one().from_person_id
     assert gone != tg.person_id
     bob = await f.identity(db, "9", display_name="Bob")
@@ -307,12 +308,12 @@ async def test_channel_delete_recomputes_preview_and_broadcasts(db_engine, sent)
 @pytest.mark.asyncio
 async def test_detach_marker_survives_a_later_merge(db):
     tg = await f.identity(db, "5", display_name="Ann", phone="15551234567")
-    sig = await crud.upsert_identity(db, channel="signal", external_id="aci-1", display_name="Ann S",
+    sig = await person_identities.upsert_identity(db, channel="signal", external_id="aci-1", display_name="Ann S",
                                      phone="+15551234567")
     a = tg.person_id
     d = await linking.detach(db, sig.id)
     await db.commit()
-    gmail = await crud.upsert_identity(db, channel="gmail", external_id="ann@x.com", display_name="Ann G")
+    gmail = await person_identities.upsert_identity(db, channel="gmail", external_id="ann@x.com", display_name="Ann G")
     g = gmail.person_id
     await linking.merge(db, g, a)
     await linking.suggest_for_person(db, g)  # what POST /people/{id}/merge does next
@@ -346,7 +347,7 @@ async def test_detach_recomputes_suggestions_for_both_people(db):
     await linking.merge(db, t1.person_id, t2.person_id)
     await db.commit()
     a = t1.person_id
-    x = await crud.upsert_identity(db, channel="gmail", external_id="annz@x.com", display_name="Z")
+    x = await person_identities.upsert_identity(db, channel="gmail", external_id="annz@x.com", display_name="Z")
     assert (await crud.merge_suggestion_for_pair(db, a, x.person_id)).status == "pending"
     d = await linking.detach(db, t1.id)
     await db.commit()
@@ -544,13 +545,13 @@ async def test_ingest_upserts_each_identity_once(db_engine, sent, monkeypatch):
 
     account_id = await _signal_account()
     calls = []
-    real = crud.upsert_identity
+    real = person_identities.upsert_identity
 
     async def counting(db, **kw):
         calls.append(kw["external_id"])
         return await real(db, **kw)
 
-    monkeypatch.setattr(crud, "upsert_identity", counting)
+    monkeypatch.setattr(person_identities, "upsert_identity", counting)
     bob = NormalizedIdentity("aci-b", display_name="Bob")
     msgs = [NormalizedMessage(f"m{k}", datetime(2026, 1, 1) + timedelta(minutes=k), sender=bob, text="x",
                               participants=[(NormalizedIdentity("aci-me"), "to")]) for k in range(20)]

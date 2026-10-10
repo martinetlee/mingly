@@ -21,6 +21,7 @@ from telethon.tl.types import Channel, User
 from backend.db import crud
 from backend.db.models import Account, Conversation, Identity
 from backend.telegram.entities import display_name, is_deactivated, is_forum, user_full_name
+from backend.people import identities as person_identities
 
 CHANNEL = "telegram"
 
@@ -117,7 +118,7 @@ def _user_profile(user) -> dict:
 async def ensure_user_identity(db: AsyncSession, user, *, commit: bool = False, **extra) -> Identity:
     """Identity for a Telethon User, created (with its person) on first sight
     and refreshed with whatever profile the entity carries."""
-    return await crud.upsert_identity(
+    return await person_identities.upsert_identity(
         db, channel=CHANNEL, external_id=str(user.id), commit=commit, **{**_user_profile(user), **extra}
     )
 
@@ -127,7 +128,7 @@ async def identity_for_user_id(db: AsyncSession, user_id: int, *, create: bool =
     existing = await crud.get_identity_by_external(db, CHANNEL, str(user_id))
     if existing is not None or not create:
         return existing
-    return await crud.upsert_identity(db, channel=CHANNEL, external_id=str(user_id), commit=False)
+    return await person_identities.upsert_identity(db, channel=CHANNEL, external_id=str(user_id), commit=False)
 
 
 async def identity_ids_for_users(db: AsyncSession, user_ids: Iterable[int]) -> dict[int, int]:

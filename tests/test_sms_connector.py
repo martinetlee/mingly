@@ -34,6 +34,7 @@ from backend.ingest import fanout
 from backend.media import MediaNotFound
 from tests import factories as f
 from tests.test_sms_typedstream import blob
+from backend.people import identities as person_identities
 
 ANN = "+15551234567"  # iMessage, in the direct chat and the group
 BOB = "Bob@Example.com"  # iMessage by email, in the group
@@ -580,7 +581,7 @@ async def test_phone_handle_links_to_the_telegram_person(db, messages, photo, ev
 
 @pytest.mark.asyncio
 async def test_email_handle_links_to_the_gmail_person(db, messages, photo, events):
-    mail = await crud.upsert_identity(db, channel="gmail", external_id="bob@example.com", display_name="Bob")
+    mail = await person_identities.upsert_identity(db, channel="gmail", external_id="bob@example.com", display_name="Bob")
     _seed(messages, photo)
     conn = await _connected(db, messages)
     await conn.sync_once()

@@ -1,7 +1,7 @@
 """Linking one human's identities across channels into one person.
 
 - Automatic: when an identity gains a phone / email contact point
-  (``on_contact_points_added``, called by ``crud.upsert_identity``) and exactly
+  (``on_contact_points_added``, called by ``people.identities.upsert_identity``) and exactly
   one other person owns an identity with the same normalized value, the two
   people are merged (``PersonMerge.automatic``). Several matches become
   suggestions instead.
@@ -58,7 +58,13 @@ class LinkingError(ValueError):
     """A merge / undo / detach that isn't allowed (message is user-facing)."""
 
 
-# ── Automatic linking (called from crud.upsert_identity) ─────────────────────
+# ── Automatic linking (called from people.identities.upsert_identity) ─────────────────────
+
+async def _fresh_person(db: AsyncSession, person_id: int) -> Optional[Person]:
+    """The person as stored now (column properties such as ``is_contact``
+    re-read), in one query whether or not the session already holds it."""
+    return await db.get(Person, person_id, populate_existing=True)
+
 
 async def on_contact_points_added(db: AsyncSession, identity: Identity) -> None:
     """``identity`` gained a phone / email. Exactly one other person with the
@@ -67,10 +73,11 @@ async def on_contact_points_added(db: AsyncSession, identity: Identity) -> None:
     points = (await db.execute(
         select(ContactPoint.kind, ContactPoint.value).where(ContactPoint.identity_id == identity.id)
     )).all()
-    person = await db.get(Person, identity.person_id)
-    if not points or person is None:
+    if not points:
         return
-    await db.refresh(person)
+    person = await _fresh_person(db, identity.person_id)
+    if person is None:
+        return
     matches = await _contact_point_matches(db, person, points)
     survivor = person.id
     if len(matches) == 1:
@@ -91,10 +98,9 @@ async def on_contact_points_added(db: AsyncSession, identity: Identity) -> None:
 
 async def on_username_changed(db: AsyncSession, identity: Identity) -> None:
     """A new / changed username: suggest people with a matching email."""
-    person = await db.get(Person, identity.person_id)
+    person = await _fresh_person(db, identity.person_id)
     if person is None:
         return
-    await db.refresh(person)
     found = {pid: USERNAME_MATCHES_EMAIL for pid in await _username_email_matches(db, [identity])}
     if await _record_suggestions(db, person, found):
         _notify_after_commit(db, (person.id,))
@@ -257,10 +263,9 @@ async def _record_suggestions(db: AsyncSession, person: Person, found: dict) -> 
 async def suggest_for_person(db: AsyncSession, person_id: int) -> int:
     """Recompute the suggestions involving one person (cheap: their own
     identities only). Returns how many were created."""
-    person = await db.get(Person, person_id)
+    person = await _fresh_person(db, person_id)
     if person is None:
         return 0
-    await db.refresh(person)
     idents = await crud.identities_for_person(db, person_id)
     found: dict[int, str] = {}
     for pid in await _username_email_matches(db, idents):
@@ -559,8 +564,7 @@ async def detach(db: AsyncSession, identity_id: int, person_id: Optional[int] = 
     ident = await crud.get_identity(db, identity_id)
     if ident is None or (person_id is not None and ident.person_id != person_id):
         raise LookupError("Identity not found")
-    old = await db.get(Person, ident.person_id)
-    await db.refresh(old)
+    old = await _fresh_person(db, ident.person_id)
     if len(await crud.identity_ids_for_person(db, old.id)) < 2:
         raise LinkingError("This is the person's only linked account")
     person = Person(is_self=bool(ident.is_self))

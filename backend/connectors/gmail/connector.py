@@ -41,6 +41,7 @@ from backend.ingest.normalized import (
 from backend.media import MediaNotFound, MediaUnavailable
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
+from backend.people import identities as person_identities
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +374,7 @@ class GmailConnector(Connector):
                     db.add(acc)
                     await db.commit()
                     await db.refresh(acc)
-            me = await crud.upsert_identity(db, channel=self.channel, external_id=email, is_self=True)
+            me = await person_identities.upsert_identity(db, channel=self.channel, external_id=email, is_self=True)
             await crud.set_account_owner(db, acc.id, external_id=email, label=email, self_identity_id=me.id)
             account_id = acc.id
         creds.save(account_id)

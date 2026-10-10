@@ -13,6 +13,7 @@ from backend.db.models import (
 )
 from backend.people import linking
 from tests import factories as f
+from backend.people import identities as person_identities
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def test_normalize_phone_e164():
 @pytest.mark.asyncio
 async def test_shared_phone_merges_automatically_and_broadcasts_after_commit(db, sent):
     tg = await f.identity(db, "5", display_name="Ann", phone="15551234567")
-    sig = await crud.upsert_identity(
+    sig = await person_identities.upsert_identity(
         db, channel="signal", external_id="aci-1", display_name="Ann S", phone="+1 555 123 4567"
     )
     await asyncio.sleep(0)
@@ -66,11 +67,11 @@ async def test_shared_phone_merges_automatically_and_broadcasts_after_commit(db,
 async def test_two_matching_people_become_suggestions(db):
     # Two people already share a phone because one of them was detached
     a = await f.identity(db, "1", display_name="A", phone="+15550000001")
-    b = await crud.upsert_identity(db, channel="signal", external_id="b", display_name="B", phone="+15550000001")
+    b = await person_identities.upsert_identity(db, channel="signal", external_id="b", display_name="B", phone="+15550000001")
     assert a.person_id == b.person_id
     new_person = await linking.detach(db, b.id)
     await db.commit()
-    c = await crud.upsert_identity(db, channel="sms", external_id="c", display_name="C", phone="15550000001")
+    c = await person_identities.upsert_identity(db, channel="sms", external_id="c", display_name="C", phone="15550000001")
     assert c.person_id not in (a.person_id, new_person.id)
     pairs = {(x, y, r) for x, y, r, st in await _suggestions(db) if st == "pending"}
     assert pairs == {
@@ -82,13 +83,13 @@ async def test_two_matching_people_become_suggestions(db):
 @pytest.mark.asyncio
 async def test_self_is_never_merged_with_others(db):
     me = await f.identity(db, "1", display_name="Me", phone="+15550000009", is_self=True)
-    other = await crud.upsert_identity(db, channel="signal", external_id="s", display_name="X", phone="+15550000009")
+    other = await person_identities.upsert_identity(db, channel="signal", external_id="s", display_name="X", phone="+15550000009")
     assert other.person_id != me.person_id
     assert await _suggestions(db) == []
     with pytest.raises(linking.LinkingError):
         await linking.merge(db, me.person_id, other.person_id)
     # Two self identities do link
-    me2 = await crud.upsert_identity(
+    me2 = await person_identities.upsert_identity(
         db, channel="signal", external_id="me", display_name="Me", phone="+15550000009", is_self=True
     )
     assert me2.person_id == me.person_id
@@ -97,10 +98,10 @@ async def test_self_is_never_merged_with_others(db):
 @pytest.mark.asyncio
 async def test_dismissed_pair_is_not_merged_automatically(db):
     a = await f.identity(db, "1", display_name="A")
-    b = await crud.upsert_identity(db, channel="signal", external_id="b", display_name="B")
+    b = await person_identities.upsert_identity(db, channel="signal", external_id="b", display_name="B")
     await crud.add_merge_suggestion(db, a.person_id, b.person_id, "same_phone", 0.9, status="dismissed")
     await db.commit()
-    await crud.upsert_identity(db, channel="signal", external_id="b", phone="+15550000001")
+    await person_identities.upsert_identity(db, channel="signal", external_id="b", phone="+15550000001")
     await f.identity(db, "1", phone="15550000001")
     assert len(await _people(db)) == 2
     assert [s[3] for s in await _suggestions(db)] == ["dismissed"]
@@ -216,7 +217,7 @@ async def test_undo_restores_earlier_merges_into_the_removed_person(db):
 async def test_detach_api(api, db, sent):
     conv = await f.conversation(db, "10", title="Ann")
     tg = conv.peer_identity
-    sig = await crud.upsert_identity(db, channel="signal", external_id="s", display_name="Ann S")
+    sig = await person_identities.upsert_identity(db, channel="signal", external_id="s", display_name="Ann S")
     await linking.merge(db, tg.person_id, sig.person_id)
     db.add(CatchUpItem(conversation_id=conv.id, person_id=tg.person_id))
     await db.commit()
@@ -238,7 +239,7 @@ async def test_detach_api(api, db, sent):
     last = await api.post(f"/api/people/{pid}/identities/{sig_id}/detach")
     assert last.status_code == 400  # the only identity left
     # Detached people are not linked again automatically
-    await crud.upsert_identity(db, channel="signal", external_id="s", phone="+15550000001")
+    await person_identities.upsert_identity(db, channel="signal", external_id="s", phone="+15550000001")
     await f.identity(db, "10", phone="15550000001")
     db.expire_all()
     assert (await crud.get_identity(db, tg_id)).person_id == new["id"]
@@ -253,7 +254,7 @@ async def test_suggestions_same_name_in_group_and_username_email(api, db, sent):
     await f.message(db, group, 1, sender=x1)
     await f.message(db, group, 2, sender=x2)
     tg_user = await f.identity(db, "4", display_name="Robin", username="robin_k")
-    mail = await crud.upsert_identity(db, channel="gmail", external_id="robin_k@example.com", display_name="R K")
+    mail = await person_identities.upsert_identity(db, channel="gmail", external_id="robin_k@example.com", display_name="R K")
     # The username ↔ email suggestion appears as soon as the email identity exists
     assert await _suggestions(db) == [
         tuple(sorted((tg_user.person_id, mail.person_id))) + ("username_matches_email", "pending")
@@ -283,7 +284,7 @@ async def test_suggestions_same_name_in_group_and_username_email(api, db, sent):
 
 @pytest.mark.asyncio
 async def test_username_change_suggests_matching_email(db):
-    mail = await crud.upsert_identity(db, channel="gmail", external_id="sam.lee@example.com")
+    mail = await person_identities.upsert_identity(db, channel="gmail", external_id="sam.lee@example.com")
     tg = await f.identity(db, "8", display_name="Sam")
     assert await _suggestions(db) == []
     await f.identity(db, "8", username="Sam.Lee")

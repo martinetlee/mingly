@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
+from backend.people import identities as person_identities
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +315,7 @@ class CalendarSync:
             email = _email(person)
             if email is None:
                 return None
-            ident = await crud.upsert_identity(
+            ident = await person_identities.upsert_identity(
                 db, channel=CHANNEL, external_id=email, commit=False,
                 display_name=str((person or {}).get("displayName") or "").strip() or None,
             )

@@ -12,18 +12,19 @@ from backend.db.models import ContactPoint, Message, MessageAttachment, Person
 from backend.api.views import conversation_json
 from backend.serializers import message_out
 from tests import factories as f
+from backend.people import identities as person_identities
 
 
 @pytest.mark.asyncio
 async def test_identity_upsert_creates_person_and_keeps_unknown_fields(db):
-    a = await crud.upsert_identity(db, channel="telegram", external_id="5", display_name="Ann", phone="15551234567")
-    b = await crud.upsert_identity(db, channel="telegram", external_id="5", username="ann", phone=None)
+    a = await person_identities.upsert_identity(db, channel="telegram", external_id="5", display_name="Ann", phone="15551234567")
+    b = await person_identities.upsert_identity(db, channel="telegram", external_id="5", username="ann", phone=None)
     assert a.id == b.id and b.display_name == "Ann" and b.username == "ann" and b.phone == "15551234567"
     person = await crud.get_person(db, a.person_id)
     assert person.name == "Ann" and person.is_contact is False
     points = (await db.execute(select(ContactPoint.kind, ContactPoint.value))).all()
     assert points == [("phone", "+15551234567")]
-    await crud.upsert_identity(db, channel="telegram", external_id="5", is_contact=True, phone="")
+    await person_identities.upsert_identity(db, channel="telegram", external_id="5", is_contact=True, phone="")
     await db.refresh(person)
     assert person.is_contact is True
     assert (await db.execute(select(ContactPoint))).scalars().all() == []  # phone cleared
@@ -32,7 +33,7 @@ async def test_identity_upsert_creates_person_and_keeps_unknown_fields(db):
 
 @pytest.mark.asyncio
 async def test_self_identity_marks_person(db):
-    me = await crud.upsert_identity(db, channel="telegram", external_id="1", display_name="Me", is_self=True)
+    me = await person_identities.upsert_identity(db, channel="telegram", external_id="1", display_name="Me", is_self=True)
     assert (await crud.self_person(db)).id == me.person_id
 
 

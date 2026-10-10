@@ -20,6 +20,7 @@ from backend.db.models import Conversation, MessageParticipant
 from backend.ingest import fanout
 from backend.ingest.normalized import NormalizedConversation, NormalizedIdentity, NormalizedMessage
 from backend.ws.manager import ws_manager
+from backend.people import identities as person_identities
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,9 @@ def _seq(msg: NormalizedMessage) -> int:
 
 async def upsert_identity(db: AsyncSession, channel: str, ident: NormalizedIdentity) -> int:
     """Store / refresh an identity; returns its id (linking to an existing
-    person happens inside ``crud.upsert_identity``)."""
+    person happens inside ``people.identities.upsert_identity``)."""
     profile = {f: getattr(ident, f) for f in _PROFILE_FIELDS}
-    stored = await crud.upsert_identity(db, channel=channel, external_id=ident.external_id, commit=False, **profile)
+    stored = await person_identities.upsert_identity(db, channel=channel, external_id=ident.external_id, commit=False, **profile)
     return stored.id
 
 

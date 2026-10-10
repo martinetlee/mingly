@@ -12,6 +12,7 @@ from typing import Optional
 
 from backend.db import crud
 from backend.db.models import Account, Conversation, Identity, Message, MessageAttachment
+from backend.people import identities as person_identities
 
 BASE_DATE = datetime(2026, 1, 1, 12, 0)
 
@@ -26,7 +27,7 @@ async def identity(
     db, external_id="77", *, channel: str = "telegram", display_name: Optional[str] = "Alice", **profile
 ) -> Identity:
     """An identity (and its new person)."""
-    return await crud.upsert_identity(
+    return await person_identities.upsert_identity(
         db, channel=channel, external_id=str(external_id), display_name=display_name, **profile
     )
 

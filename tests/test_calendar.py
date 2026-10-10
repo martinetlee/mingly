@@ -23,6 +23,7 @@ from backend.db import crud
 from backend.db.models import Account, BriefingEntry, BriefingRun, CalendarAttendee, CalendarEvent, Identity
 from tests import factories as f
 from tests.llm_fakes import FakeProvider, patch_briefing_env, seed_chat, seed_msg
+from backend.people import identities as person_identities
 
 ME = "me@example.com"
 
@@ -103,7 +104,7 @@ async def _account(db) -> Account:
                   sync_state_json=json.dumps({"history_id": "123", "last_sync_at": "2026-10-01T00:00:00"}))
     db.add(acc)
     await db.commit()
-    me = await crud.upsert_identity(db, channel="gmail", external_id=ME, is_self=True)
+    me = await person_identities.upsert_identity(db, channel="gmail", external_id=ME, is_self=True)
     await crud.set_account_owner(db, acc.id, external_id=ME, label=ME, self_identity_id=me.id)
     return acc
 

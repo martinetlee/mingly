@@ -1,13 +1,14 @@
 """Identities (one handle on one channel) and the people they belong to.
 
-Every connector records the users it sees through ``upsert_identity``; a new
-identity gets its own new person. Linking identities of the same human into
-one person is ``backend.people.linking``'s job (Phase 2).
+``store_identity`` writes an identity row (a new identity gets its own new
+person). Connectors go through ``backend.people.identities.upsert_identity``,
+which adds cross-channel linking on top.
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 import phonenumbers
 from sqlalchemy import delete, or_, select, union, update
@@ -17,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.models import ContactPoint, Identity, Person
 
 __all__ = [
-    "PROFILE_FIELDS", "normalize_phone", "normalize_email", "upsert_identity", "get_identity",
+    "PROFILE_FIELDS", "IdentityChange", "normalize_phone", "normalize_email", "store_identity",
+    "sync_contact_points", "get_identity",
     "get_identities", "get_identity_by_external", "identity_ids_by_external", "get_person", "get_people",
     "identities_for_person", "identities_for_people", "identity_ids_for_person", "self_person",
     "collect_orphans_after_account_removal", "profile_differs", "identities_by_external",
@@ -58,7 +60,7 @@ def normalize_email(raw: Optional[str]) -> Optional[str]:
     return raw.strip().lower()
 
 
-async def _sync_contact_points(db: AsyncSession, identity: Identity) -> bool:
+async def sync_contact_points(db: AsyncSession, identity: Identity) -> bool:
     """Make the identity's contact points match its handles. Returns whether
     any point was added (a new key for cross-channel linking)."""
     wanted = set()
@@ -84,21 +86,33 @@ async def _sync_contact_points(db: AsyncSession, identity: Identity) -> bool:
     return bool(added)
 
 
-async def upsert_identity(
-    db: AsyncSession, *, channel: str, external_id: str, commit: bool = True, **profile
-) -> Identity:
-    """Create or update the identity ``(channel, external_id)``.
+@dataclass(frozen=True)
+class IdentityChange:
+    """What ``store_identity`` did: a new row, which profile fields changed,
+    and whether the username is new (a linking hint)."""
+    created: bool
+    changed: frozenset
+    new_username: bool
+
+    @property
+    def any(self) -> bool:
+        return self.created or bool(self.changed)
+
+
+async def store_identity(
+    db: AsyncSession, *, channel: str, external_id: str, **profile
+) -> Tuple[Identity, IdentityChange]:
+    """Create or update the identity row ``(channel, external_id)``; no commit.
 
     Profile fields (see PROFILE_FIELDS) that are not None take the new
     value. A new identity gets a new person (marked ``is_self`` when the
-    identity is). When a phone / email contact point is added,
-    ``backend.people.linking`` may merge the person into an existing one
-    with the same verified handle; a new username may yield a merge
-    suggestion. Returns the stored identity.
+    identity is). Cross-channel linking is the caller's business
+    (``backend.people.identities.upsert_identity``). Flushes when anything
+    changed.
     """
     unknown = set(profile) - set(PROFILE_FIELDS)
     if unknown:
-        raise TypeError(f"upsert_identity: unknown fields {sorted(unknown)}")
+        raise TypeError(f"store_identity: unknown fields {sorted(unknown)}")
     given = {k: v for k, v in profile.items() if v is not None}
 
     identity = await get_identity_by_external(db, channel, external_id)
@@ -133,20 +147,10 @@ async def upsert_identity(
             identity.updated_at = datetime.utcnow()
     if given.get("is_self") and (created or "is_self" in changed):
         await db.execute(update(Person).where(Person.id == identity.person_id).values(is_self=True))
-    if not created and not changed:
-        if commit:
-            await db.commit()
-        return identity  # nothing new: no flush, contact points or linking to redo
-    await db.flush()
-    from backend.people import linking  # business rule, kept out of the data layer's imports
-    if (created or "phone" in changed) and await _sync_contact_points(db, identity):
+    change = IdentityChange(created=created, changed=frozenset(changed), new_username=new_username)
+    if change.any:
         await db.flush()
-        await linking.on_contact_points_added(db, identity)
-    elif new_username:
-        await linking.on_username_changed(db, identity)
-    if commit:
-        await db.commit()
-    return identity
+    return identity, change
 
 
 def profile_differs(identity: Identity, profile: dict) -> bool:
