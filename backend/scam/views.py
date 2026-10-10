@@ -22,7 +22,7 @@ from backend.errors import InvalidRequest, NotFound
 from backend.scam.verdict import FLAG_ACTIVE, not_pending_condition, scanned_condition
 from backend.serialization import iso_utc
 from backend.serializers import scam_fields
-from backend.scam.cloud_sync import telegram_flag_condition, telegram_message_condition
+from backend.scam.cloud_payloads import telegram_flag_condition, telegram_message_condition
 
 
 def _flag_dict(f: ScamFlag, person_id: Optional[int], info: dict) -> dict:
@@ -383,7 +383,7 @@ async def sync_summary():
             select(func.count()).select_from(ScamReport).where(ScamReport.synced_at.isnot(None))
         )).scalar() or 0
 
-        # Same row set the uploader sends (see cloud_sync._upload_scan_results)
+        # Same row set the uploader sends (see cloud_upload.CloudUploads._upload_scan_results)
         syncable = and_(
             telegram_message_condition(),
             Message.scam_updated_at.isnot(None),
