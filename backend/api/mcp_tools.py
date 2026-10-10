@@ -35,7 +35,8 @@ from backend.db.models import (
     Account, AgentReview, Conversation, ConversationTag, HistoryCoverage, Message, Organization,
 )
 from backend.serialization import iso_utc
-from backend.serializers import channel_of, conversation_out, message_out
+from backend.serializers import channel_of, message_out
+from backend.api.views import conversation_json
 from backend.telegram.archive import ARCHIVED_CHANNELS
 from backend.api.organizations import list_organizations as _list_organizations
 from backend.api.people import broadcast_person_changed, people_payload, position_dict
@@ -223,7 +224,7 @@ _CONVERSATION_KEYS = (
 
 
 def _mcp_conversation(c: Conversation, with_last_message: bool = True) -> dict:
-    full = conversation_out(c)
+    full = conversation_json(c)
     d = {"conversation_id" if k == "id" else k: full.get(k) for k in _CONVERSATION_KEYS}
     if c.kind != "direct":
         d.pop("is_bot")

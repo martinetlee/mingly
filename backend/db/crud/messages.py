@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from backend.db.crud.conversations import recompute_preview, refresh_preview
-from backend.db.models import Conversation, Message, MessageAttachment
+from backend.db.models import Conversation, Identity, Message, MessageAttachment, MessageParticipant
 
 __all__ = [
     "with_reply_preview",
@@ -41,6 +41,7 @@ __all__ = [
     "set_attachment_local_path",
     "delete_messages",
     "GENERAL_TOPIC_ID",
+    "message_participants",
 ]
 
 
@@ -599,3 +600,23 @@ async def delete_messages(db: AsyncSession, message_ids: Iterable[int], commit: 
     if commit:
         await db.commit()
     return {conv_id: sorted(mids) for conv_id, mids in by_conv.items()}
+
+
+async def message_participants(db: AsyncSession, message_ids: Iterable[int]) -> dict[int, list[dict]]:
+    """``{message_id: [{identity_id, person_id, role, display_name, external_id}]}``."""
+    ids = list(set(message_ids))
+    out: dict[int, list[dict]] = {}
+    if not ids:
+        return out
+    rows = (await db.execute(
+        select(MessageParticipant.message_id, MessageParticipant.role, Identity)
+        .join(Identity, Identity.id == MessageParticipant.identity_id)
+        .where(MessageParticipant.message_id.in_(ids))
+        .order_by(MessageParticipant.id)
+    )).all()
+    for mid, role, ident in rows:
+        out.setdefault(mid, []).append({
+            "identity_id": ident.id, "person_id": ident.person_id, "role": role,
+            "display_name": ident.display_name, "external_id": ident.external_id,
+        })
+    return out

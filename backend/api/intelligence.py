@@ -24,7 +24,8 @@ from backend.db.database import AsyncSessionLocal, get_db
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.budget import clip_to_tokens, estimate_tokens, prompt_budget_tokens
 from backend.llm.resolve import LLMUnavailable, error_kind, error_message, get_provider
-from backend.serializers import conversation_out, message_out
+from backend.serializers import message_out
+from backend.api.views import conversation_json
 
 logger = logging.getLogger(__name__)
 
@@ -812,7 +813,7 @@ async def intelligence_mentions(
             "user_reply_msg": message_out(reply) if reply is not None else None,
             "reply_has_gap": reply_has_gap,
             "conversation": {
-                **conversation_out(conv, with_last_message=False),
+                **conversation_json(conv, with_last_message=False),
                 "tags": [{"id": t.id, "name": t.name, "color": t.color} for t in tags.get(conv.id, [])],
             },
         })

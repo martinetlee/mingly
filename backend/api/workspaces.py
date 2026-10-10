@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Workspace
-from backend.serializers import conversation_out
+from backend.api.views import conversation_json
 
 router = APIRouter()
 
@@ -51,12 +51,12 @@ async def _board_payload(db: AsyncSession, workspace_id: int, board_id: Optional
         "boards": board["boards"],
         "board_id": board["board_id"],
         "columns": [
-            {**col, "conversations": [conversation_out(c) for c in col["conversations"]]}
+            {**col, "conversations": [conversation_json(c) for c in col["conversations"]]}
             for col in board["columns"]
         ],
-        "unallocated": [conversation_out(c) for c in board["unallocated"]],
+        "unallocated": [conversation_json(c) for c in board["unallocated"]],
         "backlog": {
-            section: [conversation_out(c) for c in convs]
+            section: [conversation_json(c) for c in convs]
             for section, convs in board["backlog"].items()
         },
         "classified_conversation_ids": board["classified_conversation_ids"],

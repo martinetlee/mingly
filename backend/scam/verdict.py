@@ -1,8 +1,8 @@
 """Single owner of Shield verdict state.
 
-* ``scam_fields(m)`` is the one serialization of a message's scam state, used
-  by every API response and WS event (``effective_is_scam`` comes from the
-  ``Message.effective_is_scam`` hybrid property, so the UI never re-derives it).
+* ``serializers.scam_fields(m)`` is the one serialization of a message's scam
+  state, used by every API response and WS event (``effective_is_scam`` comes
+  from the ``Message.effective_is_scam`` hybrid property).
 * ``set_verdict(...)`` is the one write path for user verdicts. Every entry
   point (PUT verdict, DELETE flag, DELETE scanned message, sender verdict)
   calls it, so they all give the same end state, the same cloud-sync change
@@ -22,6 +22,7 @@ from backend.db.models import Conversation, Identity, Message, ScamDismissal, Sc
 from backend.prefs import get_pref
 from backend.scam.channel_ids import telegram_scan_ids, telegram_user_ids
 from backend.serialization import iso_utc
+from backend.serializers import scam_fields
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -30,18 +31,6 @@ VERDICTS = ("scam", "not_scam", None)
 FLAG_ACTIVE = "active"
 FLAG_DISMISSED = "dismissed"
 
-
-def scam_fields(m: Message) -> dict:
-    """Scam state of one message as stored, plus the derived effective verdict."""
-    return {
-        "scam_score": m.scam_score,
-        "scam_reason": m.scam_reason,
-        "scam_category": m.scam_category,
-        "scam_manual_verdict": m.scam_manual_verdict,
-        "scam_status": m.scam_status,
-        "scam_error": m.scam_error,
-        "effective_is_scam": bool(m.effective_is_scam),
-    }
 
 
 def ws_message_entry(m: Message) -> dict:

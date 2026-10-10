@@ -20,7 +20,8 @@ from backend.db.database import get_db
 from backend.db.models import Person, PersonMerge, PersonMergeSuggestion, PersonPosition
 from backend.people import linking
 from backend.serialization import iso_utc
-from backend.serializers import channel_of, conversation_out, messages_out, person_out
+from backend.serializers import channel_of, messages_out, person_out
+from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
 
 router = APIRouter()
@@ -370,7 +371,7 @@ async def person_conversations(person_id: int, db: AsyncSession = Depends(get_db
     await person_or_404(db, person_id)
     ids = await crud.direct_conversation_ids_for_person(db, person_id)
     convs = await crud.get_conversations(db, ids)
-    return [conversation_out(convs[i]) for i in ids if i in convs]
+    return [conversation_json(convs[i]) for i in ids if i in convs]
 
 
 @router.get("/{person_id}/timeline")

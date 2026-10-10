@@ -273,15 +273,15 @@ async def test_multi_account_sign_in_registers_and_starts_the_new_account(db):
 @pytest.mark.asyncio
 async def test_capabilities_come_from_the_conversations_own_account(db):
     from backend.connectors import manager as mgr_mod
-    from backend.serializers import conversation_out
+    from backend.api.views import conversation_json
     conn = _Mail(None)
     conv = await f.conversation(db, "t1", title="Hi", kind="email_thread", channel="mail")
     conn.account_id = conv.account_id
     other = await f.conversation(db, "t2", title="Other", kind="email_thread", channel="mail")
     with patch.object(mgr_mod.manager, "_connectors", {**mgr_mod.manager._connectors, conn.account_key: conn}):
-        assert conversation_out(conv)["capabilities"] == ["send", "subject"]
+        assert conversation_json(conv)["capabilities"] == ["send", "subject"]
         if other.account_id != conv.account_id:
-            assert conversation_out(other)["capabilities"] == []
+            assert conversation_json(other)["capabilities"] == []
 
 
 # ── Telegram sign-in step machine ────────────────────────────────────────────

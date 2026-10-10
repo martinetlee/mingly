@@ -12,7 +12,8 @@ from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Conversation, Identity, Message, Organization, Person, PersonPosition
 from backend.serialization import iso_utc
-from backend.serializers import conversation_out, person_out
+from backend.serializers import person_out
+from backend.api.views import conversation_json
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ async def global_search(
 
     # Conversations — visible ones, most recently active first
     conversations = [
-        conversation_out(c) for c in (await db.execute(
+        conversation_json(c) for c in (await db.execute(
             select(Conversation)
             .where(
                 Conversation.is_hidden == False,  # noqa: E712

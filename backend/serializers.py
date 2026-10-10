@@ -5,6 +5,7 @@ through these so the frontend sees one shape per entity."""
 import json
 from typing import Any, Iterable, Optional
 
+from backend.db import crud
 from backend.db.models import Conversation, Identity, Message, MessageAttachment, Person
 from backend.serialization import iso_utc
 
@@ -68,14 +69,26 @@ def sender_out(m: Message) -> Optional[dict]:
     }
 
 
+def scam_fields(m: Message) -> dict:
+    """Scam state of one message as stored, plus the derived effective verdict
+    (the one serialization of it, used by every API response and WS event)."""
+    return {
+        "scam_score": m.scam_score,
+        "scam_reason": m.scam_reason,
+        "scam_category": m.scam_category,
+        "scam_manual_verdict": m.scam_manual_verdict,
+        "scam_status": m.scam_status,
+        "scam_error": m.scam_error,
+        "effective_is_scam": bool(m.effective_is_scam),
+    }
+
+
 def message_out(row, participants: Optional[list] = None) -> dict:
     """A Message, or a reply-preview row ``(Message, reply_id,
     reply_sender_name, reply_text, reply_media_type)`` from
     ``crud.with_reply_preview``. ``participants`` are the message's
-    from/to/cc/bcc identities (``ingest.service.message_participants``;
-    channels without them get an empty list)."""
-    from backend.scam.verdict import scam_fields
-
+    from/to/cc/bcc identities (``crud.message_participants``; channels
+    without them get an empty list)."""
     if isinstance(row, Message):
         m, reply_id, reply_sender, reply_text, reply_kind = row, None, None, None, None
     else:
@@ -117,10 +130,8 @@ def message_out(row, participants: Optional[list] = None) -> dict:
 
 async def messages_out(db, rows: list) -> list[dict]:
     """``message_out`` for a batch, with participants loaded in one query."""
-    from backend.ingest.service import message_participants
-
     ids = [r.id if isinstance(r, Message) else r[0].id for r in rows]
-    parts = await message_participants(db, ids)
+    parts = await crud.message_participants(db, ids)
     return [message_out(r, parts.get(i)) for r, i in zip(rows, ids)]
 
 
@@ -128,16 +139,9 @@ def channel_of(conv: Conversation) -> Optional[str]:
     return conv.account.channel if conv.account is not None else None
 
 
-def capabilities_of(conv: Conversation) -> list[str]:
-    from backend.connectors.manager import manager
-
-    connector = manager.for_account(channel_of(conv), conv.account_id)
-    if connector is None:
-        return []
-    return sorted(c.value for c in connector.conversation_capabilities(conv))
-
-
-def conversation_out(conv: Conversation, *, with_last_message: bool = True) -> dict:
+def conversation_out(conv: Conversation, *, capabilities: Iterable[str], with_last_message: bool = True) -> dict:
+    """``capabilities`` are what the conversation's connector supports in it
+    (runtime state the caller resolves, e.g. ``api.views.conversation_json``)."""
     peer = conv.peer_identity
     avatar = conv.avatar_path or (peer.avatar_path if peer is not None else None)
     title = conv.title
@@ -171,7 +175,7 @@ def conversation_out(conv: Conversation, *, with_last_message: bool = True) -> d
         "members_count": conv.members_count,
         "last_synced_at": iso_utc(conv.last_synced_at),
         "last_activity_at": iso_utc(conv.last_activity_at),
-        "capabilities": capabilities_of(conv),
+        "capabilities": sorted(capabilities),
         "labels": parse_json(conv.labels_json) or [],
     }
     if with_last_message and (conv.last_message_text is not None or conv.last_message_at is not None):

@@ -11,7 +11,7 @@ from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import BriefingEntry, BriefingRun, Conversation, Identity, Message, Person
 from backend.serialization import iso_utc
-from backend.serializers import conversation_out
+from backend.api.views import conversation_json
 
 router = APIRouter()
 
@@ -19,7 +19,7 @@ router = APIRouter()
 def _needs_reply_item(row, contexts: dict) -> dict:
     conv, sender_name, text, date, item = row
     return {
-        "conversation": conversation_out(conv),
+        "conversation": conversation_json(conv),
         "last_message": {
             "sender_name": sender_name,
             "text": text,

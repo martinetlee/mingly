@@ -71,6 +71,15 @@ class ConnectorManager:
                 return c
         return None
 
+    def capabilities_for(self, conversation: Any) -> list[str]:
+        """What the connector serving ``conversation`` supports in it (empty
+        when its account has no connector)."""
+        account = conversation.account
+        connector = self.for_account(account.channel if account is not None else None, conversation.account_id)
+        if connector is None:
+            return []
+        return sorted(c.value for c in connector.conversation_capabilities(conversation))
+
     async def load_accounts(self) -> None:
         """Create connectors for stored accounts of multi-account channels,
         and tell single-account connectors their stored account (the oldest

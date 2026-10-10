@@ -717,7 +717,6 @@ class GmailConnector(Connector):
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
         from backend.db.models import Message
-        from backend.ingest.service import message_participants
 
         api = self._require_api()
         async with AsyncSessionLocal() as db:
@@ -728,7 +727,7 @@ class GmailConnector(Connector):
                     select(Message).where(Message.conversation_id == conversation.id)
                     .order_by(Message.seq.desc()).limit(1)
                 )).scalar_one_or_none()
-            parts = (await message_participants(db, [target.id])).get(target.id, []) if target else []
+            parts = (await crud.message_participants(db, [target.id])).get(target.id, []) if target else []
 
         to: list[str] = []
         meta: dict = {}

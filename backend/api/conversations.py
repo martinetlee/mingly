@@ -21,7 +21,8 @@ from backend.db.database import AsyncSessionLocal, get_db
 from backend.db.models import Conversation, Message, MessageAttachment
 from backend.jobs import get_running, run_single
 from backend.serialization import iso_utc
-from backend.serializers import attachment_out, conversation_out, messages_out
+from backend.serializers import attachment_out, messages_out
+from backend.api.views import conversation_json
 from backend.telegram import ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name
@@ -97,7 +98,7 @@ async def list_conversations(
         label=label, kind=kind, exclude_kind=exclude_kind, account_id=account_id,
         archived=None if label is not None else False,
     )
-    return [conversation_out(c) for c in convs]
+    return [conversation_json(c) for c in convs]
 
 
 class ConversationsByIdsRequest(BaseModel):
@@ -111,7 +112,7 @@ async def get_conversations_by_ids(req: ConversationsByIdsRequest, db: AsyncSess
     legitimately contain them); hidden/briefing/deactivated are not."""
     convs = await crud.get_conversations(db, req.ids[:500])
     return [
-        conversation_out(c) for c in convs.values()
+        conversation_json(c) for c in convs.values()
         if not (c.is_hidden or c.is_briefing or c.is_deactivated)
     ]
 
@@ -133,7 +134,7 @@ async def search_conversations(q: str, db: AsyncSession = Depends(get_db)):
         .order_by(desc(Conversation.last_activity_at))
         .limit(20)
     )
-    return {"local": [conversation_out(c) for c in result.scalars().all()]}
+    return {"local": [conversation_json(c) for c in result.scalars().all()]}
 
 
 @router.get("/search/messages")
@@ -209,27 +210,27 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/hidden")
 async def list_hidden_conversations(db: AsyncSession = Depends(get_db)):
-    return [conversation_out(c) for c in await crud.get_hidden_conversations(db)]
+    return [conversation_json(c) for c in await crud.get_hidden_conversations(db)]
 
 
 @router.get("/tracked")
 async def list_tracked_conversations(db: AsyncSession = Depends(get_db)):
-    return [conversation_out(c) for c in await crud.get_tracked_conversations(db)]
+    return [conversation_json(c) for c in await crud.get_tracked_conversations(db)]
 
 
 @router.get("/briefing")
 async def list_briefing_conversations(db: AsyncSession = Depends(get_db)):
-    return [conversation_out(c) for c in await crud.get_briefing_conversations(db)]
+    return [conversation_json(c) for c in await crud.get_briefing_conversations(db)]
 
 
 @router.get("/archived")
 async def list_archived_conversations(db: AsyncSession = Depends(get_db)):
-    return [conversation_out(c) for c in await crud.get_archived_conversations(db)]
+    return [conversation_json(c) for c in await crud.get_archived_conversations(db)]
 
 
 @router.get("/{conversation_id}")
 async def get_conversation(conversation_id: int, db: AsyncSession = Depends(get_db)):
-    return conversation_out(await conversation_or_404(db, conversation_id))
+    return conversation_json(await conversation_or_404(db, conversation_id))
 
 
 # ── flags ────────────────────────────────────────────────────────────────────

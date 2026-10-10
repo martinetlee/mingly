@@ -25,7 +25,8 @@ from backend.connectors.manager import manager
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Identity, Message, MessageAttachment
-from backend.serializers import channel_of, conversation_out, messages_out
+from backend.serializers import channel_of, messages_out
+from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
 
 router = APIRouter()
@@ -133,7 +134,7 @@ async def list_threads(
             channel="gmail", label=label or ("Sent" if folder == "sent" else None), archived=archived,
         )
         summaries = await _thread_summaries(db, [c.id for c in convs])
-    return [{**conversation_out(c), "thread": summaries[c.id]} for c in convs]
+    return [{**conversation_json(c), "thread": summaries[c.id]} for c in convs]
 
 
 @router.get("/labels", dependencies=_protected)
@@ -165,7 +166,7 @@ async def _modify(conversation_id: int, add: list, remove: list) -> dict:
     async with AsyncSessionLocal() as db:
         fresh = await crud.get_conversation(db, conversation_id)
     await ws_manager.broadcast({"type": "conversations_synced", "conversation_ids": [conversation_id]})
-    return conversation_out(fresh)
+    return conversation_json(fresh)
 
 
 @router.post("/threads/{conversation_id}/archive", dependencies=_protected)

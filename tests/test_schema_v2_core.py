@@ -9,7 +9,8 @@ from sqlalchemy import select
 
 from backend.db import crud
 from backend.db.models import ContactPoint, Message, MessageAttachment, Person
-from backend.serializers import conversation_out, message_out
+from backend.api.views import conversation_json
+from backend.serializers import message_out
 from tests import factories as f
 
 
@@ -41,7 +42,7 @@ async def test_conversation_upsert_is_keyed_by_account_and_external_id(db):
     c2 = await f.conversation(db, "77", title="Alice B")
     other = await f.conversation(db, "77", title="Alice mail", channel="gmail", kind="email_thread")
     assert c1.id == c2.id != other.id
-    out = conversation_out(c2)
+    out = conversation_json(c2)
     assert out["title"] == "Alice B" and out["channel"] == "telegram" and out["kind"] == "direct"
     assert out["peer"]["identity_id"] == c2.peer_identity_id
     assert "send" in out["capabilities"] and "forum_topics" not in out["capabilities"]
@@ -191,12 +192,12 @@ async def test_person_conversations_span_channels(api, db):
 
 @pytest.mark.asyncio
 async def test_telegram_capabilities_narrow_per_conversation(db):
-    dm = conversation_out(await f.conversation(db, "77"))
-    forum = conversation_out(await f.conversation(db, "-100", title="F", kind="group", is_forum=True))
+    dm = conversation_json(await f.conversation(db, "77"))
+    forum = conversation_json(await f.conversation(db, "-100", title="F", kind="group", is_forum=True))
     assert {"pin", "forward", "react"} <= set(dm["capabilities"])
     assert "admin_moderation" not in dm["capabilities"] and "forum_topics" not in dm["capabilities"]
     assert {"admin_moderation", "forum_topics"} <= set(forum["capabilities"])
-    mail = conversation_out(await f.conversation(db, "t1", title="Hi", kind="email_thread", channel="gmail"))
+    mail = conversation_json(await f.conversation(db, "t1", title="Hi", kind="email_thread", channel="gmail"))
     assert mail["capabilities"] == []  # no Gmail connector yet
 
 

@@ -28,7 +28,8 @@ from backend.db.models import (
 )
 from backend.scam.queue import enqueue_targets, get_scan_queue, scan_unscanned_messages
 from backend.scam.service import get_scam_service
-from backend.scam.verdict import FLAG_ACTIVE, not_pending_condition, scam_fields, scanned_condition, set_verdict
+from backend.scam.verdict import FLAG_ACTIVE, not_pending_condition, scanned_condition, set_verdict
+from backend.serializers import scam_fields
 from backend.serialization import iso_utc
 from backend.tasks import spawn
 

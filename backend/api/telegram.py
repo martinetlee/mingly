@@ -20,7 +20,8 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal, get_db
 from backend.db.models import Conversation, Identity
 from backend.jobs import await_single
-from backend.serializers import conversation_out, media_url
+from backend.serializers import media_url
+from backend.api.views import conversation_json
 from backend.telegram import ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name, is_deactivated
@@ -136,7 +137,7 @@ async def search_directory(q: str, db: AsyncSession = Depends(get_db)):
         .order_by(Conversation.last_activity_at.desc().nullslast())
         .limit(20)
     )).scalars().all()
-    found = [conversation_out(c) for c in local]
+    found = [conversation_json(c) for c in local]
     seen = {ids.peer_id_of(c) for c in local}
 
     if len(q) < 2:
@@ -163,7 +164,7 @@ async def search_directory(q: str, db: AsyncSession = Depends(get_db)):
             continue
         seen.add(peer)
         if peer in stored:
-            found.append(conversation_out(stored_convs[stored[peer]]))
+            found.append(conversation_json(stored_convs[stored[peer]]))
         else:
             found.append(_directory_hit(peer, entity))
     return found
@@ -189,7 +190,7 @@ async def _ensure_conversation(db: AsyncSession, peer_id: int) -> Conversation:
 async def ensure_conversation(req: EnsureRequest, db: AsyncSession = Depends(get_db)):
     """The conversation for a Telegram peer, created from Telegram if new.
     Returns immediately; opening it starts the background history sync."""
-    return conversation_out(await _ensure_conversation(db, req.peer_id))
+    return conversation_json(await _ensure_conversation(db, req.peer_id))
 
 
 # ── create / join ────────────────────────────────────────────────────────────
@@ -217,7 +218,7 @@ class JoinRequest(BaseModel):
 async def start_private(req: StartPrivateRequest, db: AsyncSession = Depends(get_db)):
     """Open (or start) a direct conversation with a person on Telegram."""
     user_id = await _person_user_id(db, req.person_id)
-    return conversation_out(await _ensure_conversation(db, user_id))
+    return conversation_json(await _ensure_conversation(db, user_id))
 
 
 @router.post("/create/group")
@@ -241,7 +242,7 @@ async def create_group(req: CreateGroupRequest, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=500, detail=f"Failed to create group: {e}")
     created = result.chats[0] if getattr(result, "chats", None) else result.updates.chats[0]
     conv = await ids.upsert_dialog(db, tl_utils.get_peer_id(created), created, title=req.name)
-    return conversation_out(conv)
+    return conversation_json(conv)
 
 
 @router.post("/create/channel")
@@ -255,7 +256,7 @@ async def create_channel(req: CreateChannelRequest, db: AsyncSession = Depends(g
         raise HTTPException(status_code=500, detail=f"Failed to create channel: {e}")
     created = result.chats[0]
     conv = await ids.upsert_dialog(db, tl_utils.get_peer_id(created), created, title=req.name)
-    return conversation_out(conv)
+    return conversation_json(conv)
 
 
 _INVITE_PREFIXES = ("https://t.me/joinchat/", "https://t.me/+", "t.me/joinchat/", "t.me/+")
@@ -287,7 +288,7 @@ async def join(req: JoinRequest, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to join: {e}")
     conv = await ids.upsert_dialog(db, tl_utils.get_peer_id(joined), joined, is_deactivated=is_deactivated(joined))
-    return conversation_out(conv)
+    return conversation_json(conv)
 
 
 # ── people resolution ────────────────────────────────────────────────────────

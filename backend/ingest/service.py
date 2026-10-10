@@ -206,24 +206,4 @@ async def delete_messages(account_id: int, conversation_external_id: str, messag
         })
 
 
-async def message_participants(db: AsyncSession, message_ids: Iterable[int]) -> dict[int, list[dict]]:
-    """``{message_id: [{identity_id, person_id, role, display_name, external_id}]}``."""
-    from backend.db.models import Identity
-
-    ids = list(set(message_ids))
-    out: dict[int, list[dict]] = {}
-    if not ids:
-        return out
-    rows = (await db.execute(
-        select(MessageParticipant.message_id, MessageParticipant.role, Identity)
-        .join(Identity, Identity.id == MessageParticipant.identity_id)
-        .where(MessageParticipant.message_id.in_(ids))
-        .order_by(MessageParticipant.id)
-    )).all()
-    for mid, role, ident in rows:
-        out.setdefault(mid, []).append({
-            "identity_id": ident.id, "person_id": ident.person_id, "role": role,
-            "display_name": ident.display_name, "external_id": ident.external_id,
-        })
-    return out
 
