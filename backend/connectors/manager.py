@@ -57,6 +57,11 @@ class ConnectorManager:
     def all(self) -> list[Connector]:
         return list(self._connectors.values())
 
+    def with_role(self, role: type) -> list:
+        """Registered connectors implementing ``role`` (a ``connectors.roles``
+        interface)."""
+        return [c for c in self._connectors.values() if isinstance(c, role)]
+
     def get(self, key: str) -> Optional[Connector]:
         """Look up by account key, or by channel when it has exactly one."""
         if key in self._connectors:

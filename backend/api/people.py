@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.lookups import person_or_404
+from backend.connectors.manager import manager
+from backend.connectors.roles import AddressBook
 from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Person, PersonMerge, PersonMergeSuggestion, PersonPosition
@@ -23,7 +25,6 @@ from backend.serialization import iso_utc
 from backend.serializers import channel_of, messages_out, person_out
 from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
-from backend.telegram import client as tg_client
 
 router = APIRouter()
 
@@ -211,34 +212,17 @@ async def list_people(
 
 
 @router.post("/sync")
-async def sync_address_books(db: AsyncSession = Depends(get_db)):
-    """Import every connector's address book: its entries become identities
-    marked ``is_contact`` (with their people); entries no longer in it are
-    unmarked. Telegram is the only channel with an address book today."""
-    from telethon.tl.functions.contacts import GetContactsRequest
-
-    from backend.connectors.manager import manager
-    from backend.telegram import ids
-
-    client = await tg_client.connected_client(require=False)
-    if client is None:
-        telegram = manager.get(ids.CHANNEL)
-        if telegram is None or not telegram.is_configured():
-            return {"imported": 0, "total": 0}  # no connector with an address book is signed in
-        client = await tg_client.connected_client()  # signed in but unreachable: TelegramUnavailable = 503
-    result = await client(GetContactsRequest(hash=0))
-    users = list(getattr(result, "users", None) or [])
-
-    before = await crud.identity_ids_by_external(db, ids.CHANNEL, [str(u.id) for u in users])
-    was_contact = {
-        iid for iid, ident in (await crud.get_identities(db, before.values())).items() if ident.is_contact
-    }
-    contact_ids = []
-    for u in users:
-        contact_ids.append((await ids.ensure_user_identity(db, u, is_contact=True)).id)
-    await crud.set_address_book(db, ids.CHANNEL, contact_ids)
-    await db.commit()
-    return {"imported": len(set(contact_ids) - was_contact), "total": len(users)}
+async def sync_address_books():
+    """Import every connector's address book (``AddressBook`` role): its
+    entries become identities marked ``is_contact`` (with their people);
+    entries no longer in it are unmarked."""
+    imported = total = 0
+    for connector in manager.with_role(AddressBook):
+        counts = await connector.sync_address_book()
+        if counts is not None:  # None: that account isn't signed in
+            imported += counts["imported"]
+            total += counts["total"]
+    return {"imported": imported, "total": total}
 
 
 @router.post("/refresh-statuses")

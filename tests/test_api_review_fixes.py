@@ -126,7 +126,7 @@ async def test_window_stored_external_id_on_other_channel_still_jumps(api, db):
 @pytest.mark.asyncio
 async def test_connector_file_send_keeps_files_when_request_is_cancelled(db, monkeypatch):
     from backend.api import compose
-    from backend.connectors.base import Capability
+    from backend.connectors.base import SentFiles
 
     conv = await f.conversation(db, "t1", title="Mail", channel="gmail", kind="email_thread")
     seen = {}
@@ -134,22 +134,20 @@ async def test_connector_file_send_keeps_files_when_request_is_cancelled(db, mon
     finished = asyncio.Event()
 
     class _Connector:
-        def conversation_capabilities(self, c):
-            return frozenset({Capability.SEND})
-
-        async def send(self, c, draft):
+        async def send_files(self, c, draft):
             started.set()
             await asyncio.sleep(0.05)
             seen["paths"] = [x.path for x in draft.files]
             seen["exists"] = [os.path.exists(x.path) for x in draft.files]
             finished.set()
-            return []
+            return SentFiles(message_ids=[], files=[])
 
-    monkeypatch.setattr(compose, "_connector_for", lambda c: _Connector())
+    monkeypatch.setattr(compose, "_sender", lambda c: _Connector())
     upload = UploadFile(io.BytesIO(b"data"), filename="a.pdf")
-    request = asyncio.ensure_future(
-        compose._send_files_via_connector(conv, "hi", None, "nonce-cancel", [upload])
-    )
+    request = asyncio.ensure_future(compose.send_files(
+        conversation_id=conv.id, text="hi", reply_to_message_id=None, topic_id=None,
+        client_nonce="nonce-cancel", files=[upload], subject=None, to=[], cc=[],
+    ))
     await started.wait()
     request.cancel()  # the client went away; the shielded send carries on
     await asyncio.wait_for(finished.wait(), 2)
@@ -280,7 +278,7 @@ async def test_failed_connector_reaction_is_400(api, db, monkeypatch):
         async def react(self, c, m, emoji):
             raise RuntimeError("signal-cli: rate limited")
 
-    monkeypatch.setattr(conversations, "_connector_of", lambda c: _Connector())
+    monkeypatch.setattr(conversations, "connector_with", lambda conv, role, what, capability=None: _Connector())
     conv = await f.conversation(db, "+15551234", title="Bob", channel="signal")
     msg = await f.message(db, conv, 1, "hi")
     r = await api.post(f"/api/messages/{msg.id}/react", json={"emoji": "👍"})
@@ -292,6 +290,7 @@ async def test_failed_connector_reaction_is_400(api, db, monkeypatch):
 @pytest.mark.asyncio
 async def test_own_send_payload_has_reply_preview(db, monkeypatch):
     from backend.api import compose
+    from backend.telegram import outgoing
 
     conv = await f.conversation(db, "77", title="Alice")
     original = await f.message(db, conv, 1, "the question")
@@ -300,8 +299,9 @@ async def test_own_send_payload_has_reply_preview(db, monkeypatch):
         return [dict(conversation_id=conversation_id, external_id="2", seq=2, text="the answer",
                      date=datetime(2026, 1, 1, 13, 0), is_outgoing=True)]
 
-    monkeypatch.setattr(compose, "rows_for", _rows_for)
-    out = await compose._persist_sent(conv, [object()], reply_to_seq=1, topic_id=None)
+    monkeypatch.setattr(outgoing, "rows_for", _rows_for)
+    saved_ids = await outgoing._persist_sent(conv, [object()], reply_to_seq=1, topic_id=None)
+    out = await compose._stored_messages(saved_ids)
     assert len(out) == 1
     assert out[0]["reply_to_external_id"] == "1"
     assert out[0]["reply_to_message_id"] == original.id

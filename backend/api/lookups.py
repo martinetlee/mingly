@@ -1,14 +1,19 @@
-"""Path-id lookups shared by the conversation, message, person, compose and
-admin routes: 404 for unknown ids, 409 ``unsupported_channel`` when an operation
-needs a channel the conversation isn't on."""
+"""Lookups shared by the routes: 404 for unknown ids, and the conversation's
+connector (or 409 ``unsupported_channel`` when it can't do what's asked)."""
+
+from typing import Any, Awaitable, Optional, Type, TypeVar
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.connectors.base import Capability, Connector, UnsupportedOperation
+from backend.connectors.manager import manager
 from backend.db import crud
 from backend.db.models import Conversation, Message, Person
+from backend.errors import DomainError
 from backend.serializers import channel_of
-from backend.telegram import ids
+
+R = TypeVar("R")
 
 
 async def conversation_or_404(db: AsyncSession, conversation_id: int) -> Conversation:
@@ -46,8 +51,37 @@ def unsupported_channel(conv: Conversation, what: str) -> HTTPException:
     })
 
 
-def telegram_peer(conv: Conversation, what: str = "This action") -> int:
-    """The Telegram peer id of ``conv``, or 409 for other channels."""
-    if not ids.is_telegram(conv):
+def connector_for(conv: Conversation) -> Optional[Connector]:
+    """The connector serving the conversation's account (None when that
+    account isn't connected)."""
+    return manager.for_account(channel_of(conv), conv.account_id)
+
+
+def connector_with(conv: Conversation, role: Type[R], what: str,
+                   capability: Optional[Capability] = None) -> R:
+    """The conversation's connector as ``role`` (a ``connectors.roles``
+    interface, or ``Connector`` itself), or 409 ``unsupported_channel`` when
+    it has no such role / ``capability`` in this conversation."""
+    connector = connector_for(conv)
+    if not isinstance(connector, role):
         raise unsupported_channel(conv, what)
-    return ids.peer_id_of(conv)
+    if capability is not None and capability not in connector.conversation_capabilities(conv):
+        raise unsupported_channel(conv, what)
+    return connector
+
+
+async def channel_call(conv: Conversation, call: Awaitable[Any], failure: Optional[str] = None,
+                       status: int = 400, passthrough: tuple = ()) -> Any:
+    """Await a connector operation and map its errors: domain errors (503 /
+    429 / 404 …), HTTP errors and ``passthrough`` types pass through,
+    ``UnsupportedOperation`` is 409 ``unsupported_channel``, anything else is
+    the channel refusing it: ``status`` with ``"<failure>: <error>"`` (or just
+    the error)."""
+    try:
+        return await call
+    except (HTTPException, DomainError, *passthrough):
+        raise
+    except UnsupportedOperation as e:
+        raise unsupported_channel(conv, str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status, detail=f"{failure}: {e}" if failure else str(e))

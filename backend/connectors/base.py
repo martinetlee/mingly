@@ -98,12 +98,64 @@ class OutgoingFile:
 class OutgoingMessage:
     text: str = ""
     reply_to_message_id: Optional[int] = None  # internal id, same conversation
+    topic_id: Optional[int] = None  # forum topic (channels with FORUM_TOPICS)
     subject: Optional[str] = None  # email
     # Email recipients (handles). A non-empty ``to`` is the complete To list;
     # empty = the channel's default (a reply goes to the sender / Reply-To).
     to: list[str] = field(default_factory=list)
     cc: list[str] = field(default_factory=list)
     files: list[OutgoingFile] = field(default_factory=list)
+
+
+@dataclass
+class SentFiles:
+    """Result of ``send_files``: the stored message ids (in order) and one
+    report per file: ``{"filename", "status": "sent"|"failed", "message_id"?,
+    "error"?}``."""
+    message_ids: list[int]
+    files: list[dict]
+
+    @property
+    def all_sent(self) -> bool:
+        return all(f["status"] == "sent" for f in self.files)
+
+
+class SendFailed(Exception):
+    """No file of a ``send_files`` call was sent; ``files`` is the report."""
+
+    def __init__(self, message: str, files: list[dict]):
+        super().__init__(message)
+        self.files = files
+
+
+@dataclass
+class SyncResult:
+    """Outcome of one history fetch (``HistorySync``)."""
+    # changed | unchanged | skipped | unavailable | error | not_found
+    status: str
+    conversation_id: int
+    fetched: int = 0
+    added: int = 0
+    updated: int = 0
+    deleted: int = 0
+    exhausted: bool = False
+    flood_wait: int = 0
+    error: Optional[str] = None
+    added_ids: list = field(default_factory=list)  # internal message ids
+
+    @property
+    def changed(self) -> bool:
+        return self.status == "changed"
+
+    @property
+    def completed(self) -> bool:
+        return self.status in ("changed", "unchanged")
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d.pop("added_ids", None)
+        return d
+
 
 
 class Connector(ABC):
@@ -185,6 +237,16 @@ class Connector(ABC):
         """Send a message into ``conversation``; persist it like a received
         one and return the stored message ids."""
         raise UnsupportedOperation(f"{self.display_name} can't send messages")
+
+    async def send_files(self, conversation: Any, draft: OutgoingMessage) -> SentFiles:
+        """Send ``draft.files`` (with ``draft.text`` as caption / body).
+        Default: one message carrying every file (e.g. one email)."""
+        message_ids = await self.send(conversation, draft)
+        first = message_ids[0] if message_ids else None
+        return SentFiles(
+            message_ids=message_ids,
+            files=[{"filename": f.filename, "status": "sent", "message_id": first} for f in draft.files],
+        )
 
     async def fetch_attachment(self, attachment: Any, message: Any, conversation: Any) -> str:
         """Download an attachment; returns its path relative to DATA_DIR

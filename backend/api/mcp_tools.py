@@ -41,7 +41,7 @@ from backend.telegram.archive import ARCHIVED_CHANNELS
 from backend.api.organizations import list_organizations as _list_organizations
 from backend.api.people import broadcast_person_changed, people_payload, position_dict
 from backend.api.person_notes import broadcast_notes_changed, note_dict
-from backend.telegram import client as tg_client
+from backend.telegram.connector import connector as telegram_connector
 
 MAX_LIMIT = 100
 MAX_FETCH_WAIT_SECONDS = 60
@@ -337,7 +337,7 @@ def _archive():
 
 
 async def _telegram_connected() -> bool:
-    return await tg_client.connected_client(require=False) is not None
+    return await telegram_connector.reachable()
 
 
 TELEGRAM_OFFLINE_NOTE = (

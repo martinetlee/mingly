@@ -295,14 +295,14 @@ async def test_window_endpoint_pages_by_message_id(api, db):
     assert (await api.get(url, params={"before": "garbage"})).status_code == 422
     assert (await api.get("/api/conversations/999999/messages/window")).status_code == 404
     # A stored message can be opened by its external id without any fetch.
-    with patch("backend.api.conversations.coordinator.fetch_around", AsyncMock()) as fetch:
+    with patch("backend.telegram.coordinator.coordinator.fetch_around", AsyncMock()) as fetch:
         r = await api.get(url, params={"around_external_id": "5", "limit": 2})
     assert [m["seq"] for m in r.json()["messages"]] == [4, 5] and not fetch.called
 
 
 @pytest.mark.asyncio
 async def test_window_fetches_unstored_reply_target(api, db):
-    from backend.telegram.coordinator import SyncResult
+    from backend.connectors.base import SyncResult
     conv = await seed_history(db, n=2)
     conv.last_synced_at = datetime.utcnow()
     await db.commit()
@@ -313,7 +313,7 @@ async def test_window_fetches_unstored_reply_target(api, db):
             await save(s, c, tg_msg(40, "old reply target", date=datetime(2025, 12, 1, tzinfo=UTC)))
         return SyncResult("changed", conversation_id, added=1)
 
-    with patch("backend.api.conversations.coordinator.fetch_around", side_effect=fetch) as m:
+    with patch("backend.telegram.coordinator.coordinator.fetch_around", side_effect=fetch) as m:
         r = await api.get(f"/api/conversations/{conv.id}/messages/window", params={"around_external_id": "40"})
     body = r.json()
     assert m.call_args.kwargs["anchor_external_id"] == "40"

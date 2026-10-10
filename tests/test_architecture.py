@@ -42,6 +42,12 @@ LAYERS = [
 WEB_FRAMEWORKS = ("fastapi", "starlette")
 WEB_ALLOWED = {"api", "ws", "main"}
 
+# A channel's client library and session internals stay inside its package:
+# everything else goes through the connector (``connectors.roles``).
+CHANNEL_INTERNALS = {
+    "telegram": ("telethon", "backend.telegram.client", "backend.telegram.runtime"),
+}
+
 
 def _rank() -> dict:
     rank = {}
@@ -154,5 +160,20 @@ def test_web_framework_stays_at_the_transport_edges():
         for name, top, tree in _modules()
         for module, _ in _imports(tree)
         if module.split(".")[0] in WEB_FRAMEWORKS and top not in WEB_ALLOWED
+    )
+    assert offenders == []
+
+
+def test_channel_client_libraries_stay_in_their_package():
+    offenders = sorted(
+        f"{name} imports {module}"
+        for name, top, tree in _modules()
+        for module, imported in _imports(tree)
+        for package, internals in CHANNEL_INTERNALS.items()
+        if top != package and any(
+            module == m or module.startswith(m + ".")
+            or (module == "backend.telegram" and f"backend.telegram.{imported}" in internals)
+            for m in internals
+        )
     )
     assert offenders == []

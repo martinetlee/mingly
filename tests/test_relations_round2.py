@@ -148,10 +148,10 @@ async def test_profile_degrades_to_cached_copy_when_offline(api, db):
     async def offline(identity_id, user_id):
         raise ConnectionError("offline")
 
-    with patch.object(telegram, "_fetch_profile", online):
+    with patch("backend.telegram.directory.fetch_profile", online):
         r = await api.get(f"/api/telegram/identities/{nine.id}/profile")
     assert r.json()["stale"] is False
-    with patch.object(telegram, "_fetch_profile", offline):
+    with patch("backend.telegram.directory.fetch_profile", offline):
         r = await api.get(f"/api/telegram/identities/{nine.id}/profile", params={"refresh": True})
         assert r.status_code == 200 and r.json()["stale"] is True and r.json()["first_name"] == "Nine"
         assert (await api.get(f"/api/telegram/identities/{ten.id}/profile")).status_code == 503

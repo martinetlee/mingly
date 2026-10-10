@@ -16,7 +16,6 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -27,6 +26,7 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Message, MessageAttachment
 from backend.aio import LoopLock
+from backend.connectors.base import SyncResult
 from backend.tasks import spawn
 from backend.telegram import ids
 from backend.telegram.convert import GENERAL_TOPIC_ID, is_service, is_storable, media_type, rows_for
@@ -77,34 +77,6 @@ class RateLimiter:
                 if max_wait is not None and wait > max_wait:
                     return False
                 await asyncio.sleep(wait)
-
-
-@dataclass
-class SyncResult:
-    # changed | unchanged | skipped | unavailable | error | not_found
-    status: str
-    conversation_id: int
-    fetched: int = 0
-    added: int = 0
-    updated: int = 0
-    deleted: int = 0
-    exhausted: bool = False
-    flood_wait: int = 0
-    error: Optional[str] = None
-    added_ids: list = field(default_factory=list)  # internal message ids
-
-    @property
-    def changed(self) -> bool:
-        return self.status == "changed"
-
-    @property
-    def completed(self) -> bool:
-        return self.status in ("changed", "unchanged")
-
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        d.pop("added_ids", None)
-        return d
 
 
 class SyncCoordinator:

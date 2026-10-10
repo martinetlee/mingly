@@ -42,6 +42,7 @@ __all__ = [
     "delete_messages",
     "GENERAL_TOPIC_ID",
     "message_participants",
+    "stored_topics",
 ]
 
 
@@ -620,3 +621,14 @@ async def message_participants(db: AsyncSession, message_ids: Iterable[int]) -> 
             "display_name": ident.display_name, "external_id": ident.external_id,
         })
     return out
+
+
+async def stored_topics(db: AsyncSession, conversation_id: int) -> list[tuple[int, datetime]]:
+    """``(topic_id, first message date)`` of the forum topics seen in stored
+    messages (a fallback when the channel can't list them)."""
+    rows = (await db.execute(
+        select(Message.topic_id, func.min(Message.date))
+        .where(Message.conversation_id == conversation_id, Message.topic_id.isnot(None))
+        .group_by(Message.topic_id)
+    )).all()
+    return [(tid, first) for tid, first in rows]

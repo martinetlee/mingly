@@ -132,8 +132,8 @@ async def test_anchor_not_local_is_fetched_from_telegram(api, db):
 @pytest.mark.asyncio
 async def test_anchor_view_starts_first_sync_of_never_synced_chat(api, db):
     conv = await tg_conv(db)  # last_synced_at NULL
-    from backend.api import conversations as conv_api
-    with patch.object(conv_api, "run_single") as start, use_client(None):
+    from backend.connectors import autosync
+    with patch.object(autosync, "run_single") as start, use_client(None):
         await api.get(f"/api/conversations/{conv.id}/messages/window", params={"around_external_id": "5"})
     assert start.called and start.call_args.args[0] == f"autosync:{conv.id}"
 
@@ -141,8 +141,8 @@ async def test_anchor_view_starts_first_sync_of_never_synced_chat(api, db):
 @pytest.mark.asyncio
 async def test_no_auto_sync_for_other_channels(api, db):
     mail = await f.conversation(db, "thread-1", title="Hi", kind="email_thread", channel="gmail")
-    from backend.api import conversations as conv_api
-    with patch.object(conv_api, "run_single") as start:
+    from backend.connectors import autosync
+    with patch.object(autosync, "run_single") as start:
         r = await api.get(f"/api/conversations/{mail.id}/messages/window")
     assert r.status_code == 200 and r.json()["syncing"] is False and not start.called
 
@@ -152,8 +152,10 @@ async def test_no_auto_sync_for_other_channels(api, db):
 @pytest.mark.asyncio
 async def test_first_sync_empty_only_after_deep_fetch_completes(db):
     conv = await tg_conv(db)
-    from backend.api import conversations as chats_api
-    from backend.telegram.coordinator import SyncResult
+    from backend.connectors import autosync
+    from backend.connectors.base import SyncResult
+    from backend.telegram.connector import connector as telegram
+    from backend.telegram.coordinator import coordinator
 
     def run(results):
         it = iter(results)
@@ -163,18 +165,18 @@ async def test_first_sync_empty_only_after_deep_fetch_completes(db):
     shallow = SyncResult("unchanged", conv.id, fetched=100)  # full page, nothing storable
     deep_err = SyncResult("error", conv.id, error="boom")
     deep_ok = SyncResult("unchanged", conv.id, fetched=40, exhausted=True)
-    with patch.object(chats_api.coordinator, "sync_conversation", run([shallow, deep_err, shallow, deep_ok])) as sc, \
-         patch.object(chats_api.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
-         patch.object(chats_api.asyncio, "sleep", AsyncMock()):
-        await chats_api._auto_sync(conv.id, first_sync=True)
+    with patch.object(coordinator, "sync_conversation", run([shallow, deep_err, shallow, deep_ok])) as sc, \
+         patch.object(autosync.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
+         patch.object(autosync.asyncio, "sleep", AsyncMock()):
+        await autosync._auto_sync(telegram, conv, first_sync=True)
     assert [c.args[1] for c in sc.call_args_list] == [100, 500, 100, 500]
     assert sent == [{"type": "conversation_sync_empty", "conversation_id": conv.id}]
 
     sent.clear()
-    with patch.object(chats_api.coordinator, "sync_conversation", run([shallow, deep_err] * 4)), \
-         patch.object(chats_api.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
-         patch.object(chats_api.asyncio, "sleep", AsyncMock()):
-        await chats_api._auto_sync(conv.id, first_sync=True)
+    with patch.object(coordinator, "sync_conversation", run([shallow, deep_err] * 4)), \
+         patch.object(autosync.ws_manager, "broadcast", AsyncMock(side_effect=lambda d: sent.append(d))), \
+         patch.object(autosync.asyncio, "sleep", AsyncMock()):
+        await autosync._auto_sync(telegram, conv, first_sync=True)
     assert [d["type"] for d in sent] == ["conversation_sync_failed"]
 
 

@@ -14,7 +14,7 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend.errors import ServiceUnavailable
+from backend.errors import DomainError
 from backend.features import features_payload
 from backend import instance, wiring
 from backend import secrets as vault
@@ -68,8 +68,8 @@ async def _http_error_handler(_request: Request, exc: StarletteHTTPException) ->
     return JSONResponse(status_code=exc.status_code, content=content, headers=getattr(exc, "headers", None))
 
 
-async def _service_unavailable_handler(_request: Request, exc: ServiceUnavailable) -> JSONResponse:
-    return JSONResponse(status_code=503, content={"detail": exc.detail})
+async def _domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
 
 
 async def _vault_corrupt_handler(_request: Request, exc: vault.VaultCorruptError) -> JSONResponse:
@@ -115,7 +115,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, _http_error_handler)
     app.add_exception_handler(vault.VaultCorruptError, _vault_corrupt_handler)
-    app.add_exception_handler(ServiceUnavailable, _service_unavailable_handler)
+    app.add_exception_handler(DomainError, _domain_error_handler)
     app.add_exception_handler(Exception, _unhandled_error_handler)
 
     # Optional features plug into the core's extension points.
