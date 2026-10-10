@@ -159,6 +159,10 @@ class Connector(ABC):
     async def continue_auth(self, flow_id: str, data: dict[str, Any]) -> AuthStep:
         """Raises AuthFlowError for an unknown or finished flow."""
 
+    async def on_reauthorized(self) -> None:
+        """A sign-in flow renewed this registered account's credentials (the
+        flow may have run on a provisional connector). Default: nothing."""
+
     @abstractmethod
     async def logout(self) -> None:
         """Sign the account out and forget its stored session."""

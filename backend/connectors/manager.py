@@ -125,9 +125,14 @@ class ConnectorManager:
             raise AuthFlowError("Unknown or expired sign-in flow")
         step = await connector.continue_auth(flow_id, data)
         self._track(step, connector)
-        if step.kind == "done" and connector.account_key not in self._connectors and connector.account_id is not None:
-            self.register(connector)
-            spawn(self._start_one(connector), name=f"connector_start:{connector.account_key}")
+        if step.kind == "done" and connector.account_id is not None:
+            registered = self._connectors.get(connector.account_key)
+            if registered is None:
+                self.register(connector)
+                spawn(self._start_one(connector), name=f"connector_start:{connector.account_key}")
+            else:
+                # Re-auth of a running account (or the same account added again).
+                spawn(registered.on_reauthorized(), name=f"connector_reauthorized:{connector.account_key}")
         return step
 
     async def cancel_auth(self, flow_id: str) -> None:

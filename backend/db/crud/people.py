@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.crud.organizations import get_or_create_organization
 from backend.db.crud.text import contains_ci
 from backend.db.crud.conversations import one_to_one_filter
+from backend.db.crud.identities import get_person
 from backend.db.crud.messages import with_reply_preview
 from backend.db.models import (
     Conversation, Identity, Message, MessageParticipant, Organization, Person, PersonMerge, PersonMergeSuggestion,
@@ -25,6 +26,7 @@ from backend.validators import validate_linkedin_url
 
 __all__ = [
     "VALID_STATUSES",
+    "merged_into",
     "PositionConflict",
     "explain_relationship_status",
     "interaction_stats",
@@ -568,3 +570,23 @@ async def merges_into_person(db: AsyncSession, person_id: int, include_undone: b
     if not include_undone:
         q = q.where(PersonMerge.undone_at.is_(None))
     return list((await db.execute(q.order_by(desc(PersonMerge.id)))).scalars().all())
+
+
+async def merged_into(db: AsyncSession, person_id: int) -> Optional[int]:
+    """The surviving person a removed person was merged into (following
+    later merges of the survivor), or None. Undone merges don't count."""
+    seen = {person_id}
+    current = person_id
+    while True:
+        target = (await db.execute(
+            select(PersonMerge.into_person_id)
+            .where(PersonMerge.from_person_id == current, PersonMerge.undone_at.is_(None))
+            .order_by(PersonMerge.id.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        if target is None or target in seen:
+            return None
+        if await get_person(db, target) is not None:
+            return target
+        seen.add(target)
+        current = target

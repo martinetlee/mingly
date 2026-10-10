@@ -20,6 +20,8 @@ from typing import Awaitable, Callable, Optional, Union
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from backend.db.models import AUTOINCREMENT_TABLES
+
 logger = logging.getLogger(__name__)
 
 # A migration step is a SQL string, or an async callable for data transforms
@@ -102,8 +104,6 @@ async def _rebuild_with_autoincrement(conn: AsyncConnection, table: str) -> bool
 @foreign_keys_off
 async def _never_reuse_ids(conn: AsyncConnection) -> None:
     """Every integer-id table becomes AUTOINCREMENT (models.AUTOINCREMENT_TABLES)."""
-    from backend.db.models import AUTOINCREMENT_TABLES
-
     rebuilt = [t for t in AUTOINCREMENT_TABLES if await _rebuild_with_autoincrement(conn, t)]
     leftovers = [name for name, sql in (await conn.exec_driver_sql(
         "SELECT name, sql FROM sqlite_master"

@@ -48,7 +48,7 @@ async def _count(db, model) -> int:
 
 @pytest.mark.asyncio
 async def test_retired_database_backup_survives_migration_backup_rotation(tmp_path, monkeypatch):
-    from backend.db import database
+    from backend.db import database, startup
     from backend.db.migrations import runner
 
     path = tmp_path / "mingly.db"
@@ -56,7 +56,7 @@ async def test_retired_database_backup_survives_migration_backup_rotation(tmp_pa
         old.execute("CREATE TABLE chats (id INTEGER PRIMARY KEY, telegram_id INTEGER)")
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     monkeypatch.setattr(database, "engine", engine)
-    await database.init_db()
+    await startup.init_db()
     [retired] = list((tmp_path / "backups").glob("mingly-retired-gen1-*.db"))
     os.utime(retired, (time.time() - 3600, time.time() - 3600))  # oldest backup on disk
     async with engine.connect() as conn:
@@ -71,7 +71,7 @@ async def test_retired_database_backup_survives_migration_backup_rotation(tmp_pa
 
 @pytest.mark.asyncio
 async def test_newer_schema_generation_refuses_to_start_and_keeps_the_file(tmp_path, monkeypatch):
-    from backend.db import database
+    from backend.db import database, startup
 
     path = tmp_path / "mingly.db"
     with sqlite3.connect(str(path)) as newer:
@@ -81,8 +81,8 @@ async def test_newer_schema_generation_refuses_to_start_and_keeps_the_file(tmp_p
     before = path.read_bytes()
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     monkeypatch.setattr(database, "engine", engine)
-    with pytest.raises(database.NewerSchemaError):
-        await database.init_db()
+    with pytest.raises(startup.NewerSchemaError):
+        await startup.init_db()
     await engine.dispose()
     assert path.read_bytes() == before
     assert not (tmp_path / "backups").exists()
@@ -118,7 +118,7 @@ async def _legacy_schema_db(path: Path):
     from backend.db.migrations import runner
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    from backend.db import database
+    from backend.db import database, startup
     from sqlalchemy import event
     event.listen(engine.sync_engine, "connect", database._set_sqlite_pragmas)
     tables = [Base.metadata.tables[n] for n in models.AUTOINCREMENT_TABLES]

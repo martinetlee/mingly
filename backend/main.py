@@ -3,7 +3,7 @@ import threading
 
 from backend.api.router import create_app
 from backend.config import API_HOST, API_PORT
-from backend.db.database import init_db
+from backend.db.startup import init_db
 from backend.connectors.manager import manager
 from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config

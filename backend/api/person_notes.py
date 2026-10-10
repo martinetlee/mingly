@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.lookups import person_or_404
 from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import PersonNote
@@ -62,7 +63,6 @@ def _citations(raw: Optional[List[Citation]]):
 
 
 async def _require_person(db: AsyncSession, person_id: int) -> None:
-    from backend.api.people import person_or_404  # 404 carries merged_into for merged-away people
 
     await person_or_404(db, person_id)
 

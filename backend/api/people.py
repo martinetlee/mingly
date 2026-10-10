@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.lookups import person_or_404
 from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Person, PersonMerge, PersonMergeSuggestion, PersonPosition
@@ -147,37 +148,6 @@ async def person_payload(db: AsyncSession, person: Person) -> dict:
 async def broadcast_person_changed(person_id: int) -> None:
     await ws_manager.broadcast({"type": "person_changed", "person_id": person_id})
 
-
-async def merged_into(db: AsyncSession, person_id: int) -> Optional[int]:
-    """The surviving person a removed person was merged into (following
-    later merges of the survivor), or None. Undone merges don't count."""
-    seen = {person_id}
-    current = person_id
-    while True:
-        target = (await db.execute(
-            select(PersonMerge.into_person_id)
-            .where(PersonMerge.from_person_id == current, PersonMerge.undone_at.is_(None))
-            .order_by(PersonMerge.id.desc())
-            .limit(1)
-        )).scalar_one_or_none()
-        if target is None or target in seen:
-            return None
-        if await crud.get_person(db, target) is not None:
-            return target
-        seen.add(target)
-        current = target
-
-
-async def person_or_404(db: AsyncSession, person_id: int) -> Person:
-    """404 for unknown ids; a person that was merged away answers
-    ``{"detail", "merged_into": <surviving person id>}``."""
-    person = await crud.get_person(db, person_id)
-    if person is None:
-        survivor = await merged_into(db, person_id)
-        if survivor is not None:
-            raise HTTPException(status_code=404, detail={"message": "Person not found", "merged_into": survivor})
-        raise HTTPException(status_code=404, detail="Person not found")
-    return person
 
 
 async def _changed(db: AsyncSession, person: Person) -> dict:

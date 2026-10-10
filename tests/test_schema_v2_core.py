@@ -153,7 +153,7 @@ async def test_deleting_conversation_cascades(db):
 @pytest.mark.asyncio
 async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
     from sqlalchemy.ext.asyncio import create_async_engine
-    from backend.db import database
+    from backend.db import database, startup
 
     path = tmp_path / "mingly.db"
     with sqlite3.connect(str(path)) as old:
@@ -161,7 +161,7 @@ async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
         old.execute("INSERT INTO chats (telegram_id) VALUES (77)")
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     monkeypatch.setattr(database, "engine", engine)
-    await database.init_db()
+    await startup.init_db()
     [backup] = list((tmp_path / "backups").glob("mingly-retired-gen1-*.db"))
     with sqlite3.connect(str(backup)) as b:
         assert b.execute("SELECT telegram_id FROM chats").fetchone() == (77,)
@@ -170,7 +170,7 @@ async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
         assert "chats" not in tables and "conversations" in tables
         assert new.execute("SELECT value FROM schema_meta").fetchone() == ("2",)
     # A current DB is left alone on the next start.
-    await database.init_db()
+    await startup.init_db()
     assert len(list((tmp_path / "backups").glob("*.db"))) == 1
     await engine.dispose()
 

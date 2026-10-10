@@ -271,6 +271,43 @@ async def test_multi_account_sign_in_registers_and_starts_the_new_account(db):
 
 
 @pytest.mark.asyncio
+async def test_re_auth_of_a_registered_account_notifies_the_running_connector(db):
+    """A sign-in that ends on an already-registered account (re-auth, or the
+    same mailbox added again from a provisional connector) reaches the
+    running connector via on_reauthorized; nothing is registered twice."""
+    import asyncio
+
+    reauthorized = []
+
+    class _ReMail(_Mail):
+        async def on_reauthorized(self):
+            reauthorized.append(self)
+
+        async def continue_auth(self, flow_id, data):
+            if self.account_id is None:  # provisional: resolve to the existing row
+                self.account_id = data["account_id"]
+            return AuthStep(flow_id, "done")
+
+    m = ConnectorManager()
+    m.register_factory("mail", "Mail", lambda account_id: _ReMail(account_id))
+    first = await m.begin_auth("mail", {})
+    await m.continue_auth(first.flow_id, {"account_id": 7})
+    await asyncio.sleep(0.01)
+    [running] = m.all()
+    assert reauthorized == []  # a new account is started, not "re-authorized"
+
+    again = await m.begin_auth("mail", {})  # same account added again
+    await m.continue_auth(again.flow_id, {"account_id": 7})
+    await asyncio.sleep(0.01)
+    assert m.all() == [running] and reauthorized == [running]
+
+    reauth = await m.begin_auth(running.account_key, {})  # re-auth of the running one
+    await m.continue_auth(reauth.flow_id, {})
+    await asyncio.sleep(0.01)
+    assert reauthorized == [running, running]
+
+
+@pytest.mark.asyncio
 async def test_capabilities_come_from_the_conversations_own_account(db):
     from backend.connectors import manager as mgr_mod
     from backend.api.views import conversation_json

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.lookups import person_or_404
 from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Account
@@ -144,8 +145,6 @@ async def list_events(
 @router.get("/people/{person_id}/upcoming")
 async def person_upcoming(person_id: int, limit: int = 5, db: AsyncSession = Depends(get_db)):
     """Meetings with this person that aren't over yet, earliest first."""
-    from backend.api.people import person_or_404  # 404 carries merged_into for merged-away people
-
     await person_or_404(db, person_id)
     now = local_now()
     events = await crud.person_meetings(

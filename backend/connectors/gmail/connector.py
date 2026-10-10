@@ -328,7 +328,6 @@ class GmailConnector(Connector):
         except Exception as e:
             logger.warning("Gmail sign-in could not be completed: %r", e)
             return AuthStep(flow_id=flow_id, kind="error", title="Google sign-in failed", message=str(e))
-        self._restart_registered()
         return AuthStep(flow_id=flow_id, kind="done", title="Gmail connected", message=f"Signed in as {email}")
 
     async def abandon_flow(self, flow_id: str) -> None:
@@ -382,15 +381,11 @@ class GmailConnector(Connector):
         self._self_email = email
         return email
 
-    def _restart_registered(self) -> None:
+    async def on_reauthorized(self) -> None:
         """Re-auth of a running account (or the same mailbox added again):
-        the registered connector picks up the new grant. A brand-new account
-        is registered and started by the manager instead."""
-        from backend.connectors.manager import manager
-
-        registered = manager.get(self.account_key)
-        if registered is not None and hasattr(registered, "restart"):
-            spawn(registered.restart(), name=f"gmail_restart:{self.account_id}")
+        pick up the new grant. (A brand-new account is registered and started
+        by the manager instead.)"""
+        await self.restart()
 
     # -- sync loop ---------------------------------------------------------------------------
 
