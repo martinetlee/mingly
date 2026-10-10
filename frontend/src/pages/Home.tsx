@@ -10,7 +10,7 @@ import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useCoalescedRefetch } from '../hooks/useCoalescedRefetch'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMentionNavigator, useMentions } from '../hooks/useMentions'
-import CatchUpQueue, { applyTriageUpdate } from '../components/CatchUpQueue'
+import CatchUpQueue, { applyTriageUpdate } from '../components/intelligence/CatchUpQueue'
 import MentionCard, {
   MENTION_FILTER_OPTIONS,
   countMentions,
@@ -18,9 +18,9 @@ import MentionCard, {
   mentionFilterClass,
   mentionKey,
   type MentionFilter,
-} from '../components/MentionCard'
-import { BriefingEntryList } from '../components/BriefingEntryCard'
-import NoAccountsNotice from '../components/NoAccountsNotice'
+} from '../components/intelligence/MentionCard'
+import { BriefingEntryList } from '../components/intelligence/BriefingEntryCard'
+import NoAccountsNotice from '../components/channels/NoAccountsNotice'
 import { errorMessage, toast } from '../lib/toast'
 import { fmtRelative } from '../utils/time'
 

@@ -19,7 +19,7 @@ vi.mock('../../../api/accounts', async (importOriginal) => ({
 import { beginAccountAuth, getAccounts, removeAccount } from '../../../api/accounts'
 import type { Account, AccountsResponse } from '../../../api/accounts'
 import { ConfirmProvider } from '../../../components/ui'
-import NoAccountsNotice from '../../../components/NoAccountsNotice'
+import NoAccountsNotice from '../../../components/channels/NoAccountsNotice'
 import Connections from '../Connections'
 
 const account = (over: Partial<Account>): Account => ({

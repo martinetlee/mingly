@@ -26,7 +26,7 @@ import {
   updateAiConversationTitle,
 } from '../../api/client'
 import type { AiConversationDetail, AiConversationSummary } from '../../api/types'
-import Markdown from '../../components/Markdown'
+import Markdown from '../../components/ui/Markdown'
 import { useConfirm } from '../../components/ui'
 import { errorMessage, reportError } from '../../lib/toast'
 import { fmtDate } from '../../utils/time'

@@ -11,7 +11,7 @@ import {
 } from '../../api/client'
 import { setChannelNotifPref } from '../../api/email'
 import type { Prefs } from '../../api/types'
-import { channelLabel } from '../../components/ChannelIcon'
+import { channelLabel } from '../../components/channels/ChannelIcon'
 import { WEEKDAYS, dayLabel } from '../../features/briefing/schedule'
 import { useAccounts } from '../../hooks/useAccounts'
 import { useSettingField } from '../../hooks/useSettingField'

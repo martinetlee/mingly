@@ -16,9 +16,9 @@ import { getArchivedConversations, getHiddenConversations, getTags, MESSENGERS_O
 import { useLatestQuery } from '../../hooks/useLatestQuery'
 import { errorMessage } from '../../lib/toast'
 import { fmtDate } from '../../utils/time'
-import ChannelIcon, { channelLabel } from '../../components/ChannelIcon'
-import SenderAvatar from '../../components/SenderAvatar'
-import ConversationAvatar from '../../components/ConversationAvatar'
+import ChannelIcon, { channelLabel } from '../../components/channels/ChannelIcon'
+import SenderAvatar from '../../components/chat/SenderAvatar'
+import ConversationAvatar from '../../components/chat/ConversationAvatar'
 import { LoadError } from '../../components/ui'
 import { conversationTitle, isDirectoryHit, kindColor, kindLabel } from '../../lib/conversation'
 

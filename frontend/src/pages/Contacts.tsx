@@ -13,12 +13,12 @@ import { invalidatePerson, invalidateAllPeople } from '../hooks/usePersonSummary
 import { reportError, errorMessage, toast } from '../lib/toast'
 import { can } from '../lib/capabilities'
 import { personUrl } from '../lib/routes'
-import ChannelIcon from '../components/ChannelIcon'
-import ContactInfoSection from '../components/ContactInfoSection'
-import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from '../components/PersonCard'
-import ChatMessagesView from '../components/ChatMessagesView'
+import ChannelIcon from '../components/channels/ChannelIcon'
+import ContactInfoSection from '../components/people/ContactInfoSection'
+import PersonCard, { RELATIONSHIP_STATUS_COLORS, RELATIONSHIP_STATUS_LABELS, fmtRelative } from '../components/people/PersonCard'
+import ChatMessagesView from '../components/chat/ChatMessagesView'
 import { applyReaction } from './chats/ChatPane'
-import ComposeBar from '../components/ComposeBar'
+import ComposeBar from '../components/chat/ComposeBar'
 import { LoadError } from '../components/ui'
 
 function ContactCard({

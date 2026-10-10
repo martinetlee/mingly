@@ -27,10 +27,10 @@ vi.mock('../../api/client', () => {
 })
 vi.mock('../../hooks/useWebSocket', () => ({ useWsEvent: () => {}, useWebSocket: () => {} }))
 vi.mock('../../hooks/useKeyboardShortcuts', () => ({ useKeyboardShortcuts: () => {} }))
-vi.mock('../../components/MessageList', () => ({
+vi.mock('../../components/chat/MessageList', () => ({
   default: ({ messages }: { messages: { id: number }[] }) => <div data-testid="message-list">{messages.length} messages</div>,
 }))
-vi.mock('../../components/ComposeBar', () => ({ default: () => null }))
+vi.mock('../../components/chat/ComposeBar', () => ({ default: () => null }))
 vi.mock('../chats/ChatPane', () => ({ applyReaction: (m: unknown) => m }))
 
 import Contacts, { parseContactFilter } from '../Contacts'

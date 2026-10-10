@@ -77,7 +77,7 @@ vi.mock('../../api/session', async (orig) => ({
   ...(await orig<typeof import('../../api/session')>()),
   authenticatedMediaUrl: (p: string) => p,
 }))
-vi.mock('../../components/ChatInfoPanel', () => ({ default: () => null }))
+vi.mock('../../components/chat/ChatInfoPanel', () => ({ default: () => null }))
 vi.mock('react-virtuoso', () => import('../../test/virtuosoTestShim'))
 
 import Chats from '../Chats'
