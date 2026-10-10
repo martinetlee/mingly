@@ -35,6 +35,12 @@ class NotAuthenticated(DomainError):
     default_message = "Not authenticated"
 
 
+class InvalidRequest(DomainError):
+    """The request's parameters are invalid."""
+    status_code = 400
+    default_message = "Invalid request"
+
+
 class NotFound(DomainError):
     status_code = 404
     default_message = "Not found"

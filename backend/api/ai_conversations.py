@@ -8,15 +8,14 @@ from typing import List, Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import AIConversation, AIConversationMessage
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMUnavailable, complete_text
 from backend.serialization import iso_utc
-from backend.db.results import affected_rows
 
 router = APIRouter()
 
@@ -65,6 +64,28 @@ def _fmt(dt: Optional[datetime]) -> str:
     return iso_utc(dt or datetime.utcnow())
 
 
+async def _conversation_or_404(db: AsyncSession, ai_conversation_id: int) -> AIConversation:
+    conv = await db.get(AIConversation, ai_conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
+def _message_out(m: AIConversationMessage) -> ConversationMessageOut:
+    return ConversationMessageOut(id=m.id, role=m.role, content=m.content, created_at=_fmt(m.created_at))
+
+
+async def _detail(db: AsyncSession, conv: AIConversation) -> ConversationDetailOut:
+    msgs = await crud.get_ai_conversation_messages(db, conv.id)
+    return ConversationDetailOut(
+        id=conv.id,
+        title=conv.title,
+        created_at=_fmt(conv.created_at),
+        updated_at=_fmt(conv.updated_at),
+        messages=[_message_out(m) for m in msgs if m.role != "tool"],  # tool traces are LLM context only
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -72,32 +93,13 @@ def _fmt(dt: Optional[datetime]) -> str:
 @router.get("/", response_model=List[ConversationSummaryOut])
 async def list_conversations(db: AsyncSession = Depends(get_db)):
     """List all conversations newest-first, with message counts."""
-    msg_count_sub = (
-        select(
-            AIConversationMessage.ai_conversation_id,
-            func.count(AIConversationMessage.id).label("cnt"),
+    return [
+        ConversationSummaryOut(
+            id=conv.id, title=conv.title, created_at=_fmt(conv.created_at), updated_at=_fmt(conv.updated_at),
+            message_count=count,
         )
-        .where(AIConversationMessage.role != "tool")  # internal tool traces aren't visible messages
-        .group_by(AIConversationMessage.ai_conversation_id)
-        .subquery()
-    )
-    rows = await db.execute(
-        select(AIConversation, msg_count_sub.c.cnt)
-        .outerjoin(msg_count_sub, AIConversation.id == msg_count_sub.c.ai_conversation_id)
-        .order_by(desc(AIConversation.updated_at))
-    )
-    result = []
-    for conv, cnt in rows.all():
-        result.append(
-            ConversationSummaryOut(
-                id=conv.id,
-                title=conv.title,
-                created_at=_fmt(conv.created_at),
-                updated_at=_fmt(conv.updated_at),
-                message_count=cnt or 0,
-            )
-        )
-    return result
+        for conv, count in await crud.list_ai_conversations(db)
+    ]
 
 
 @router.post("/", response_model=ConversationDetailOut, status_code=201)
@@ -120,31 +122,7 @@ async def create_conversation(db: AsyncSession = Depends(get_db)):
 @router.get("/{ai_conversation_id}", response_model=ConversationDetailOut)
 async def get_conversation(ai_conversation_id: int, db: AsyncSession = Depends(get_db)):
     """Get a conversation with all its messages."""
-    conv = await db.get(AIConversation, ai_conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    msgs_result = await db.execute(
-        select(AIConversationMessage)
-        .where(AIConversationMessage.ai_conversation_id == ai_conversation_id)
-        .order_by(AIConversationMessage.created_at)
-    )
-    msgs = msgs_result.scalars().all()
-    return ConversationDetailOut(
-        id=conv.id,
-        title=conv.title,
-        created_at=_fmt(conv.created_at),
-        updated_at=_fmt(conv.updated_at),
-        messages=[
-            ConversationMessageOut(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=_fmt(m.created_at),
-            )
-            for m in msgs
-            if m.role != "tool"  # internal tool traces are LLM context only
-        ],
-    )
+    return await _detail(db, await _conversation_or_404(db, ai_conversation_id))
 
 
 @router.put("/{ai_conversation_id}", response_model=ConversationDetailOut)
@@ -152,51 +130,19 @@ async def update_conversation_title(
     ai_conversation_id: int, body: UpdateTitleIn, db: AsyncSession = Depends(get_db)
 ):
     """Update the title of a conversation."""
-    conv = await db.get(AIConversation, ai_conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = await _conversation_or_404(db, ai_conversation_id)
     conv.title = body.title
     conv.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(conv)
-    msgs_result = await db.execute(
-        select(AIConversationMessage)
-        .where(AIConversationMessage.ai_conversation_id == ai_conversation_id)
-        .order_by(AIConversationMessage.created_at)
-    )
-    msgs = msgs_result.scalars().all()
-    return ConversationDetailOut(
-        id=conv.id,
-        title=conv.title,
-        created_at=_fmt(conv.created_at),
-        updated_at=_fmt(conv.updated_at),
-        messages=[
-            ConversationMessageOut(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=_fmt(m.created_at),
-            )
-            for m in msgs
-            if m.role != "tool"  # internal tool traces are LLM context only
-        ],
-    )
+    return await _detail(db, conv)
 
 
 @router.delete("/{ai_conversation_id}", status_code=204)
 async def delete_conversation(ai_conversation_id: int, db: AsyncSession = Depends(get_db)):
     """Delete a conversation and all its messages."""
-    conv = await db.get(AIConversation, ai_conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    # Delete messages first (SQLite may not enforce FK cascade without pragma)
-    msgs_result = await db.execute(
-        select(AIConversationMessage).where(AIConversationMessage.ai_conversation_id == ai_conversation_id)
-    )
-    for msg in msgs_result.scalars().all():
-        await db.delete(msg)
-    await db.delete(conv)
-    await db.commit()
+    await _conversation_or_404(db, ai_conversation_id)
+    await crud.delete_ai_conversation(db, ai_conversation_id)
 
 
 @router.post("/{ai_conversation_id}/messages", response_model=ConversationMessageOut, status_code=201)
@@ -204,28 +150,10 @@ async def append_message(
     ai_conversation_id: int, body: AppendMessageIn, db: AsyncSession = Depends(get_db)
 ):
     """Append a message to a conversation."""
-    conv = await db.get(AIConversation, ai_conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    await _conversation_or_404(db, ai_conversation_id)
     if body.role not in ("user", "assistant"):
         raise HTTPException(status_code=400, detail="role must be 'user' or 'assistant'")
-    now = datetime.utcnow()
-    msg = AIConversationMessage(
-        ai_conversation_id=ai_conversation_id,
-        role=body.role,
-        content=body.content,
-        created_at=now,
-    )
-    db.add(msg)
-    conv.updated_at = now
-    await db.commit()
-    await db.refresh(msg)
-    return ConversationMessageOut(
-        id=msg.id,
-        role=msg.role,
-        content=msg.content,
-        created_at=_fmt(msg.created_at),
-    )
+    return _message_out(await crud.add_ai_conversation_message(db, ai_conversation_id, body.role, body.content))
 
 
 @router.post("/{ai_conversation_id}/suggest-title")
@@ -238,19 +166,11 @@ async def suggest_title(ai_conversation_id: int, db: AsyncSession = Depends(get_
     untitled (WHERE title IS NULL), so it never overwrites a manual rename;
     in that case the current title is returned with applied=false.
     """
-    conv = await db.get(AIConversation, ai_conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = await _conversation_or_404(db, ai_conversation_id)
     if conv.title:
         return {"title": conv.title, "applied": False}
 
-    msgs_result = await db.execute(
-        select(AIConversationMessage)
-        .where(AIConversationMessage.ai_conversation_id == ai_conversation_id, AIConversationMessage.role != "tool")
-        .order_by(AIConversationMessage.created_at)
-        .limit(6)
-    )
-    msgs = msgs_result.scalars().all()
+    msgs = [m for m in await crud.get_ai_conversation_messages(db, ai_conversation_id) if m.role != "tool"][:6]
     if not msgs:
         return {"title": None, "applied": False}
     convo_text = "\n".join(f"{m.role.upper()}: {m.content[:300]}" for m in msgs)
@@ -279,14 +199,5 @@ async def suggest_title(ai_conversation_id: int, db: AsyncSession = Depends(get_
     title = raw_title.strip().strip('"\'').strip()[:60] or None
     if not title:
         return {"title": None, "applied": False}
-
-    res = await db.execute(
-        update(AIConversation)
-        .where(AIConversation.id == ai_conversation_id, AIConversation.title.is_(None))
-        .values(title=title, updated_at=datetime.utcnow())
-    )
-    await db.commit()
-    if affected_rows(res):
-        return {"title": title, "applied": True}
-    current = (await db.execute(select(AIConversation.title).where(AIConversation.id == ai_conversation_id))).scalar()
-    return {"title": current, "applied": False}
+    applied, current = await crud.set_ai_title_if_untitled(db, ai_conversation_id, title)
+    return {"title": current, "applied": applied}

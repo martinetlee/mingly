@@ -34,7 +34,7 @@ from backend.features import shield_enabled
 from backend.prefs import get_pref
 from backend.scam.requests import build_scan_request
 from backend.scam.scan import MAX_AUTO_ATTEMPTS
-from backend.scam.service import get_scam_service
+from backend.scam import service as scam_service
 from backend.scam.verdict import unscanned_condition
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
@@ -226,7 +226,7 @@ class _ScanQueue:
     async def _process(self, key: tuple, source: str) -> None:
 
         conversation_id, message_id = key
-        svc = get_scam_service()
+        svc = scam_service.get_scam_service()
         req = await build_scan_request(conversation_id, [message_id]) if svc is not None else None
         if req is not None:
             await svc.check_messages_for_scam(req, source=source)
@@ -281,7 +281,7 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
     doesn't scan the user's whole recent history.
     """
 
-    if not shield_enabled() or get_scam_service() is None:
+    if not shield_enabled() or scam_service.get_scam_service() is None:
         return 0
     now = datetime.utcnow()
     cutoff = now - timedelta(hours=max_age_hours)
@@ -317,7 +317,7 @@ async def scan_unscanned_messages(max_messages: int = 200, max_age_hours: int = 
 async def resume_pending_checks() -> None:
     """Startup: re-run checks a previous process left unfinished."""
 
-    svc = get_scam_service()
+    svc = scam_service.get_scam_service()
     if svc is None:
         return
     for conversation_id, message_ids in await svc.resume_pending_requests():

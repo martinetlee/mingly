@@ -234,7 +234,8 @@ async def test_export_has_no_cap_and_cleans_old_files(api, db, tmp_path, monkeyp
     import time
     import backend.api.scam as scam_api
     monkeypatch.setattr(scam_api, "_EXPORTS_DIR", tmp_path / "exports")
-    monkeypatch.setattr(scam_api, "_EXPORT_BATCH", 4)
+    from backend.scam import views as scam_views
+    monkeypatch.setattr(scam_views, "EXPORT_BATCH", 4)
     (tmp_path / "exports").mkdir()
     stale = tmp_path / "exports" / "old.json"
     stale.write_text("[]")

@@ -13,7 +13,10 @@ from backend.db.crud.accounts import (
 )
 from backend.db.crud.ai import (
     add_ai_conversation_message,
+    delete_ai_conversation,
     get_ai_conversation_messages,
+    list_ai_conversations,
+    set_ai_title_if_untitled,
 )
 from backend.db.crud.briefing import (
     add_briefing_entry,
@@ -268,6 +271,7 @@ __all__ = [
     "create_tag",
     "create_workspace",
     "create_workspace_board",
+    "delete_ai_conversation",
     "delete_board_column",
     "delete_briefing_run",
     "delete_calendar_event",
@@ -349,6 +353,7 @@ __all__ = [
     "identity_ids_by_external",
     "identity_ids_for_person",
     "interaction_stats",
+    "list_ai_conversations",
     "list_briefing_runs",
     "list_calendar_events",
     "list_conversations",
@@ -397,6 +402,7 @@ __all__ = [
     "self_person",
     "set_account_owner",
     "set_address_book",
+    "set_ai_title_if_untitled",
     "set_attachment_local_path",
     "set_conversation_flags",
     "set_manual_relationship_status",

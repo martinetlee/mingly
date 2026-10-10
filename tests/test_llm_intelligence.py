@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.api import intelligence
+from backend.ai import agent, chat_tools
+from backend.llm.base import ChatMessage
 from backend.db import crud
 from backend.db.models import AIConversation
 from backend.llm.base import CompletionResponse, LLMTimeout, ToolCall
@@ -46,11 +47,11 @@ async def test_agent_loop_uses_provider_tools_and_persists_turn_once(db):
     ])
     # A client that still appends the user message itself must not cause a duplicate.
     await crud.add_ai_conversation_message(db, conv_id, "user", "what about the roadmap?")
-    uid = await intelligence._persist_user_message(conv_id, "what about the roadmap?")
-    history = intelligence._window_history(await crud.get_ai_conversation_messages(db, conv_id))
+    uid = await agent.persist_user_message(conv_id, "what about the roadmap?")
+    history = agent.window_history(await crud.get_ai_conversation_messages(db, conv_id))
 
-    with patch.object(intelligence, "get_provider", return_value=provider):
-        events = _parse([c async for c in intelligence._run_agent(history, conv_id, uid)])
+    with patch.object(agent, "get_provider", return_value=provider):
+        events = _parse([c async for c in agent.run_agent(history, conv_id, uid)])
 
     names = [e for e, _ in events]
     assert names[0] == "tool_call" and names[1] == "tool_result" and names[-1] == "done"
@@ -61,7 +62,7 @@ async def test_agent_loop_uses_provider_tools_and_persists_turn_once(db):
     second = provider.complete_calls[1]["messages"]
     assert second[-2].role == "assistant" and second[-2].tool_calls[0]["id"] == "c1"
     assert second[-1].role == "tool" and second[-1].tool_call_id == "c1"
-    assert provider.complete_calls[0]["tools"] is intelligence.TOOLS
+    assert provider.complete_calls[0]["tools"] is chat_tools.TOOLS
 
     rows = await crud.get_ai_conversation_messages(db, conv_id)
     assert [r.role for r in rows] == ["user", "tool", "assistant"]
@@ -74,9 +75,9 @@ async def test_agent_loop_uses_provider_tools_and_persists_turn_once(db):
 async def test_agent_llm_failure_ends_with_typed_error_and_persists_nothing(db):
     conv_id = await _ai_conversation(db)
     provider = FakeProvider(fail_with=LLMTimeout("slow"))
-    with patch.object(intelligence, "get_provider", return_value=provider):
-        events = _parse([c async for c in intelligence._run_agent(
-            [intelligence.ChatMessage(role="user", content="hi")], conv_id)])
+    with patch.object(agent, "get_provider", return_value=provider):
+        events = _parse([c async for c in agent.run_agent(
+            [ChatMessage(role="user", content="hi")], conv_id)])
     assert events == [("error", {"message": "The AI model timed out.", "kind": "timeout"})]
     assert await crud.get_ai_conversation_messages(db, conv_id) == []
 
@@ -88,7 +89,7 @@ def test_history_window_is_budgeted_and_starts_with_user():
 
     rows = [Row("user", "u" * 10), Row("assistant", "a" * 30000)] + \
         [Row("user", "q1"), Row("tool", "t"), Row("assistant", "a1"), Row("user", "q2")]
-    out = intelligence._window_history(rows)
+    out = agent.window_history(rows)
     assert out[0].role == "user" and out[0].content == "q1"
     assert out[1].role == "assistant" and out[1].content.startswith("[Tool results")
     assert out[-1].content == "q2"
@@ -98,7 +99,7 @@ def test_history_window_is_budgeted_and_starts_with_user():
 async def test_chat_endpoint_persists_user_message(api, db):
     conv_id = await _ai_conversation(db)
     provider = FakeProvider(responses=[_resp(content="hello!")])
-    with patch.object(intelligence, "get_provider", return_value=provider):
+    with patch.object(agent, "get_provider", return_value=provider):
         resp = await api.post("/api/intelligence/chat", json={"ai_conversation_id": conv_id, "message": "hey"})
     assert resp.status_code == 200
     assert "event: done" in resp.text
@@ -111,8 +112,8 @@ async def test_get_chat_messages_tool_is_truncated(db):
     big = await seed_chat(db, -1001, "Big")
     for i in range(1, 61):
         await seed_msg(db, big, i, "x" * 2000, minutes_ago=100 - i)
-    out = await intelligence.execute_tool("get_chat_messages", {"chat_name": "Big", "limit": 100}, db)
-    assert len(out) <= intelligence.TOOL_RESULT_CHARS + 200
+    out = await chat_tools.execute_tool("get_chat_messages", {"chat_name": "Big", "limit": 100}, db)
+    assert len(out) <= chat_tools.TOOL_RESULT_CHARS + 200
     assert "…" in out
 
 
@@ -171,12 +172,12 @@ async def test_tag_tools_never_use_board_stage_tags(db):
     db.add(stage)
     await db.commit()
 
-    out = await intelligence.execute_tool("tag_chat", {"chat_name": "Alpha", "tag_name": "done"}, db)
+    out = await chat_tools.execute_tool("tag_chat", {"chat_name": "Alpha", "tag_name": "done"}, db)
     assert out.startswith("Tagged"), out
     tags = await crud.get_tags_for_conversation(db, conv.id)
     assert [t.category for t in tags] != [crud.STAGE_CATEGORY] and stage.id not in [t.id for t in tags]
 
-    out = await intelligence.execute_tool("tag_chats_matching", {"keyword": "Alpha", "tag_name": "  "}, db)
+    out = await chat_tools.execute_tool("tag_chats_matching", {"keyword": "Alpha", "tag_name": "  "}, db)
     assert out.startswith("Tool error"), out
     user_tags = (await db.execute(select(Tag).where(Tag.category.is_(None)))).scalars().all()
     assert all(t.name.strip() for t in user_tags)
@@ -190,21 +191,21 @@ async def test_agent_prompt_fits_provider_context_window(db):
         await seed_msg(db, big, i, "長訊息 " * 150, minutes_ago=200 - i)  # CJK-heavy
     history = []
     for i in range(30):
-        history.append(intelligence.ChatMessage(role="user", content=f"old question {i} " + "x" * 3000))
-        history.append(intelligence.ChatMessage(role="assistant", content="old answer " + "y" * 3000))
-    history.append(intelligence.ChatMessage(role="user", content="what is in Big?"))
+        history.append(ChatMessage(role="user", content=f"old question {i} " + "x" * 3000))
+        history.append(ChatMessage(role="assistant", content="old answer " + "y" * 3000))
+    history.append(ChatMessage(role="user", content="what is in Big?"))
 
     provider = FakeProvider(context_tokens=8192, responses=[
         _resp(tool_calls=[ToolCall(id="c1", name="get_chat_messages", arguments={"chat_name": "Big", "limit": 100})]),
         _resp(content="done"),
     ])
-    with patch.object(intelligence, "get_provider", return_value=provider):
-        events = _parse([c async for c in intelligence._run_agent(history, None)])
+    with patch.object(agent, "get_provider", return_value=provider):
+        events = _parse([c async for c in agent.run_agent(history, None)])
     assert events[-1][0] == "done"
     for call in provider.complete_calls:
         msgs = call["messages"]
-        prompt = sum(intelligence._message_tokens(m) for m in msgs) + estimate_tokens(json.dumps(call["tools"]))
-        assert prompt + intelligence.AGENT_MAX_TOKENS <= 8192, prompt
+        prompt = sum(agent._message_tokens(m) for m in msgs) + estimate_tokens(json.dumps(call["tools"]))
+        assert prompt + agent.AGENT_MAX_TOKENS <= 8192, prompt
         assert msgs[0].role == "system" and msgs[1].role == "user"
         assert any(m.content == "what is in Big?" for m in msgs)
     # the tool result survived (clipped), paired with its tool call
@@ -220,7 +221,7 @@ async def test_telegram_tools_report_not_connected(db):
         return None
 
     with patch("backend.telegram.client.connected_client", side_effect=no_client):
-        out = await intelligence.execute_tool("sync_tagged_chats", {"tag_name": "X"}, db)
+        out = await chat_tools.execute_tool("sync_tagged_chats", {"tag_name": "X"}, db)
         assert out.startswith("Telegram not connected")
 
 

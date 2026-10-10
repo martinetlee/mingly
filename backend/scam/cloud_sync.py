@@ -466,6 +466,15 @@ class CloudSyncManager:
         return get_running("cloud_sync") is not None
 
     @property
+    def last_sync_outcome(self) -> dict:
+        """Status / error / details of the last finished sync."""
+        return {
+            "last_sync_status": self._last_sync_status,
+            "last_sync_error": self._last_sync_error,
+            "last_sync_details": self._last_sync_details,
+        }
+
+    @property
     def last_synced_at(self) -> Optional[datetime]:
         return self._last_synced_at
 

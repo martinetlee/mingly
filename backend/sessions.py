@@ -17,8 +17,8 @@ import secrets
 import time
 from typing import Callable, Dict, List, Optional
 
+from backend import prefs
 from backend import secrets as vault
-from backend.prefs import get_pref
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _notify_revoked() -> None:
 
 
 def get_idle_timeout_minutes() -> int:
-    raw = get_pref("session_idle_timeout_minutes", DEFAULT_IDLE_TIMEOUT_MINUTES)
+    raw = prefs.get_pref("session_idle_timeout_minutes", DEFAULT_IDLE_TIMEOUT_MINUTES)
     try:
         value = int(raw)
     except (TypeError, ValueError):
