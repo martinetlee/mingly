@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import type { PeoplePage, Person } from '../../api/types'
-import { makeConversation, makePerson, msg } from '../chats/__tests__/fixtures'
+import { makeConversation, makePerson, msg } from '../../test/fixtures'
 import { ConfirmProvider } from '../../components/ui/ConfirmDialog'
 
 const api = vi.hoisted(() => ({
@@ -27,10 +27,10 @@ vi.mock('../../api/client', () => {
 })
 vi.mock('../../hooks/useWebSocket', () => ({ useWsEvent: () => {}, useWebSocket: () => {} }))
 vi.mock('../../hooks/useKeyboardShortcuts', () => ({ useKeyboardShortcuts: () => {} }))
-vi.mock('../../components/MessageList', () => ({
+vi.mock('../../components/chat/MessageList', () => ({
   default: ({ messages }: { messages: { id: number }[] }) => <div data-testid="message-list">{messages.length} messages</div>,
 }))
-vi.mock('../../components/ComposeBar', () => ({ default: () => null }))
+vi.mock('../../components/chat/ComposeBar', () => ({ default: () => null }))
 vi.mock('../chats/ChatPane', () => ({ applyReaction: (m: unknown) => m }))
 
 import Contacts, { parseContactFilter } from '../Contacts'

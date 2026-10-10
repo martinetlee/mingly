@@ -21,8 +21,8 @@ import { WebSocketClient } from '../../lib/ws'
 import { ApiError } from '../../lib/http'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import { ConfirmProvider } from '../../components/ui'
-import { deferred, makeConversation, msg, page } from '../chats/__tests__/fixtures'
-import { __resetChatUiStore } from '../chats/chatUiStore'
+import { deferred, makeConversation, msg, page } from '../../test/fixtures'
+import { __resetChatUiStore } from '../../features/chat/chatUiStore'
 
 const chatAztec = makeConversation(111, 'Aztec <> ETHTaipei')
 const chatPolygon = makeConversation(222, 'Polygon <> ETHTaipei 2024')
@@ -77,8 +77,8 @@ vi.mock('../../api/session', async (orig) => ({
   ...(await orig<typeof import('../../api/session')>()),
   authenticatedMediaUrl: (p: string) => p,
 }))
-vi.mock('../../components/ChatInfoPanel', () => ({ default: () => null }))
-vi.mock('react-virtuoso', () => import('../chats/__tests__/virtuosoTestShim'))
+vi.mock('../../components/chat/ChatInfoPanel', () => ({ default: () => null }))
+vi.mock('react-virtuoso', () => import('../../test/virtuosoTestShim'))
 
 import Chats from '../Chats'
 

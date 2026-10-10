@@ -17,7 +17,7 @@ vi.mock('../../api/calendar', async (importOriginal) => ({
 
 import { getCalendarAccounts, getCalendarEvents, getGoogleCalendars, localDateKey, setSyncedCalendars } from '../../api/calendar'
 import Calendar from '../Calendar'
-import { addDays, eventDayKeys, groupByDay, startOfLocalDay, startOfWeek, viewRange } from '../calendar/agenda'
+import { addDays, eventDayKeys, groupByDay, startOfLocalDay, startOfWeek, viewRange } from '../../features/calendar/agenda'
 
 const gmail = { account_key: 'gmail:3', account_id: 3, channel: 'gmail', display_name: 'Gmail', label: 'me@example.com', capabilities: [], configured: true, status: { state: 'ready', error: null } }
 

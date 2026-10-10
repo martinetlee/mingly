@@ -9,7 +9,7 @@ import type { ReactNode } from 'react'
 import type { MessageWindow } from '../../api/types'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
-import { deferred, msg, page } from '../../pages/chats/__tests__/fixtures'
+import { deferred, msg, page } from '../../test/fixtures'
 
 const getMessageWindow = vi.fn()
 const backfillConversation = vi.fn()

@@ -1,7 +1,7 @@
 /** useChatList: a failed first page is an inline `error` (no toast); a good page or a new key clears it. */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { makeConversation } from './fixtures'
+import { makeConversation } from '../../../test/fixtures'
 
 vi.mock('../../../api/client', async (orig) => ({
   ...(await orig<typeof import('../../../api/client')>()),

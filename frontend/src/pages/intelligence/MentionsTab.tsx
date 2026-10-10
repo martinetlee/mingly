@@ -7,7 +7,7 @@ import MentionCard, {
   mentionFilterClass,
   mentionKey,
   type MentionFilter,
-} from '../../components/MentionCard'
+} from '../../components/intelligence/MentionCard'
 import { useDebouncedValue } from '../../hooks/useDebouncedQuery'
 import { useMentionNavigator, useMentions } from '../../hooks/useMentions'
 import { errorMessage, reportError } from '../../lib/toast'

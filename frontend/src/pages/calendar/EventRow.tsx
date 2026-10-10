@@ -8,7 +8,7 @@ import { Link } from 'react-router-dom'
 import { ExternalLink, MapPin } from 'lucide-react'
 import type { CalendarAttendee, CalendarEvent } from '../../api/calendar'
 import { personUrl } from '../../lib/routes'
-import { eventTimeLabel } from './agenda'
+import { eventTimeLabel } from '../../features/calendar/agenda'
 
 const RESPONSE_LABEL: Record<string, string> = {
   accepted: 'accepted', declined: 'declined', tentative: 'maybe', needsAction: 'no reply',

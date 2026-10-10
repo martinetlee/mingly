@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { notifPrefFor, shouldNotify, notificationContent, setCachedChannelNotifPref, setCachedNotifPref } from '../notifications'
 import { WebSocketClient } from '../ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
-import NotificationBridge from '../../components/NotificationBridge'
+import NotificationBridge from '../../components/layout/NotificationBridge'
 import { FakeWebSocket } from '../../test/fakeWebSocket'
 
 vi.mock('../../api/client', async (orig) => ({

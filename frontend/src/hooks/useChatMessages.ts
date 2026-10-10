@@ -21,8 +21,8 @@ import { errorMessage } from '../lib/toast'
 import {
   MAX_WINDOW, applyLive, appendNewer, cursorOf, deletionApplies, firstUnreadId, fromPage, inScope,
   mergeLatest, prependOlder, withKnownContext,
-} from '../pages/chats/messageWindow'
-import type { WindowSlice } from '../pages/chats/messageWindow'
+} from '../features/chat/messageWindow'
+import type { WindowSlice } from '../features/chat/messageWindow'
 
 export const PAGE_SIZE = 50
 /** How long a jumped-to message stays visually highlighted */

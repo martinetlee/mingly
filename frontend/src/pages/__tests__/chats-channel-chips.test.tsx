@@ -14,8 +14,8 @@ import type { ConversationListFilter } from '../../api/client'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
 import { ConfirmProvider } from '../../components/ui'
-import { makeConversation } from '../chats/__tests__/fixtures'
-import { __resetChatUiStore } from '../chats/chatUiStore'
+import { makeConversation } from '../../test/fixtures'
+import { __resetChatUiStore } from '../../features/chat/chatUiStore'
 import { messengerChannels } from '../chats/channelFilter'
 
 const tgChat = makeConversation(111, 'Telegram group')
@@ -55,11 +55,11 @@ vi.mock('../../api/accounts', async (orig) => ({
 vi.mock('../../context/WorkspaceContext', () => ({
   useWorkspaces: () => ({ workspaces: [], activeWorkspace: null, loaded: true, setActiveWorkspaceId: () => {}, refreshWorkspaces: async () => {} }),
 }))
-vi.mock('../../components/ChatInfoPanel', () => ({ default: () => null }))
-vi.mock('react-virtuoso', () => import('../chats/__tests__/virtuosoTestShim'))
+vi.mock('../../components/chat/ChatInfoPanel', () => ({ default: () => null }))
+vi.mock('react-virtuoso', () => import('../../test/virtuosoTestShim'))
 
 import Chats from '../Chats'
-import ChatPickerDialog from '../../components/ChatPickerDialog'
+import ChatPickerDialog from '../../components/chat/ChatPickerDialog'
 
 function renderChats() {
   const ws = new WebSocketClient({ url: () => null })

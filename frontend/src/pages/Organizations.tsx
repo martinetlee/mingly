@@ -10,8 +10,8 @@ import { invalidateAllPeople } from '../hooks/usePersonSummary'
 import { useConfirm } from '../components/ui'
 import { errorMessage, reportError, toast } from '../lib/toast'
 import { fmtDateTime, parseServerDate } from '../utils/time'
-import PersonCard from '../components/PersonCard'
-import MergeOrgDialog from '../components/MergeOrgDialog'
+import PersonCard from '../components/people/PersonCard'
+import MergeOrgDialog from '../components/people/MergeOrgDialog'
 
 function OrgCard({
   org,

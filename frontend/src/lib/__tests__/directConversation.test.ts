@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { makeConversation } from '../../pages/chats/__tests__/fixtures'
+import { makeConversation } from '../../test/fixtures'
 
 const getPersonConversations = vi.fn()
 const startPrivateChat = vi.fn()

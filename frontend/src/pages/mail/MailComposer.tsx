@@ -4,7 +4,7 @@ import type { Message } from '../../api/types'
 import { composeEmail, isValidAddress, parseAddressList, sendEmail, sendEmailFiles } from '../../api/email'
 import { ApiError } from '../../lib/http'
 import { errorMessage } from '../../lib/toast'
-import { newNonce, sendKey } from '../chats/chatUiStore'
+import { newNonce, sendKey } from '../../features/chat/chatUiStore'
 
 export type ComposerMode =
   | { kind: 'new'; accountId: number }
