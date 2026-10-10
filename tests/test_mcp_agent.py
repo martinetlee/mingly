@@ -16,7 +16,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
 from backend.api import mcp as mcp_module
-from backend.api import mcp_tools
+from backend.api.mcp_tools import archive as mcp_archive, common as mcp_common
+from backend.api.mcp_tools import conversations as mcp_conversations
 from backend.config import API_PORT
 from backend.db import crud, database
 from backend.db.models import AgentReview, HistoryCoverage, Identity, Message, Person, PersonNote
@@ -42,7 +43,7 @@ def _telegram_online(monkeypatch):
     async def _connected():
         return True
 
-    monkeypatch.setattr(mcp_tools, "_telegram_connected", _connected)
+    monkeypatch.setattr(mcp_common, "telegram_connected", _connected)
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ class FakeArchive:
 @pytest.fixture
 def fake_archive(monkeypatch):
     fake = FakeArchive()
-    monkeypatch.setattr(mcp_tools, "_archive", lambda: fake)
+    monkeypatch.setattr(mcp_common, "get_archive", lambda: fake)
     return fake
 
 
@@ -775,7 +776,7 @@ async def test_fetch_history_offline_returns_immediately(agent, db, fake_archive
     async def _offline():
         return False
 
-    monkeypatch.setattr(mcp_tools, "_telegram_connected", _offline)
+    monkeypatch.setattr(mcp_common, "telegram_connected", _offline)
 
     async def never(conversation_id, timeout):
         raise AssertionError("must not wait while Telegram is offline")
@@ -816,17 +817,17 @@ async def test_dms_on_unarchived_channels_count_complete_and_can_be_reviewed(db)
     last = await factories.message(db, sms, 1_700_000_000_000, "see you", date=T0)
 
     archive = SimpleNamespace(refresh_status=AsyncMock(return_value={}), get_status=lambda: {"state": "idle"})
-    with patch.object(mcp_tools, "_archive", return_value=archive):
-        status = await mcp_tools._tool_get_archive_status(db, {}, {})
+    with patch.object(mcp_common, "get_archive", return_value=archive):
+        status = await mcp_archive.tool_get_archive_status(db, {}, {})
         assert status["dms"]["history_complete"] == 2 and status["dms"]["history_incomplete"] == 0
-        assert (await mcp_tools._tool_list_dms(db, {"filter": "incomplete"}, {}))["dms"] == []
+        assert (await mcp_conversations.tool_list_dms(db, {"filter": "incomplete"}, {}))["dms"] == []
 
-        fetched = await mcp_tools._tool_fetch_history(db, {"conversation_id": sms.id}, {})
+        fetched = await mcp_archive.tool_fetch_history(db, {"conversation_id": sms.id}, {})
         assert fetched["history_complete"] is True and fetched["coverage"]["history_complete"] is True
 
-        reviewed = await mcp_tools._tool_mark_reviewed(
+        reviewed = await mcp_archive.tool_mark_reviewed(
             db, {"conversation_id": sms.id, "through_message_id": last.id}, {})
         assert reviewed["review"]["up_to_date"] is True
-        unreviewed = (await mcp_tools._tool_list_dms(db, {"filter": "unreviewed"}, {}))["dms"]
+        unreviewed = (await mcp_conversations.tool_list_dms(db, {"filter": "unreviewed"}, {}))["dms"]
         assert [d["conversation_id"] for d in unreviewed] == [tg.id]
-        assert (await mcp_tools._tool_get_archive_status(db, {}, {}))["dms"]["reviewed_up_to_date"] == 1
+        assert (await mcp_archive.tool_get_archive_status(db, {}, {}))["dms"]["reviewed_up_to_date"] == 1
