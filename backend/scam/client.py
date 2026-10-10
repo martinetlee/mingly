@@ -18,7 +18,7 @@ from backend.scam.scan import (
 )
 from backend.db.database import AsyncSessionLocal
 from backend.scam.channel_ids import cloud_refs, handle_salt
-from backend.scam.cloud_sync import CONTRACT_HEADER, ContractDiscovery
+from backend.scam.cloud_contract import CONTRACT_HEADER, ContractDiscovery
 from backend.scam.pipeline import _PIPELINE_FILE, get_pipeline_manager, init_pipeline_manager, PipelineConfig
 from backend.secret_prefs import get_secret_pref
 

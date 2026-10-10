@@ -15,7 +15,7 @@ from backend import secrets as vault
 from backend.db import database
 from backend.db.models import Message, ScamAnalytics, ScamDismissal, ScamFeedback, ScamFlag, ScamReport
 from backend.prefs import update_prefs
-from backend.scam import channel_ids, cloud_sync
+from backend.scam import channel_ids, cloud_contract, cloud_payloads, cloud_sync
 from backend.scam.client import ExternalScamAPIClient
 from backend.scam.scan import ScanRequest
 from tests import factories as f
@@ -341,7 +341,7 @@ async def test_v2_server_gets_channel_neutral_payloads_for_all_channels(db, unlo
 @pytest.mark.asyncio
 async def test_v2_content_upload_follows_per_channel_prefs(db, unlocked_vault):
     rows = await seed(db)
-    update_prefs(lambda p: p.update({cloud_sync.CONTENT_UPLOAD_PREF: {"gmail": True, "telegram": False}}))
+    update_prefs(lambda p: p.update({cloud_payloads.CONTENT_UPLOAD_PREF: {"gmail": True, "telegram": False}}))
     cloud = FakeCloud(versions=[2])
     mgr = _manager(cloud)
 
@@ -359,7 +359,7 @@ async def test_v2_content_upload_follows_per_channel_prefs(db, unlocked_vault):
 
 
 def test_content_defaults():
-    assert [cloud_sync.content_upload_allowed(ch) for ch in ("telegram", "signal", "sms", "gmail", "other")] == [
+    assert [cloud_payloads.content_upload_allowed(ch) for ch in ("telegram", "signal", "sms", "gmail", "other")] == [
         True, True, True, False, False]
 
 
@@ -371,13 +371,13 @@ def test_content_defaults():
 async def test_capability_cache_ttl():
     now = {"t": 1000.0}
     cloud = FakeCloud(versions=[1, 2])
-    disc = cloud_sync.ContractDiscovery("/sync/capabilities", clock=lambda: now["t"])
+    disc = cloud_contract.ContractDiscovery("/sync/capabilities", clock=lambda: now["t"])
     args = ("https://cloud.test", {"Authorization": "Bearer k"}, cloud.transport)
 
     assert await disc.contract(*args) == 2
     assert await disc.contract(*args) == 2
     assert cloud.capability_gets() == 1
-    now["t"] += cloud_sync.CAPABILITIES_TTL - 1
+    now["t"] += cloud_contract.CAPABILITIES_TTL - 1
     cloud.versions = [1]  # server downgraded; not seen until the TTL runs out
     assert await disc.contract(*args) == 2 and cloud.capability_gets() == 1
     now["t"] += 2
@@ -385,10 +385,10 @@ async def test_capability_cache_ttl():
 
     # An error means v1, asked again after the short retry TTL
     cloud.versions = 503
-    now["t"] += cloud_sync.CAPABILITIES_TTL + 1
+    now["t"] += cloud_contract.CAPABILITIES_TTL + 1
     assert await disc.contract(*args) == 1 and cloud.capability_gets() == 3
     cloud.versions = [1, 2]
-    now["t"] += cloud_sync.CAPABILITIES_RETRY_TTL - 1
+    now["t"] += cloud_contract.CAPABILITIES_RETRY_TTL - 1
     assert await disc.contract(*args) == 1 and cloud.capability_gets() == 3
     now["t"] += 2
     assert await disc.contract(*args) == 2 and cloud.capability_gets() == 4
@@ -398,7 +398,7 @@ async def test_capability_cache_ttl():
     ([1, 2], {1, 2}), ([2], {2}), ([], {1}), (None, {1}), ("2", {1}), ([True, "2", 2.0], {1}), ([3, 2], {2, 3}),
 ])
 def test_contract_versions_parsing(value, expected):
-    assert cloud_sync.parse_contract_versions(value) == frozenset(expected)
+    assert cloud_contract.parse_contract_versions(value) == frozenset(expected)
 
 
 @pytest.mark.asyncio

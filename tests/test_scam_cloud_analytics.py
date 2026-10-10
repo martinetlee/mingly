@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from backend.db import database
 from backend.db.models import Message, ScamAnalytics, ScamFlag
-from backend.scam import cloud_sync
+from backend.scam import cloud_assets, cloud_contract, cloud_sync
 from backend.scam.analytics import AnalyticsTracker
 from tests import factories as f
 
@@ -71,7 +71,7 @@ async def test_only_closed_days_are_uploaded(db_engine):
     ("http://shield.example.com", False), ("ftp://x", False), ("https://", False),
 ])
 def test_cloud_url_must_be_https(url, ok):
-    assert (cloud_sync.validate_cloud_url(url) is None) is ok
+    assert (cloud_contract.validate_cloud_url(url) is None) is ok
 
 
 @pytest.mark.asyncio
@@ -391,10 +391,10 @@ async def test_vault_lock_stops_sync_loop_and_inflight_sync(monkeypatch):
 
 def test_verify_artifact_is_the_single_gate():
     data = b"bundle"
-    cloud_sync.verify_artifact(data, {}, "x")  # no hash given: allowed (https only)
-    cloud_sync.verify_artifact(data, {"sha256": hashlib.sha256(data).hexdigest().upper()}, "x")
+    cloud_assets.verify_artifact(data, {}, "x")  # no hash given: allowed (https only)
+    cloud_assets.verify_artifact(data, {"sha256": hashlib.sha256(data).hexdigest().upper()}, "x")
     with pytest.raises(ValueError):
-        cloud_sync.verify_artifact(data, {"sha256": "00"}, "x")
+        cloud_assets.verify_artifact(data, {"sha256": "00"}, "x")
 
 
 # ---------------------------------------------------------------------------
