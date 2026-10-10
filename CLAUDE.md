@@ -115,7 +115,7 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 ### API Routes
 - One router per domain in `backend/api/`, registered in `router.py`; routers parse requests and shape
   responses — queries live in `db/crud`, behaviour in services (`scam/views.py`, `scam/reports.py`,
-  `ai/agent.py`, …). Exception: MCP tool handlers (`api/mcp_tools.py`) own their paginated queries.
+  `ai/agent.py`, …). Exception: MCP tool handlers (`api/mcp_tools/`) own their paginated queries.
 - All routes (except `/api/auth/*`) require `X-Session-Token` header
 - Auth dependency: `require_session_token()` in `dependencies.py`; the token store is `backend/sessions.py`
 
