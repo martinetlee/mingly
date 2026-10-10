@@ -388,7 +388,7 @@ def _register_vault_listeners() -> None:
 
 def init_cloud_sync_manager() -> "CloudSyncManager":
     global _manager
-    from backend.api.settings import get_shield_api_key
+    from backend.secret_prefs import get_shield_api_key
 
     _manager = CloudSyncManager(key_provider=get_shield_api_key)
     _manager.configure(base_url=get_pref("shield_cloud_url", "") or "")

@@ -536,15 +536,6 @@ def test_data_layers_do_not_import_the_api_layer():
     assert offenders == []
 
 
-def test_api_keeps_reexporting_moved_helpers():
-    from backend import prefs, validators
-    from backend.api import settings
-    from backend.api import validators as api_validators
-
-    assert settings.get_notif_pref is prefs.get_notif_pref
-    assert api_validators.validate_linkedin_url is validators.validate_linkedin_url
-
-
 # ── 9. Identity resolution is memoized per ingest ────────────────────────────
 
 @pytest.mark.asyncio

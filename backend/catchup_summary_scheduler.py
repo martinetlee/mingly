@@ -20,7 +20,7 @@ from sqlalchemy import select, desc, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend import jobs
-from backend.api.settings import _load_prefs
+from backend import prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import CatchUpSummary, Message
@@ -143,7 +143,7 @@ def _msg_dict(msg: Message) -> dict:
 
 def get_summary_interval_minutes() -> int:
     """Return configured interval in minutes (default 30)."""
-    val = _load_prefs().get("catchup_summary_interval_minutes", DEFAULT_INTERVAL_MINUTES)
+    val = prefs.load_prefs().get("catchup_summary_interval_minutes", DEFAULT_INTERVAL_MINUTES)
     try:
         return max(5, min(1440, int(val)))
     except (TypeError, ValueError):

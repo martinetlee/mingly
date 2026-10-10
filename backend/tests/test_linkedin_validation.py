@@ -1,7 +1,7 @@
 """Tests for LinkedIn URL validation."""
 import pytest
 
-from backend.api.validators import validate_linkedin_url
+from backend.validators import validate_linkedin_url
 
 
 class TestValidateLinkedinUrl:

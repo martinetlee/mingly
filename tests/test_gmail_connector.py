@@ -439,7 +439,7 @@ async def test_fetch_attachment_recovers_from_a_reissued_attachment_id(db, googl
 
 @pytest.mark.asyncio
 async def test_email_notifications_default_off_and_are_per_channel(api):
-    from backend.api.settings import get_notif_pref
+    from backend.prefs import get_notif_pref
 
     assert get_notif_pref("gmail") == "off"
     assert get_notif_pref("telegram") == get_notif_pref() == "tracked"
@@ -809,7 +809,7 @@ async def test_compose_new_keeps_files_when_the_request_is_cancelled(db, monkeyp
 
     from fastapi import UploadFile
 
-    from backend.connectors.gmail import routes
+    from backend.api import gmail as routes
 
     seen = {}
     started, finished = asyncio.Event(), asyncio.Event()

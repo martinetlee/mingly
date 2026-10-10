@@ -254,7 +254,7 @@ def test_should_exit_runs_shutdown_hooks():
 async def test_lock_endpoint_stops_runtime_and_locks_vault(db_engine):
     from backend.api.router import create_app
     from backend.api import auth
-    from backend.api.dependencies import generate_session_token
+    from backend.sessions import generate_session_token
     from backend.telegram.runtime import runtime
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as c:
@@ -328,7 +328,7 @@ async def test_send_files_reports_per_file_results_and_never_resends(api, db):
 # ── 10. truncated media ──────────────────────────────────────────────────────
 
 def test_file_is_complete(tmp_path):
-    from backend.telegram.media import file_is_complete
+    from backend.media import file_is_complete
     jpg = tmp_path / "a.jpg"
     jpg.write_bytes(b"\xff\xd8data\xff\xd9")
     assert file_is_complete(jpg, "photo", None)
@@ -342,7 +342,7 @@ def test_file_is_complete(tmp_path):
 
 @pytest.mark.asyncio
 async def test_audit_clears_truncated_files(db, tmp_path):
-    from backend.telegram import media
+    from backend import media
     conv = await tg_conv(db)
     msgs = [
         await f.message(db, conv, 1, "", attachments=[f.photo()]),

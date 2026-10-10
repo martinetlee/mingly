@@ -47,6 +47,7 @@ from backend.ingest import service as ingest_service
 from backend.ingest.normalized import (
     NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
 )
+from backend.media import MediaNotFound
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
 
@@ -533,7 +534,6 @@ class SmsConnector(Connector):
     # -- attachments -------------------------------------------------------------------
 
     def _attachment_source(self, ref: Optional[str]) -> Path:
-        from backend.telegram.media import MediaNotFound
 
         if not ref:
             raise MediaNotFound("This attachment was never downloaded to this Mac")

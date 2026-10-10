@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from backend.api.dependencies import clear_session_token, generate_session_token
+from backend.sessions import clear_session_token, generate_session_token
 from backend.db import database
 
 

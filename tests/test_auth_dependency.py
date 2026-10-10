@@ -5,12 +5,12 @@ from unittest.mock import patch, AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from backend.api.dependencies import (
+from backend.api.dependencies import validate_ws_origin
+from backend.sessions import (
+    clear_session_token,
     generate_session_token,
     get_session_token,
-    clear_session_token,
     is_valid_session_token,
-    validate_ws_origin,
 )
 
 

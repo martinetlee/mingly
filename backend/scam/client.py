@@ -265,7 +265,7 @@ MockScamAPIClient = LocalPipelineClient
 # ---------------------------------------------------------------------------
 
 def _vault_scam_api_key() -> str:
-    from backend.api.settings import get_secret_pref
+    from backend.secret_prefs import get_secret_pref
     return get_secret_pref("scam_detection_api_key")
 
 

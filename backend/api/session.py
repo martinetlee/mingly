@@ -8,7 +8,7 @@ from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
 
 from backend import instance
-from backend.api.dependencies import get_idle_timeout_minutes, is_valid_session_token
+from backend.sessions import get_idle_timeout_minutes, is_valid_session_token
 from backend.secrets import vault_status
 
 router = APIRouter()

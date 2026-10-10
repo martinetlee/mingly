@@ -79,6 +79,10 @@ class ScamDetectionService:
     def __init__(self, client: ScamAPIClient):
         self._client = client
 
+    def set_client(self, client: ScamAPIClient) -> None:
+        """Swap the detection backend (settings changed or the vault unlocked)."""
+        self._client = client
+
     # ------------------------------------------------------------------
     # Sender lookups
     # ------------------------------------------------------------------

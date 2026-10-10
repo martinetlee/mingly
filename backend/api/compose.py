@@ -4,7 +4,6 @@ are looked up from the stored rows."""
 
 import os
 import tempfile
-import time
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -14,38 +13,13 @@ from backend.api.lookups import conversation_or_404, message_or_404, telegram_pe
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation
-from backend.jobs import await_single
+from backend.api.idempotency import cached_response, cleanup_temp_files, idempotent
 from backend.serializers import messages_out
 from backend.telegram import ids
 from backend.telegram.runtime import runtime
 from backend.telegram.convert import GENERAL_TOPIC_ID, rows_for
 
 router = APIRouter()
-
-# Completed idempotent sends: client_nonce → (expires_at, response)
-_NONCE_TTL = 600
-_completed: dict[str, tuple[float, dict]] = {}
-
-
-def _cached(nonce: Optional[str]) -> Optional[dict]:
-    now = time.monotonic()
-    for k in [k for k, (exp, _) in _completed.items() if exp < now]:
-        _completed.pop(k, None)
-    hit = _completed.get(nonce) if nonce else None
-    return hit[1] if hit else None
-
-
-async def _idempotent(nonce: Optional[str], factory) -> dict:
-    """Run ``factory`` once per client nonce: a retry while the first attempt is
-    in flight joins it, a retry after success gets the same response."""
-    if not nonce:
-        return await factory()
-    hit = _cached(nonce)
-    if hit is not None:
-        return hit
-    result = await await_single(f"compose:{nonce}", factory)
-    _completed[nonce] = (time.monotonic() + _NONCE_TTL, result)
-    return result
 
 
 async def _require_client():
@@ -158,7 +132,7 @@ async def send_message(req: SendRequest):
         draft = OutgoingMessage(
             text=req.text, reply_to_message_id=req.reply_to_message_id, subject=req.subject, to=req.to, cc=req.cc,
         )
-        return await _idempotent(req.client_nonce, lambda: _send_via_connector(conv, draft))
+        return await idempotent(req.client_nonce, lambda: _send_via_connector(conv, draft))
 
     conv, peer = await _target(req.conversation_id, "Sending")
     reply_seq = await _reply_seq(conv.id, req.reply_to_message_id)
@@ -172,7 +146,7 @@ async def send_message(req: SendRequest):
         saved = await _persist_sent(conv, [msg], reply_seq, req.topic_id)
         return {"success": True, "message_id": saved[0]["id"], "message": saved[0]}
 
-    return await _idempotent(req.client_nonce, _send)
+    return await idempotent(req.client_nonce, _send)
 
 
 class EditRequest(BaseModel):
@@ -290,7 +264,7 @@ async def send_files(
     reply_seq = await _reply_seq(conv.id, reply_to_message_id)
     client = await _require_client()
 
-    hit = _cached(client_nonce)
+    hit = cached_response(client_nonce)
     if hit is not None:
         return _files_response(hit)
 
@@ -317,21 +291,21 @@ async def send_files(
             try:
                 return await _send_entries(client, conv, peer, text, reply_seq, topic_id, entries)
             finally:
-                _cleanup(temp_paths)
+                cleanup_temp_files(temp_paths)
 
-        return _files_response(await _idempotent(client_nonce, _send))
+        return _files_response(await idempotent(client_nonce, _send))
     finally:
         # Once the send started, it owns the temp files (it may outlive this
         # request if the client disconnects); otherwise clean up here.
         if not started:
-            _cleanup(temp_paths)
+            cleanup_temp_files(temp_paths)
 
 
 async def _send_files_via_connector(conv, text, reply_to_message_id, client_nonce, files, *, subject=None, to=(), cc=()):
     """Other channels send all files with one message (e.g. one email)."""
     from backend.connectors.base import OutgoingFile, OutgoingMessage
 
-    hit = _cached(client_nonce)
+    hit = cached_response(client_nonce)
     if hit is not None:
         return _files_response(hit)
     if reply_to_message_id is not None:
@@ -357,19 +331,19 @@ async def _send_files_via_connector(conv, text, reply_to_message_id, client_nonc
             try:
                 body = await _send_via_connector(conv, draft)
             finally:
-                _cleanup(temp_paths)
+                cleanup_temp_files(temp_paths)
             message_id = body["message_id"]
             return {
                 "success": True, "partial": False, "message_ids": body["message_ids"], "messages": body["messages"],
                 "files": [{"filename": f.filename, "status": "sent", "message_id": message_id} for f in outgoing],
             }
 
-        return _files_response(await _idempotent(client_nonce, _send))
+        return _files_response(await idempotent(client_nonce, _send))
     finally:
         # Once the send started, it owns the temp files (it may outlive this
         # request if the client disconnects); otherwise clean up here.
         if not started:
-            _cleanup(temp_paths)
+            cleanup_temp_files(temp_paths)
 
 
 ALBUM_MAX = 10
@@ -432,9 +406,3 @@ def _files_response(body: dict):
     return JSONResponse(body, status_code=207 if body.get("partial") else 200)
 
 
-def _cleanup(paths: list[str]) -> None:
-    for path in paths:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass

@@ -57,6 +57,7 @@ from backend.ingest import service as ingest_service
 from backend.ingest.normalized import (
     NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
 )
+from backend.media import MediaNotFound
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
 
@@ -696,7 +697,6 @@ class SignalConnector(Connector):
         return f"media/{conversation_id}/{attachment_id}{ext}"
 
     async def fetch_attachment(self, attachment: Any, message: Any, conversation: Any) -> str:
-        from backend.telegram.media import MediaNotFound
 
         ref = attachment.external_ref
         if not ref or Path(ref).name != ref or ref in (".", ".."):

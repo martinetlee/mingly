@@ -57,8 +57,7 @@ async def test_scheduled_briefing_runs_with_tracked_and_briefing_chats(db):
 
     provider = FakeProvider(summary="- summary [1]")
     sched._note_success()
-    with patch_briefing_env(provider) as env, \
-         patch.object(sched, "_load_prefs", side_effect=lambda: dict(env.prefs)):
+    with patch_briefing_env(provider) as env:
         assert await sched.check_and_run(_dt.now())
     entries = (await db.execute(select(BriefingEntry))).scalars().all()
     assert sorted(e.conversation_title for e in entries) == ["Briefing", "Tracked"]

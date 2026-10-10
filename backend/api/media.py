@@ -12,12 +12,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from backend.config import DATA_DIR
+from backend.connectors.base import UnsupportedOperation
+from backend.connectors.manager import manager
+from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import MessageAttachment
-from backend.serializers import media_url
-from backend.telegram.media import (
-    DOWNLOADABLE_TYPES, MediaNotFound, MediaUnavailable, download_attachment, file_is_complete,
-)
+from backend.media import DOWNLOADABLE_TYPES, MediaNotFound, MediaUnavailable, file_is_complete
+from backend.serializers import channel_of, media_url
 
 logger = logging.getLogger(__name__)
 
@@ -25,19 +26,11 @@ router = APIRouter()
 
 
 async def _download(att: MessageAttachment) -> str:
-    """Telegram downloads through its runtime; other channels through their
-    connector."""
-    from backend.connectors.base import UnsupportedOperation
-    from backend.connectors.manager import manager
-    from backend.db import crud
-    from backend.serializers import channel_of
-
+    """Fetch through the connector serving the attachment's account."""
     async with AsyncSessionLocal() as db:
         msg = await crud.get_message(db, att.message_id)
         conv = await crud.get_conversation(db, msg.conversation_id)
     channel = channel_of(conv)
-    if channel == "telegram":
-        return await download_attachment(att.id)
     connector = manager.for_account(channel, conv.account_id)
     if connector is None:
         raise MediaUnavailable(f"{channel} is not connected")

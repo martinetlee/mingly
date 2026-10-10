@@ -14,7 +14,7 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.settings import _load_prefs
+from backend import prefs
 from backend.db import crud
 from backend.db.models import Organization, Person, PersonPosition
 
@@ -23,14 +23,14 @@ logger = logging.getLogger(__name__)
 
 def get_user_organizations() -> list[str]:
     """Return the list of org names the user belongs to (from prefs)."""
-    orgs = _load_prefs().get("user_organizations", [])
+    orgs = prefs.load_prefs().get("user_organizations", [])
     return [o for o in orgs if isinstance(o, str) and o.strip()]
 
 
 def get_user_organization_ids() -> Optional[list[int]]:
     """Org ids the user belongs to (prefs ``user_organization_ids``, kept by
     backend.user_orgs), or None when only legacy names are stored."""
-    ids = _load_prefs().get("user_organization_ids")
+    ids = prefs.load_prefs().get("user_organization_ids")
     if not isinstance(ids, list):
         return None
     return [i for i in ids if isinstance(i, int) and not isinstance(i, bool)]

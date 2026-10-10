@@ -56,8 +56,7 @@ async def test_scheduler_tick_runs_and_records_success(db):
     import backend.briefing_scheduler as sched
     await _seed(db)
     sched._note_success()
-    with patch_briefing_env(FakeProvider()) as env, \
-         patch.object(sched, "_load_prefs", side_effect=lambda: dict(env.prefs)):
+    with patch_briefing_env(FakeProvider()) as env:
         assert await sched.check_and_run(WED_1000)
         assert "briefing_last_run" in env.prefs
         assert sched._failures == 0
@@ -71,8 +70,7 @@ async def test_scheduler_failure_backs_off_and_keeps_last_run(db):
     await _seed(db)
     sched._note_success()
     try:
-        with patch_briefing_env(FakeProvider(fail_with=LLMUnavailable("down"))) as env, \
-             patch.object(sched, "_load_prefs", side_effect=lambda: dict(env.prefs)):
+        with patch_briefing_env(FakeProvider(fail_with=LLMUnavailable("down"))) as env:
             assert await sched.check_and_run(WED_1000)
             assert "briefing_last_run" not in env.prefs
             assert sched._failures == 1 and sched._retry_after is not None

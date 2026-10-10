@@ -9,7 +9,8 @@ from backend.connectors.manager import manager
 from backend.secrets import (
     vault_status, initialize_vault, unlock as unlock_vault_fn, reset_vault, lock as lock_vault_fn,
 )
-from backend.api.dependencies import generate_session_token, require_session_token, revoke_session
+from backend.api.dependencies import require_session_token, revoke_session
+from backend.sessions import generate_session_token
 from backend.tasks import spawn
 
 logger = logging.getLogger(__name__)

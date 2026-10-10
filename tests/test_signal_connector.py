@@ -662,7 +662,7 @@ async def test_fetch_attachment_copies_from_signal_cli_storage(db):
         stored = (await s.execute(select(MessageAttachment))).scalar_one()
     assert stored.local_path == rel
 
-    from backend.telegram.media import MediaNotFound
+    from backend.media import MediaNotFound
     att.external_ref = "../vault.enc"
     with pytest.raises(MediaNotFound):
         await conn.fetch_attachment(att, msg, conv)

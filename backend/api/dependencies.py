@@ -1,143 +1,28 @@
 """
 Shared authentication and request-origin checks for API routes and WebSockets.
 
-Sessions: every vault unlock/init issues a new token and ADDS it to a set of
-valid tokens, so a second app window doesn't invalidate the first. Each token
-expires after an idle period (prefs ``session_idle_timeout_minutes``, default
-12h, 0 = never). Locking or resetting the vault revokes every token, and
-WebSockets opened with a revoked or expired token are closed.
+Sessions: the token store is ``backend.sessions``; ``require_session_token``
+is its FastAPI dependency. WebSockets opened with a revoked or expired token
+are closed by the WebSocket manager.
 
 Origins: ``HostOriginMiddleware`` (installed app-wide in router.py) rejects
 non-loopback Host headers (DNS rebinding) and state-changing requests whose
 Origin isn't the app's own (or the Vite dev server in development).
 """
 
-import asyncio
-import hmac
 import json
-import secrets
 import sys
-import time
-from typing import Dict, Optional
+from typing import Optional
 from urllib.parse import urlsplit
 
 from fastapi import Header, HTTPException, WebSocket, status
 
-from backend import secrets as vault
+from backend import sessions as _session_store
 from backend.config import API_PORT
+from backend.sessions import has_sessions, is_valid_session_token
+from backend.ws import manager as ws
 
 # ── Session tokens ───────────────────────────────────────────────────────────
-
-DEFAULT_IDLE_TIMEOUT_MINUTES = 720
-MAX_SESSIONS = 16
-
-# token -> last activity (time.monotonic())
-_sessions: Dict[str, float] = {}
-_latest_token: Optional[str] = None
-
-
-def get_idle_timeout_minutes() -> int:
-    from backend.prefs import get_pref
-
-    raw = get_pref("session_idle_timeout_minutes", DEFAULT_IDLE_TIMEOUT_MINUTES)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_IDLE_TIMEOUT_MINUTES
-    return max(0, value)
-
-
-def _expired(last_seen: float, now: float, timeout_s: float) -> bool:
-    return timeout_s > 0 and now - last_seen > timeout_s
-
-
-def _prune(now: float) -> bool:
-    """Drop idle-expired tokens. Returns True if any were removed."""
-    timeout_s = get_idle_timeout_minutes() * 60
-    stale = [t for t, seen in _sessions.items() if _expired(seen, now, timeout_s)]
-    for t in stale:
-        _sessions.pop(t, None)
-    return bool(stale)
-
-
-def _lookup(token: Optional[str]) -> Optional[str]:
-    """Constant-time match of *token* against the active set."""
-    if not token:
-        return None
-    match = None
-    for t in _sessions:
-        if hmac.compare_digest(t, token):
-            match = t
-    return match
-
-
-def _schedule_ws_eviction() -> None:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return  # no loop (sync caller/tests); sockets are rechecked on broadcast
-    from backend.tasks import spawn
-    from backend.ws.manager import ws_manager
-
-    spawn(ws_manager.evict_invalid(), name="ws_evict_invalid")
-
-
-def generate_session_token() -> str:
-    """Issue a new session token (called when the vault is unlocked/initialized).
-
-    Existing tokens stay valid; the least recently used is evicted beyond
-    MAX_SESSIONS.
-    """
-    global _latest_token
-    now = time.monotonic()
-    pruned = _prune(now)
-    token = secrets.token_urlsafe(32)
-    _sessions[token] = now
-    evicted = False
-    while len(_sessions) > MAX_SESSIONS:
-        oldest = min(_sessions, key=_sessions.get)
-        _sessions.pop(oldest, None)
-        evicted = True
-    _latest_token = token
-    if pruned or evicted:
-        _schedule_ws_eviction()
-    return token
-
-
-def is_valid_session_token(token: Optional[str], touch: bool = False) -> bool:
-    """True if *token* is active and not idle-expired. ``touch`` records activity."""
-    match = _lookup(token)
-    if match is None:
-        return False
-    now = time.monotonic()
-    if _expired(_sessions[match], now, get_idle_timeout_minutes() * 60):
-        _sessions.pop(match, None)
-        return False
-    if touch:
-        _sessions[match] = now
-    return True
-
-
-def get_session_token() -> Optional[str]:
-    """Return the most recently issued token if it is still valid, else None."""
-    if _latest_token is not None and is_valid_session_token(_latest_token):
-        return _latest_token
-    return None
-
-
-def active_session_count() -> int:
-    _prune(time.monotonic())
-    return len(_sessions)
-
-
-def clear_session_token() -> None:
-    """Revoke every session (vault lock/reset). Open WebSockets are closed."""
-    global _latest_token
-    had_sessions = bool(_sessions)
-    _sessions.clear()
-    _latest_token = None
-    if had_sessions:
-        _schedule_ws_eviction()
 
 
 async def revoke_session(token: Optional[str] = None) -> None:
@@ -146,24 +31,11 @@ async def revoke_session(token: Optional[str] = None) -> None:
     Use from lock/logout/reset flows; ``revoke_session()`` with no argument
     also closes every WebSocket immediately.
     """
-    global _latest_token
-    from backend.ws.manager import ws_manager
-
+    _session_store.revoke(token)
     if token is None:
-        _sessions.clear()
-        _latest_token = None
-        await ws_manager.close_all()
-        return
-    match = _lookup(token)
-    if match is not None:
-        _sessions.pop(match, None)
-        if match == _latest_token:
-            _latest_token = None
-    await ws_manager.evict_invalid()
-
-
-# Locking or resetting the vault ends every session.
-vault.add_lock_listener(clear_session_token)
+        await ws.ws_manager.close_all()
+    else:
+        await ws.ws_manager.evict_invalid()
 
 
 async def require_session_token(
@@ -175,7 +47,7 @@ async def require_session_token(
     the auth/vault bootstrap endpoints). A valid request refreshes the
     token's idle timer.
     """
-    if not _sessions:
+    if not has_sessions():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No active session — unlock the vault",

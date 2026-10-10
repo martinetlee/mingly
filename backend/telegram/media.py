@@ -21,6 +21,7 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation, Identity, Message, MessageAttachment
 from backend.jobs import await_single
+from backend.media import AVATAR_DIR, MEDIA_DIR, MediaIncomplete, MediaNotFound, MediaUnavailable, file_is_complete
 from backend.serializers import media_url
 from backend.tasks import spawn
 from backend.telegram import ids
@@ -29,9 +30,6 @@ from backend.telegram.convert import media_type as _media_type
 
 logger = logging.getLogger(__name__)
 
-MEDIA_DIR = DATA_DIR / "media"
-MEDIA_DIR.mkdir(exist_ok=True)
-AVATAR_DIR = MEDIA_DIR / "avatars"
 
 _EXTENSIONS = {
     "photo": ".jpg",
@@ -41,50 +39,10 @@ _EXTENSIONS = {
     "audio": ".mp3",
 }
 
-DOWNLOADABLE_TYPES = frozenset(set(_EXTENSIONS) | {"document", "gif"})
-
-
-class MediaUnavailable(Exception):
-    """Telegram is not connected."""
-
-
-class MediaNotFound(Exception):
-    """The message or its media no longer exists on Telegram."""
-
-
-class MediaIncomplete(Exception):
-    """A downloaded file is shorter than Telegram says it is."""
-
 
 def _document_size(tg_msg) -> Optional[int]:
     doc = getattr(tg_msg, "document", None)
     return getattr(doc, "size", None) if doc is not None else None
-
-
-def file_is_complete(path: Path, media_type: Optional[str], expected_size: Optional[int]) -> bool:
-    """Detect files truncated by an interrupted download.
-
-    Exact size check when Telegram's size is known (documents, videos, voice,
-    and the chosen photo thumbnail); otherwise JPEGs must end with the EOI
-    marker. Stored photo ``media_size`` is the *largest* size, not the
-    downloaded thumbnail, so it is never used for photos.
-    """
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return False
-    if size == 0:
-        return False
-    if expected_size:
-        return size == expected_size
-    if media_type == "photo" or path.suffix.lower() in (".jpg", ".jpeg"):
-        try:
-            with open(path, "rb") as f:
-                f.seek(-2, os.SEEK_END)
-                return f.read(2) == b"\xff\xd9"
-        except OSError:
-            return False
-    return True
 
 
 def pick_thumb(msg):
@@ -238,39 +196,6 @@ async def _worker(queue: asyncio.Queue) -> None:
         finally:
             queue.task_done()
 
-
-async def audit_media_files() -> int:
-    """Startup pass: find stored attachment files that are truncated or
-    missing, delete them and clear ``local_path`` so the UI re-downloads
-    through the atomic path. Returns the number cleared."""
-    async with AsyncSessionLocal() as db:
-        rows = (await db.execute(
-            select(MessageAttachment.id, MessageAttachment.local_path, MessageAttachment.kind, MessageAttachment.size)
-            .where(MessageAttachment.local_path.isnot(None))
-        )).all()
-
-    def _scan() -> list:
-        bad = []
-        for att_id, rel, kind, size in rows:
-            path = DATA_DIR / rel
-            expected = size if kind != "photo" else None
-            if not file_is_complete(path, kind, expected):
-                bad.append((att_id, path))
-        return bad
-
-    bad = await asyncio.to_thread(_scan)
-    if not bad:
-        return 0
-    async with AsyncSessionLocal() as db:
-        for att_id, path in bad:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            await db.execute(update(MessageAttachment).where(MessageAttachment.id == att_id).values(local_path=None))
-        await db.commit()
-    logger.info("Cleared %d truncated/missing media files", len(bad))
-    return len(bad)
 
 
 def enqueue_photo(conversation_id: int, attachment_id: int, tg_msg) -> bool:

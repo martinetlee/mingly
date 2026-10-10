@@ -6,6 +6,9 @@ from typing import Dict, Optional
 
 from fastapi import WebSocket
 
+from backend import sessions
+from backend.tasks import spawn
+
 logger = logging.getLogger(__name__)
 
 # Close code the frontend treats as "session ended — re-authenticate".
@@ -41,9 +44,7 @@ class WebSocketManager:
 
     async def evict_invalid(self) -> int:
         """Close sockets whose session token was revoked or has expired."""
-        from backend.api.dependencies import is_valid_session_token
-
-        stale = [ws for ws, tok in list(self._tokens.items()) if not is_valid_session_token(tok)]
+        stale = [ws for ws, tok in list(self._tokens.items()) if not sessions.is_valid_session_token(tok)]
         for ws in stale:
             await self._close(ws, SESSION_ENDED_CODE, "Session ended")
         return len(stale)
@@ -74,3 +75,16 @@ class WebSocketManager:
 
 
 ws_manager = WebSocketManager()
+
+
+def _evict_on_revocation() -> None:
+    """Session tokens were dropped: close their sockets (sync callers and
+    tests have no loop; sockets are rechecked on the next broadcast)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    spawn(ws_manager.evict_invalid(), name="ws_evict_invalid")
+
+
+sessions.add_revocation_listener(_evict_on_revocation)

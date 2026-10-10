@@ -1,6 +1,5 @@
 import logging
-import re
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,16 +13,20 @@ from backend.llm.briefing_prompts import (
     DEFAULT_TRACKED_CHAT_PROMPT,
 )
 from backend import prefs as _prefs
-from backend.prefs import NOTIF_PREFS, get_pref, load_prefs, save_prefs
+from backend.briefing.settings import (
+    get_briefing_prompt_override,
+    get_briefing_prompt_overrides,
+    parse_briefing_time,
+)
+from backend.prefs import NOTIF_PREFS
+from backend.scam.settings import get_scam_detection_settings, reconfigure_scam_service
+from backend.secret_prefs import clear_secret_pref, get_shield_api_key, migrate_plaintext_secrets
+from backend.sessions import get_idle_timeout_minutes
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Kept as aliases: several modules import these names from here.
-_load_prefs = load_prefs
-get_notif_pref = _prefs.get_notif_pref  # lives in backend.prefs (the ingest layer reads it)
-_save_prefs = save_prefs
 
 # Prefs the UI may read back via GET /prefs. Everything else (API keys, sync
 # bookkeeping, prompt overrides with their own endpoints) stays server-side.
@@ -43,69 +46,20 @@ PUBLIC_PREF_KEYS = (
     "session_idle_timeout_minutes",
 )
 
-# API keys that used to live in plaintext prefs.json. They now live in the
-# vault; a legacy plaintext value is moved into the vault on first access
-# while the vault is unlocked (and on every unlock).
-SECRET_PREF_KEYS = ("scam_detection_api_key", "shield_api_key")
-
-
-def migrate_plaintext_secrets() -> "list[str]":
-    """Move legacy plaintext API keys from prefs.json into the vault.
-
-    No-op while the vault is locked. A value already in the vault wins (new
-    code never writes these keys to prefs). Returns the keys removed from prefs.
-    """
-    if vault.vault_status() != "unlocked":
-        return []
-    prefs = load_prefs()
-    moved = [k for k in SECRET_PREF_KEYS if k in prefs]
-    if not moved:
-        return []
-    for key in moved:
-        value = prefs.pop(key)
-        if value and not vault.get_secret(key):
-            vault.save_secret(key, str(value))
-    save_prefs(prefs)
-    logger.info("Moved %s from prefs.json into the vault", ", ".join(moved))
-    return moved
-
-
-def get_secret_pref(key: str) -> str:
-    """Return an API key from the vault, falling back to a not-yet-migrated
-    plaintext value (e.g. at startup, before the first unlock)."""
-    value = vault.get_secret(key)
-    if value:
-        return value
-    legacy = get_pref(key) or ""
-    if legacy and vault.vault_status() == "unlocked":
-        migrate_plaintext_secrets()
-    return legacy
-
-
 def _store_secret_pref(key: str, value: str) -> None:
     if vault.vault_status() != "unlocked":
         raise HTTPException(status_code=409, detail="Vault must be unlocked to store an API key")
     vault.save_secret(key, value)
 
 
-def _clear_secret_pref(key: str) -> None:
-    vault.delete_secret(key)
-    prefs = load_prefs()
-    if prefs.pop(key, None) is not None:
-        save_prefs(prefs)
-
-
-def get_shield_api_key() -> str:
-    return get_secret_pref("shield_api_key")
-
 
 def on_vault_unlocked() -> None:
     """Unlock listener: migrate legacy keys and hand vault-held keys to the
     services that were configured at startup while the vault was locked."""
     migrate_plaintext_secrets()
-    prefs = load_prefs()
+    prefs = _prefs.load_prefs()
     if prefs.get("scam_detection_mode") == "external":
-        _reconfigure_scam_service(prefs)
+        reconfigure_scam_service()
     try:
         from backend.scam.cloud_sync import get_cloud_sync_manager
 
@@ -136,27 +90,11 @@ class BriefingTimeRequest(BaseModel):
     time: str  # "HH:MM" in 24h format, e.g. "09:00"
 
 
-_HHMM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
-DEFAULT_BRIEFING_TIME = "09:00"
-
-
-def parse_briefing_time(value: object) -> Optional[Tuple[int, int]]:
-    """Strictly parse "HH:MM" (00-23 / 00-59). Returns (hour, minute) or None."""
-    if not isinstance(value, str):
-        return None
-    m = _HHMM.fullmatch(value)
-    return (int(m.group(1)), int(m.group(2))) if m else None
-
-
-def get_briefing_time() -> Tuple[int, int]:
-    """Configured briefing time; an invalid stored value falls back to 09:00."""
-    return parse_briefing_time(get_pref("briefing_time")) or parse_briefing_time(DEFAULT_BRIEFING_TIME)  # type: ignore[return-value]
-
 
 @router.get("/prefs")
 async def get_prefs():
     """Whitelisted view of prefs.json (never includes secrets)."""
-    prefs = load_prefs()
+    prefs = _prefs.load_prefs()
     return {k: prefs[k] for k in PUBLIC_PREF_KEYS if k in prefs}
 
 
@@ -164,7 +102,7 @@ async def get_prefs():
 async def set_notif_pref(req: NotifPrefRequest):
     if req.pref not in NOTIF_PREFS:
         raise HTTPException(status_code=400, detail="Invalid preference")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     if req.channel:
         per_channel = prefs.get("notif_pref_channels")
         per_channel = dict(per_channel) if isinstance(per_channel, dict) else {}
@@ -172,7 +110,7 @@ async def set_notif_pref(req: NotifPrefRequest):
         prefs["notif_pref_channels"] = per_channel
     else:
         prefs["notif_pref"] = req.pref
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "pref": req.pref, "channel": req.channel}
 
 
@@ -182,12 +120,12 @@ async def set_email_remote_images(req: RemoteImagesRequest):
     sender = req.sender.strip().lower()
     if "@" not in sender:
         raise HTTPException(status_code=400, detail="Invalid sender address")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     current = prefs.get("email_remote_images_senders")
     senders = [s for s in current if isinstance(s, str)] if isinstance(current, list) else []
     senders = [s for s in senders if s != sender] + ([sender] if req.allowed else [])
     prefs["email_remote_images_senders"] = sorted(senders)
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "senders": prefs["email_remote_images_senders"]}
 
 
@@ -195,9 +133,9 @@ async def set_email_remote_images(req: RemoteImagesRequest):
 async def set_briefing_schedule(req: BriefingScheduleRequest):
     if req.schedule not in ("daily", "weekly"):
         raise HTTPException(status_code=400, detail="Invalid schedule")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["briefing_schedule"] = req.schedule
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "schedule": req.schedule}
 
 
@@ -206,9 +144,9 @@ async def set_briefing_time(req: BriefingTimeRequest):
     """Set the hour/minute at which the briefing auto-runs (local time, 24h HH:MM)."""
     if parse_briefing_time(req.time) is None:
         raise HTTPException(status_code=400, detail="Invalid time. Use 24-hour HH:MM (00:00-23:59).")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["briefing_time"] = req.time
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "time": req.time}
 
 
@@ -222,9 +160,9 @@ async def set_briefing_day(req: BriefingDayRequest):
     valid = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     if req.day not in valid:
         raise HTTPException(status_code=400, detail="Invalid day")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["briefing_day"] = req.day
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "day": req.day}
 
 
@@ -241,47 +179,15 @@ class BriefingPromptsRequest(BaseModel):
     briefing_prompt: str
 
 
-def get_briefing_max_tokens() -> int:
-    """Returns the configured max_tokens for briefing generation (default 4000)."""
-    val = _load_prefs().get("briefing_max_tokens", 4000)
-    try:
-        return max(256, min(32000, int(val)))
-    except (TypeError, ValueError):
-        return 4000
-
-
-def get_briefing_prompt_override() -> Optional[str]:
-    """Returns the user-provided briefing prompt override, if any."""
-    val = _load_prefs().get("briefing_prompt_override")
-    if isinstance(val, str):
-        val = val.strip()
-        return val or None
-    return None
-
-
-def _normalize_prompt(v: object) -> Optional[str]:
-    if isinstance(v, str):
-        s = v.strip()
-        return s or None
-    return None
-
-
-def get_briefing_prompt_overrides() -> dict:
-    prefs = _load_prefs()
-    return {
-        "tracked": _normalize_prompt(prefs.get("briefing_prompt_tracked")),
-        "briefing": _normalize_prompt(prefs.get("briefing_prompt_briefing")),
-    }
-
 
 @router.post("/prefs/briefing-max-tokens")
 async def set_briefing_max_tokens(req: BriefingMaxTokensRequest):
     """Set max_tokens used when calling the LLM for each briefing summary."""
     if not (256 <= req.max_tokens <= 32000):
         raise HTTPException(status_code=400, detail="max_tokens must be between 256 and 32000")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["briefing_max_tokens"] = req.max_tokens
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "max_tokens": req.max_tokens}
 
 
@@ -298,13 +204,13 @@ async def set_briefing_prompt(req: BriefingPromptRequest):
     Set briefing prompt override.
     Send empty string to clear override and revert to default.
     """
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prompt = (req.prompt or "").strip()
     if prompt:
         prefs["briefing_prompt_override"] = prompt
     else:
         prefs.pop("briefing_prompt_override", None)
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "is_custom": bool(prompt)}
 
 
@@ -338,7 +244,7 @@ async def set_briefing_prompts(req: BriefingPromptsRequest):
     Set tracked/briefing prompt overrides.
     Send empty string for either field to use default for that category.
     """
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     tracked = (req.tracked_prompt or "").strip()
     briefing = (req.briefing_prompt or "").strip()
 
@@ -352,7 +258,7 @@ async def set_briefing_prompts(req: BriefingPromptsRequest):
     else:
         prefs.pop("briefing_prompt_briefing", None)
 
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {
         "success": True,
         "tracked_is_custom": bool(tracked),
@@ -369,9 +275,9 @@ async def set_catchup_summary_interval(req: CatchUpSummaryIntervalRequest):
     """Set the interval (in minutes) for the catch-up summary cronjob (5-1440)."""
     if not (5 <= req.interval_minutes <= 1440):
         raise HTTPException(status_code=400, detail="Interval must be between 5 and 1440 minutes")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["catchup_summary_interval_minutes"] = req.interval_minutes
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "interval_minutes": req.interval_minutes}
 
 
@@ -379,9 +285,9 @@ async def set_catchup_summary_interval(req: CatchUpSummaryIntervalRequest):
 async def set_briefing_last_run():
     """Mark that the briefing was just run (stores current UTC ISO timestamp)."""
     from datetime import datetime
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["briefing_last_run"] = datetime.now().isoformat()
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "briefing_last_run": prefs["briefing_last_run"]}
 
 
@@ -424,9 +330,9 @@ class TranslationLanguageRequest(BaseModel):
 
 @router.post("/prefs/translation-language")
 async def set_translation_language(req: TranslationLanguageRequest):
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["translation_language"] = req.language
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "language": req.language}
 
 
@@ -440,16 +346,6 @@ class ScamDetectionSettingsRequest(BaseModel):
     api_key: str = ""
     max_tokens: int = 200
 
-
-def get_scam_detection_settings() -> dict:
-    """Return scam detection settings from prefs."""
-    prefs = _load_prefs()
-    return {
-        "mode": prefs.get("scam_detection_mode", "local_llm"),
-        "api_url": prefs.get("scam_detection_api_url", ""),
-        "api_key": get_secret_pref("scam_detection_api_key"),
-        "max_tokens": prefs.get("scam_detection_max_tokens", 200),
-    }
 
 
 @router.get("/prefs/scam-detection", dependencies=[Depends(require_shield)])
@@ -475,7 +371,7 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
     if req.mode == "external" and not req.api_url.strip():
         raise HTTPException(status_code=400, detail="API URL is required for external mode")
 
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["scam_detection_mode"] = req.mode
     prefs["scam_detection_api_url"] = req.api_url.strip()
     prefs["scam_detection_max_tokens"] = max(50, min(2000, req.max_tokens))
@@ -484,12 +380,12 @@ async def set_scam_detection(req: ScamDetectionSettingsRequest):
         _store_secret_pref("scam_detection_api_key", req.api_key)
     elif req.mode == "local_llm":
         # Clear API key when switching to local mode
-        _clear_secret_pref("scam_detection_api_key")
+        clear_secret_pref("scam_detection_api_key")
         prefs.pop("scam_detection_api_key", None)
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
 
     # Reconfigure the live scam service
-    _reconfigure_scam_service(prefs)
+    reconfigure_scam_service()
 
     return {"success": True, "mode": req.mode}
 
@@ -503,7 +399,7 @@ class ShieldCloudSettingsRequest(BaseModel):
 @router.get("/prefs/shield-cloud", dependencies=[Depends(require_shield)])
 async def get_shield_cloud():
     """Get Shield cloud sync configuration."""
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     api_key = get_shield_api_key()
     return {
         "cloud_url": prefs.get("shield_cloud_url", ""),
@@ -518,11 +414,11 @@ async def set_shield_cloud(req: ShieldCloudSettingsRequest):
     """Update Shield cloud sync configuration."""
     if req.api_key:
         _store_secret_pref("shield_api_key", req.api_key)
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["shield_cloud_url"] = req.cloud_url.strip()
     if req.sync_dismissals is not None:
         prefs["shield_sync_dismissals"] = req.sync_dismissals
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
 
     # Reconfigure the sync manager
     from backend.scam.cloud_sync import get_cloud_sync_manager
@@ -546,8 +442,6 @@ class SessionTimeoutRequest(BaseModel):
 
 @router.get("/prefs/session-timeout")
 async def get_session_timeout():
-    from backend.api.dependencies import get_idle_timeout_minutes
-
     return {"minutes": get_idle_timeout_minutes()}
 
 
@@ -556,9 +450,9 @@ async def set_session_timeout(req: SessionTimeoutRequest):
     """Idle minutes after which a window's session token expires (0 = never, else 5-10080)."""
     if req.minutes != 0 and not (5 <= req.minutes <= 10080):
         raise HTTPException(status_code=400, detail="Timeout must be 0 (never) or between 5 and 10080 minutes")
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["session_idle_timeout_minutes"] = req.minutes
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"success": True, "minutes": req.minutes}
 
 
@@ -568,12 +462,12 @@ async def set_session_timeout(req: SessionTimeoutRequest):
 
 def get_mcp_enabled() -> bool:
     """Whether the MCP endpoint should accept requests (default off)."""
-    return bool(_load_prefs().get("mcp_enabled", False))
+    return bool(_prefs.load_prefs().get("mcp_enabled", False))
 
 
 def get_mcp_write_enabled() -> bool:
     """Whether MCP write tools (notes, person fields, tags, review marks) may run (default off)."""
-    return bool(_load_prefs().get("mcp_write_enabled", False))
+    return bool(_prefs.load_prefs().get("mcp_write_enabled", False))
 
 
 class McpSettingsRequest(BaseModel):
@@ -603,9 +497,9 @@ async def get_mcp_settings():
 async def set_mcp_settings(req: McpSettingsRequest):
     from backend.secrets import get_secret
 
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["mcp_enabled"] = req.enabled
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {
         "success": True,
         "enabled": req.enabled,
@@ -616,9 +510,9 @@ async def set_mcp_settings(req: McpSettingsRequest):
 @router.post("/prefs/mcp/write")
 async def set_mcp_write(req: McpWriteRequest):
     """Allow or forbid the MCP write tools. Read tools are unaffected."""
-    prefs = _load_prefs()
+    prefs = _prefs.load_prefs()
     prefs["mcp_write_enabled"] = req.enabled
-    _save_prefs(prefs)
+    _prefs.save_prefs(prefs)
     return {"write_enabled": req.enabled}
 
 
@@ -648,25 +542,3 @@ async def reveal_mcp_key():
     return {"key": key}
 
 
-def _reconfigure_scam_service(prefs: dict) -> None:
-    """Swap the scam detection client based on current preferences."""
-    from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
-    from backend.scam.pipeline import get_pipeline_manager
-    from backend.scam.service import get_scam_service
-
-    svc = get_scam_service()
-    if svc is None:
-        return
-
-    mode = prefs.get("scam_detection_mode", "local_llm")
-    if mode == "external":
-        api_url = prefs.get("scam_detection_api_url", "")
-        api_key = get_secret_pref("scam_detection_api_key")
-        svc._client = ExternalScamAPIClient(base_url=api_url, api_key=api_key)
-    else:
-        max_tokens = prefs.get("scam_detection_max_tokens", 200)
-        mgr = get_pipeline_manager()
-        if not mgr:
-            from backend.scam.pipeline import init_pipeline_manager
-            mgr = init_pipeline_manager()
-        svc._client = LocalPipelineClient(mgr.get_config(), max_tokens=max_tokens)

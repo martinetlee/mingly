@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from backend import instance
 from backend import prefs as prefs_mod
 from backend import secrets as vault
+from backend import sessions
 from backend.api import dependencies as deps
 from backend.config import API_PORT
 from backend.ws.manager import WebSocketManager
@@ -24,7 +25,7 @@ def isolated_files(tmp_path, monkeypatch):
     yield tmp_path
     vault.lock()
     prefs_mod.invalidate_cache()
-    deps.clear_session_token()
+    sessions.clear_session_token()
 
 
 @pytest.fixture
@@ -72,7 +73,7 @@ async def test_foreign_origin_blocked_on_mutation(app):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("origin", [f"http://127.0.0.1:{API_PORT}", "http://localhost:5173"])
 async def test_allowed_origin_passes_mutation(app, origin):
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token, "Origin": origin}) as c:
         r = await c.post("/api/settings/prefs/notifications", json={"pref": "all"})
     assert r.status_code == 200
@@ -101,7 +102,7 @@ async def test_validation_error_is_flat_string(app):
 
 @pytest.mark.asyncio
 async def test_unknown_api_path_is_json_404(app):
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token}) as c:
         r = await c.get("/api/definitely/not/here")
         assert r.status_code == 404
@@ -145,15 +146,15 @@ async def test_session_validate(app):
         r = await c.get("/api/session/validate")
         assert r.json()["valid"] is False
         assert r.json()["vault_status"] == "unset"
-        token = deps.generate_session_token()
+        token = sessions.generate_session_token()
         r = await c.get("/api/session/validate", headers={"X-Session-Token": token})
         assert r.json() == {"valid": True, "vault_status": "unset", "idle_timeout_minutes": 720}
 
 
 @pytest.mark.asyncio
 async def test_multiple_windows_stay_valid(app):
-    t1 = deps.generate_session_token()
-    t2 = deps.generate_session_token()
+    t1 = sessions.generate_session_token()
+    t2 = sessions.generate_session_token()
     async with _client(app) as c:
         for t in (t1, t2):
             r = await c.get("/api/settings/prefs", headers={"X-Session-Token": t})
@@ -164,28 +165,28 @@ def test_idle_expiry(monkeypatch):
     prefs_mod.save_prefs({"session_idle_timeout_minutes": 5})
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    t = deps.generate_session_token()
+    t = sessions.generate_session_token()
     now[0] += 4 * 60
-    assert deps.is_valid_session_token(t, touch=True)  # activity resets idle timer
+    assert sessions.is_valid_session_token(t, touch=True)  # activity resets idle timer
     now[0] += 4 * 60
-    assert deps.is_valid_session_token(t)
+    assert sessions.is_valid_session_token(t)
     now[0] += 6 * 60
-    assert not deps.is_valid_session_token(t)
+    assert not sessions.is_valid_session_token(t)
 
 
 def test_idle_timeout_zero_never_expires(monkeypatch):
     prefs_mod.save_prefs({"session_idle_timeout_minutes": 0})
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    t = deps.generate_session_token()
+    t = sessions.generate_session_token()
     now[0] += 365 * 86400
-    assert deps.is_valid_session_token(t)
+    assert sessions.is_valid_session_token(t)
 
 
 def test_session_cap_evicts_least_recent():
-    tokens = [deps.generate_session_token() for _ in range(deps.MAX_SESSIONS + 1)]
-    assert not deps.is_valid_session_token(tokens[0])
-    assert all(deps.is_valid_session_token(t) for t in tokens[1:])
+    tokens = [sessions.generate_session_token() for _ in range(sessions.MAX_SESSIONS + 1)]
+    assert not sessions.is_valid_session_token(tokens[0])
+    assert all(sessions.is_valid_session_token(t) for t in tokens[1:])
 
 
 @pytest.mark.asyncio
@@ -193,7 +194,7 @@ async def test_expired_token_rejected_by_dependency(app, monkeypatch):
     prefs_mod.save_prefs({"session_idle_timeout_minutes": 5})
     now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    t = deps.generate_session_token()
+    t = sessions.generate_session_token()
     now[0] += 10 * 60
     async with _client(app, headers={"X-Session-Token": t}) as c:
         r = await c.get("/api/settings/prefs")
@@ -220,8 +221,8 @@ class FakeWS:
 @pytest.mark.asyncio
 async def test_ws_evicts_revoked_token_and_close_all():
     mgr = WebSocketManager()
-    t1 = deps.generate_session_token()
-    t2 = deps.generate_session_token()
+    t1 = sessions.generate_session_token()
+    t2 = sessions.generate_session_token()
     a, b = FakeWS(), FakeWS()
     await mgr.connect(a, t1)
     await mgr.connect(b, t2)
@@ -250,7 +251,7 @@ async def test_ws_broadcast_drops_expired_sockets(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     mgr = WebSocketManager()
     ws = FakeWS()
-    await mgr.connect(ws, deps.generate_session_token())
+    await mgr.connect(ws, sessions.generate_session_token())
     now[0] += 10 * 60
     await mgr.broadcast({"type": "x"})
     assert ws.closed == 4001 and ws.sent == []
@@ -266,7 +267,7 @@ def test_ws_endpoint_auth():
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/api/ws?token=bad", headers=host) as ws:
             ws.receive_text()
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(
             f"/api/ws?token={token}", headers={**host, "Origin": "http://evil.example.com"}
@@ -293,7 +294,7 @@ async def test_get_prefs_is_whitelisted(app):
         "shield_api_key": "sh-secret",
         "shield_last_sync_error": "boom",
     })
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token}) as c:
         r = await c.get("/api/settings/prefs")
     assert r.json() == {"notif_pref": "all"}
@@ -305,7 +306,7 @@ async def test_get_prefs_is_whitelisted(app):
     ("24:00", False), ("99:99", False), ("12:60", False), ("9:00", False), ("09:00 ", False), ("", False),
 ])
 async def test_briefing_time_validation(app, value, ok):
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token}) as c:
         r = await c.post("/api/settings/prefs/briefing-time", json={"time": value})
     assert (r.status_code == 200) is ok
@@ -314,7 +315,7 @@ async def test_briefing_time_validation(app, value, ok):
 
 
 def test_get_briefing_time_falls_back_on_bad_stored_value():
-    from backend.api.settings import get_briefing_time
+    from backend.briefing.settings import get_briefing_time
 
     prefs_mod.save_prefs({"briefing_time": "99:99"})
     assert get_briefing_time() == (9, 0)
@@ -323,6 +324,7 @@ def test_get_briefing_time_falls_back_on_bad_stored_value():
 
 
 def test_plaintext_keys_migrate_into_vault_on_unlock(isolated_files):
+    from backend import secret_prefs
     from backend.api import settings
 
     vault.add_unlock_listener(settings.on_vault_unlocked)
@@ -333,16 +335,16 @@ def test_plaintext_keys_migrate_into_vault_on_unlock(isolated_files):
     assert vault.get_secret("shield_api_key") == "sh-1"
     on_disk = json.loads((isolated_files / "prefs.json").read_text())
     assert on_disk == {"notif_pref": "off"}
-    assert settings.get_secret_pref("scam_detection_api_key") == "sk-1"
+    assert secret_prefs.get_secret_pref("scam_detection_api_key") == "sk-1"
     vault.lock()
-    assert settings.get_secret_pref("scam_detection_api_key") == ""
+    assert secret_prefs.get_secret_pref("scam_detection_api_key") == ""
 
 
 def test_secret_pref_served_from_prefs_while_locked():
-    from backend.api import settings
+    from backend.secret_prefs import get_shield_api_key
 
     prefs_mod.save_prefs({"shield_api_key": "legacy"})
-    assert settings.get_shield_api_key() == "legacy"
+    assert get_shield_api_key() == "legacy"
 
 
 @pytest.mark.asyncio
@@ -350,9 +352,9 @@ def test_secret_pref_served_from_prefs_while_locked():
 async def test_scam_key_saved_to_vault_not_prefs(app, isolated_files, monkeypatch):
     import backend.api.settings as settings
 
-    monkeypatch.setattr(settings, "_reconfigure_scam_service", lambda prefs: None)
+    monkeypatch.setattr(settings, "reconfigure_scam_service", lambda: None)
     vault.initialize_vault("pw-123456")
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token}) as c:
         r = await c.post("/api/settings/prefs/scam-detection",
                          json={"mode": "external", "api_url": "https://x", "api_key": "sk-new"})
@@ -367,7 +369,7 @@ async def test_scam_key_saved_to_vault_not_prefs(app, isolated_files, monkeypatc
 
 @pytest.mark.asyncio
 async def test_session_timeout_setting(app):
-    token = deps.generate_session_token()
+    token = sessions.generate_session_token()
     async with _client(app, headers={"X-Session-Token": token}) as c:
         assert (await c.post("/api/settings/prefs/session-timeout", json={"minutes": 3})).status_code == 400
         assert (await c.post("/api/settings/prefs/session-timeout", json={"minutes": 60})).status_code == 200

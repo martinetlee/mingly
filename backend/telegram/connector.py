@@ -81,6 +81,11 @@ class TelegramConnector(Connector):
     def status(self) -> ConnectorStatus:
         return ConnectorStatus(runtime.state, runtime.last_error)
 
+    async def fetch_attachment(self, attachment, message, conversation) -> str:
+        from backend.telegram.media import download_attachment
+
+        return await download_attachment(attachment.id)
+
     def conversation_capabilities(self, conversation) -> frozenset[Capability]:
         caps = set(self.capabilities)
         if not conversation.is_forum:

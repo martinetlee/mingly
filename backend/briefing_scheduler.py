@@ -14,7 +14,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from backend.api.settings import _load_prefs
+from backend import prefs
 from backend.briefing import schedule
 from backend.briefing.events import get_event_job
 from backend.briefing.pipeline import BRIEFING_JOB_KEY, LLM_ROLE, cleanup_stale_runs, start_briefing_job
@@ -50,10 +50,10 @@ async def check_and_run(now: datetime | None = None) -> bool:
     now = now or datetime.now()
     if _retry_after is not None and now < _retry_after:
         return False
-    prefs = _load_prefs()
-    sched = prefs.get("briefing_schedule", "daily")
-    if not schedule.is_due(now, sched, prefs.get("briefing_time"), prefs.get("briefing_day"),
-                           prefs.get("briefing_last_run")):
+    data = prefs.load_prefs()
+    sched = data.get("briefing_schedule", "daily")
+    if not schedule.is_due(now, sched, data.get("briefing_time"), data.get("briefing_day"),
+                           data.get("briefing_last_run")):
         return False
 
     days = schedule.window_days(sched)

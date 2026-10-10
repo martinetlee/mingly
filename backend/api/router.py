@@ -20,11 +20,12 @@ from backend import secrets as vault
 from backend.config import DATA_DIR
 from backend.ws.manager import ws_manager
 from backend.api import (
-    accounts, admin, ai_conversations, archive, auth, calendar, catchup, compose, conversations, dashboard,
+    accounts, admin, ai_conversations, archive, auth, calendar, catchup, compose, conversations, dashboard, gmail,
     intelligence, llm, mcp, media, organizations, people, person_notes, scam, search, session, settings, tags,
     telegram, translate, workspaces,
 )
-from backend.api.dependencies import HostOriginMiddleware, is_valid_session_token, require_session_token, validate_ws_origin
+from backend.api.dependencies import HostOriginMiddleware, require_session_token, validate_ws_origin
+from backend.sessions import is_valid_session_token
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +150,7 @@ def create_app() -> FastAPI:
 
     # OAuth redirect targets: the browser arrives without the session token;
     # each request is authenticated by its sign-in flow's state parameter.
-    from backend.connectors.gmail.routes import router as gmail_routes
-    app.include_router(gmail_routes, prefix="/api/connectors/gmail", tags=["gmail"])
+    app.include_router(gmail.router, prefix="/api/connectors/gmail", tags=["gmail"])
 
     # MCP endpoint has its own auth (vault-stored bearer key), NOT the session
     # token — external MCP clients can't obtain the ephemeral session token.

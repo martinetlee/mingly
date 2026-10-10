@@ -53,8 +53,8 @@ def patch_briefing_env(provider, *, prefs: Optional[dict] = None) -> ExitStack:
     # even if that provider then fails (e.g. Ollama down → backoff).
     stack.enter_context(patch("backend.briefing_scheduler.llm_configured", return_value=True))
     stack.enter_context(patch.object(BriefingSettings, "load", classmethod(lambda cls: BriefingSettings())))
-    stack.enter_context(patch("backend.api.settings._load_prefs", side_effect=lambda: dict(store)))
-    stack.enter_context(patch("backend.api.settings._save_prefs", side_effect=lambda d: (store.clear(), store.update(d))))
+    stack.enter_context(patch("backend.prefs.load_prefs", side_effect=lambda: dict(store)))
+    stack.enter_context(patch("backend.prefs.save_prefs", side_effect=lambda d: (store.clear(), store.update(d))))
     stack.enter_context(patch("backend.briefing.pipeline.presync", side_effect=_no_presync))
     stack.prefs = store
     return stack

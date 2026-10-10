@@ -38,6 +38,7 @@ from backend.connectors.gmail.calendar_sync import CalendarSync
 from backend.ingest.normalized import (
     NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
 )
+from backend.media import MediaNotFound, MediaUnavailable
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
 
@@ -438,7 +439,6 @@ class GmailConnector(Connector):
 
     def _require_api(self) -> GmailApi:
         if self._api is None:
-            from backend.telegram.media import MediaUnavailable
             raise MediaUnavailable("Gmail is not connected")
         return self._api
 
@@ -773,7 +773,6 @@ class GmailConnector(Connector):
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
         from backend.db.models import MessageAttachment
-        from backend.telegram.media import MediaNotFound
 
         api = self._require_api()
         part_id, _, att_id = (attachment.external_ref or "").partition(":")

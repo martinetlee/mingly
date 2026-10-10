@@ -21,7 +21,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from backend import prefs
 from backend.aio import LoopLock
+from backend.briefing.settings import (
+    get_briefing_max_tokens,
+    get_briefing_prompt_override,
+    get_briefing_prompt_overrides,
+)
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.llm.base import BaseLLMProvider, ChatMessage, LLMError
@@ -72,11 +78,6 @@ class BriefingSettings:
 
     @classmethod
     def load(cls) -> "BriefingSettings":
-        from backend.api.settings import (
-            get_briefing_max_tokens,
-            get_briefing_prompt_override,
-            get_briefing_prompt_overrides,
-        )
         from backend.org_context import get_user_organization_ids, get_user_organizations
         return cls(
             max_tokens=get_briefing_max_tokens(),
@@ -485,10 +486,9 @@ async def presync(conversation_ids: list[int], since: datetime) -> None:
 
 
 def _mark_last_run() -> None:
-    from backend.api.settings import _load_prefs, _save_prefs
-    prefs = _load_prefs()
-    prefs["briefing_last_run"] = datetime.now().isoformat()
-    _save_prefs(prefs)
+    data = prefs.load_prefs()
+    data["briefing_last_run"] = datetime.now().isoformat()
+    prefs.save_prefs(data)
 
 
 async def run_briefing(job, days: int, *, sync_first: bool = True) -> BriefingOutcome:

@@ -9,7 +9,6 @@ from backend.llm.registry import get_registry
 from backend.llm.config import load_registry_config
 from backend.briefing_scheduler import start_briefing_scheduler
 from backend.catchup_summary_scheduler import start_catchup_summary_scheduler
-from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
 from backend.scam.pipeline import init_pipeline_manager
 from backend.scam.service import init_scam_service
 from backend.tasks import spawn
@@ -24,22 +23,13 @@ def _start_shield() -> None:
     client, and resuming interrupted checks. Skipped while Shield is disabled."""
     import importlib
     importlib.import_module("backend.scam.tools")  # triggers auto-registration of tools
-    pipeline_mgr = init_pipeline_manager()
+    init_pipeline_manager()
 
     from backend.scam.cloud_sync import init_cloud_sync_manager
     init_cloud_sync_manager()
 
-    from backend.api.settings import get_scam_detection_settings
-    scam_settings = get_scam_detection_settings()
-    if scam_settings["mode"] == "external" and scam_settings["api_url"]:
-        scam_client = ExternalScamAPIClient(
-            base_url=scam_settings["api_url"],
-            api_key=scam_settings["api_key"],
-        )
-    else:
-        max_tokens = scam_settings.get("max_tokens", 200)
-        scam_client = LocalPipelineClient(pipeline_mgr.get_config(), max_tokens=max_tokens)
-    scam_svc = init_scam_service(scam_client)
+    from backend.scam.settings import build_scam_client
+    scam_svc = init_scam_service(build_scam_client())
     spawn(scam_svc.resume_pending_requests(), name="resume_pending_scam_requests")
 
 
@@ -65,7 +55,7 @@ async def on_startup():
 
     # Clear media files truncated by the old non-atomic downloader before the
     # UI can be served them (local-only; no Telegram needed).
-    from backend.telegram.media import audit_media_files
+    from backend.media import audit_media_files
     spawn(audit_media_files(), name="media_audit")
 
     # The vault is normally still locked here (credentials unavailable), in

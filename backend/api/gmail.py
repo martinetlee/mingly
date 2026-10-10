@@ -1,4 +1,4 @@
-"""Gmail HTTP routes (/api/connectors/gmail).
+"""Gmail HTTP routes (/api/connectors/gmail): OAuth callback and the Mail space.
 
 The router is mounted WITHOUT the session token because Google's OAuth
 redirect arrives from the browser without it (``/oauth/callback``,
@@ -17,7 +17,16 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from backend.api.dependencies import require_session_token
+from backend.api.idempotency import cleanup_temp_files, idempotent
+from backend.api.lookups import conversation_or_404
+from backend.connectors.base import OutgoingFile, OutgoingMessage
 from backend.connectors.gmail import oauth
+from backend.connectors.manager import manager
+from backend.db import crud
+from backend.db.database import AsyncSessionLocal
+from backend.db.models import Identity, Message, MessageAttachment
+from backend.serializers import channel_of, conversation_out, messages_out
+from backend.ws.manager import ws_manager
 
 router = APIRouter()
 _protected = [Depends(require_session_token)]
@@ -53,7 +62,6 @@ async def oauth_callback(state: Optional[str] = None, code: Optional[str] = None
 # -- Mail space (session-protected) ------------------------------------------------
 
 def _connector(account_id: Optional[int]):
-    from backend.connectors.manager import manager
 
     connector = manager.for_account("gmail", account_id)
     if connector is None:
@@ -63,9 +71,6 @@ def _connector(account_id: Optional[int]):
 
 async def _thread(conversation_id: int):
     """The email-thread conversation and the connector of its account."""
-    from backend.api.lookups import conversation_or_404
-    from backend.db.database import AsyncSessionLocal
-    from backend.serializers import channel_of
 
     async with AsyncSessionLocal() as db:
         conv = await conversation_or_404(db, conversation_id)
@@ -77,7 +82,6 @@ async def _thread(conversation_id: int):
 async def _thread_summaries(db, conversation_ids: list) -> dict:
     """``{conversation_id: {senders: [{name, person_id, is_me}], message_count, has_attachments}}``
     — senders in order of their first message, like a mail client's thread row."""
-    from backend.db.models import Identity, Message, MessageAttachment
 
     out: dict = {cid: {"senders": [], "message_count": 0, "has_attachments": False} for cid in conversation_ids}
     if not conversation_ids:
@@ -119,9 +123,6 @@ async def list_threads(
     ``inbox`` (not archived; Promotions & co. are archived), ``sent``,
     ``archive``, ``all`` — or a ``label``. Each is a Conversation plus a
     ``thread`` summary (senders, message count, attachments)."""
-    from backend.db import crud
-    from backend.db.database import AsyncSessionLocal
-    from backend.serializers import conversation_out
 
     if folder not in FOLDERS:
         raise HTTPException(status_code=400, detail=f"Unknown folder: {folder}")
@@ -138,8 +139,6 @@ async def list_threads(
 @router.get("/labels", dependencies=_protected)
 async def list_labels(account_id: Optional[int] = None):
     """Labels in use on one account (or all Gmail accounts): ``[{label, count}]``."""
-    from backend.db import crud
-    from backend.db.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         rows = await crud.conversation_labels(db, account_id=account_id)
@@ -155,10 +154,6 @@ class ReadRequest(BaseModel):
 
 
 async def _modify(conversation_id: int, add: list, remove: list) -> dict:
-    from backend.db import crud
-    from backend.db.database import AsyncSessionLocal
-    from backend.serializers import conversation_out
-    from backend.ws.manager import ws_manager
 
     conv, connector = await _thread(conversation_id)
     try:
@@ -197,11 +192,6 @@ async def compose_new(
 ):
     """Start a new email thread from one account (multipart, optional files).
     Returns ``{conversation_id, message_id, message}``."""
-    from backend.api.compose import _cleanup, _idempotent
-    from backend.connectors.base import OutgoingFile, OutgoingMessage
-    from backend.db import crud
-    from backend.db.database import AsyncSessionLocal
-    from backend.serializers import messages_out
 
     connector = _connector(account_id)
     temp_paths: list = []
@@ -224,7 +214,7 @@ async def compose_new(
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
             finally:
-                _cleanup(temp_paths)
+                cleanup_temp_files(temp_paths)
             async with AsyncSessionLocal() as db:
                 rows = await crud.get_reply_previews(db, ids)
                 messages = await messages_out(db, list(rows))
@@ -232,9 +222,9 @@ async def compose_new(
                     "message_id": messages[0]["id"] if messages else None,
                     "message": messages[0] if messages else None}
 
-        return await _idempotent(client_nonce, _send)
+        return await idempotent(client_nonce, _send)
     finally:
         # Once the send started, it owns the temp files (it may outlive this
         # request if the client disconnects); otherwise clean up here.
         if not started:
-            _cleanup(temp_paths)
+            cleanup_temp_files(temp_paths)

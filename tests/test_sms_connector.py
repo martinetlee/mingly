@@ -31,7 +31,7 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Account, Conversation, Identity, Message, MessageAttachment
 from backend.ingest import fanout
-from backend.telegram.media import MediaNotFound
+from backend.media import MediaNotFound
 from tests import factories as f
 from tests.test_sms_typedstream import blob
 

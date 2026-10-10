@@ -8,6 +8,7 @@ import pytest
 
 from backend import prefs as prefs_mod
 from backend import secrets as vault
+from backend import sessions
 from backend.api import dependencies as deps
 
 
@@ -20,7 +21,7 @@ def isolated_files(tmp_path, monkeypatch):
     yield tmp_path
     vault.lock()
     prefs_mod.invalidate_cache()
-    deps.clear_session_token()
+    sessions.clear_session_token()
 
 
 # ── Vault ────────────────────────────────────────────────────────────────────
@@ -82,11 +83,11 @@ def test_failed_write_keeps_cache_consistent(isolated_files, monkeypatch):
 
 def test_lock_revokes_all_sessions(isolated_files):
     vault.initialize_vault("pw-123456")
-    t1 = deps.generate_session_token()
-    t2 = deps.generate_session_token()
+    t1 = sessions.generate_session_token()
+    t2 = sessions.generate_session_token()
     vault.lock()
-    assert not deps.is_valid_session_token(t1)
-    assert not deps.is_valid_session_token(t2)
+    assert not sessions.is_valid_session_token(t1)
+    assert not sessions.is_valid_session_token(t2)
 
 
 def test_unlock_listener_runs(isolated_files):
