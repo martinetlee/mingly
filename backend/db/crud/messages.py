@@ -15,8 +15,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from backend.db.crud.conversations import recompute_preview, refresh_preview
-from backend.db.models import Conversation, Identity, Message, MessageAttachment, MessageParticipant
+from backend.db.crud.conversations import one_to_one_filter, recompute_preview, refresh_preview
+from backend.db.models import Conversation, Identity, Message, MessageAttachment, MessageParticipant, Person
 
 __all__ = [
     "with_reply_preview",
@@ -43,6 +43,8 @@ __all__ = [
     "GENERAL_TOPIC_ID",
     "message_participants",
     "stored_topics",
+    "count_relevant_incoming_since",
+    "latest_messages",
 ]
 
 
@@ -632,3 +634,47 @@ async def stored_topics(db: AsyncSession, conversation_id: int) -> list[tuple[in
         .group_by(Message.topic_id)
     )).all()
     return [(tid, first) for tid, first in rows]
+
+
+async def count_relevant_incoming_since(db: AsyncSession, since: datetime) -> int:
+    """Incoming messages since ``since`` in tracked conversations or direct
+    conversations with important people (visible conversations only)."""
+    important_peers = (
+        select(Identity.id).join(Person, Person.id == Identity.person_id)
+        .where(Person.is_important == True)  # noqa: E712
+    )
+    relevant = or_(
+        Conversation.is_tracked == True,  # noqa: E712
+        and_(one_to_one_filter(), Conversation.peer_identity_id.in_(important_peers)),
+    )
+    return (await db.execute(
+        select(func.count()).select_from(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Message.date >= since,
+            Message.is_outgoing == False,  # noqa: E712
+            Message.kind == "message",
+            Conversation.is_hidden == False,  # noqa: E712
+            Conversation.is_deactivated == False,  # noqa: E712
+            relevant,
+        )
+    )).scalar() or 0
+
+
+async def latest_messages(db: AsyncSession, conversation_ids: Iterable[int]) -> dict[int, Message]:
+    """The newest message of each conversation (one query)."""
+    ids = list(conversation_ids)
+    if not ids:
+        return {}
+    ranked = (
+        select(
+            Message.id,
+            func.row_number().over(
+                partition_by=Message.conversation_id, order_by=(desc(Message.date), desc(Message.id)),
+            ).label("rn"),
+        )
+        .where(Message.conversation_id.in_(ids))
+        .subquery()
+    )
+    rows = (await db.execute(select(Message).join(ranked, ranked.c.id == Message.id).where(ranked.c.rn == 1))).scalars()
+    return {m.conversation_id: m for m in rows.all()}

@@ -125,18 +125,7 @@ async def search_conversations(q: str, db: AsyncSession = Depends(get_db)):
     q = q.strip()
     if not q:
         return {"local": []}
-    pattern = f"%{q}%"
-    result = await db.execute(
-        select(Conversation)
-        .where(
-            or_(Conversation.title.ilike(pattern), Conversation.username.ilike(pattern)),
-            Conversation.is_hidden == False,  # noqa: E712
-            Conversation.is_deactivated == False,  # noqa: E712
-        )
-        .order_by(desc(Conversation.last_activity_at))
-        .limit(20)
-    )
-    return {"local": [conversation_json(c) for c in result.scalars().all()]}
+    return {"local": [conversation_json(c) for c in await crud.search_conversations(db, q, 20)]}
 
 
 @router.get("/search/messages")

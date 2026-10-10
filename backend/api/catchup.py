@@ -6,13 +6,11 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, desc, and_, or_, func
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.database import get_db
-from backend.db.models import CatchUpItem, CatchUpSummary, Message
 from backend.db import crud
+from backend.db.database import get_db
+from backend.db.models import CatchUpItem
 from backend.serialization import iso_utc
 
 router = APIRouter()
@@ -65,21 +63,7 @@ async def _peer_person_id(db: AsyncSession, conversation_id: int) -> Optional[in
 
 
 async def _get_or_create_item(db: AsyncSession, conversation_id: int) -> CatchUpItem:
-    person_id = await _peer_person_id(db, conversation_id)
-    # INSERT OR IGNORE: two concurrent first actions on a conversation can't
-    # collide on the unique conversation_id.
-    now = datetime.utcnow()
-    await db.execute(
-        sqlite_insert(CatchUpItem)
-        .values(conversation_id=conversation_id, person_id=person_id, status="pending",
-                created_at=now, updated_at=now)
-        .on_conflict_do_nothing(index_elements=["conversation_id"])
-    )
-    item = (await db.execute(
-        select(CatchUpItem).where(CatchUpItem.conversation_id == conversation_id)
-    )).scalar_one()
-    item.person_id = person_id  # the peer may have been linked to another person since
-    return item
+    return await crud.get_or_create_catchup_item(db, conversation_id, await _peer_person_id(db, conversation_id))
 
 
 async def _save(db: AsyncSession, item: CatchUpItem) -> dict:
@@ -93,17 +77,7 @@ async def contexts_for(db: AsyncSession, conversation_ids: list[int]) -> dict[in
     """Stored catch-up context for many conversations in two queries."""
     if not conversation_ids:
         return {}
-    summaries = {
-        s.conversation_id: s
-        for s in (await db.execute(
-            select(CatchUpSummary).where(CatchUpSummary.conversation_id.in_(conversation_ids))
-        )).scalars().all()
-    }
-    totals = dict((await db.execute(
-        select(Message.conversation_id, func.count(Message.id))
-        .where(Message.conversation_id.in_(list(summaries)))
-        .group_by(Message.conversation_id)
-    )).all()) if summaries else {}
+    summaries, totals = await crud.catchup_summaries(db, conversation_ids)
     out: dict[int, dict] = {}
     for cid in conversation_ids:
         s = summaries.get(cid)
@@ -138,28 +112,13 @@ async def contexts_for(db: AsyncSession, conversation_ids: list[int]) -> dict[in
 @router.get("/items")
 async def list_catchup_items(db: AsyncSession = Depends(get_db)):
     """Return active (pending or un-snoozed) catchup items."""
-    now = datetime.utcnow()
-    result = await db.execute(
-        select(CatchUpItem).where(
-            or_(
-                CatchUpItem.status == "pending",
-                and_(
-                    CatchUpItem.status == "snoozed",
-                    CatchUpItem.snoozed_until <= now,
-                ),
-            )
-        ).order_by(desc(CatchUpItem.updated_at))
-    )
-    return [item_dict(i) for i in result.scalars().all()]
+    return [item_dict(i) for i in await crud.list_active_catchup_items(db, datetime.utcnow())]
 
 
 @router.get("/all")
 async def list_all_catchup_items(db: AsyncSession = Depends(get_db)):
     """Return all catchup items regardless of status."""
-    result = await db.execute(
-        select(CatchUpItem).order_by(desc(CatchUpItem.updated_at))
-    )
-    return [item_dict(i) for i in result.scalars().all()]
+    return [item_dict(i) for i in await crud.list_catchup_items(db)]
 
 
 @router.get("/contexts")

@@ -14,12 +14,10 @@ import logging
 from datetime import datetime
 from typing import Optional, Protocol
 
-from sqlalchemy import select
-
 from backend import prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
-from backend.db.models import CatchUpItem, Conversation, Message
+from backend.db.models import Conversation, Message
 from backend.notify import send_native_notification
 from backend.serializers import message_out, messages_out
 from backend.ws.manager import ws_manager
@@ -90,17 +88,7 @@ async def stamp_triage(conversation_id: int, date: datetime) -> None:
 async def _reopen_catchup(conversation_id: int) -> None:
     """An incoming message reopens a handled catch-up item."""
     async with AsyncSessionLocal() as db:
-        item = (await db.execute(
-            select(CatchUpItem).where(
-                CatchUpItem.conversation_id == conversation_id,
-                CatchUpItem.status == "handled",
-            )
-        )).scalar_one_or_none()
-        if item:
-            item.status = "pending"
-            item.handled_at = None
-            item.updated_at = datetime.utcnow()
-            await db.commit()
+        await crud.reopen_handled_catchup(db, conversation_id)
 
 
 def _channel(conv: Conversation) -> Optional[str]:

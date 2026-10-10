@@ -20,6 +20,7 @@ __all__ = [
     "get_entries_for_runs",
     "get_briefing_run_entries",
     "delete_briefing_run",
+    "latest_finished_briefing_run",
 ]
 
 
@@ -124,3 +125,12 @@ async def delete_briefing_run(db: AsyncSession, run_id: int) -> bool:
     await db.delete(run)
     await db.commit()
     return True
+
+
+async def latest_finished_briefing_run(db: AsyncSession) -> Optional[BriefingRun]:
+    """The newest run that finished (fully or partly)."""
+    return (await db.execute(
+        select(BriefingRun)
+        .where(BriefingRun.status.in_(("done", "partial")))
+        .order_by(desc(BriefingRun.generated_at)).limit(1)
+    )).scalar_one_or_none()

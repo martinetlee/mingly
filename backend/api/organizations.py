@@ -1,20 +1,21 @@
+"""Organizations (/api/organizations): the directory, members (current and
+former), related group conversations and the LLM-generated context."""
+
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend import user_orgs
 from backend.db import crud
 from backend.db.database import get_db
-from backend.db.models import Conversation, Message, Organization, PersonPosition
+from backend.db.models import Organization
 from backend.llm.base import ChatMessage, LLMError
 from backend.llm.resolve import LLMUnavailable, complete_text
 from backend.serialization import iso_utc
-from backend import user_orgs
-from backend.db.results import affected_rows
 
 router = APIRouter()
 
@@ -45,9 +46,7 @@ async def _get_org(db: AsyncSession, org_id: int) -> Organization:
 
 async def _org_detail(db: AsyncSession, org: Organization) -> dict:
     """Full org: current and former members, related group conversations."""
-    positions = list((await db.execute(
-        select(PersonPosition).where(PersonPosition.organization_id == org.id).order_by(PersonPosition.id)
-    )).scalars().all())
+    positions = await crud.organization_positions(db, org.id)
     people = await crud.get_people(db, {p.person_id for p in positions})
     identities = await crud.identities_for_people(db, people)
     members = []
@@ -67,35 +66,8 @@ async def _org_detail(db: AsyncSession, org: Organization) -> dict:
     for group in (members, former_members):
         group.sort(key=lambda m: (m["name"].lower(), m["position_id"]))
 
-    # Group conversations whose title contains the org name (heuristic)
-    related = list((await db.execute(
-        select(Conversation)
-        .where(
-            crud.contains_ci(Conversation.title, org.name),
-            Conversation.kind.in_(["group", "channel"]),
-            Conversation.is_deactivated == False,  # noqa: E712
-        )
-        .order_by(desc(Conversation.last_activity_at), Conversation.title)
-        .limit(10)
-    )).scalars().all())
-
-    # Latest message per related conversation, in one query
-    latest: dict[int, Message] = {}
-    if related:
-        ranked = (
-            select(
-                Message.id,
-                func.row_number().over(
-                    partition_by=Message.conversation_id, order_by=(desc(Message.date), desc(Message.id)),
-                ).label("rn"),
-            )
-            .where(Message.conversation_id.in_([c.id for c in related]))
-            .subquery()
-        )
-        for msg in (await db.execute(
-            select(Message).join(ranked, ranked.c.id == Message.id).where(ranked.c.rn == 1)
-        )).scalars().all():
-            latest[msg.conversation_id] = msg
+    related = await crud.related_group_conversations(db, org.name, limit=10)
+    latest = await crud.latest_messages(db, [c.id for c in related])
 
     return {
         "id": org.id,
@@ -213,11 +185,7 @@ async def update_organization(
     after_commit = None  # user-orgs prefs follow the DB change once committed
     if data.name is not None:
         new_name = _name_or_400(data.name)
-        clash = (await db.execute(
-            select(Organization).where(
-                crud.name_key(Organization.name) == crud.name_key(new_name), Organization.id != org.id,
-            ).limit(1)
-        )).scalar_one_or_none()
+        clash = await crud.find_organization_by_name(db, new_name, exclude_id=org.id)
         if clash is not None:
             if not data.merge:
                 raise _exists_409(clash)
@@ -328,14 +296,7 @@ async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
     if not generated:
         raise HTTPException(status_code=502, detail="LLM returned an empty response.")
 
-    unchanged = (
-        Organization.context.is_(None) if context_before is None else Organization.context == context_before
-    )
-    res = await db.execute(
-        update(Organization).where(Organization.id == org_id, unchanged).values(context=generated)
-    )
-    await db.commit()
-    if not affected_rows(res):
+    if not await crud.set_org_context_if_unchanged(db, org_id, context_before, generated):
         if await db.get(Organization, org_id) is None:
             raise HTTPException(status_code=404, detail="Organization was deleted while generating")
         raise HTTPException(

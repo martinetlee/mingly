@@ -11,7 +11,7 @@ from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.crud.text import contains_ci, name_key
-from backend.db.models import Organization, PersonPosition
+from backend.db.models import Conversation, Organization, PersonPosition
 from backend.db.results import affected_rows
 
 __all__ = [
@@ -23,14 +23,19 @@ __all__ = [
     "delete_organization",
     "list_organizations_with_counts",
     "detached_position_names",
+    "organization_positions",
+    "related_group_conversations",
+    "set_org_context_if_unchanged",
 ]
 
 
-async def find_organization_by_name(db: AsyncSession, name: str) -> Optional[Organization]:
-    return (await db.execute(
-        select(Organization).where(name_key(Organization.name) == name_key(name.strip()))
-        .order_by(Organization.id).limit(1)
-    )).scalar_one_or_none()
+async def find_organization_by_name(db: AsyncSession, name: str, exclude_id: Optional[int] = None) -> Optional[Organization]:
+    """The organization with this name (case / whitespace-insensitive), other
+    than ``exclude_id``."""
+    q = select(Organization).where(name_key(Organization.name) == name_key(name.strip()))
+    if exclude_id is not None:
+        q = q.where(Organization.id != exclude_id)
+    return (await db.execute(q.order_by(Organization.id).limit(1))).scalar_one_or_none()
 
 
 async def attach_detached_positions(db: AsyncSession, org: Organization) -> int:
@@ -179,3 +184,34 @@ async def detached_position_names(db: AsyncSession) -> list[str]:
             .group_by(keyed)
         )).all()
     ]
+
+
+async def organization_positions(db: AsyncSession, org_id: int) -> list[PersonPosition]:
+    """Every position (current and former) at the organization, oldest first."""
+    return list((await db.execute(
+        select(PersonPosition).where(PersonPosition.organization_id == org_id).order_by(PersonPosition.id)
+    )).scalars().all())
+
+
+async def related_group_conversations(db: AsyncSession, org_name: str, limit: int = 10) -> list[Conversation]:
+    """Group / channel conversations whose title contains the org name
+    (heuristic), most recently active first."""
+    return list((await db.execute(
+        select(Conversation)
+        .where(
+            contains_ci(Conversation.title, org_name),
+            Conversation.kind.in_(["group", "channel"]),
+            Conversation.is_deactivated == False,  # noqa: E712
+        )
+        .order_by(Conversation.last_activity_at.desc(), Conversation.title)
+        .limit(limit)
+    )).scalars().all())
+
+
+async def set_org_context_if_unchanged(db: AsyncSession, org_id: int, expected: Optional[str], context: str) -> bool:
+    """Compare-and-set the generated context: written only while the stored
+    context is still ``expected``. Commits; returns whether it was written."""
+    unchanged = Organization.context.is_(None) if expected is None else Organization.context == expected
+    res = await db.execute(update(Organization).where(Organization.id == org_id, unchanged).values(context=context))
+    await db.commit()
+    return bool(affected_rows(res))
