@@ -14,10 +14,10 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from backend.llm.base import ChatMessage, LLMError
-from backend.llm.resolve import LLMUnavailable, get_provider_for_model
+from backend.llm.base import ChatMessage, LLMError, ToolCall
+from backend.llm.resolve import get_provider_for_model, LLMUnavailable
 from backend.scam.channel_ids import TELEGRAM
-from backend.scam.scan import ScamCheckResult
+from backend.scam.scan import extract_domains, ScamCheckResult
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +301,6 @@ def _build_tool_prompt(tools: list) -> str:
 
 def _parse_text_tool_calls(text: str) -> list:
     """Parse TOOL_CALL: lines from LLM text response."""
-    from backend.llm.base import ToolCall
     calls = []
     for match in _TOOL_CALL_RE.finditer(text):
         name = match.group(1)
@@ -683,7 +682,6 @@ def _signature_match(sigs, targets: list[dict], channel: Optional[str] = None) -
     Known-scammer ids are Telegram sender ids (as before the multi-channel
     refactor: the user, or a chat posting as itself), so they only match
     Telegram senders."""
-    from backend.scam.scan import extract_domains
 
     known_ids = set(sigs.telegram_ids) if channel == TELEGRAM else set()
     for msg in targets:

@@ -18,15 +18,11 @@ from pydantic import BaseModel
 
 from backend.config import DATA_DIR
 from backend.llm.base import LLMError
-from backend.llm.config import (
-    LLMInstanceConfig,
-    LLMRegistryConfig,
-    load_registry_config,
-    save_registry_config,
-)
+from backend.llm.config import LLMInstanceConfig, LLMRegistryConfig, load_registry_config, save_registry_config
 from backend.llm.registry import get_registry
 from backend.tasks import spawn
 from backend.llm.ollama import OllamaProvider
+from backend.secrets import delete_secret, save_secret
 
 router = APIRouter()
 
@@ -169,7 +165,6 @@ async def api_key_status():
 
 @router.put("/keys/{provider}")
 async def set_api_key(provider: str, req: ApiKeyRequest):
-    from backend.secrets import save_secret
     if provider not in _KEY_SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}")
     key = req.api_key.strip()
@@ -184,7 +179,6 @@ async def set_api_key(provider: str, req: ApiKeyRequest):
 
 @router.delete("/keys/{provider}")
 async def delete_api_key(provider: str):
-    from backend.secrets import delete_secret
     if provider not in _KEY_SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}")
     delete_secret(_KEY_SECRETS[provider])

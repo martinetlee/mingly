@@ -42,6 +42,7 @@ from backend.api.organizations import list_organizations as _list_organizations
 from backend.api.people import broadcast_person_changed, people_payload, position_dict
 from backend.api.person_notes import broadcast_notes_changed, note_dict
 from backend.telegram.connector import connector as telegram_connector
+from backend.telegram import archive
 
 MAX_LIMIT = 100
 MAX_FETCH_WAIT_SECONDS = 60
@@ -332,7 +333,6 @@ async def _require_person(db: AsyncSession, person_id: int):
 
 
 def _archive():
-    from backend.telegram import archive
     return archive
 
 

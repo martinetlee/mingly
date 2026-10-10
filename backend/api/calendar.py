@@ -23,6 +23,9 @@ from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import Account
 from backend.serialization import iso_utc
+from backend.connectors.gmail.api import GmailError
+from backend.connectors.gmail.calendar_sync import PRIMARY, selected_calendars, set_selected_calendars
+from backend.connectors.manager import manager
 
 router = APIRouter()
 
@@ -154,7 +157,6 @@ async def person_upcoming(person_id: int, limit: int = 5, db: AsyncSession = Dep
 
 
 def _sync_of(account_id: int):
-    from backend.connectors.manager import manager
 
     connector = manager.for_account("gmail", account_id)
     return connector, getattr(connector, "calendar", None)
@@ -164,7 +166,6 @@ def _sync_of(account_id: int):
 async def calendar_accounts(db: AsyncSession = Depends(get_db)):
     """Gmail accounts and their calendar sync: ``[{account_id, label,
     calendar_ids, syncing, last_sync_at, error}]``."""
-    from backend.connectors.gmail.calendar_sync import selected_calendars
 
     accounts = await crud.get_accounts(db, channel="gmail")
     out = []
@@ -191,8 +192,6 @@ def _running_sync(account_id: int):
 @router.get("/accounts/{account_id}/calendars")
 async def list_calendars(account_id: int):
     """The account's calendars at Google: ``[{id, summary, primary, selected, color}]``."""
-    from backend.connectors.gmail.api import GmailError
-    from backend.connectors.gmail.calendar_sync import PRIMARY, selected_calendars
 
     sync = _running_sync(account_id)
     try:
@@ -216,7 +215,6 @@ class CalendarSelection(BaseModel):
 @router.put("/accounts/{account_id}/calendars")
 async def select_calendars(account_id: int, body: CalendarSelection, db: AsyncSession = Depends(get_db)):
     """Choose which calendars of the account are synced (empty = primary only)."""
-    from backend.connectors.gmail.calendar_sync import set_selected_calendars
 
     acc = await db.get(Account, account_id)
     if acc is None or acc.channel != "gmail":
@@ -231,7 +229,6 @@ async def select_calendars(account_id: int, body: CalendarSelection, db: AsyncSe
 @router.post("/sync")
 async def sync_now():
     """Sync every connected account's calendars now."""
-    from backend.connectors.manager import manager
 
     n = 0
     for c in manager.all():

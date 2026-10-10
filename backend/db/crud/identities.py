@@ -15,7 +15,9 @@ from sqlalchemy import delete, or_, select, union, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import ContactPoint, Identity, Person
+from backend.db.models import ContactPoint, Identity, Person, PersonMerge, PersonNote, PersonPosition
+from backend import prefs
+from backend.db.database import Base
 
 __all__ = [
     "PROFILE_FIELDS", "IdentityChange", "normalize_phone", "normalize_email", "store_identity",
@@ -259,7 +261,6 @@ def _identity_references() -> list:
     (a conversation peer, a sender, a recipient, an attendee, an account
     owner, a Shield record…), derived from the schema so new references
     count automatically. Contact points are the identity's own data."""
-    from backend.db.database import Base
 
     refs = []
     for table in Base.metadata.sorted_tables:
@@ -280,8 +281,6 @@ async def collect_orphans_after_account_removal(db: AsyncSession, channel: str, 
     (CRM fields, notes, positions, merge history). Also drops the account's
     entries from account-keyed prefs. Commits. Returns
     ``{"identities": n, "people": n, "prefs": [pref keys changed]}``."""
-    from backend import prefs
-    from backend.db.models import PersonMerge, PersonNote, PersonPosition
 
     in_use = [select(col).where(col.isnot(None)) for col in _identity_references()]
     orphan_q = select(Identity.id, Identity.person_id).where(Identity.channel == channel)

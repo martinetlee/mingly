@@ -57,11 +57,10 @@ from backend.db.models import Account, Conversation, HistoryCoverage
 from backend.jobs import get_running, run_single
 from backend.serialization import iso_utc
 from backend.tasks import spawn
-from backend.telegram import ids
+from backend.telegram import client as tg_client, ids, sync as tg_sync
 from backend.telegram.convert import rows_for
 from backend.telegram.coordinator import broadcast_conversations_synced, coordinator
 from backend.ws.manager import ws_manager
-from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +361,6 @@ class DMArchive:
     async def _enumerate_dialogs(self) -> bool:
         """Step 1: every dialog in every folder. Returns False when it must be
         retried (FloodWait slept out, or a transient failure)."""
-        from backend.telegram import sync as tg_sync
 
         now = datetime.utcnow()
         fresh = timedelta(seconds=DIALOGS_FRESH_SECONDS)

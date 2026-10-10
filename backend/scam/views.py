@@ -22,6 +22,7 @@ from backend.errors import InvalidRequest, NotFound
 from backend.scam.verdict import FLAG_ACTIVE, not_pending_condition, scanned_condition
 from backend.serialization import iso_utc
 from backend.serializers import scam_fields
+from backend.scam.cloud_sync import telegram_flag_condition, telegram_message_condition
 
 
 def _flag_dict(f: ScamFlag, person_id: Optional[int], info: dict) -> dict:
@@ -366,7 +367,6 @@ async def recent_requests(status: Optional[str] = None):
 async def sync_summary():
     """Sync status summary — counts of synced vs unsynced items. Flags and
     scans count the rows the current (Telegram-only) cloud contract uploads."""
-    from backend.scam.cloud_sync import telegram_flag_condition, telegram_message_condition
 
     async with AsyncSessionLocal() as db:
         flags_total = (await db.execute(

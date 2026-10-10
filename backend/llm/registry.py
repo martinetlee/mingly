@@ -3,6 +3,7 @@ from typing import Optional
 
 from backend.llm.base import BaseLLMProvider
 from backend.llm.config import LLMInstanceConfig
+from backend.tasks import spawn
 
 
 class LLMRegistry:
@@ -81,7 +82,6 @@ def _close_later(provider: BaseLLMProvider) -> None:
         asyncio.get_running_loop()
     except RuntimeError:
         return
-    from backend.tasks import spawn
     spawn(provider.aclose(), name=f"llm_close:{provider.instance_name}")
 
 

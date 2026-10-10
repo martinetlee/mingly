@@ -6,6 +6,7 @@ from backend import prefs
 from backend.scam.client import ExternalScamAPIClient, LocalPipelineClient
 from backend.scam.scan import ScamAPIClient
 from backend.secret_prefs import get_secret_pref
+from backend.scam.pipeline import get_pipeline_manager, init_pipeline_manager
 
 SCAM_API_KEY = "scam_detection_api_key"
 
@@ -24,7 +25,6 @@ def get_scam_detection_settings() -> dict:
 def build_scam_client(settings: Optional[dict] = None) -> ScamAPIClient:
     """The detection client the settings select: the external API when
     configured with a URL, else the local DAG pipeline."""
-    from backend.scam.pipeline import get_pipeline_manager, init_pipeline_manager
 
     s = settings if settings is not None else get_scam_detection_settings()
     if s["mode"] == "external" and s["api_url"]:

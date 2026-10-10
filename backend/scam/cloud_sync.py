@@ -48,16 +48,34 @@ from sqlalchemy import and_, or_, select, update
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import (
-    Account, Conversation, Identity, Message, ScamDismissal, ScamFeedback, ScamFlag, ScamReport,
+    Account,
+    Conversation,
+    Identity,
+    Message,
+    ScamDismissal,
+    ScamFeedback,
+    ScamFlag,
+    ScamReport,
 )
 from backend.fsutil import atomic_write_text
-from backend.jobs import await_single
+from backend.jobs import await_single, get_running
 from backend.prefs import get_pref, update_prefs
 from backend.scam.channel_ids import (
-    TELEGRAM, CloudRefs, cloud_refs, handle_salt, telegram_message_id, telegram_peer_ids, telegram_scan_ids,
+    cloud_refs,
+    CloudRefs,
+    handle_salt,
+    TELEGRAM,
+    telegram_message_id,
+    telegram_peer_ids,
+    telegram_scan_ids,
     telegram_user_ids,
 )
 from backend.scam.verdict import not_pending_condition
+from backend import secrets as vault
+from backend.scam.analytics import get_analytics_tracker
+from backend.scam.pipeline import _load_signatures_file, get_pipeline_manager
+from backend.secret_prefs import get_shield_api_key
+from backend.tasks import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +375,6 @@ def start_sync_loop() -> bool:
         asyncio.get_running_loop()
     except RuntimeError:
         return False
-    from backend.tasks import spawn
 
     _loop_task = spawn(_sync_loop(), name="cloud_sync_loop")
     return True
@@ -370,7 +387,6 @@ def stop_sync_loop() -> None:
     if _loop_task is not None and not _loop_task.done():
         _loop_task.cancel()
     _loop_task = None
-    from backend.jobs import get_running
 
     running = get_running("cloud_sync")
     if running is not None:
@@ -378,7 +394,6 @@ def stop_sync_loop() -> None:
 
 
 def _register_vault_listeners() -> None:
-    from backend import secrets as vault
 
     vault.add_lock_listener(stop_sync_loop)  # reset_vault() locks first
     vault.add_unlock_listener(start_sync_loop)
@@ -388,7 +403,6 @@ def _register_vault_listeners() -> None:
 
 def init_cloud_sync_manager() -> "CloudSyncManager":
     global _manager
-    from backend.secret_prefs import get_shield_api_key
 
     _manager = CloudSyncManager(key_provider=get_shield_api_key)
     _manager.configure(base_url=get_pref("shield_cloud_url", "") or "")
@@ -461,7 +475,6 @@ class CloudSyncManager:
 
     @property
     def is_running(self) -> bool:
-        from backend.jobs import get_running
 
         return get_running("cloud_sync") is not None
 
@@ -627,7 +640,6 @@ class CloudSyncManager:
         return updated
 
     async def _after_download(self, updated: list) -> None:
-        from backend.scam.pipeline import _load_signatures_file, get_pipeline_manager
         from backend.scam.tools.search_library import invalidate_cache
 
         mgr = get_pipeline_manager()
@@ -998,7 +1010,6 @@ class CloudSyncManager:
 
     async def _upload_analytics(self) -> int:
         """Upload closed (past) analytics days that haven't been synced."""
-        from backend.scam.analytics import get_analytics_tracker
         tracker = get_analytics_tracker()
 
         periods = await tracker.get_pending_periods()

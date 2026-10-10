@@ -25,6 +25,7 @@ from backend.serialization import iso_utc
 from backend.serializers import channel_of, messages_out, person_out
 from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
+from backend.api.calendar import timeline_meetings
 
 router = APIRouter()
 
@@ -342,7 +343,6 @@ async def person_timeline(
     event}``. Paged by messages: page with ``before`` (ISO date of the oldest
     *message* item shown) and ``before_id`` (its id, breaks date ties); a
     page carries the meetings between its oldest message and ``before``."""
-    from backend.api.calendar import timeline_meetings
 
     await person_or_404(db, person_id)
     limit = max(1, min(limit, 200))

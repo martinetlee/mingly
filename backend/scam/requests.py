@@ -15,6 +15,7 @@ from backend.scam.channel_ids import (
     TELEGRAM, TelegramScanIds, telegram_scan_ids, telegram_sender_condition, telegram_user_ids,
 )
 from backend.scam.scan import ScanRequest
+from backend.scam.pipeline import get_pipeline_manager
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,6 @@ def _msg_dict(m: Message, tg_users: dict[int, int], tg: Optional[TelegramScanIds
 
 
 def _context_limit() -> int:
-    from backend.scam.pipeline import get_pipeline_manager
 
     mgr = get_pipeline_manager()
     if mgr is None:

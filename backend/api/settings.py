@@ -5,23 +5,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend import secrets as vault
+from backend import prefs as _prefs, secrets as vault
 from backend.api.dependencies import require_shield
 from backend.db.database import get_db
-from backend.llm.briefing_prompts import (
-    DEFAULT_BRIEFING_CHAT_PROMPT,
-    DEFAULT_TRACKED_CHAT_PROMPT,
-)
-from backend import prefs as _prefs
-from backend.briefing.settings import (
-    get_briefing_prompt_override,
-    get_briefing_prompt_overrides,
-    parse_briefing_time,
-)
+from backend.llm.briefing_prompts import DEFAULT_BRIEFING_CHAT_PROMPT, DEFAULT_TRACKED_CHAT_PROMPT
+from backend.briefing.settings import get_briefing_prompt_override, get_briefing_prompt_overrides, parse_briefing_time
 from backend.prefs import NOTIF_PREFS
 from backend.scam.settings import get_scam_detection_settings, reconfigure_scam_service
 from backend.secret_prefs import clear_secret_pref, get_shield_api_key, migrate_plaintext_secrets
 from backend.sessions import get_idle_timeout_minutes
+from backend.config import API_PORT
+from backend.user_orgs import resolve_user_orgs, set_user_orgs
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +305,6 @@ def _user_orgs_response(entries: list) -> dict:
 async def get_user_organizations(db: AsyncSession = Depends(get_db)):
     """The organizations the user belongs to: names (legacy shape) plus
     ``entries`` [{id, name}] where id is null for names matching no org."""
-    from backend.user_orgs import resolve_user_orgs
 
     return _user_orgs_response(await resolve_user_orgs(db))
 
@@ -319,7 +312,6 @@ async def get_user_organizations(db: AsyncSession = Depends(get_db)):
 @router.put("/prefs/user-organizations")
 async def set_user_organizations(req: UserOrganizationsRequest, db: AsyncSession = Depends(get_db)):
     """Set which organizations the user belongs to (ids or names)."""
-    from backend.user_orgs import set_user_orgs
 
     return {"success": True, **_user_orgs_response(await set_user_orgs(db, req.organizations))}
 
@@ -481,7 +473,6 @@ class McpWriteRequest(BaseModel):
 @router.get("/prefs/mcp")
 async def get_mcp_settings():
     """MCP server status: enabled flag, write access, whether a key exists, and the live URL."""
-    from backend.config import API_PORT
     from backend.secrets import get_secret, vault_status
 
     return {

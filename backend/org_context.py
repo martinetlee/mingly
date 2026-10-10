@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import prefs
 from backend.db import crud
 from backend.db.models import Organization, Person, PersonPosition
+from backend.user_orgs import resolve_user_orgs
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,6 @@ class OrgDirectory:
         if user_orgs is None and user_org_ids is None:
             # Prefs path: backend.user_orgs owns the representation (and
             # migrates legacy names to ids as it reads).
-            from backend.user_orgs import resolve_user_orgs
             org_ids = [e["id"] for e in await resolve_user_orgs(db) if e.get("id") is not None]
         else:
             org_ids = await resolve_user_org_ids(db, user_orgs, user_org_ids)

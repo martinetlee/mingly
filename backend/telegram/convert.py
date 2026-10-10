@@ -20,6 +20,7 @@ from telethon.tl import types
 from backend.serialization import iso_utc
 from backend.telegram.entities import is_forum as _entity_is_forum, sender_name as _sender_name
 from backend.telegram.formatting import entities_to_html
+from backend.telegram.ids import sender_identity_ids
 
 # Forum chats have an implicit "General" topic whose messages carry no topic
 # header. Telegram addresses it as topic id 1.
@@ -511,7 +512,6 @@ def message_to_row(
 async def rows_for(db, conversation_id: int, msgs, *, forum: bool) -> list[dict]:
     """Rows for a batch of storable messages of one conversation, with each
     sender's identity resolved (created on first sight)."""
-    from backend.telegram.ids import sender_identity_ids
 
     msgs = [m for m in msgs if is_storable(m)]
     senders = await sender_identity_ids(db, msgs)

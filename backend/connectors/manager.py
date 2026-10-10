@@ -19,6 +19,12 @@ from typing import Any, Callable, Optional
 
 from backend.connectors.base import AuthFlowError, AuthStep, Connector
 from backend.tasks import spawn
+from backend import secrets as vault
+from backend.connectors import gmail, signal, sms
+from backend.db import crud
+from backend.db.database import AsyncSessionLocal
+from backend.db.models import Account
+from backend.telegram.connector import connector as telegram
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +95,6 @@ class ConnectorManager:
         """Create connectors for stored accounts of multi-account channels,
         and tell single-account connectors their stored account (the oldest
         signed-in row of their channel; None when there is none)."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             accounts = await crud.get_accounts(db)
@@ -172,10 +176,7 @@ class ConnectorManager:
         await connector.remove()
         self._connectors.pop(key, None)
         if connector.account_id is not None:
-            from backend.db.database import AsyncSessionLocal
-            from backend.db.models import Account
 
-            from backend.db import crud
 
             async with AsyncSessionLocal() as db:
                 acc = await db.get(Account, connector.account_id)
@@ -221,9 +222,7 @@ class ConnectorManager:
 
 
 def _build_manager() -> ConnectorManager:
-    from backend.telegram.connector import connector as telegram
 
-    from backend.connectors import gmail, signal, sms
 
     m = ConnectorManager()
     m.register(telegram)
@@ -247,7 +246,6 @@ def _on_vault_lock() -> None:
 
 
 def _register_vault_listener() -> None:
-    from backend import secrets as vault
     vault.add_lock_listener(_on_vault_lock)
 
 

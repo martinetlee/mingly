@@ -28,10 +28,10 @@ from backend.db.models import Message, MessageAttachment
 from backend.aio import LoopLock
 from backend.connectors.base import SyncResult
 from backend.tasks import spawn
-from backend.telegram import ids
+from backend.telegram import client as tg_client, ids
 from backend.telegram.convert import GENERAL_TOPIC_ID, is_service, is_storable, media_type, rows_for
 from backend.ws.manager import ws_manager
-from backend.telegram import client as tg_client
+from backend.telegram.media import enqueue_photo
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +255,6 @@ class SyncCoordinator:
             missing = await _photos_without_file(db, conversation_id, photos)
 
         if missing:
-            from backend.telegram.media import enqueue_photo
             for m in photos:
                 if m.id in missing:
                     enqueue_photo(conversation_id, missing[m.id], m)
@@ -352,7 +351,6 @@ class SyncCoordinator:
         result.added_ids = res["created"]
         if result.status == "unchanged" and (result.added or result.updated):
             result.status = "changed"
-        from backend.telegram.media import enqueue_photo
         for m in photos:
             if m.id in missing:
                 enqueue_photo(conversation_id, missing[m.id], m)

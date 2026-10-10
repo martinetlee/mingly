@@ -12,6 +12,7 @@ from backend.db import crud
 from backend.db.database import get_db
 from backend.db.models import CatchUpItem
 from backend.serialization import iso_utc
+from backend.catchup_summary_scheduler import get_job_status, start_generation
 
 router = APIRouter()
 
@@ -148,7 +149,6 @@ async def trigger_generate_summaries(req: GenerateSummariesRequest = GenerateSum
 
     Returns the job status immediately; poll GET /generate-summaries/status
     or listen for the ``catchup_summaries_updated`` WebSocket event."""
-    from backend.catchup_summary_scheduler import start_generation
 
     state, started = start_generation(req.conversation_ids, force=req.conversation_ids is not None)
     return {**state, "started": started}
@@ -156,7 +156,6 @@ async def trigger_generate_summaries(req: GenerateSummariesRequest = GenerateSum
 
 @router.get("/generate-summaries/status")
 async def generate_summaries_status():
-    from backend.catchup_summary_scheduler import get_job_status
     return get_job_status()
 
 

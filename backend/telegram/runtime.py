@@ -18,9 +18,21 @@ from typing import Optional
 from backend.aio import LoopLock
 from backend.ingest import fanout
 from backend.tasks import spawn
-from backend.telegram import client as tg_client
+from backend.telegram import archive, client as tg_client, ids
 from backend.telegram.client import TelegramUnavailable
 from backend.ws.manager import ws_manager
+from backend.db import crud
+from backend.db.database import AsyncSessionLocal
+from backend.telegram.entities import user_full_name
+from backend.telegram.media import stop_media_workers
+from backend.telegram.sync import (
+    bulk_sync,
+    cancel_tag_sync,
+    register_event_handlers,
+    resolve_numeric_names,
+    sync_dialogs,
+    sync_global_mentions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +104,6 @@ class TelegramRuntime:
         """Idempotently bring the runtime up. Returns True when Telegram is
         authorized and live handlers are registered, False when the account
         still needs onboarding. Raises if handler registration fails."""
-        from backend.telegram.sync import register_event_handlers
 
         async with self._lock:
             client = tg_client.get_client()
@@ -143,9 +154,6 @@ class TelegramRuntime:
 
     async def stop(self, *, disconnect: bool = True) -> None:
         """Cancel runtime tasks, remove handlers and (optionally) disconnect."""
-        from backend.telegram import archive
-        from backend.telegram.media import stop_media_workers
-        from backend.telegram.sync import cancel_tag_sync
 
         async with self._lock:
             self._teardown_locked()
@@ -167,9 +175,6 @@ class TelegramRuntime:
             logger.warning("Telegram startup step '%s' failed", label, exc_info=True)
 
     async def _startup_sequence(self, client) -> None:
-        from backend.telegram.sync import (
-            bulk_sync, resolve_numeric_names, sync_dialogs, sync_global_mentions,
-        )
 
         await self._step("account", self._record_account(client))
         # Handlers are registered, so catch-up updates are processed by them.
@@ -184,16 +189,11 @@ class TelegramRuntime:
         # Full DM history archive: its own single-flight job, so it never
         # blocks unlock or this sequence (its first step reuses the dialog
         # enumeration done above).
-        from backend.telegram import archive
         archive.auto_start()
 
     async def _record_account(self, client) -> None:
         """Record the signed-in user as the Telegram account's owner (and as
         the person who is "me")."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
-        from backend.telegram import ids
-        from backend.telegram.entities import user_full_name
 
         me = await client.get_me()
         if me is None:
@@ -210,7 +210,6 @@ class TelegramRuntime:
         await fanout.inspect_backlog()
 
     async def _periodic_dialog_sync(self) -> None:
-        from backend.telegram.sync import sync_dialogs
         while True:
             await asyncio.sleep(PERIODIC_DIALOG_SYNC_SECONDS)
             await self._step("periodic_dialogs", sync_dialogs(limit=100, include_archived=True))
@@ -218,7 +217,6 @@ class TelegramRuntime:
     async def _watchdog(self, client) -> None:
         """Telethon retries a dropped connection a few times and then gives up
         silently. Reconnect with backoff after that, then catch up."""
-        from backend.telegram.sync import sync_dialogs
 
         while True:
             try:

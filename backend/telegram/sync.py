@@ -19,14 +19,18 @@ from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation, Message
 from backend.ingest import fanout
 from backend.serialization import iso_utc
-from backend.telegram import ids
+from backend.telegram import client as tg_client, ids
 from backend.telegram.convert import extract_reactions, is_storable, media_type, rows_for
 from backend.telegram.coordinator import (
-    broadcast_conversations_synced, coordinator, sync_conversations_since as _sync_since,
+    broadcast_conversations_synced,
+    coordinator,
+    sync_conversations_since as _sync_since,
 )
 from backend.telegram.entities import display_name, is_deactivated, is_forum, sender_name
 from backend.ws.manager import ws_manager
-from backend.telegram import client as tg_client
+from backend.jobs import run_single
+from backend.tasks import spawn
+from backend.telegram.media import enqueue_photo
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +364,6 @@ def start_tag_sync(tag_name: str, conversation_ids: list[int], messages_per_conv
     """Start a background sync of the given conversations unless one is
     already running. Returns the run state; check 'already_running'."""
     global _tag_sync_task, _tag_sync_state
-    from backend.tasks import spawn
 
     if _tag_sync_task is not None and not _tag_sync_task.done():
         return {**_tag_sync_state, "already_running": True}
@@ -411,7 +414,6 @@ async def _sync_after_service_message(peer_id: int) -> None:
 
 
 def _schedule_service_sync(peer_id: int) -> None:
-    from backend.jobs import run_single
     run_single(f"service_sync:{peer_id}", lambda: _sync_after_service_message(peer_id))
 
 
@@ -455,7 +457,6 @@ def register_event_handlers(client) -> list:
         await fanout.message_received(conv, saved, sender_profile=profile)
 
         if media_type(msg) == "photo" and photo_attachment is not None:
-            from backend.telegram.media import enqueue_photo
             enqueue_photo(conv.id, photo_attachment, msg)
 
     async def on_message_edited(event):

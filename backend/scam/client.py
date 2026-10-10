@@ -7,15 +7,20 @@ import logging
 from typing import Any, Callable, Optional, Union
 
 from backend.scam.scan import (
+    build_message_context,
     EXTERNAL_KIND,
     FollowUpRequest,
+    is_telegram_request,
     ScamAPIClient,
     ScamCheckResult,
     ScanRequest,
-    build_message_context,
-    is_telegram_request,
     telegram_chat_metadata,
 )
+from backend.db.database import AsyncSessionLocal
+from backend.scam.channel_ids import cloud_refs, handle_salt
+from backend.scam.cloud_sync import CONTRACT_HEADER, ContractDiscovery
+from backend.scam.pipeline import _PIPELINE_FILE, get_pipeline_manager, init_pipeline_manager, PipelineConfig
+from backend.secret_prefs import get_secret_pref
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +33,6 @@ class LocalPipelineClient(ScamAPIClient):
     """Local detection using pipeline config: signature pre-check + LLM analysis."""
 
     def __init__(self, pipeline_config, max_tokens: int = 200):
-        from backend.scam.pipeline import PipelineConfig
         self._pipeline: PipelineConfig = pipeline_config
         self._max_tokens = max_tokens
 
@@ -55,7 +59,6 @@ class LocalPipelineClient(ScamAPIClient):
         """Ensure pipeline is loaded. Returns True if ready."""
         if self._pipeline is not None and self._pipeline.system_prompt:
             return True
-        from backend.scam.pipeline import get_pipeline_manager, init_pipeline_manager, _PIPELINE_FILE
         logger.warning("Pipeline not loaded on client, attempting recovery. File exists: %s", _PIPELINE_FILE.exists())
         mgr = get_pipeline_manager()
         if not mgr:
@@ -93,7 +96,6 @@ MockScamAPIClient = LocalPipelineClient
 # ---------------------------------------------------------------------------
 
 def _vault_scam_api_key() -> str:
-    from backend.secret_prefs import get_secret_pref
     return get_secret_pref("scam_detection_api_key")
 
 
@@ -151,8 +153,6 @@ def _external_v1_request(request_id: str, req: ScanRequest) -> dict:
 async def _external_v2_request(request_id: str, req: ScanRequest) -> dict:
     """Channel-neutral isThisScam request: senders as v2 handles (Telegram
     user id, else the install-salted hash), v2 conversation kinds."""
-    from backend.db.database import AsyncSessionLocal
-    from backend.scam.channel_ids import cloud_refs, handle_salt
 
     messages = req.all_messages()
     identity_ids = [m.get("identity_id") for m in messages] + [p.get("identity_id") for p in req.profiles]
@@ -189,7 +189,6 @@ class ExternalScamAPIClient(ScamAPIClient):
         """``api_key`` is accepted for old callers and ignored: the key lives
         in the vault and is read on every request, so a lock or vault reset
         revokes it immediately."""
-        from backend.scam.cloud_sync import ContractDiscovery
 
         self._base_url = base_url
         self._key_provider = key_provider or _vault_scam_api_key
@@ -240,7 +239,6 @@ class ExternalScamAPIClient(ScamAPIClient):
     async def is_this_scam(self, request_id: str, req: ScanRequest) -> ScamCheckResult:
         headers = self._headers
         if await self.contract_version() >= 2:
-            from backend.scam.cloud_sync import CONTRACT_HEADER
 
             payload = await _external_v2_request(request_id, req)
             headers[CONTRACT_HEADER] = "2"

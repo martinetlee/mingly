@@ -19,6 +19,7 @@ from backend.scam.tools.registry import register_script
 logger = logging.getLogger(__name__)
 
 from backend.config import DATA_DIR
+from backend.scam.scan import TARGETS_HEADER
 
 _BUNDLE_MODELS_DIR = Path(__file__).parent.parent / "ml_models"  # shipped with app
 _DATA_MODELS_DIR = DATA_DIR / "ml_models"  # runtime location (writable, syncable)
@@ -235,7 +236,6 @@ def _extract_text(args: dict) -> str:
     if text or "$message" not in args:
         return text
     # Legacy fallback: parse the rendered prompt (targets are the last section)
-    from backend.scam.scan import TARGETS_HEADER
 
     msg = args["$message"]
     if TARGETS_HEADER not in msg:

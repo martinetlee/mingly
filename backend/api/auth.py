@@ -12,6 +12,7 @@ from backend.secrets import (
 from backend.api.dependencies import require_session_token, revoke_session
 from backend.sessions import generate_session_token
 from backend.tasks import spawn
+from backend.api.mcp import clear_mcp_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,6 @@ async def do_reset_vault(req: VaultResetRequest):
     the password), so it requires a typed confirmation instead."""
     if req.confirm != "RESET":
         raise HTTPException(status_code=400, detail='Type "RESET" to confirm')
-    from backend.api.mcp import clear_mcp_sessions
 
     await manager.stop_all()
     clear_mcp_sessions()

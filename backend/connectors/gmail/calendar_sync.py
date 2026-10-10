@@ -31,6 +31,10 @@ from typing import Any, Optional
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
 from backend.people import identities as person_identities
 from backend.connectors.sync_state import load_sync_state, merge_sync_state
+from backend.db import crud
+from backend.db.database import AsyncSessionLocal
+from backend.db.models import CalendarEvent
+from backend.prefs import update_prefs
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +64,6 @@ def selected_calendars(account_id: int) -> list[str]:
 
 
 def set_selected_calendars(account_id: int, calendar_ids: list[str]) -> list[str]:
-    from backend.prefs import update_prefs
 
     ids = list(dict.fromkeys(c.strip() for c in calendar_ids if c and c.strip())) or [PRIMARY]
 
@@ -190,8 +193,6 @@ class CalendarSync:
 
     async def sync_once(self) -> bool:
         """Sync every selected calendar once. Returns whether anything changed."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
 
         calendars = selected_calendars(self.account_id)
         state = (await load_sync_state(self.account_id)).get(STATE_KEY) or {}
@@ -254,8 +255,6 @@ class CalendarSync:
     ) -> "tuple[Optional[str], int]":
         """Page through ``events.list``. ``full`` = the window (naive UTC) of
         a window pull, whose stored events Google didn't return are dropped."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
 
         seen: set = set()
         count = 0
@@ -293,8 +292,6 @@ class CalendarSync:
         but weren't in the window pull (deleted or moved out at Google)."""
         from sqlalchemy import delete, select
 
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import CalendarEvent
 
         start, end = window
         async with AsyncSessionLocal() as db:
@@ -309,7 +306,6 @@ class CalendarSync:
         return len(stale)
 
     async def _store(self, db, event: dict, calendar_id: str) -> None:
-        from backend.db import crud
 
         async def identity_id(person: Optional[dict]) -> Optional[int]:
             email = _email(person)

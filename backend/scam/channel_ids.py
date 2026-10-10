@@ -21,6 +21,9 @@ from typing import Iterable, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from backend import secrets as vault
+from backend.db.models import Account, Conversation, Identity, Message
+from backend.telegram import ids as tg_ids
 
 TELEGRAM = "telegram"
 
@@ -35,7 +38,6 @@ async def telegram_user_ids(db: AsyncSession, identity_ids: Iterable[int]) -> di
     ids = [i for i in set(identity_ids) if i]
     if not ids:
         return {}
-    from backend.telegram import ids as tg_ids
 
     return await tg_ids.user_ids_for(db, ids)
 
@@ -45,7 +47,6 @@ async def identity_ids_for_telegram_users(db: AsyncSession, user_ids: Iterable[i
     ids = [u for u in set(user_ids) if u]
     if not ids:
         return {}
-    from backend.telegram import ids as tg_ids
 
     return await tg_ids.identity_ids_for_users(db, ids)
 
@@ -55,14 +56,12 @@ async def telegram_peer_ids(db: AsyncSession, conversation_ids: Iterable[int]) -
     ids = [c for c in set(conversation_ids) if c]
     if not ids:
         return {}
-    from backend.telegram import ids as tg_ids
 
     return await tg_ids.peer_ids_for(db, ids)
 
 
 def telegram_message_id(message) -> int:
     """The Telegram message id of a stored message in a Telegram conversation."""
-    from backend.telegram import ids as tg_ids
 
     return tg_ids.tg_message_id_of(message)
 
@@ -88,7 +87,6 @@ async def telegram_scan_ids(db: AsyncSession, conversation, messages) -> Optiona
     before the sender peer was recorded), the chat itself."""
     if conversation is None or conversation.account is None or conversation.account.channel != TELEGRAM:
         return None
-    from backend.telegram import ids as tg_ids
 
     users = await tg_ids.user_ids_for(db, {m.sender_identity_id for m in messages if m.sender_identity_id})
     peer = tg_ids.peer_id_of(conversation)
@@ -97,7 +95,6 @@ async def telegram_scan_ids(db: AsyncSession, conversation, messages) -> Optiona
 
 
 def _telegram_sender(conversation, peer: int, message, users: dict) -> Optional[int]:
-    from backend.telegram import ids as tg_ids
 
     if message.sender_identity_id:
         return users.get(message.sender_identity_id)
@@ -115,8 +112,6 @@ def telegram_sender_condition(conversation, sender: int):
     ``sender`` (a channel / chat peer id; user senders have identities)."""
     from sqlalchemy import and_, func, or_
 
-    from backend.db.models import Message
-    from backend.telegram import ids as tg_ids
 
     posted_as = func.json_extract(Message.meta_json, "$.sender_peer")
     no_identity = Message.sender_identity_id.is_(None)
@@ -137,7 +132,6 @@ def handle_salt() -> bytes:
     """The per-install salt for v2 handle hashes, created in the vault on
     first use. Resetting the vault makes a new salt (a new install for the
     cloud). Raises RuntimeError while the vault is locked."""
-    from backend import secrets as vault
 
     stored = vault.get_secret(HANDLE_SALT_KEY)
     if stored:
@@ -194,7 +188,6 @@ async def cloud_refs(
     db: AsyncSession, salt: bytes, *, identity_ids=(), conversation_ids=(), message_ids=()
 ) -> CloudRefs:
     """v2 handle / conversation / message objects for the given internal ids."""
-    from backend.db.models import Account, Conversation, Identity, Message
 
     refs = CloudRefs()
     iids = [i for i in set(identity_ids) if i]

@@ -21,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.prefs import load_prefs, update_prefs
+from backend.db.crud import name_key
+from backend.db.models import Organization
 
 IDS_KEY = "user_organization_ids"
 NAMES_KEY = "user_organizations"
@@ -55,8 +57,6 @@ def read_user_org_prefs() -> tuple[list[int], list[str]]:
 
 
 async def _org_by_name(db: AsyncSession, name: str):
-    from backend.db.crud import name_key
-    from backend.db.models import Organization
 
     return (await db.execute(
         select(Organization).where(name_key(Organization.name) == name_key(name)).limit(1)
@@ -64,7 +64,6 @@ async def _org_by_name(db: AsyncSession, name: str):
 
 
 async def _orgs_by_id(db: AsyncSession, ids: list[int]) -> dict[int, str]:
-    from backend.db.models import Organization
 
     if not ids:
         return {}

@@ -38,9 +38,12 @@ from backend.llm.briefing_prompts import (
     DEFAULT_TRACKED_CHAT_PROMPT,
 )
 from backend.llm.resolve import error_kind, error_message, get_provider
-from backend.org_context import OrgDirectory
+from backend.org_context import get_user_organization_ids, get_user_organizations, OrgDirectory
 from backend.serialization import iso_utc
 from backend.serializers import channel_of
+from backend.briefing.events import get_event_job, start_event_job
+from backend.db.models import BriefingRun, Message
+from backend.telegram.sync import sync_conversations_since
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +81,6 @@ class BriefingSettings:
 
     @classmethod
     def load(cls) -> "BriefingSettings":
-        from backend.org_context import get_user_organization_ids, get_user_organizations
         return cls(
             max_tokens=get_briefing_max_tokens(),
             prompt_override=get_briefing_prompt_override(),
@@ -439,7 +441,6 @@ async def summarize_target(
 
 async def _has_messages(target: Target, since: datetime, until: Optional[datetime]) -> bool:
     from sqlalchemy import func, select
-    from backend.db.models import Message
     async with AsyncSessionLocal() as db:
         if target.category == "important_contact":
             scope = Message.sender_identity_id.in_(await crud.identity_ids_for_person(db, target.person_id))
@@ -476,7 +477,6 @@ async def presync(conversation_ids: list[int], since: datetime) -> None:
     "not_found") simply have nothing to sync."""
     if not conversation_ids:
         return
-    from backend.telegram.sync import sync_conversations_since
     try:
         await asyncio.wait_for(sync_conversations_since(conversation_ids, since), timeout=PRESYNC_TIMEOUT_S)
     except asyncio.CancelledError:
@@ -594,7 +594,6 @@ async def _close_run(run_id: int, keep_entries: int, status: str, error: Optiona
 
 def start_briefing_job(days: int, *, trigger: str = "manual"):
     """Start (or join) the single briefing job. Returns (EventJob, started)."""
-    from backend.briefing.events import start_event_job
     return start_event_job(
         BRIEFING_JOB_KEY,
         "briefing",
@@ -610,7 +609,6 @@ async def replace_briefing_job(days: int):
     """Atomically cancel any running briefing, wait for it to finish its
     cleanup, and start a ``days`` run. Serialized by a lock so concurrent
     replaces can't interleave. Returns (EventJob, replaced_job_id | None)."""
-    from backend.briefing.events import get_event_job
     async with _replace_lock:
         old = get_event_job(BRIEFING_JOB_KEY)
         replaced = None
@@ -625,7 +623,6 @@ async def replace_briefing_job(days: int):
 async def cleanup_stale_runs() -> None:
     """Runs left 'running' by a crash: keep those with entries as 'partial'."""
     from sqlalchemy import select
-    from backend.db.models import BriefingRun
     async with AsyncSessionLocal() as db:
         ids = list((await db.execute(
             select(BriefingRun.id).where(BriefingRun.status == "running")
@@ -688,7 +685,6 @@ async def regenerate_entry(job, run_id: int, entry_id: int) -> Optional[dict]:
 
 
 def start_regenerate_job(run_id: int, entry_id: int):
-    from backend.briefing.events import start_event_job
     return start_event_job(
         f"briefing-entry:{entry_id}",
         "briefing_entry",

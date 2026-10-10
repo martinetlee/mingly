@@ -30,19 +30,34 @@ from sqlalchemy import select, update
 
 from backend.aio import LoopLocal
 from backend.connectors.base import (
-    AuthField, AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage,
+    AuthField,
+    AuthFlowError,
+    AuthStep,
+    Capability,
+    Connector,
+    ConnectorStatus,
+    OutgoingMessage,
 )
 from backend.connectors.gmail import mime, oauth
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
 from backend.connectors.gmail.calendar_sync import CalendarSync
 from backend.ingest.normalized import (
-    NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
+    NormalizedAttachment,
+    NormalizedConversation,
+    NormalizedIdentity,
+    NormalizedMessage,
 )
 from backend.media import MediaNotFound, MediaUnavailable
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
 from backend.people import identities as person_identities
 from backend.connectors.sync_state import load_sync_state, merge_sync_state
+from backend import config
+from backend.db import crud
+from backend.db.database import AsyncSessionLocal
+from backend.db.models import Account, Message, MessageAttachment
+from backend.fsutil import atomic_write_bytes
+from backend.ingest.service import delete_messages, ingest
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +173,6 @@ class GmailConnector(Connector):
         if creds is None or not creds.refresh_token:
             await self._set_state("unauthorized")
             return False
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             acc = await crud.get_account(db, self.account_id)
@@ -309,9 +322,6 @@ class GmailConnector(Connector):
     async def _finish_sign_in(self, pending: oauth.PendingAuth) -> str:
         """Create (or confirm) the account row and its self identity, then
         store the credentials under the account id."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import Account
 
         creds = oauth.Credentials(pending.client_id, pending.client_secret, pending.refresh_token)
         api = GmailApi(creds, access_token=pending.access_token, expires_in=pending.expires_in)
@@ -475,7 +485,6 @@ class GmailConnector(Connector):
             if not await self._sync_thread_isolated(tid, realtime_ids=frozenset(added.get(tid) or ())):
                 failed.add(tid)
             if deleted.get(tid):
-                from backend.ingest.service import delete_messages
                 await delete_messages(self.account_id, tid, deleted[tid])
         await self._save_sync_state(
             history_id=latest, last_sync_at=datetime.utcnow().isoformat(),
@@ -524,7 +533,6 @@ class GmailConnector(Connector):
     # -- threads → normalized shapes --------------------------------------------------------
 
     async def _sync_thread(self, thread_id: str, realtime_ids: frozenset = frozenset()) -> Optional[int]:
-        from backend.ingest.service import ingest
 
         async with self._sem.get():
             try:
@@ -662,8 +670,6 @@ class GmailConnector(Connector):
         return await self._store_sent(sent, str(sent.get("threadId") or ""))
 
     async def _store_sent(self, sent: dict, thread_id: str) -> "tuple[int, list[int]]":
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
 
         conv_id = await self._sync_thread(thread_id)
         if conv_id is None:
@@ -676,9 +682,6 @@ class GmailConnector(Connector):
         """Reply in a thread. ``draft.to`` non-empty is the complete To list
         (the Mail composer shows the recipients); empty = reply to the
         sender (Reply-To), or to your own recipients when answering yourself."""
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import Message
 
         api = self._require_api()
         async with AsyncSessionLocal() as db:
@@ -730,10 +733,6 @@ class GmailConnector(Connector):
         return ids
 
     async def fetch_attachment(self, attachment: Any, message: Any, conversation: Any) -> str:
-        from backend import config
-        from backend.db import crud
-        from backend.db.database import AsyncSessionLocal
-        from backend.db.models import MessageAttachment
 
         api = self._require_api()
         part_id, _, att_id = (attachment.external_ref or "").partition(":")
@@ -788,7 +787,6 @@ def _next_failures(previous: dict, attempted: set, failed: set) -> dict:
 
 
 def _write_file(path: Path, data: bytes) -> None:
-    from backend.fsutil import atomic_write_bytes
 
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(path, data, 0o600)

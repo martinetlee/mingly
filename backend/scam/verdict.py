@@ -24,6 +24,7 @@ from backend.scam.channel_ids import telegram_scan_ids, telegram_user_ids
 from backend.serialization import iso_utc
 from backend.serializers import scam_fields
 from backend.ws.manager import ws_manager
+from backend.scam.analytics import get_analytics_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,6 @@ def _dismiss_flag(flag: ScamFlag, now: datetime) -> None:
 
 
 async def _record_analytics(*, messages_unflagged: int = 0, flags_dismissed: int = 0) -> None:
-    from backend.scam.analytics import get_analytics_tracker
 
     counters = {}
     if messages_unflagged:

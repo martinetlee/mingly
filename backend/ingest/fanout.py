@@ -19,7 +19,7 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation, Message
 from backend.notify import send_native_notification
-from backend.serializers import message_out, messages_out
+from backend.serializers import channel_of, message_out, messages_out
 from backend.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,6 @@ async def _reopen_catchup(conversation_id: int) -> None:
 def _channel(conv: Conversation) -> Optional[str]:
     from sqlalchemy.orm.exc import DetachedInstanceError
 
-    from backend.serializers import channel_of
     try:
         return channel_of(conv)
     except DetachedInstanceError:  # account not loaded on a detached row

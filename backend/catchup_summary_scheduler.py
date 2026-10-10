@@ -19,16 +19,16 @@ from typing import List, Optional
 from sqlalchemy import select, desc, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from backend import jobs
-from backend import prefs
+from backend import jobs, prefs
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import CatchUpSummary, Message
 from backend.llm.base import ChatMessage, LLMError
-from backend.llm.resolve import LLMModelMissing, LLMUnavailable, get_provider
+from backend.llm.resolve import get_provider, LLMModelMissing, LLMUnavailable
 from backend.serialization import iso_utc
 from backend.serializers import attachment_out, channel_of
 from backend.tasks import spawn
+from backend.org_context import OrgDirectory
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,6 @@ async def generate_summary_for_conversation(db, conversation_id: int, use_llm: b
     title = (conv.title if conv is not None else None) or f"Conversation {conversation_id}"
     channel = channel_of(conv) if conv is not None else None
 
-    from backend.org_context import OrgDirectory
     if orgs is None:
         orgs = await OrgDirectory.load(db)
     sender_names = list({m["sender_name"] for m in summary_messages if m.get("sender_name")})
@@ -310,7 +309,6 @@ async def generate_all_summaries(
     if progress is not None:
         progress.update(total=len(conversation_ids), done=0)
 
-    from backend.org_context import OrgDirectory
     async with AsyncSessionLocal() as db:
         orgs = await OrgDirectory.load(db)  # once per batch, not per conversation
 

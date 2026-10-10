@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 import httpx
 
 from backend import secrets as vault
+from backend.config import API_PORT
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -67,7 +68,6 @@ class OAuthUnreachable(OAuthError):
 
 
 def redirect_uri() -> str:
-    from backend.config import API_PORT
     return f"http://127.0.0.1:{API_PORT}{CALLBACK_PATH}"
 
 

@@ -40,26 +40,37 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
 from backend import config
-from backend.connectors.base import (
-    AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage,
-)
+from backend.connectors.base import AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage
 from backend.connectors.signal import cli, install
 from backend.connectors.signal.envelopes import (
-    Address, ConvRef, DeleteEvent, MessageEvent, ReactionEvent, ReceiptEvent, attachment_kind, extension_for,
-    message_key, parse_envelope, split_message_key, utc,
+    Address,
+    attachment_kind,
+    ConvRef,
+    DeleteEvent,
+    extension_for,
+    message_key,
+    MessageEvent,
+    parse_envelope,
+    ReactionEvent,
+    ReceiptEvent,
+    split_message_key,
+    utc,
 )
 from backend.connectors.signal.rpc import JsonRpcProcess, ProcessGone, RpcError
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Account, Conversation, Message, MessageAttachment
-from backend.ingest import fanout
-from backend.ingest import service as ingest_service
+from backend.ingest import fanout, service as ingest_service
 from backend.ingest.normalized import (
-    NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
+    NormalizedAttachment,
+    NormalizedConversation,
+    NormalizedIdentity,
+    NormalizedMessage,
 )
 from backend.media import MediaNotFound
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
+from backend.serializers import media_url
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +631,6 @@ class SignalConnector(Connector):
     async def _keep_sent_files(self, conversation_id: int, message_id: int, draft: OutgoingMessage) -> None:
         """signal-cli doesn't keep what it sent: copy the files into media/
         now, while the caller's temp files still exist."""
-        from backend.serializers import media_url
 
         async with AsyncSessionLocal() as db:
             atts = list((await db.execute(

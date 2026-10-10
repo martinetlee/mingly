@@ -16,10 +16,10 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation
 from backend.serialization import iso_utc
-from backend.telegram import client as tg_client
-from backend.telegram import ids
+from backend.telegram import client as tg_client, ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name
+from backend.telegram.sync import status_info
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,6 @@ async def list_members(conv: Conversation, limit: int) -> list[dict]:
 async def presence(conv: Conversation) -> dict:
     from telethon.tl.functions.users import GetFullUserRequest
 
-    from backend.telegram.sync import status_info
 
     if conv.kind != "direct":
         return {"status": "unknown"}
