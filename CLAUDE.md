@@ -108,6 +108,9 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
   otherwise) and wrap calls in `channel_call(...)` for the HTTP error mapping. Never branch on
   `channel == "telegram"` in a route.
 - `ConnectorManager` owns lifecycles and sign-in flows; `manager.with_role(Role)` lists connectors with a role.
+- Writing: Gmail / Signal / SMS store through `ingest.service` (normalized shapes); Telegram converts Telethon
+  messages itself (`telegram/convert.py`). Both end in the same `crud.save_messages`,
+  `people.identities.upsert_identity` (linking) and `ingest.fanout` (post-save side effects).
 
 ### API Routes
 - One router per domain in `backend/api/`, registered in `router.py`; routers parse requests and shape
