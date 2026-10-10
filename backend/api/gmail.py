@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from backend.errors import ServiceUnavailable
 from backend.api.dependencies import require_session_token
 from backend.api.idempotency import cleanup_temp_files, idempotent
 from backend.api.lookups import conversation_or_404
@@ -159,7 +160,7 @@ async def _modify(conversation_id: int, add: list, remove: list) -> dict:
     conv, connector = await _thread(conversation_id)
     try:
         await connector.modify_thread(conv, add=add, remove=remove)
-    except HTTPException:
+    except (HTTPException, ServiceUnavailable):
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gmail: {e}")

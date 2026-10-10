@@ -9,12 +9,12 @@ lock). Everything else obtains a connected client through
 import logging
 from typing import Optional, Tuple
 
-from fastapi import HTTPException
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from backend.aio import LoopLock
 from backend.config import TG_API_ID, TG_API_HASH
+from backend.errors import ServiceUnavailable
 from backend.secrets import get_secret, save_secret
 
 logger = logging.getLogger(__name__)
@@ -22,12 +22,10 @@ logger = logging.getLogger(__name__)
 _client: Optional[TelegramClient] = None
 
 
-class TelegramUnavailable(HTTPException):
-    """No connected Telegram client. An HTTPException so any router that lets
-    it propagate answers 503 without its own handler."""
+class TelegramUnavailable(ServiceUnavailable):
+    """No connected Telegram client (the API answers 503)."""
 
-    def __init__(self, detail: str = "Telegram client not connected"):
-        super().__init__(status_code=503, detail=detail)
+    default_message = "Telegram client not connected"
 
 
 def get_client() -> Optional[TelegramClient]:

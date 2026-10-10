@@ -19,6 +19,7 @@ from fastapi import Header, HTTPException, WebSocket, status
 
 from backend import sessions as _session_store
 from backend.config import API_PORT
+from backend.features import shield_enabled
 from backend.sessions import has_sessions, is_valid_session_token
 from backend.ws import manager as ws
 
@@ -36,6 +37,12 @@ async def revoke_session(token: Optional[str] = None) -> None:
         await ws.ws_manager.close_all()
     else:
         await ws.ws_manager.evict_invalid()
+
+
+def require_shield() -> None:
+    """Route dependency: Shield endpoints don't exist while it's disabled."""
+    if not shield_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 async def require_session_token(

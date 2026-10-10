@@ -16,6 +16,7 @@ from telethon import utils as tl_utils
 from telethon.errors import FloodWaitError
 from telethon.tl.types import User
 
+from backend.errors import ServiceUnavailable
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal, get_db
 from backend.db.models import Conversation, Identity
@@ -283,7 +284,7 @@ async def join(req: JoinRequest, db: AsyncSession = Depends(get_db)):
             entity = await client.get_entity(username)
             result = await client(JoinChannelRequest(entity))
             joined = result.chats[0] if result.chats else entity
-    except HTTPException:
+    except (HTTPException, ServiceUnavailable):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to join: {e}")

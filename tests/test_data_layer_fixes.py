@@ -521,22 +521,6 @@ async def test_migration_4_moves_the_skip_marker_into_columns(tmp_path):
     ]
 
 
-# ── 8. Layering ──────────────────────────────────────────────────────────────
-
-def test_data_layers_do_not_import_the_api_layer():
-    root = Path(__file__).resolve().parent.parent / "backend"
-    offenders = []
-    for area in ("db", "people", "ingest"):
-        for path in (root / area).rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("backend.api"):
-                    offenders.append(f"{path.relative_to(root)}: {node.module}")
-                elif isinstance(node, ast.Import):
-                    offenders += [f"{path.relative_to(root)}: {a.name}" for a in node.names
-                                  if a.name.startswith("backend.api")]
-    assert offenders == []
-
-
 # ── 9. Identity resolution is memoized per ingest ────────────────────────────
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import secrets as vault
-from backend.features import require_shield
+from backend.api.dependencies import require_shield
 from backend.db.database import get_db
 from backend.llm.briefing_prompts import (
     DEFAULT_BRIEFING_CHAT_PROMPT,

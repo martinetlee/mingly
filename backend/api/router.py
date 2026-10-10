@@ -14,7 +14,8 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend.features import features_payload, require_shield
+from backend.errors import ServiceUnavailable
+from backend.features import features_payload
 from backend import instance, wiring
 from backend import secrets as vault
 from backend.config import DATA_DIR
@@ -24,7 +25,7 @@ from backend.api import (
     intelligence, llm, mcp, media, organizations, people, person_notes, scam, search, session, settings, tags,
     telegram, translate, workspaces,
 )
-from backend.api.dependencies import HostOriginMiddleware, require_session_token, validate_ws_origin
+from backend.api.dependencies import HostOriginMiddleware, require_session_token, require_shield, validate_ws_origin
 from backend.sessions import is_valid_session_token
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,10 @@ async def _http_error_handler(_request: Request, exc: StarletteHTTPException) ->
     else:
         content = {"detail": json.dumps(detail, default=str) if detail is not None else "Error"}
     return JSONResponse(status_code=exc.status_code, content=content, headers=getattr(exc, "headers", None))
+
+
+async def _service_unavailable_handler(_request: Request, exc: ServiceUnavailable) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": exc.detail})
 
 
 async def _vault_corrupt_handler(_request: Request, exc: vault.VaultCorruptError) -> JSONResponse:
@@ -110,6 +115,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, _http_error_handler)
     app.add_exception_handler(vault.VaultCorruptError, _vault_corrupt_handler)
+    app.add_exception_handler(ServiceUnavailable, _service_unavailable_handler)
     app.add_exception_handler(Exception, _unhandled_error_handler)
 
     # Optional features plug into the core's extension points.

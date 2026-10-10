@@ -1,4 +1,4 @@
-"""Event-streaming jobs and the single SSE helper.
+"""Event-streaming jobs and the SSE wire format (the HTTP response wrapper is api/sse.py).
 
 An ``EventJob`` is a single-flight background task (via ``backend.jobs``)
 that records every event it emits. Any number of HTTP clients can attach to
@@ -15,7 +15,6 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from fastapi.responses import StreamingResponse
 
 from backend import jobs
 from backend.llm.resolve import LLMError, LLMUnavailable, error_kind, error_message
@@ -31,23 +30,6 @@ def error_payload(exc: BaseException) -> dict:
     if isinstance(exc, LLMError):
         return {"message": error_message(exc), "kind": error_kind(exc)}
     return {"message": f"Unexpected error: {exc}", "kind": "internal"}
-
-
-def sse_response(events: AsyncIterator[str]) -> StreamingResponse:
-    """Wrap an SSE generator so ANY exception ends the stream with an
-    ``event: error`` instead of a truncated response."""
-
-    async def guarded() -> AsyncIterator[str]:
-        try:
-            async for chunk in events:
-                yield chunk
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("SSE stream failed")
-            yield sse("error", error_payload(exc))
-
-    return StreamingResponse(guarded(), media_type="text/event-stream")
 
 
 class EventJob:

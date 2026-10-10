@@ -9,6 +9,7 @@ from typing import List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from backend.errors import ServiceUnavailable
 from backend.api.lookups import conversation_or_404, message_or_404, telegram_peer, unsupported_channel
 from backend.db import crud
 from backend.db.database import AsyncSessionLocal
@@ -108,7 +109,7 @@ async def _send_via_connector(conv: Conversation, draft) -> dict:
         ids_ = await connector.send(conv, draft)
     except UnsupportedOperation as e:
         raise unsupported_channel(conv, str(e))
-    except HTTPException:
+    except (HTTPException, ServiceUnavailable):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

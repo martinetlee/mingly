@@ -44,7 +44,7 @@ async def test_connected_client_requires_or_returns_none():
     with patch.object(tg_client, "get_client", return_value=None):
         with pytest.raises(TelegramUnavailable) as exc:
             await tg_client.connected_client()
-        assert exc.value.status_code == 503
+        assert str(exc.value) == "Telegram client not connected"
         assert await tg_client.connected_client(require=False) is None
 
     dropped = ConnClient(connected=False)

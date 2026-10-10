@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.briefing.events import get_event_job, sse, sse_response
+from backend.api.sse import sse_response
+from backend.briefing.events import get_event_job, sse
 from backend.briefing.pipeline import (
     BRIEFING_JOB_KEY,
     replace_briefing_job,

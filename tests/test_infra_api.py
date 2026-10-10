@@ -418,3 +418,25 @@ async def test_focus_endpoint(app):
         assert r.json() == {"focused": True} and calls == [1]
     finally:
         instance.set_focus_callback(None)
+
+
+@pytest.mark.asyncio
+async def test_channel_unavailable_answers_503_with_its_message():
+    """Domain code raises TelegramUnavailable (no HTTP types below the API);
+    the API maps it to 503 with the message as detail."""
+    from backend.api.router import create_app
+    from backend.telegram.client import TelegramUnavailable
+
+    from fastapi.routing import APIRoute
+
+    async def _probe():
+        raise TelegramUnavailable()
+
+    app = create_app()
+    app.router.routes.insert(0, APIRoute("/api/_probe_unavailable", _probe))  # ahead of the SPA catch-all
+
+    async with _client(app) as c:
+        r = await c.get("/api/_probe_unavailable")
+    assert r.status_code == 503
+    assert r.json() == {"detail": "Telegram client not connected"}
+
