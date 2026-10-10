@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import select, update
 
 from backend.aio import LoopLocal
 from backend.connectors.base import (
@@ -42,6 +42,7 @@ from backend.media import MediaNotFound, MediaUnavailable
 from backend.tasks import spawn
 from backend.ws.manager import ws_manager
 from backend.people import identities as person_identities
+from backend.connectors.sync_state import load_sync_state, merge_sync_state
 
 logger = logging.getLogger(__name__)
 
@@ -74,41 +75,6 @@ SETUP_HELP = (
 )
 
 _MSGID = re.compile(r"<[^<>\s]+>")
-
-
-async def load_sync_state(account_id: int) -> dict:
-    """``accounts.sync_state_json`` of a Gmail account: the mail keys
-    (``history_id``, ``last_sync_at``) and the ``calendar`` key."""
-    from backend.db import crud
-    from backend.db.database import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        acc = await crud.get_account(db, account_id)
-    try:
-        state = json.loads(acc.sync_state_json) if acc is not None and acc.sync_state_json else {}
-    except ValueError:
-        return {}
-    return state if isinstance(state, dict) else {}
-
-
-async def merge_sync_state(account_id: int, **values: Any) -> None:
-    """Set top-level keys of ``accounts.sync_state_json`` in one UPDATE, so
-    the mail and calendar loops of an account never overwrite each other's keys."""
-    from backend.db.database import AsyncSessionLocal
-    from backend.db.models import Account
-
-    if not values:
-        return
-    args: list = []
-    for key, value in values.items():
-        if not re.fullmatch(r"[a-z_]+", key):
-            raise ValueError(f"Invalid sync state key: {key}")
-        args += [f"$.{key}", func.json(json.dumps(value))]
-    current = case((func.json_valid(Account.sync_state_json), Account.sync_state_json), else_="{}")
-    async with AsyncSessionLocal() as db:
-        await db.execute(update(Account).where(Account.id == account_id)
-                         .values(sync_state_json=func.json_set(current, *args)))
-        await db.commit()
 
 
 def backfill_days() -> int:

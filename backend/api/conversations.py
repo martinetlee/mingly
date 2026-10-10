@@ -26,9 +26,9 @@ from backend.api.views import conversation_json
 from backend.telegram import ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name
-from backend.telegram.runtime import runtime
 from backend.telegram.sync import bulk_sync
 from backend.ws.manager import ws_manager
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ async def search_messages_global(q: str, db: AsyncSession = Depends(get_db)):
     locally (so it can be opened); messages are referenced by external id."""
     if not q.strip():
         return []
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client or not await coordinator.limiter.acquire(1, max_wait=2):
         return []
     try:
@@ -247,7 +247,7 @@ async def _telegram_best_effort(conv: Conversation, what: str, call) -> None:
     Failures are logged: the local state already changed."""
     if not ids.is_telegram(conv):
         return
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if client is None:
         return
     try:
@@ -414,7 +414,7 @@ async def _auto_sync(conversation_id: int, first_sync: bool) -> None:
         if res.flood_wait:
             logger.info("auto-sync %s: FloodWait %ss (attempt %d)", conversation_id, res.flood_wait, attempt)
             await asyncio.sleep(min(res.flood_wait + 2, 600))
-        elif res.status in ("unavailable", "not_found") and await runtime.client(require=False) is not None:
+        elif res.status in ("unavailable", "not_found") and await tg_client.connected_client(require=False) is not None:
             break  # the conversation itself can't be fetched (deleted, private, banned)
         else:
             await asyncio.sleep(3 * attempt)
@@ -572,7 +572,7 @@ async def backfill_history(
     )
     _raise_for_sync(res, "Backfill")
     if res.status == "unavailable":
-        await runtime.client()  # 503 when Telegram itself is unreachable
+        await tg_client.connected_client()  # 503 when Telegram itself is unreachable
         raise HTTPException(status_code=422, detail=res.error or "Conversation unavailable")
     return {"added": res.added, "exhausted": res.exhausted, "status": res.status}
 
@@ -595,7 +595,7 @@ async def sync_conversation(conversation_id: int, limit: int = 100, db: AsyncSes
     res = await coordinator.sync_conversation(conversation_id, max(1, min(limit, 200)))
     _raise_for_sync(res, "Sync")
     if res.status == "unavailable":
-        await runtime.client()  # 503 when Telegram itself is unreachable
+        await tg_client.connected_client()  # 503 when Telegram itself is unreachable
         raise HTTPException(
             status_code=422,
             detail=f"Could not resolve the conversation. The user or chat may have been deleted. ({res.error})",
@@ -658,7 +658,7 @@ async def get_members(conversation_id: int, limit: int = 100, db: AsyncSession =
     if conv.kind == "direct":
         return []
     peer = telegram_peer(conv, "Listing members")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     from telethon.tl.types import User
 
@@ -701,7 +701,7 @@ async def get_presence(conversation_id: int, db: AsyncSession = Depends(get_db))
     peer = telegram_peer(conv, "Presence")
     if conv.kind != "direct":
         return {"status": "unknown"}
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.users import GetFullUserRequest
         from backend.telegram.sync import status_info
@@ -720,7 +720,7 @@ async def send_typing(conversation_id: int, db: AsyncSession = Depends(get_db)):
     """Send a typing indicator. Non-critical: failures don't fail the request."""
     conv = await conversation_or_404(db, conversation_id)
     peer = telegram_peer(conv, "Typing indicators")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.messages import SetTypingRequest
         from telethon.tl.types import SendMessageTypingAction
@@ -737,7 +737,7 @@ async def list_topics(conversation_id: int, db: AsyncSession = Depends(get_db)):
     """Forum topics of a supergroup with forum mode enabled."""
     conv = await conversation_or_404(db, conversation_id)
     peer = telegram_peer(conv, "Forum topics")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     from telethon.tl.functions.messages import GetForumTopicsRequest
     from telethon.tl.types import ForumTopic
@@ -785,7 +785,7 @@ class CreateTopicRequest(BaseModel):
 async def create_topic(conversation_id: int, req: CreateTopicRequest, db: AsyncSession = Depends(get_db)):
     conv = await conversation_or_404(db, conversation_id)
     peer = telegram_peer(conv, "Forum topics")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.messages import CreateForumTopicRequest
         result = await client(CreateForumTopicRequest(peer=peer, title=req.title))
@@ -811,7 +811,7 @@ async def set_topic_state(
     """Close or reopen a forum topic."""
     conv = await conversation_or_404(db, conversation_id)
     peer = telegram_peer(conv, "Forum topics")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.messages import EditForumTopicRequest
         await client(EditForumTopicRequest(peer=peer, topic_id=topic_id, closed=req.closed))
@@ -828,7 +828,7 @@ class SlowModeRequest(BaseModel):
 async def set_slow_mode(conversation_id: int, req: SlowModeRequest, db: AsyncSession = Depends(get_db)):
     conv = await conversation_or_404(db, conversation_id)
     peer = telegram_peer(conv, "Slow mode")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.channels import ToggleSlowModeRequest
         await client(ToggleSlowModeRequest(channel=peer, seconds=req.seconds))
@@ -852,7 +852,7 @@ async def get_post_stats(conversation_id: int, limit: int = 20, db: AsyncSession
     peer = telegram_peer(conv, "Post stats")
     if conv.kind != "channel":
         raise HTTPException(status_code=400, detail="Post stats are only available for channels")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     limit = max(1, min(limit, 100))
     if not await coordinator.limiter.acquire(1, max_wait=30):
         raise HTTPException(
@@ -922,7 +922,7 @@ async def react_to_message(message_id: int, req: ReactRequest, db: AsyncSession 
         msg = await crud.set_my_reaction(db, message_id, req.emoji)
         return {"success": True, "my_reaction": msg.my_reaction if msg else req.emoji}
     peer = telegram_peer(conv, "Reactions")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.messages import SendReactionRequest
         from telethon.tl.types import ReactionEmoji
@@ -945,7 +945,7 @@ async def pin_message(message_id: int, req: MessagePinRequest, db: AsyncSession 
     msg = await message_or_404(db, message_id)
     conv = await conversation_or_404(db, msg.conversation_id)
     peer = telegram_peer(conv, "Pinning messages")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         if req.pinned:
             await client.pin_message(peer, ids.tg_message_id_of(msg), notify=req.notify)

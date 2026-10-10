@@ -18,7 +18,7 @@ from backend.briefing import pipeline
 from backend.connectors.gmail import calendar_sync, oauth
 from backend.connectors.gmail.api import GmailApi
 from backend.connectors.gmail.calendar_sync import CalendarSync, parse_when
-from backend.connectors.gmail.connector import load_sync_state, merge_sync_state
+from backend.connectors.sync_state import load_sync_state, merge_sync_state
 from backend.db import crud
 from backend.db.models import Account, BriefingEntry, BriefingRun, CalendarAttendee, CalendarEvent, Identity
 from tests import factories as f

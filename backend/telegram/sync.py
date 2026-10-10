@@ -20,13 +20,13 @@ from backend.db.models import Conversation, Message
 from backend.ingest import fanout
 from backend.serialization import iso_utc
 from backend.telegram import ids
-from backend.telegram.runtime import runtime
 from backend.telegram.convert import extract_reactions, is_storable, media_type, rows_for
 from backend.telegram.coordinator import (
     broadcast_conversations_synced, coordinator, sync_conversations_since as _sync_since,
 )
 from backend.telegram.entities import display_name, is_deactivated, is_forum, sender_name
 from backend.ws.manager import ws_manager
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
     """
     from backend.telegram.media import download_avatar
 
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client:
         return []
 
@@ -148,7 +148,7 @@ async def sync_dialogs(limit: Optional[int] = None, include_archived: bool = Fal
 
 async def resolve_numeric_names() -> int:
     """Re-resolve direct conversations still titled with a numeric id."""
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client:
         return 0
 
@@ -178,7 +178,7 @@ async def resolve_numeric_names() -> int:
 async def sync_global_mentions(days: int = 7) -> int:
     """Search Telegram globally for messages mentioning the current user and
     store them. Returns the number of mention messages saved."""
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client:
         return 0
     try:
@@ -247,7 +247,7 @@ async def bulk_sync(n_conversations: int = 50, messages_per_conversation: int = 
     """Sync recent history for the top ``n_conversations`` dialogs ∪ tracked ∪
     briefing conversations. Broadcasts one ``conversations_synced`` for the
     ones that changed. Returns the number synced successfully."""
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client:
         return 0
 
@@ -319,7 +319,7 @@ async def _run_tag_sync(tag_name: str, conversation_ids: list[int], messages_per
             if peer is None:
                 _tag_sync_state["skipped"] = _tag_sync_state.get("skipped", 0) + 1
                 continue  # not a Telegram conversation
-            client = await runtime.client(require=False)
+            client = await tg_client.connected_client(require=False)
             try:
                 entity = await client.get_entity(peer) if client else None
             except Exception:

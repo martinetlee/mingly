@@ -12,7 +12,6 @@ from typing import Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.lookups import person_or_404
@@ -24,6 +23,7 @@ from backend.serialization import iso_utc
 from backend.serializers import channel_of, messages_out, person_out
 from backend.api.views import conversation_json
 from backend.ws.manager import ws_manager
+from backend.telegram import client as tg_client
 
 router = APIRouter()
 
@@ -219,14 +219,13 @@ async def sync_address_books(db: AsyncSession = Depends(get_db)):
 
     from backend.connectors.manager import manager
     from backend.telegram import ids
-    from backend.telegram.runtime import runtime
 
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if client is None:
         telegram = manager.get(ids.CHANNEL)
         if telegram is None or not telegram.is_configured():
             return {"imported": 0, "total": 0}  # no connector with an address book is signed in
-        client = await runtime.client()  # signed in but unreachable: TelegramUnavailable = 503
+        client = await tg_client.connected_client()  # signed in but unreachable: TelegramUnavailable = 503
     result = await client(GetContactsRequest(hash=0))
     users = list(getattr(result, "users", None) or [])
 

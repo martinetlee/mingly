@@ -29,9 +29,9 @@ from backend.db.models import Message, MessageAttachment
 from backend.aio import LoopLock
 from backend.tasks import spawn
 from backend.telegram import ids
-from backend.telegram.runtime import runtime
 from backend.telegram.convert import GENERAL_TOPIC_ID, is_service, is_storable, media_type, rows_for
 from backend.ws.manager import ws_manager
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ class SyncCoordinator:
             conv = await crud.get_conversation(db, conversation_id)
         if conv is None or conv.account is None or conv.account.channel != ids.CHANNEL:
             return SyncResult("not_found", conversation_id, error="Not a Telegram conversation")
-        client = await runtime.client(require=False)
+        client = await tg_client.connected_client(require=False)
         if client is None:
             return SyncResult("unavailable", conversation_id, error="Telegram client not connected")
         # One token up front; _fetch charges one more per extra page fetched.

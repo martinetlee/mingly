@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
 from backend.people import identities as person_identities
+from backend.connectors.sync_state import load_sync_state, merge_sync_state
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,6 @@ class CalendarSync:
 
     async def sync_once(self) -> bool:
         """Sync every selected calendar once. Returns whether anything changed."""
-        from backend.connectors.gmail.connector import load_sync_state, merge_sync_state
         from backend.db import crud
         from backend.db.database import AsyncSessionLocal
 

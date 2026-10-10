@@ -38,26 +38,25 @@ class ConnClient:
 
 
 @pytest.mark.asyncio
-async def test_runtime_client_requires_or_returns_none():
-    from backend.telegram import runtime as rt_mod
+async def test_connected_client_requires_or_returns_none():
+    from backend.telegram import client as tg_client
     from backend.telegram.client import TelegramUnavailable
-    rt = rt_mod.TelegramRuntime()
-    with patch.object(rt_mod.tg_client, "get_client", return_value=None):
+    with patch.object(tg_client, "get_client", return_value=None):
         with pytest.raises(TelegramUnavailable) as exc:
-            await rt.client()
+            await tg_client.connected_client()
         assert exc.value.status_code == 503
-        assert await rt.client(require=False) is None
+        assert await tg_client.connected_client(require=False) is None
 
     dropped = ConnClient(connected=False)
-    with patch.object(rt_mod.tg_client, "get_client", return_value=dropped):
-        got = await asyncio.gather(rt.client(), rt.client(), rt.client())
+    with patch.object(tg_client, "get_client", return_value=dropped):
+        got = await asyncio.gather(*(tg_client.connected_client() for _ in range(3)))
     assert all(g is dropped for g in got) and dropped.connects == 1  # one reconnect, shared
 
     offline = ConnClient(connected=False, fail=True)
-    with patch.object(rt_mod.tg_client, "get_client", return_value=offline):
-        assert await rt.client(require=False) is None
+    with patch.object(tg_client, "get_client", return_value=offline):
+        assert await tg_client.connected_client(require=False) is None
         with pytest.raises(TelegramUnavailable):
-            await rt.client()
+            await tg_client.connected_client()
 
 
 @pytest.mark.asyncio

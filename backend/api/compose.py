@@ -16,14 +16,14 @@ from backend.db.models import Conversation
 from backend.api.idempotency import cached_response, cleanup_temp_files, idempotent
 from backend.serializers import messages_out
 from backend.telegram import ids
-from backend.telegram.runtime import runtime
 from backend.telegram.convert import GENERAL_TOPIC_ID, rows_for
+from backend.telegram import client as tg_client
 
 router = APIRouter()
 
 
 async def _require_client():
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     if not await client.is_user_authorized():
         raise HTTPException(status_code=401, detail="Not authenticated")
     return client

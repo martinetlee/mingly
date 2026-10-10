@@ -42,7 +42,7 @@ def _telegram_online(monkeypatch, module, client):
     async def _client(require: bool = True):
         return client
 
-    monkeypatch.setattr(module.runtime, "client", _client)
+    monkeypatch.setattr("backend.telegram.client.connected_client", _client)
 
 
 # ── accounts: logout ─────────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ async def test_telegram_user_person_creates_no_placeholders(api, db, monkeypatch
     async def _offline(require: bool = True):
         return None
 
-    monkeypatch.setattr(telegram.runtime, "client", _offline)
+    monkeypatch.setattr("backend.telegram.client.connected_client", _offline)
     before = (await db.execute(select(func.count()).select_from(Person))).scalar()
     for uid in (-5, 0, 123456789):
         r = await api.get(f"/api/telegram/users/{uid}/person")

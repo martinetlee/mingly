@@ -60,8 +60,8 @@ from backend.tasks import spawn
 from backend.telegram import ids
 from backend.telegram.convert import rows_for
 from backend.telegram.coordinator import broadcast_conversations_synced, coordinator
-from backend.telegram.runtime import runtime
 from backend.ws.manager import ws_manager
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +321,7 @@ class DMArchive:
                 self.state = "stopped"
 
     async def _step(self) -> None:
-        client = await runtime.client(require=False)
+        client = await tg_client.connected_client(require=False)
         if client is None:
             await self._set_state("idle")
             await self._wait_wake(NO_CLIENT_RETRY_SECONDS)

@@ -219,7 +219,7 @@ async def test_telegram_tools_report_not_connected(db):
     async def no_client(require=True):
         return None
 
-    with patch.object(runtime, "client", side_effect=no_client):
+    with patch("backend.telegram.client.connected_client", side_effect=no_client):
         out = await intelligence.execute_tool("sync_tagged_chats", {"tag_name": "X"}, db)
         assert out.startswith("Telegram not connected")
 

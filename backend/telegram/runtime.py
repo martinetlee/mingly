@@ -33,7 +33,6 @@ class TelegramRuntime:
         # Built on the server loop at first use: this singleton is created
         # at import, before (and on another thread than) that loop.
         self._lock = LoopLock()
-        self._connect_lock = LoopLock()
         self._client = None
         self._handlers: list = []
         self._tasks: list[asyncio.Task] = []
@@ -58,32 +57,6 @@ class TelegramRuntime:
     def _spawn(self, coro, name: str) -> None:
         self._tasks.append(spawn(coro, name=name))
 
-    # -- client access (the only way to obtain a usable client) --------------
-
-    async def client(self, require: bool = True):
-        """Return the connected client, reconnecting a dropped link first.
-
-        require=True raises TelegramUnavailable (HTTP 503) when there is no
-        client or the reconnect fails; require=False returns None instead.
-        Never creates a client — that happens only under the runtime lock.
-        """
-        c = tg_client.get_client()
-        if c is None:
-            if require:
-                raise TelegramUnavailable()
-            return None
-        if not c.is_connected():
-            async with self._connect_lock:
-                if not c.is_connected():
-                    try:
-                        await c.connect()
-                    except Exception as e:
-                        logger.warning("Telegram reconnect failed: %s", e)
-                        if require:
-                            raise TelegramUnavailable(f"Telegram reconnect failed: {e}") from e
-                        return None
-        return c
-
     async def login_client(self):
         """Client for onboarding (send-code / sign-in): reuse the current one
         or create it under the runtime lock."""
@@ -94,7 +67,7 @@ class TelegramRuntime:
                     raise TelegramUnavailable("Telegram API credentials are not set")
                 await tg_client._create_client()
                 c = tg_client.get_client()
-        return await self.client(require=True)
+        return await tg_client.connected_client(require=True)
 
     async def replace_client(self) -> bool:
         """New API credentials: tear down and connect a fresh client. Returns
@@ -263,7 +236,7 @@ class TelegramRuntime:
             backoff = 2
             while not client.is_connected():
                 try:
-                    async with self._connect_lock:
+                    async with tg_client.connect_lock:
                         if not client.is_connected():
                             await client.connect()
                 except asyncio.CancelledError:

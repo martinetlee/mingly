@@ -156,7 +156,7 @@ def tg(monkeypatch, fast_limiter):
     from backend.telegram import sync as tg_sync
     from backend.telegram.runtime import runtime
     fake = FakeTelegram()
-    monkeypatch.setattr(runtime, "client", AsyncMock(return_value=fake))
+    monkeypatch.setattr("backend.telegram.client.connected_client", AsyncMock(return_value=fake))
     monkeypatch.setattr(tg_sync, "last_full_dialog_sync", None)
     return fake
 

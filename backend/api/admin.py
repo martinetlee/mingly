@@ -18,7 +18,7 @@ from backend.db.database import get_db
 from backend.db.models import AdminActionLog, Identity
 from backend.serialization import iso_utc
 from backend.telegram import ids
-from backend.telegram.runtime import runtime
+from backend.telegram import client as tg_client
 
 router = APIRouter()
 
@@ -130,7 +130,7 @@ async def promote_admin(
 ):
     """Promote a user to admin with granular permissions."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.channels import EditAdminRequest
@@ -169,7 +169,7 @@ async def demote_admin(
 ):
     """Demote an admin back to regular member."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.channels import EditAdminRequest
@@ -200,7 +200,7 @@ async def ban_member(
 ):
     """Ban a user from the group/channel."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -237,7 +237,7 @@ async def restrict_member(
 ):
     """Restrict a member's permissions."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -278,7 +278,7 @@ async def approve_member(
 ):
     """Remove all restrictions from a user (unban/unrestrict)."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.channels import EditBannedRequest
@@ -307,7 +307,7 @@ async def get_invite_links(
 ):
     """Get all invite links for a group/channel."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.messages import GetExportedChatInvitesRequest
@@ -342,7 +342,7 @@ async def create_invite_link(
 ):
     """Create a new invite link."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.messages import ExportChatInviteRequest
@@ -379,7 +379,7 @@ async def revoke_invite_link(
 ):
     """Revoke an existing invite link."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         from telethon.tl.functions.messages import EditExportedChatInviteRequest
@@ -404,7 +404,7 @@ async def get_group_settings(
 ):
     """Get the current title and about/description for a group or channel."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     try:
         full = await client.get_entity(peer)
@@ -438,7 +438,7 @@ async def update_group_settings(
 ):
     """Update group/channel title and/or description."""
     peer = await _require_group(conversation_id, db)
-    client = await runtime.client()
+    client = await tg_client.connected_client()
 
     changes = []
     try:

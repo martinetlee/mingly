@@ -726,7 +726,7 @@ def _failing_thread(google, monkeypatch, *, status=400, slow=None):
 
 @pytest.mark.asyncio
 async def test_a_failing_thread_does_not_block_backfill_and_is_retried(db, google, unlocked_vault, broadcasts, monkeypatch):
-    from backend.connectors.gmail.connector import load_sync_state
+    from backend.connectors.sync_state import load_sync_state
 
     google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")],
                       "bad": [gmsg("mb", "bad", frm="bob@example.com")]}
@@ -747,7 +747,7 @@ async def test_a_failing_thread_does_not_block_backfill_and_is_retried(db, googl
 
 @pytest.mark.asyncio
 async def test_a_failing_thread_does_not_freeze_the_history_cursor(db, google, unlocked_vault, broadcasts, monkeypatch):
-    from backend.connectors.gmail.connector import load_sync_state, merge_sync_state
+    from backend.connectors.sync_state import load_sync_state, merge_sync_state
 
     google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")]}
     google.history_pages = [{"historyId": "2000", "history": [

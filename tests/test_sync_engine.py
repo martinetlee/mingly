@@ -23,9 +23,9 @@ UTC = timezone.utc
 
 
 def use_client(client):
-    """Make runtime.client() return ``client`` (None = Telegram unavailable)."""
-    from backend.telegram.runtime import runtime
-    return patch.object(runtime, "client", AsyncMock(return_value=client))
+    """Make connected_client() return ``client`` (None = Telegram unavailable)."""
+    from backend.telegram import client as tg_client
+    return patch.object(tg_client, "connected_client", AsyncMock(return_value=client))
 
 
 def tg_msg(mid, text="hi", peer=77, date=None, entities=None, out=False, sender=None, **kw):

@@ -50,10 +50,11 @@ async def _contend(lock) -> None:
 
 
 def test_import_time_singleton_locks_work_on_the_server_loop():
+    from backend.telegram import client as tg_client
     from backend.telegram.coordinator import coordinator
     from backend.telegram.runtime import runtime
 
-    for lock in (runtime._lock, runtime._connect_lock, coordinator.limiter._lock):
+    for lock in (runtime._lock, tg_client.connect_lock, coordinator.limiter._lock):
         _on_server_loop(lambda: _contend(lock))
         _on_server_loop(lambda: _contend(lock))  # and again on a later loop
 

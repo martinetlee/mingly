@@ -1,8 +1,8 @@
-"""Low-level Telethon client storage.
+"""Telethon client storage and access.
 
 Only ``backend.telegram.runtime`` creates or replaces the client (under its
 lock). Everything else obtains a connected client through
-``runtime.client(require=True)``, which raises ``TelegramUnavailable``
+``connected_client(require=True)``, which raises ``TelegramUnavailable``
 (an HTTP 503) or, with ``require=False``, returns None.
 """
 
@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from backend.aio import LoopLock
 from backend.config import TG_API_ID, TG_API_HASH
 from backend.secrets import get_secret, save_secret
 
@@ -31,8 +32,38 @@ class TelegramUnavailable(HTTPException):
 
 def get_client() -> Optional[TelegramClient]:
     """Peek at the current client without connecting (status checks only).
-    Use ``runtime.client()`` to get a usable, connected client."""
+    Use ``connected_client()`` to get a usable, connected client."""
     return _client
+
+
+# Serializes (re)connects of the current client: request paths and the
+# runtime's reconnect watchdog share it. Built on the server loop at first use.
+connect_lock = LoopLock()
+
+
+async def connected_client(require: bool = True) -> Optional[TelegramClient]:
+    """Return the connected client, reconnecting a dropped link first.
+
+    require=True raises TelegramUnavailable (HTTP 503) when there is no
+    client or the reconnect fails; require=False returns None instead.
+    Never creates a client — that happens only under the runtime lock.
+    """
+    c = get_client()
+    if c is None:
+        if require:
+            raise TelegramUnavailable()
+        return None
+    if not c.is_connected():
+        async with connect_lock:
+            if not c.is_connected():
+                try:
+                    await c.connect()
+                except Exception as e:
+                    logger.warning("Telegram reconnect failed: %s", e)
+                    if require:
+                        raise TelegramUnavailable(f"Telegram reconnect failed: {e}") from e
+                    return None
+    return c
 
 
 def _get_api_credentials() -> Tuple[int, str]:

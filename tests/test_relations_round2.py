@@ -185,7 +185,7 @@ async def test_profile_photo_uses_shared_atomic_helper(api, db):
     async def connected(require=True):
         return FakeClient()
 
-    with patch.object(media, "download_avatar", fake_helper), patch.object(telegram.runtime, "client", connected):
+    with patch.object(media, "download_avatar", fake_helper), patch("backend.telegram.client.connected_client", connected):
         r = await api.get(f"/api/telegram/identities/{ident.id}/profile")
     assert r.status_code == 200, r.text
     assert calls == [(42, ident.id)] and r.json()["avatar_url"] is None

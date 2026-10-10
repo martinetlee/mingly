@@ -25,8 +25,8 @@ from backend.media import AVATAR_DIR, MEDIA_DIR, MediaIncomplete, MediaNotFound,
 from backend.serializers import media_url
 from backend.tasks import spawn
 from backend.telegram import ids
-from backend.telegram.runtime import runtime
 from backend.telegram.convert import media_type as _media_type
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ async def _attachment_context(attachment_id: int):
 
 async def _download(attachment_id: int, tg_msg) -> str:
     att, msg, conv = await _attachment_context(attachment_id)
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if client is None:
         raise MediaUnavailable("Telegram client not connected")
     if tg_msg is None:

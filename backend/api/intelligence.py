@@ -26,6 +26,7 @@ from backend.llm.budget import clip_to_tokens, estimate_tokens, prompt_budget_to
 from backend.llm.resolve import LLMUnavailable, error_kind, error_message, get_provider
 from backend.serializers import message_out
 from backend.api.views import conversation_json
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -438,9 +439,8 @@ async def execute_tool(name: str, args: dict, db: AsyncSession) -> str:
             tag_name = args.get("tag_name", "")
             if not tag_name:
                 return "tag_name is required."
-            from backend.telegram.runtime import runtime
             from backend.telegram.sync import start_tag_sync, get_tag_sync_state
-            if await runtime.client(require=False) is None:
+            if await tg_client.connected_client(require=False) is None:
                 return (
                     "Telegram not connected — chat history can't be synced right now. "
                     "Tell the user to reconnect Telegram and try again."

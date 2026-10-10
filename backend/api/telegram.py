@@ -25,7 +25,7 @@ from backend.api.views import conversation_json
 from backend.telegram import ids
 from backend.telegram.coordinator import coordinator
 from backend.telegram.entities import display_name, is_deactivated
-from backend.telegram.runtime import runtime
+from backend.telegram import client as tg_client
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ async def list_folders(db: AsyncSession = Depends(get_db)):
     from telethon.tl.functions.messages import GetDialogFiltersRequest
     from telethon.tl.types import DialogFilter
 
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if not client:
         return []
     try:
@@ -142,7 +142,7 @@ async def search_directory(q: str, db: AsyncSession = Depends(get_db)):
 
     if len(q) < 2:
         return found
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     # Typeahead must never queue behind a FloodWait: skip the directory lookup.
     if not client or not await coordinator.limiter.acquire(1, max_wait=2):
         return found
@@ -178,7 +178,7 @@ async def _ensure_conversation(db: AsyncSession, peer_id: int) -> Conversation:
     conv = await ids.conversation_for(db, peer_id)
     if conv is not None:
         return conv
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         entity = await client.get_entity(peer_id)
     except Exception as e:
@@ -226,7 +226,7 @@ async def create_group(req: CreateGroupRequest, db: AsyncSession = Depends(get_d
     """Create a new Telegram group with the given people."""
     if not req.person_ids:
         raise HTTPException(status_code=400, detail="At least one member is required")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     users = []
     for pid in req.person_ids:
         try:
@@ -248,7 +248,7 @@ async def create_group(req: CreateGroupRequest, db: AsyncSession = Depends(get_d
 @router.post("/create/channel")
 async def create_channel(req: CreateChannelRequest, db: AsyncSession = Depends(get_db)):
     """Create a new Telegram broadcast channel."""
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         from telethon.tl.functions.channels import CreateChannelRequest as TLCreateChannel
         result = await client(TLCreateChannel(title=req.name, about=req.about, megagroup=False, broadcast=True))
@@ -266,7 +266,7 @@ _INVITE_PREFIXES = ("https://t.me/joinchat/", "https://t.me/+", "t.me/joinchat/"
 async def join(req: JoinRequest, db: AsyncSession = Depends(get_db)):
     """Join a chat via an invite link (t.me/joinchat/…, t.me/+…) or a public
     username (t.me/name, @name)."""
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     link = req.link.strip()
     if not link:
         raise HTTPException(status_code=400, detail="Link is required")
@@ -303,7 +303,7 @@ async def person_for_user(user_id: int, db: AsyncSession = Depends(get_db)):
         raise not_found
     ident = await ids.identity_for_user_id(db, user_id, create=False)
     if ident is None:
-        client = await runtime.client(require=False)
+        client = await tg_client.connected_client(require=False)
         entity = None
         if client is not None:
             try:
@@ -324,7 +324,7 @@ async def resolve_username(username: str, db: AsyncSession = Depends(get_db)):
     name = username.strip().lstrip("@")
     if not name:
         raise HTTPException(status_code=400, detail="username is required")
-    client = await runtime.client()
+    client = await tg_client.connected_client()
     try:
         entity = await client.get_entity(name)
     except (ValueError, TypeError) as e:
@@ -396,7 +396,7 @@ def _user_status(status) -> str:
 async def _fetch_profile(identity_id: int, user_id: int) -> dict:
     from backend.telegram.media import download_avatar
 
-    client = await runtime.client(require=False)
+    client = await tg_client.connected_client(require=False)
     if client is None:
         raise ConnectionError("Telegram client not connected")
     try:

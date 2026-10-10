@@ -320,14 +320,14 @@ async def test_address_book_sync_marks_identities_as_contacts(api, db):
         return FakeClient()
 
     from backend.telegram.runtime import runtime
-    with patch.object(runtime, "client", connected):
+    with patch("backend.telegram.client.connected_client", connected):
         r = await api.post("/api/people/sync")
     assert r.json() == {"imported": 2, "total": 2}
     body = (await api.get("/api/people", params={"contacts_only": "true"})).json()
     assert sorted(p["name"] for p in body["items"]) == ["Ann", "Bot"]
     await db.refresh(stale)
     assert stale.is_contact is False
-    with patch.object(runtime, "client", connected):
+    with patch("backend.telegram.client.connected_client", connected):
         assert (await api.post("/api/people/sync")).json() == {"imported": 0, "total": 2}
 
 
