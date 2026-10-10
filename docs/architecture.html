@@ -237,7 +237,7 @@ footer{color:var(--muted);font-size:12.5px;margin-top:40px}
     <div class="card cp ok"><b>Ports instead of upward imports</b><p>Ingest exposes a <code>MessageInspector</code> port and Shield plugs into it through <code>backend/wiring.py</code>. Sessions notify revocation listeners and the WebSocket manager subscribes. The connector manager tells a connector <code>on_reauthorized</code>.</p></div>
     <div class="card cp ok"><b>Connector roles</b><p>Routes ask <code>connector_with(conv, Role, …)</code> and never branch on the channel. Telegram's code (send, albums, edit/delete/forward, pins, dialogs, members, topics, admin, history, search, address book, directory) lives in <code>backend/telegram/</code>. <code>tests/test_telegram_routes.py</code> pins every Telegram route's calls and responses; it passed unchanged before and after the move.</p></div>
     <div class="card cp ok"><b>Domain errors</b><p>Lower layers raise <code>backend.errors</code> types (503, 401, 404, 400, 429), and one API handler maps them. No HTTP types appear below the API.</p></div>
-    <div class="card cp"><b>Deliberate exceptions</b><p>MCP tool handlers (<code>api/mcp_tools.py</code>) keep their own paginated queries: they're the resolvers of an external read API. Telegram converts Telethon messages itself, then shares the same <code>crud.save_messages</code>, <code>people.identities</code> and <code>ingest.fanout</code> as every channel. 44 imports stay inside functions, all on purpose: late binding for patched singletons, optional dependencies, and Shield-only startup.</p></div>
+    <div class="card cp"><b>Deliberate exceptions</b><p>MCP tool handlers (<code>api/mcp_tools/</code>) keep their own paginated queries: they're the resolvers of an external read API. Telegram converts Telethon messages itself, then shares the same <code>crud.save_messages</code>, <code>people.identities</code> and <code>ingest.fanout</code> as every channel. 44 imports stay inside functions, all on purpose: late binding for patched singletons, optional dependencies, and Shield-only startup.</p></div>
   </div>
 
   <footer>Built from <code>mingly/</code> (branch refactor/modularization) on 2026-10-11 by parsing every <code>import</code>/<code>from</code> in <code>backend/**/*.py</code> and every relative import in <code>frontend/src/**/*.ts(x)</code>, tests excluded. Line counts are approximate. Open locally via file://.</footer>
@@ -272,7 +272,7 @@ const BACK = {
    "lookups.py — path ids, connector_with / channel_call",
    "views.py — conversation_json (adds live capabilities)",
    "dependencies.py — session / origin / Shield guards",
-   "mcp.py + mcp_tools.py — MCP endpoint and tools",
+   "mcp.py + mcp_tools/ — MCP endpoint and tools",
    "../wiring.py — composition root"
   ]
  },
