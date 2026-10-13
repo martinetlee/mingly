@@ -233,9 +233,9 @@ class _Mail(Connector):
 async def test_multi_account_sign_in_registers_and_starts_the_new_account(db):
     import asyncio
     m = ConnectorManager()
-    m.register_factory("mail", "Mail", lambda account_id: _Mail(account_id))
+    m.register_factory(_Mail)
     _Mail.started = []
-    assert {"channel": "mail", "display_name": "Mail", "multi_account": True} in m.channels()
+    assert {"channel": "mail", "display_name": "Mail", "multi_account": True, "setup": None} in m.channels()
 
     step = await m.begin_auth("mail", {})
     assert step.kind == "fields" and m.all() == []  # provisional until the flow creates the account
@@ -255,7 +255,7 @@ async def test_multi_account_sign_in_registers_and_starts_the_new_account(db):
 
     # A fresh manager (app restart) recreates both from the accounts table.
     m2 = ConnectorManager()
-    m2.register_factory("mail", "Mail", lambda account_id: _Mail(account_id))
+    m2.register_factory(_Mail)
     await m2.load_accounts()
     assert sorted(c.account_id for c in m2.all()) == sorted(c.account_id for c in m.all())
     assert m2.for_account("mail", conn.account_id).account_id == conn.account_id
@@ -289,7 +289,7 @@ async def test_re_auth_of_a_registered_account_notifies_the_running_connector(db
             return AuthStep(flow_id, "done")
 
     m = ConnectorManager()
-    m.register_factory("mail", "Mail", lambda account_id: _ReMail(account_id))
+    m.register_factory(_ReMail)
     first = await m.begin_auth("mail", {})
     await m.continue_auth(first.flow_id, {"account_id": 7})
     await asyncio.sleep(0.01)
@@ -410,7 +410,7 @@ async def test_accounts_routes_list_and_drive_auth(api):
     with patch.object(telegram, "is_configured", return_value=False):
         r = await api.get("/api/accounts")
         assert r.status_code == 200
-        assert {"channel": "telegram", "display_name": "Telegram", "multi_account": False} in r.json()["channels"]
+        assert {"channel": "telegram", "display_name": "Telegram", "multi_account": False, "setup": None} in r.json()["channels"]
         [tg] = [a for a in r.json()["accounts"] if a["channel"] == "telegram"]
         assert tg["account_key"] == "telegram:default" and tg["configured"] is False
         assert "forum_topics" in tg["capabilities"]

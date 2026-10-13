@@ -337,6 +337,51 @@ async def test_opening_signal_while_setup_runs_shows_progress(no_install):
     install._state = install.InstallState(status="unpacking", total=1)
     step = await SignalConnector().begin_auth({})
     assert step.kind == "progress" and step.poll is True and "Unpacking" in step.message
+    assert step.stop_label == "Cancel setup"
+
+
+@pytest.mark.asyncio
+async def test_leaving_setup_keeps_it_running_and_stop_cancels_it(no_install):
+    """Closing the progress step leaves the download running (the channel
+    list reports it); "Cancel setup" (stop) asks the install to stop."""
+    from backend.connectors.signal import install
+
+    install._state = install.InstallState(status="downloading", downloaded=90_000_000, total=180_000_000)
+    manager = ConnectorManager()
+    register(manager)
+
+    step = await manager.begin_auth("signal", {})
+    await manager.cancel_auth(step.flow_id)
+    assert install._state.running and not install._state.cancel_requested
+    [signal] = [c for c in manager.channels() if c["channel"] == "signal"]
+    assert signal["setup"]["state"] == "running" and 0.4 < signal["setup"]["progress"] < 0.5
+    assert "90 of 180 MB" in signal["setup"]["message"]
+
+    step = await manager.begin_auth("signal", {})  # back to the progress step
+    assert step.kind == "progress"
+    await manager.cancel_auth(step.flow_id, stop=True)
+    assert install._state.cancel_requested
+
+    # While it winds down: no second stop offered, the list says so
+    step = await manager.begin_auth("signal", {})
+    assert step.kind == "progress" and step.stop_label is None and step.message == "Cancelling…"
+    [signal] = [c for c in manager.channels() if c["channel"] == "signal"]
+    assert signal["setup"]["state"] == "cancelling"
+    await manager.cancel_auth(step.flow_id)
+
+
+def test_setup_status_follows_the_install(no_install):
+    from backend.connectors.signal import install
+
+    assert SignalConnector.setup_status() is None
+    install._state = install.InstallState(status="checking", total=1)
+    assert SignalConnector.setup_status().state == "running"
+    install._state = install.InstallState(status="done")
+    assert SignalConnector.setup_status().to_dict() == {"state": "ready", "progress": None, "message": "Ready to link"}
+    install._state = install.InstallState(status="error", error="Download failed (ConnectError).")
+    assert SignalConnector.setup_status().to_dict()["state"] == "failed"
+    install._state = install.InstallState(status="cancelled")
+    assert SignalConnector.setup_status() is None
 
 
 @pytest.mark.asyncio
@@ -368,7 +413,7 @@ async def test_link_flow_creates_account_and_self_identity(db, fake_cli, events)
     _scenario()
     manager = ConnectorManager()
     register(manager)
-    assert {"channel": "signal", "display_name": "Signal", "multi_account": True} in manager.channels()
+    assert {"channel": "signal", "display_name": "Signal", "multi_account": True, "setup": None} in manager.channels()
 
     step = await manager.begin_auth("signal", {})
     assert step.kind == "qr" and step.poll is True

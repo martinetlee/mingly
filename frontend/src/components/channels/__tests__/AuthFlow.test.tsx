@@ -142,7 +142,9 @@ describe('AuthFlow', () => {
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('25')
     expect(screen.queryByText('Waiting…')).toBeNull()
     expect(screen.queryByText(/Unsupported sign-in step/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+    // Leaving keeps the setup going: no "Cancel", the leave button is labelled for that
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Close' })).toBeTruthy()
 
     await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('60')
@@ -150,6 +152,40 @@ describe('AuthFlow', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(POLL_MS) })
     expect(screen.queryByRole('progressbar')).toBeNull()
     expect(screen.getByText('Link Signal')).toBeTruthy()
+  })
+
+  it('a progress step can be left (work continues) or stopped (cancel with stop)', async () => {
+    const progress = step({
+      flow_id: 'p1', kind: 'progress', title: 'Setting up Signal support', message: 'Downloading…',
+      progress: 0.3, poll: true, stop_label: 'Cancel setup',
+    })
+    vi.mocked(beginAccountAuth).mockResolvedValue(progress)
+    const onClose = vi.fn()
+    render(<AuthFlow accountKey="signal" onClose={onClose} backgroundLabel="Connect another account" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect another account' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'p1')
+    cleanup()
+
+    vi.mocked(cancelAccountAuth).mockClear()
+    const onClose2 = vi.fn()
+    render(<AuthFlow accountKey="signal" onClose={onClose2} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel setup' }))
+    await waitFor(() => expect(onClose2).toHaveBeenCalledTimes(1))
+    expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'p1', { stop: true })
+    expect(cancelAccountAuth).toHaveBeenCalledTimes(1) // unmounting doesn't cancel again
+  })
+
+  it('a failed stop keeps the step open and says why', async () => {
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      flow_id: 'p2', kind: 'progress', progress: 0.3, poll: true, stop_label: 'Cancel setup',
+    }))
+    vi.mocked(cancelAccountAuth).mockRejectedValueOnce(new Error('offline'))
+    const onClose = vi.fn()
+    render(<AuthFlow accountKey="signal" onClose={onClose} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel setup' }))
+    expect(await screen.findByText('offline')).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('resolves a 1Password reference before the form can be submitted', async () => {

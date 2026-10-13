@@ -63,10 +63,12 @@ async def continue_auth(key: str, flow_id: str, data: dict[str, Any] = Body(defa
 
 
 @router.delete("/{key}/auth/{flow_id}", status_code=204)
-async def cancel_auth(key: str, flow_id: str) -> Response:
+async def cancel_auth(key: str, flow_id: str, stop: bool = False) -> Response:
     """The user closed a sign-in: end the flow (Signal's link process, a
-    pending OAuth consent). Idempotent: 204 for unknown or finished flows too."""
-    await manager.cancel_auth(flow_id)
+    pending OAuth consent). Background work the flow started (Signal's setup
+    download) keeps going unless ``stop`` (the step's ``stop_label`` button).
+    Idempotent: 204 for unknown or finished flows too."""
+    await manager.cancel_auth(flow_id, stop=stop)
     return Response(status_code=204)
 
 

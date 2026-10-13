@@ -65,6 +65,22 @@ class AuthStep:
     poll: bool = False  # continue_auth with {} until the step changes
     progress: Optional[float] = None  # 0–1 for a `progress` step (a setup download)
     submit_label: Optional[str] = None  # button of a `fields` step; "Continue" when None
+    # The step's background work (a setup download) keeps going when the user
+    # leaves the flow; this labels the button that stops it instead
+    # (``abandon_flow(stop=True)``). None: nothing to stop.
+    stop_label: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SetupStatus:
+    """One-time setup a channel runs before its first sign-in (Signal's
+    signal-cli download), shown next to the channel while no flow is open."""
+    state: str  # running | cancelling | ready | failed
+    progress: Optional[float] = None  # 0–1 while running
+    message: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -219,9 +235,17 @@ class Connector(ABC):
     async def logout(self) -> None:
         """Sign the account out and forget its stored session."""
 
-    async def abandon_flow(self, flow_id: str) -> None:
-        """A sign-in flow was given up (the manager evicted it): release
-        what it holds (e.g. a helper process). The default does nothing."""
+    async def abandon_flow(self, flow_id: str, *, stop: bool = False) -> None:
+        """A sign-in flow was left (closed by the user, or evicted by the
+        manager): release what it holds (e.g. a helper process). Background
+        work it started (a setup download) keeps going unless ``stop``, the
+        user's "stop" on a step with ``stop_label``. The default does nothing."""
+        return None
+
+    @classmethod
+    def setup_status(cls) -> Optional[SetupStatus]:
+        """The channel's one-time setup, when one is running or just ended.
+        Default: the channel needs none."""
         return None
 
     async def close_flows(self) -> None:

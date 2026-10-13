@@ -314,7 +314,7 @@ def test_register_adds_a_single_account_connector():
     m = ConnectorManager()
     register(m)
     assert m.get("sms").account_key == "sms:default"
-    assert {"channel": "sms", "display_name": "SMS / iMessage", "multi_account": False} in m.channels()
+    assert {"channel": "sms", "display_name": "SMS / iMessage", "multi_account": False, "setup": None} in m.channels()
 
 
 def test_the_app_manager_has_sms():

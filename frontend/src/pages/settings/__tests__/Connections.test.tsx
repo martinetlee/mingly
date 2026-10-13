@@ -86,6 +86,17 @@ describe('Connections', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy()
     expect(beginAccountAuth).toHaveBeenCalledWith('telegram', {})
   })
+
+  it("a channel's background setup shows on its add button", async () => {
+    vi.mocked(getAccounts).mockResolvedValue({
+      accounts: [],
+      channels: [{ channel: 'signal', display_name: 'Signal', multi_account: true,
+        setup: { state: 'running', progress: 0.42, message: 'Downloading…' } }],
+    })
+    renderConnections()
+    const add = await screen.findByRole('button', { name: /Add Signal account/ })
+    expect(within(add).getByText('Setting up… 42%')).toBeTruthy()
+  })
 })
 
 describe('Connections: Telegram credentials', () => {

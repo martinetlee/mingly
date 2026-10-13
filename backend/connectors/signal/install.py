@@ -74,6 +74,10 @@ class InstallError(Exception):
     """Setting up signal-cli failed; the message is shown as is."""
 
 
+class _Cancelled(Exception):
+    """``cancel()`` was asked for; the setup stops at the next check."""
+
+
 def runtime_root() -> Path:
     return Path(config.DATA_DIR) / "signal-runtime"
 
@@ -116,10 +120,11 @@ def download_size() -> int:
 
 @dataclass
 class InstallState:
-    status: str = "idle"  # idle | downloading | unpacking | checking | done | error
+    status: str = "idle"  # idle | downloading | unpacking | checking | done | error | cancelled
     downloaded: int = 0
     total: int = 0
     error: Optional[str] = None
+    cancel_requested: bool = False
 
     @property
     def running(self) -> bool:
@@ -148,6 +153,21 @@ def start() -> InstallState:
     return _state
 
 
+def cancel() -> InstallState:
+    """Stop a running setup. Cooperative: the download stops at its next
+    chunk, unpacking and the run check at the end of their step (an executor
+    thread can't be interrupted), then the work directory is removed and the
+    status becomes ``cancelled``. A no-op when nothing runs."""
+    if _state.running:
+        _state.cancel_requested = True
+    return _state
+
+
+def _check_cancel(st: InstallState) -> None:
+    if st.cancel_requested:
+        raise _Cancelled()
+
+
 def _fail(st: InstallState, exc: BaseException) -> None:
     st.status = "error"
     st.error = str(exc) or type(exc).__name__
@@ -163,6 +183,7 @@ async def _download(client: httpx.AsyncClient, archive: Archive, dest: Path, st:
         resp.raise_for_status()
         with dest.open("wb") as f:
             async for chunk in resp.aiter_bytes(1 << 16):
+                _check_cancel(st)
                 received += len(chunk)
                 if received > archive.size:
                     raise InstallError("A download was larger than expected; it may have been tampered with.")
@@ -229,11 +250,15 @@ def _place(staged: Path, final: Path, root: Path, work: Path) -> None:
 
 
 async def _install(st: InstallState) -> None:
+    """Run one setup into ``st``. The final status is set only after the work
+    directory is gone, so a setup started right after this one ends (``running``
+    turns False) never shares that directory with this cleanup."""
     root = runtime_root()
     root.mkdir(parents=True, exist_ok=True)
     work = root / f".setup-{os.getpid()}"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir()
+    status, error = "error", None
     try:
         jre = jre_archive()
         st.total = SIGNAL_CLI.size + jre.size
@@ -241,23 +266,33 @@ async def _install(st: InstallState) -> None:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
             await _download(client, SIGNAL_CLI, work / "signal-cli.tar.gz", st)
             await _download(client, jre, work / "jre.tar.gz", st)
+        _check_cancel(st)
         st.status = "unpacking"
         staged = work / RELEASE
         await loop.run_in_executor(None, _extract, work / "signal-cli.tar.gz", staged / "signal-cli")
         await loop.run_in_executor(None, _extract, work / "jre.tar.gz", staged / "jre")
+        _check_cancel(st)
         st.status = "checking"
         await _version_ok(staged)
+        _check_cancel(st)
         # Deleting a previous release (a JRE: thousands of files) is slow
         await loop.run_in_executor(None, _place, staged, _release_dir(), root, work)
-        st.status = "done"
-        log.info("Signal support set up: %s", RELEASE)
+        status = "done"
+    except _Cancelled:
+        status = "cancelled"
     except InstallError as e:
-        st.status, st.error = "error", str(e)
+        error = str(e)
     except httpx.HTTPError as e:
-        st.status, st.error = "error", f"Download failed ({e.__class__.__name__}). Check your internet connection and try again."
+        error = f"Download failed ({e.__class__.__name__}). Check your internet connection and try again."
     except OSError as e:
-        st.status, st.error = "error", f"Couldn't save Signal support ({e.strerror or e})."
+        error = f"Couldn't save Signal support ({e.strerror or e})."
     finally:
         await asyncio.to_thread(shutil.rmtree, work, ignore_errors=True)
-        if st.status == "error":
-            log.warning("Signal support setup failed: %s", st.error)
+    # (any other exception propagates; spawn's on_error marks the state failed)
+    st.status, st.error = status, error
+    if status == "done":
+        log.info("Signal support set up: %s", RELEASE)
+    elif status == "cancelled":
+        log.info("Signal support setup cancelled")
+    else:
+        log.warning("Signal support setup failed: %s", error)

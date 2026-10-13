@@ -309,7 +309,7 @@ class GmailConnector(Connector):
             return AuthStep(flow_id=flow_id, kind="error", title="Google sign-in failed", message=str(e))
         return AuthStep(flow_id=flow_id, kind="done", title="Gmail connected", message=f"Signed in as {email}")
 
-    async def abandon_flow(self, flow_id: str) -> None:
+    async def abandon_flow(self, flow_id: str, *, stop: bool = False) -> None:
         self._flows.pop(flow_id, None)
         pending = oauth.by_flow(flow_id)
         if pending is not None:

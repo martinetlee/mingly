@@ -40,7 +40,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
 from backend import config
-from backend.connectors.base import AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage
+from backend.connectors.base import (
+    AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage, SetupStatus,
+)
 from backend.connectors.signal import cli, install
 from backend.connectors.signal.envelopes import (
     Address,
@@ -99,6 +101,20 @@ class _LinkFlow:
     readers: list = field(default_factory=list)
     watchdog: Optional[asyncio.Task] = None  # ends ``signal-cli link`` at LINK_TIMEOUT
     expired: bool = False
+
+
+def _install_progress(st: install.InstallState) -> tuple[str, float]:
+    """What a running setup is doing, and how far along it is (0–1), for the
+    progress step and the channel list alike."""
+    if st.status == "downloading":
+        total = st.total or 1
+        message = f"Downloading signal-cli and Java ({st.downloaded // 1_000_000} of {total // 1_000_000} MB)…"
+        progress = min(st.downloaded / total, 1.0) * 0.9
+    elif st.status == "unpacking":
+        message, progress = "Unpacking…", 0.93
+    else:
+        message, progress = "Checking that it runs…", 0.97
+    return ("Cancelling…" if st.cancel_requested else message), progress
 
 
 def _kill(proc: asyncio.subprocess.Process) -> None:
@@ -739,9 +755,11 @@ class SignalConnector(Connector):
             if flow.watchdog is not None:
                 flow.watchdog.cancel()
 
-    async def abandon_flow(self, flow_id: str) -> None:
+    async def abandon_flow(self, flow_id: str, *, stop: bool = False) -> None:
         self._drop_flow(flow_id)
-        self._setup_flows.pop(flow_id, None)
+        phase = self._setup_flows.pop(flow_id, None)
+        if stop and phase == "installing":
+            install.cancel()
 
     async def close_flows(self) -> None:
         for flow_id in list(self._flows):
@@ -784,19 +802,27 @@ class SignalConnector(Connector):
     def _install_step(self, flow_id: str) -> AuthStep:
         self._setup_flows[flow_id] = "installing"
         st = install.state()
-        if st.status == "downloading":
-            total = st.total or 1
-            message = f"Downloading signal-cli and Java ({st.downloaded // 1_000_000} of {total // 1_000_000} MB)…"
-            progress = min(st.downloaded / total, 1.0) * 0.9
-        elif st.status == "unpacking":
-            message, progress = "Unpacking…", 0.93
-        else:
-            message, progress = "Checking that it runs…", 0.97
+        message, progress = _install_progress(st)
+        if st.cancel_requested:
+            return AuthStep(flow_id, "progress", title="Setting up Signal support", message=message,
+                            progress=progress, poll=True)
         return AuthStep(
             flow_id, "progress", title="Setting up Signal support",
-            message=message + "\nYou can close this window; setup continues in the background.",
-            progress=progress, poll=True,
+            message=message + "\nYou can leave this screen; setup continues in the background.",
+            progress=progress, poll=True, stop_label="Cancel setup",
         )
+
+    @classmethod
+    def setup_status(cls) -> Optional[SetupStatus]:
+        st = install.state()
+        if st.running:
+            message, progress = _install_progress(st)
+            return SetupStatus("cancelling" if st.cancel_requested else "running", progress=progress, message=message)
+        if st.status == "done":
+            return SetupStatus("ready", message="Ready to link")
+        if st.status == "error":
+            return SetupStatus("failed", message=st.error)
+        return None
 
     async def _continue_setup(self, flow_id: str) -> AuthStep:
         phase = self._setup_flows[flow_id]

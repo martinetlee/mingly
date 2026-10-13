@@ -11,11 +11,12 @@ vi.mock('../../api/accounts', async (importOriginal) => ({
   getAccounts: vi.fn(),
   beginAccountAuth: vi.fn(),
   continueAccountAuth: vi.fn(),
+  cancelAccountAuth: vi.fn(async () => undefined),
 }))
 
 import { initVault } from '../../api/client'
-import { beginAccountAuth, continueAccountAuth, getAccounts } from '../../api/accounts'
-import type { AuthStep } from '../../api/accounts'
+import { beginAccountAuth, cancelAccountAuth, continueAccountAuth, getAccounts } from '../../api/accounts'
+import type { Account, AuthStep, ConnectableChannel } from '../../api/accounts'
 import Onboarding from '../Onboarding'
 
 const step = (over: Partial<AuthStep>): AuthStep => ({
@@ -78,7 +79,48 @@ describe('Onboarding', () => {
     expect(await screen.findByText('Signed in as ann')).toBeTruthy()
     expect(beginAccountAuth).toHaveBeenCalledWith('telegram', {})
     expect(continueAccountAuth).toHaveBeenCalledWith('telegram', 'f1', { phone: '+15551234567' })
+
+    // Done goes back to the list (to connect more); the connected channel is marked, then Continue moves on
+    vi.mocked(getAccounts).mockResolvedValue({
+      accounts: [connectedAccount('telegram', 'ann')],
+      channels: [{ channel: 'telegram', display_name: 'Telegram', multi_account: false }],
+    })
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(onComplete).not.toHaveBeenCalled()
+    const telegram = await screen.findByRole('button', { name: /Telegram.*ann/ })
+    expect(telegram).toHaveProperty('disabled', true) // single-account channel: already connected
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     expect(onComplete).toHaveBeenCalledTimes(1)
   })
+
+  it('a setup running in the background shows on its channel; another one can be connected meanwhile', async () => {
+    vi.mocked(initVault).mockResolvedValue({ success: true, session_token: 't' })
+    const channels = (progress: number): ConnectableChannel[] => [
+      { channel: 'signal', display_name: 'Signal', multi_account: true,
+        setup: { state: 'running', progress, message: 'Downloading…' } },
+      { channel: 'telegram', display_name: 'Telegram', multi_account: false, setup: null },
+    ]
+    vi.mocked(getAccounts).mockResolvedValue({ accounts: [], channels: channels(0.2) })
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      kind: 'progress', title: 'Setting up Signal support', progress: 0.2, poll: true, stop_label: 'Cancel setup',
+    }))
+    render(<Onboarding onComplete={vi.fn()} />)
+    setPassword()
+    expect(await screen.findByText('Setting up… 20%')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /Signal/ }))
+    vi.mocked(getAccounts).mockResolvedValue({ accounts: [], channels: channels(0.5) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect another account' }))
+    expect(cancelAccountAuth).toHaveBeenCalledWith('signal', 'f1') // left, not stopped
+    expect(await screen.findByText('Setting up… 50%')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Telegram/ })).toHaveProperty('disabled', false)
+  })
 })
+
+function connectedAccount(channel: string, label: string): Account {
+  return {
+    account_key: channel, account_id: null, channel, display_name: channel, label,
+    capabilities: [], configured: true, status: { state: 'ready', error: null },
+  }
+}

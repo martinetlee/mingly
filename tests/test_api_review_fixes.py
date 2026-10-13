@@ -362,8 +362,8 @@ async def test_cancel_auth_flow_ends_it_and_is_idempotent(api, monkeypatch):
         async def begin_auth(self, params):
             return AuthStep(flow_id="flow-1", kind="qr", title="Link", qr_payload="sgnl://x", poll=True)
 
-        async def abandon_flow(self, flow_id):
-            abandoned.append(flow_id)
+        async def abandon_flow(self, flow_id, *, stop=False):
+            abandoned.append((flow_id, stop))
 
     fake = _Connector()
     monkeypatch.setattr(manager, "_connectors", {"signal:test": fake})
@@ -372,12 +372,17 @@ async def test_cancel_auth_flow_ends_it_and_is_idempotent(api, monkeypatch):
 
     r = await api.delete("/api/accounts/signal:test/auth/flow-1")
     assert r.status_code == 204 and r.content == b""
-    assert abandoned == ["flow-1"]
+    assert abandoned == [("flow-1", False)]
     r = await api.post("/api/accounts/signal:test/auth/flow-1", json={})
     assert r.status_code == 404  # the flow is gone
 
     r = await api.delete("/api/accounts/signal:test/auth/flow-1")  # again: still 204, no second abandon
     assert r.status_code == 204
-    assert abandoned == ["flow-1"]
+    assert abandoned == [("flow-1", False)]
     r = await api.delete("/api/accounts/whatever/auth/never-existed")
     assert r.status_code == 204
+
+    # "Cancel setup": the connector is told to stop the flow's background work too
+    await api.post("/api/accounts/signal:test/auth", json={})
+    r = await api.delete("/api/accounts/signal:test/auth/flow-1", params={"stop": "true"})
+    assert r.status_code == 204 and abandoned[-1] == ("flow-1", True)

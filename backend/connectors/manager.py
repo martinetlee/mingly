@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from backend.connectors.base import AuthFlowError, AuthStep, Connector
 from backend.tasks import spawn
@@ -28,15 +28,14 @@ from backend.telegram.connector import connector as telegram
 
 logger = logging.getLogger(__name__)
 
-ConnectorFactory = Callable[[Optional[int]], Connector]
+ConnectorClass = type[Connector]  # called with the account id (None: provisional)
 MAX_OPEN_FLOWS = 32  # unfinished sign-in flows kept; older ones are abandoned
 
 
 class ConnectorManager:
     def __init__(self) -> None:
         self._connectors: dict[str, Connector] = {}
-        self._factories: dict[str, ConnectorFactory] = {}
-        self._names: dict[str, str] = {}
+        self._factories: dict[str, ConnectorClass] = {}
         self._flows: dict[str, Connector] = {}  # flow_id -> connector running it
 
     # -- registry --------------------------------------------------------------
@@ -46,18 +45,22 @@ class ConnectorManager:
             raise ValueError(f"Connector {connector.account_key} already registered")
         self._connectors[connector.account_key] = connector
 
-    def register_factory(self, channel: str, display_name: str, factory: ConnectorFactory) -> None:
-        self._factories[channel] = factory
-        self._names[channel] = display_name
+    def register_factory(self, cls: ConnectorClass) -> None:
+        """A multi-account channel: one ``cls(account_id)`` per account."""
+        self._factories[cls.channel] = cls
 
     def channels(self) -> list[dict[str, Any]]:
         """Channels a user can connect (for the Connections page)."""
-        single = {c.channel: c for c in self._connectors.values() if not c.multi_account}
-        out = [{"channel": ch, "display_name": c.display_name, "multi_account": False} for ch, c in single.items()]
-        out += [
-            {"channel": ch, "display_name": self._names[ch], "multi_account": True}
-            for ch in self._factories if ch not in single
-        ]
+        single = {c.channel: type(c) for c in self._connectors.values() if not c.multi_account}
+        classes = [(cls, False) for cls in single.values()]
+        classes += [(cls, True) for ch, cls in self._factories.items() if ch not in single]
+        out = []
+        for cls, multi in classes:
+            setup = cls.setup_status()
+            out.append({
+                "channel": cls.channel, "display_name": cls.display_name, "multi_account": multi,
+                "setup": setup.to_dict() if setup is not None else None,
+            })
         return sorted(out, key=lambda d: d["display_name"])
 
     def all(self) -> list[Connector]:
@@ -144,15 +147,16 @@ class ConnectorManager:
                 spawn(registered.on_reauthorized(), name=f"connector_reauthorized:{connector.account_key}")
         return step
 
-    async def cancel_auth(self, flow_id: str) -> None:
+    async def cancel_auth(self, flow_id: str, *, stop: bool = False) -> None:
         """The user closed a sign-in: drop the flow and let its connector
-        release what it holds (Signal kills ``signal-cli link``). A no-op for
-        an unknown or finished flow; never raises."""
+        release what it holds (Signal kills ``signal-cli link``); ``stop``
+        also ends background work the flow started (a setup download). A
+        no-op for an unknown or finished flow; never raises."""
         connector = self._flows.pop(flow_id, None)
         if connector is None:
             return
         try:
-            await connector.abandon_flow(flow_id)
+            await connector.abandon_flow(flow_id, stop=stop)
         except Exception:
             logger.warning("Cancelling sign-in flow of %s failed", connector.account_key, exc_info=True)
 

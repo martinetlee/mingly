@@ -8,12 +8,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import { AlertCircle, CheckCircle2, ExternalLink, Loader2 } from 'lucide-react'
-import { beginAccountAuth, cancelAccountAuth, continueAccountAuth } from '../../api/accounts'
+import { beginAccountAuth, cancelAccountAuth, continueAccountAuth, SIGN_IN_POLL_MS } from '../../api/accounts'
 import type { AuthField, AuthStep } from '../../api/accounts'
 import { openExternalUrl, resolve1Password } from '../../api/client'
 import { errorMessage } from '../../lib/toast'
 
-export const POLL_MS = 2000
+export const POLL_MS = SIGN_IN_POLL_MS
 
 const inputClass =
   'w-full rounded-lg border border-slate-600 bg-slate-700 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20'
@@ -37,17 +37,25 @@ export interface AuthFlowProps {
   /** Leave the flow (Cancel, or the button on the done screen) */
   onClose?: () => void
   doneLabel?: string
+  /**
+   * Leaving a `progress` step (its background work keeps going, e.g. "Connect
+   * another account"); the step's `stop_label` button stops the work instead
+   */
+  backgroundLabel?: string
   /** Parameters for begin_auth */
   params?: Record<string, unknown>
 }
 
-export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Close', params }: AuthFlowProps) {
+export default function AuthFlow({
+  accountKey, onDone, onClose, doneLabel = 'Close', backgroundLabel = 'Close', params,
+}: AuthFlowProps) {
   const [step, setStep] = useState<AuthStep | null>(null)
   // The step's message is an error when the connector re-asked the same step
   const [messageIsError, setMessageIsError] = useState(false)
   // A request failed (network, unknown flow) — distinct from an `error` step
   const [requestError, setRequestError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [values, setValues] = useState<Record<string, string>>({})
   const [attempt, setAttempt] = useState(0)
 
@@ -134,6 +142,22 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
 
   const retry = () => setAttempt((n) => n + 1)
   const close = onClose ? () => { release(); onClose() } : undefined
+  // Leave and stop the step's background work (e.g. cancel Signal's setup download)
+  const stopAndClose = onClose ? async () => {
+    const f = openFlow.current
+    if (!f || stopping) return
+    setStopping(true)
+    setRequestError('')
+    openFlow.current = null
+    try {
+      await cancelAccountAuth(f.key, f.flowId, { stop: true })
+      if (mounted.current) onClose()
+    } catch (e) {
+      // Not stopped: the flow is still open
+      openFlow.current = f
+      if (mounted.current) { setRequestError(errorMessage(e)); setStopping(false) }
+    }
+  } : undefined
 
   if (!step) {
     return (
@@ -223,9 +247,21 @@ export default function AuthFlow({ accountKey, onDone, onClose, doneLabel = 'Clo
               <ErrorBlock message={requestError} onRetry={retry} onClose={close} />
             </div>
           )}
-          {!requestError && (
+          {!requestError && step.kind === 'progress' && (
             <div className="mt-4 flex items-center justify-between gap-2">
-              {step.poll && step.kind !== 'progress'
+              {step.stop_label && stopAndClose
+                ? (
+                  <button type="button" onClick={() => void stopAndClose()} disabled={stopping} className={secondaryButton}>
+                    {stopping ? 'Stopping…' : step.stop_label}
+                  </button>
+                )
+                : <span />}
+              {close && <button type="button" onClick={close} className={primaryButton}>{backgroundLabel}</button>}
+            </div>
+          )}
+          {!requestError && step.kind !== 'progress' && (
+            <div className="mt-4 flex items-center justify-between gap-2">
+              {step.poll
                 ? <span className="flex items-center gap-2 text-xs text-slate-400"><Loader2 size={12} className="animate-spin" />Waiting…</span>
                 : <span />}
               {close && <button type="button" onClick={close} className={secondaryButton}>Cancel</button>}

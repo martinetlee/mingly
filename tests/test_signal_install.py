@@ -200,6 +200,28 @@ async def test_start_while_running_is_one_setup(serve):
     assert len(serve.requests) == 2
 
 
+@pytest.mark.asyncio
+async def test_cancel_stops_the_download_and_cleans_up(serve, monkeypatch):
+    serve(_signal_cli_tar(), _jre_tar())
+    real_download = install._download
+
+    async def cancel_during_second(client, archive, dest, st):
+        if archive is not install.SIGNAL_CLI:
+            install.cancel()  # mid-setup, as the user's "Cancel setup"
+        await real_download(client, archive, dest, st)
+
+    monkeypatch.setattr(install, "_download", cancel_during_second)
+    st = await _run()
+    assert st.status == "cancelled" and st.error is None and not st.running
+    assert install.installed() is None and _leftovers() == []
+    assert install.cancel() is st and st.status == "cancelled"  # a no-op once ended
+
+    # A new setup after a cancel runs from scratch
+    monkeypatch.setattr(install, "_download", real_download)
+    again = await _run()
+    assert again is not st and again.status == "done" and not again.cancel_requested
+
+
 def test_unknown_processor_is_a_clear_error(monkeypatch):
     monkeypatch.setattr(install.platform, "machine", lambda: "riscv64")
     with pytest.raises(install.InstallError, match="riscv64"):

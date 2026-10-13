@@ -8,13 +8,13 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { WebSocketClient } from '../../lib/ws'
 import { WebSocketProvider } from '../../context/WebSocketContext'
-import type { Account } from '../../api/accounts'
+import type { Account, ConnectableChannel } from '../../api/accounts'
 
 vi.mock('../../api/accounts', async (orig) => ({
   ...(await orig<typeof import('../../api/accounts')>()),
   getAccounts: vi.fn(),
 }))
-import { getAccounts } from '../../api/accounts'
+import { getAccounts, SIGN_IN_POLL_MS } from '../../api/accounts'
 import { useAccounts } from '../useAccounts'
 
 const signal = (over: Partial<Account> = {}): Account => ({
@@ -62,5 +62,28 @@ describe('useAccounts', () => {
     await waitFor(() => expect(result.current.loaded).toBe(true))
     act(() => status('unauthorized'))
     expect(getAccounts).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-reads while a channel setup runs (no event reports its progress), and works without a WS provider', async () => {
+    vi.useFakeTimers()
+    try {
+      const setup = (state: string): ConnectableChannel[] => [
+        { channel: 'signal', display_name: 'Signal', multi_account: true, setup: { state, progress: 0.5, message: null } },
+      ]
+      vi.mocked(getAccounts).mockResolvedValue({ accounts: [], channels: setup('running') })
+      const { result } = renderHook(() => useAccounts()) // onboarding: outside <WebSocketProvider>
+      await act(async () => { await Promise.resolve() })
+      expect(result.current.loaded).toBe(true)
+      await act(async () => { await vi.advanceTimersByTimeAsync(SIGN_IN_POLL_MS) })
+      expect(getAccounts).toHaveBeenCalledTimes(2)
+
+      vi.mocked(getAccounts).mockResolvedValue({ accounts: [], channels: setup('ready') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(SIGN_IN_POLL_MS) })
+      expect(result.current.channels[0].setup?.state).toBe('ready')
+      await act(async () => { await vi.advanceTimersByTimeAsync(SIGN_IN_POLL_MS * 3) })
+      expect(getAccounts).toHaveBeenCalledTimes(3) // stopped once the setup ended
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -1,23 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { Check } from 'lucide-react'
 import logo from '../assets/logo.png'
 import { initVault } from '../api/client'
-import { getAccounts } from '../api/accounts'
 import type { ConnectableChannel } from '../api/accounts'
 import AuthFlow from '../components/channels/AuthFlow'
 import ChannelIcon from '../components/channels/ChannelIcon'
+import ChannelSetupNote from '../components/channels/ChannelSetupNote'
+import { useAccounts } from '../hooks/useAccounts'
 import { useAsyncAction } from '../hooks/useAsyncAction'
 import { errorMessage } from '../lib/toast'
 
 type Step = 'set-password' | 'connect'
 
 interface Props {
-  /** Vault created (and optionally a first account connected or skipped) */
+  /** Vault created (and accounts connected, or skipped) */
   onComplete: () => void
 }
 
 /**
  * First run: set the master password that creates the vault, then optionally
- * connect a first account through the same generic sign-in as Settings →
+ * connect accounts through the same generic sign-in as Settings →
  * Connections. Accounts can always be added later there.
  */
 export default function Onboarding({ onComplete }: Props) {
@@ -127,7 +129,7 @@ export default function Onboarding({ onComplete }: Props) {
             </>
           )}
 
-          {step === 'connect' && <ConnectFirstAccount onComplete={onComplete} />}
+          {step === 'connect' && <ConnectAccounts onComplete={onComplete} />}
         </div>
 
         <p className="mt-4 text-center text-xs text-slate-600">
@@ -138,71 +140,92 @@ export default function Onboarding({ onComplete }: Props) {
   )
 }
 
-/** Pick a channel and sign in, or skip; more accounts live in Settings → Connections. */
-function ConnectFirstAccount({ onComplete }: { onComplete: () => void }) {
-  const [channels, setChannels] = useState<ConnectableChannel[] | null>(null)
-  const [loadError, setLoadError] = useState('')
+/**
+ * Connect one or more accounts, or skip; more live in Settings → Connections.
+ * A channel's setup (Signal's download) runs in the background, so another
+ * account can be connected meanwhile; the list shows how far it got.
+ */
+function ConnectAccounts({ onComplete }: { onComplete: () => void }) {
+  const { accounts, channels, loaded, error, refresh } = useAccounts()
   const [chosen, setChosen] = useState<ConnectableChannel | null>(null)
-  const [connected, setConnected] = useState(false)
-  const [attempt, setAttempt] = useState(0)
-
-  useEffect(() => {
-    let cancelled = false
-    setLoadError('')
-    getAccounts()
-      .then((r) => { if (!cancelled) setChannels(r.channels) })
-      .catch((e) => { if (!cancelled) setLoadError(errorMessage(e)) })
-    return () => { cancelled = true }
-  }, [attempt])
 
   if (chosen) {
     return (
       <AuthFlow
         key={chosen.channel}
         accountKey={chosen.channel}
-        onDone={() => setConnected(true)}
-        // Cancel goes back to the channel list; the done screen's button continues
-        onClose={() => (connected ? onComplete() : setChosen(null))}
-        doneLabel="Continue"
+        onDone={() => void refresh()}
+        // Cancel, the done screen and leaving a background setup all go back to the list
+        onClose={() => { setChosen(null); void refresh() }}
+        doneLabel="Done"
+        backgroundLabel="Connect another account"
       />
     )
   }
 
+  const connected = accounts.filter((a) => a.configured)
+  const connectedOn = (channel: string) => connected.filter((a) => a.channel === channel)
+
   return (
     <>
-      <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Connect an account</h2>
+      <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Connect your accounts</h2>
       <p className="mb-5 text-xs text-slate-500">
-        Choose a messaging account to sync. You can add more, or do this later, in Settings → Connections.
+        Choose the messaging accounts to sync — as many as you like. You can add more, or do this later, in Settings → Connections.
       </p>
-      {loadError ? (
+      {error != null && channels.length === 0 ? (
         <div className="mb-4">
-          <p role="alert" className="text-xs text-red-400">Couldn't load the available channels: {loadError}</p>
+          <p role="alert" className="text-xs text-red-400">Couldn't load the available channels: {errorMessage(error)}</p>
           <button
-            onClick={() => setAttempt((n) => n + 1)}
+            onClick={() => void refresh()}
             className="mt-2 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800"
           >
             Retry
           </button>
         </div>
-      ) : channels === null ? (
+      ) : !loaded ? (
         <p className="mb-4 text-xs text-slate-500">Loading…</p>
       ) : (
         <div className="mb-4 flex flex-col gap-2">
-          {channels.map((c) => (
-            <button
-              key={c.channel}
-              onClick={() => setChosen(c)}
-              className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm text-slate-200 transition hover:border-indigo-500/60 hover:bg-slate-800/60"
-            >
-              <span aria-hidden><ChannelIcon channel={c.channel} size={16} className="text-slate-300" /></span>
-              {c.display_name}
-            </button>
-          ))}
+          {channels.map((c) => {
+            const on = connectedOn(c.channel)
+            // A single-account channel is done once connected; a multi-account one can add another
+            const full = on.length > 0 && !c.multi_account
+            return (
+              <button
+                key={c.channel}
+                onClick={() => setChosen(c)}
+                disabled={full}
+                className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2.5 text-left text-sm text-slate-200 transition enabled:hover:border-indigo-500/60 enabled:hover:bg-slate-800/60 disabled:cursor-default"
+              >
+                <span aria-hidden><ChannelIcon channel={c.channel} size={16} className="text-slate-300" /></span>
+                <span className="flex-shrink-0">{c.display_name}</span>
+                <span className="ml-auto flex min-w-0 items-center justify-end">
+                  {on.length > 0 ? (
+                    <span className="flex items-center gap-1 truncate text-[11px] text-emerald-400">
+                      <Check size={12} aria-hidden />
+                      {on.length === 1 ? on[0].label || 'Connected' : `${on.length} connected`}
+                    </span>
+                  ) : (
+                    <ChannelSetupNote setup={c.setup} />
+                  )}
+                </span>
+              </button>
+            )
+          })}
         </div>
       )}
-      <button onClick={onComplete} className="w-full text-xs text-slate-500 transition hover:text-slate-300">
-        Skip for now
-      </button>
+      {connected.length > 0 ? (
+        <button
+          onClick={onComplete}
+          className="w-full rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-medium text-white shadow-lg shadow-indigo-500/25 transition hover:from-indigo-400 hover:to-purple-400"
+        >
+          Continue
+        </button>
+      ) : (
+        <button onClick={onComplete} className="w-full text-xs text-slate-500 transition hover:text-slate-300">
+          Skip for now
+        </button>
+      )}
     </>
   )
 }

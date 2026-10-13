@@ -5,6 +5,7 @@ import type { Account, ConnectableChannel } from '../../api/accounts'
 import type { ConnectorState } from '../../api/types'
 import AuthFlow from '../../components/channels/AuthFlow'
 import ChannelIcon from '../../components/channels/ChannelIcon'
+import ChannelSetupNote from '../../components/channels/ChannelSetupNote'
 import { Modal, useConfirm } from '../../components/ui'
 import { useAccounts } from '../../hooks/useAccounts'
 import { errorMessage, toast } from '../../lib/toast'
@@ -129,7 +130,8 @@ export default function Connections() {
               accountKey={flow.key}
               params={flow.params}
               onDone={() => void refresh()}
-              onClose={() => setFlow(null)}
+              // Leaving a background setup refreshes too: its button shows the progress
+              onClose={() => { setFlow(null); void refresh() }}
               doneLabel="Done"
             />
           </div>
@@ -194,6 +196,7 @@ function AddButton({ channel: c, onClick }: { channel: ConnectableChannel; onCli
     >
       <span aria-hidden><ChannelIcon channel={c.channel} size={14} className="text-slate-300" /></span>
       {c.multi_account ? `Add ${c.display_name} account` : `Connect ${c.display_name}`}
+      <ChannelSetupNote setup={c.setup} />
       <Plus size={12} className="text-slate-500" />
     </button>
   )

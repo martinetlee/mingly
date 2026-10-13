@@ -30,6 +30,11 @@ export interface AuthStep {
   progress?: number | null
   /** Button label of a `fields` step (default "Continue") */
   submit_label?: string | null
+  /**
+   * The step's background work (a setup download) keeps going when the flow
+   * is left; this labels the button that stops it (cancel with `stop`).
+   */
+  stop_label?: string | null
 }
 
 /** One connector's describe() */
@@ -45,17 +50,30 @@ export interface Account {
   status: { state: ConnectorState; error: string | null }
 }
 
+/** A channel's one-time setup before its first sign-in (Signal's signal-cli download) */
+export interface ChannelSetup {
+  state: 'running' | 'cancelling' | 'ready' | 'failed' | (string & {})
+  /** 0–1 while running or cancelling */
+  progress: number | null
+  message: string | null
+}
+
 /** A channel that can be connected */
 export interface ConnectableChannel {
   channel: ChannelName
   display_name: string
   multi_account: boolean
+  /** Setup running or just ended; null when none */
+  setup?: ChannelSetup | null
 }
 
 export interface AccountsResponse {
   accounts: Account[]
   channels: ConnectableChannel[]
 }
+
+/** How often a polling sign-in step, and a running channel setup, is re-read */
+export const SIGN_IN_POLL_MS = 2000
 
 export const getAccounts = (signal?: AbortSignal) =>
   request<AccountsResponse>('/api/accounts', { signal })
@@ -81,10 +99,11 @@ export const continueAccountAuth = (key: string, flowId: string, data: Record<st
 
 /**
  * Abandon a sign-in flow (the user left it): the connector stops what the
- * flow holds open — e.g. Signal's `signal-cli link` process.
+ * flow holds open — e.g. Signal's `signal-cli link` process. Background work
+ * the flow started (a setup download) keeps going unless `stop`.
  */
-export const cancelAccountAuth = (key: string, flowId: string) =>
-  request<void>(`/api/accounts/${enc(key)}/auth/${enc(flowId)}`, { method: 'DELETE' })
+export const cancelAccountAuth = (key: string, flowId: string, { stop = false }: { stop?: boolean } = {}) =>
+  request<void>(`/api/accounts/${enc(key)}/auth/${enc(flowId)}${stop ? '?stop=true' : ''}`, { method: 'DELETE' })
 
 export const logoutAccount = (key: string) =>
   request<{ success: boolean }>(`/api/accounts/${enc(key)}/logout`, { method: 'POST' })
