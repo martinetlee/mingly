@@ -77,7 +77,7 @@ export default function Unlock({ onUnlock, onReset = () => window.location.reloa
         {/* Card */}
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-7 shadow-2xl backdrop-blur-sm">
           <h2 className="mb-0.5 text-sm font-semibold text-slate-200">Unlock Common Defense</h2>
-          <p className="mb-5 text-xs text-slate-500">Your Telegram credentials and session are encrypted with your master password.</p>
+          <p className="mb-5 text-xs text-slate-500">Your account sign-ins and API keys are encrypted with your master password.</p>
 
           <form onSubmit={(e) => { e.preventDefault(); submit() }}>
             <input
@@ -192,8 +192,9 @@ function ResetVaultDialog({ onClose, onReset }: { onClose: () => void; onReset: 
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-gray-100">Reset the vault?</h3>
             <div className="mt-1 text-xs text-slate-400">
-              This permanently deletes your encrypted vault: the master password, Telegram API credentials,
-              Telegram session and stored API keys. You will set a new password and sign in to Telegram again.
+              This permanently deletes your encrypted vault: the master password, account sign-ins (such as
+              Telegram sessions and Gmail tokens) and stored API keys. You will set a new password and sign in
+              to those accounts again.
             </div>
           </div>
         </div>

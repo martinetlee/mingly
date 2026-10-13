@@ -357,7 +357,7 @@ export function SecuritySection() {
   return (
     <Section
       title="Security"
-      description="Your Telegram credentials, session and API keys are encrypted with your master password. Messages and other app data are stored unencrypted in a local database on this computer."
+      description="Account sign-ins (such as Telegram sessions and Gmail tokens) and API keys are encrypted with your master password. Messages and other app data are stored unencrypted in a local database on this computer."
     >
       <Card>
         <label className={labelClass} htmlFor="session-timeout">Ask for the password after inactivity</label>
