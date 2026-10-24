@@ -34,6 +34,30 @@ export interface CalendarEvent {
   organizer: CalendarAttendee | null
   /** Organizer first */
   attendees: CalendarAttendee[]
+  /** Video call (Google Meet, Zoom…) to join */
+  conference_url?: string | null
+  conference_name?: string | null
+  /** Your own reply; null when the event has no guests */
+  my_response?: MyResponse | null
+  /** The series' rule ("RRULE:FREQ=WEEKLY;BYDAY=MO") when known */
+  recurrence?: string | null
+  /** An instance of a recurring series */
+  recurring?: boolean
+  /** The event's own colour (hex); null = its calendar's */
+  color?: string | null
+  /** transparent = shows as free */
+  transparency?: 'opaque' | 'transparent' | null
+}
+
+export type MyResponse = 'accepted' | 'tentative' | 'declined' | 'needsAction'
+
+/** A synced calendar of an account, with its name and colour */
+export interface SyncedCalendar {
+  /** As events carry it in `calendar_id` (the primary one as PRIMARY_CALENDAR) */
+  id: string
+  name: string
+  color: string | null
+  primary: boolean
 }
 
 export interface CalendarAccount {
@@ -44,6 +68,10 @@ export interface CalendarAccount {
   syncing: boolean
   last_sync_at: string | null
   error: string | null
+  /** The synced calendars (older servers: absent) */
+  calendars?: SyncedCalendar[]
+  /** The dates the sync covers (YYYY-MM-DD, `to` exclusive) */
+  window?: { from: string; to: string } | null
 }
 
 export interface GoogleCalendar {

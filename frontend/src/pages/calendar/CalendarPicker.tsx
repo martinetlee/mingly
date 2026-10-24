@@ -1,6 +1,6 @@
 /**
  * Which Google calendars of an account are synced (default: the primary
- * one). Loads the account's calendar list from Google when opened; each
+ * one); unchecking one removes its events from Mingly. Loads the account's calendar list from Google when opened; each
  * toggle saves at once and the backend re-syncs.
  */
 import { useState } from 'react'
@@ -11,8 +11,13 @@ import { errorMessage, reportError } from '../../lib/toast'
 
 const syncId = (c: GoogleCalendar) => (c.primary ? PRIMARY_CALENDAR : c.id)
 
-export default function CalendarPicker({ accountId, label }: { accountId: number; label: string | null }) {
-  const [open, setOpen] = useState(false)
+export default function CalendarPicker({ accountId, label, defaultOpen = false }: {
+  accountId: number
+  label: string | null
+  /** Start expanded (in the synced-calendars dialog) */
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
   const [saving, setSaving] = useState(false)
   const list = useLatestQuery(['google-calendars', accountId], (signal) => getGoogleCalendars(accountId, signal), { enabled: open })
 

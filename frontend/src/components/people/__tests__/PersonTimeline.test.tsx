@@ -111,7 +111,7 @@ describe('PersonTimeline', () => {
     expect(m.textContent).toContain('Meeting')
     expect(m.textContent).toContain('Room 4')
     expect(m.textContent).toContain('1 person') // you aren't counted
-    expect(m.getAttribute('href')).toMatch(/^\/calendar\?event=7&date=\d{4}-\d{2}-\d{2}$/)
+    expect(m.getAttribute('href')).toMatch(/^\/calendar\?view=week&date=\d{4}-\d{2}-\d{2}&event=7$/)
     // Newest first, as the server sent them
     const order = screen.getAllByTestId(/timeline-(row|meeting)/).map((el) => el.getAttribute('data-testid'))
     expect(order).toEqual(['timeline-row', 'timeline-meeting', 'timeline-row'])

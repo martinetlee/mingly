@@ -424,6 +424,13 @@ class CalendarEvent(Base):
         Integer, ForeignKey("identities.id", ondelete="SET NULL"), nullable=True
     )
     html_link: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    conference_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # video call (Meet, Zoom, …)
+    conference_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # "Google Meet"
+    my_response: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # the account owner's RSVP
+    recurring_event_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # the series (master) id
+    recurrence: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # the series' RRULE
+    color: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # the event's own colour; None = the calendar's
+    transparency: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # opaque | transparent (free)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

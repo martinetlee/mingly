@@ -8,7 +8,7 @@
  */
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, Archive, Inbox, Layers, Mail as MailIcon, PenSquare, Search, Send, Tag } from 'lucide-react'
+import { Archive, Inbox, Layers, Mail as MailIcon, PenSquare, Search, Send, Tag } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { Conversation } from '../api/types'
 import { getMailLabels } from '../api/email'
@@ -18,7 +18,7 @@ import { useLatestQuery } from '../hooks/useLatestQuery'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 import AccountGate from '../components/channels/AccountGate'
 import { CONNECTIONS_PATH } from '../components/channels/NoAccountsNotice'
-import { LoadError } from '../components/ui'
+import { LinkifiedText, LoadError, StatusBanner } from '../components/ui'
 import { errorMessage } from '../lib/toast'
 import ThreadList from './mail/ThreadList'
 import ThreadView from './mail/ThreadView'
@@ -189,15 +189,12 @@ export default function Mail() {
           </label>
         </header>
         {problems.map((a) => (
-          <p key={a.account_key} className="mx-3 mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200" data-testid="mail-account-problem">
-            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
-            <span className="min-w-0 flex-1">
-              {mailAccounts.length > 1 ? `${a.label ?? a.account_key}: ` : ''}
-              {a.status.state === 'unauthorized' ? 'Signed out — new mail won’t arrive. ' : a.status.state === 'reconnecting' ? 'Reconnecting… ' : ''}
-              {a.status.error ?? (a.status.state === 'stopped' ? 'Sync is stopped.' : '')}
-              {a.status.state === 'unauthorized' && <Link to={CONNECTIONS_PATH} className="ml-1 underline hover:text-amber-100">Reconnect</Link>}
-            </span>
-          </p>
+          <StatusBanner key={a.account_key} className="mx-3 mt-2" testId="mail-account-problem">
+            {mailAccounts.length > 1 ? `${a.label ?? a.account_key}: ` : ''}
+            {a.status.state === 'unauthorized' ? 'Signed out — new mail won’t arrive. ' : a.status.state === 'reconnecting' ? 'Reconnecting… ' : ''}
+            <LinkifiedText text={a.status.error ?? (a.status.state === 'stopped' ? 'Sync is stopped.' : '')} />
+            {a.status.state === 'unauthorized' && <Link to={CONNECTIONS_PATH} className="ml-1 underline hover:text-amber-100">Reconnect</Link>}
+          </StatusBanner>
         ))}
         {list.error != null && list.threads.length === 0 ? (
           <LoadError message={`Couldn’t load mail: ${errorMessage(list.error)}`} onRetry={() => { void list.reload() }} />

@@ -297,7 +297,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     ),
     "list_calendar_events": _read(
         "Calendar events (Google Calendar) overlapping [start, end), earliest first, with attendees as "
-        "person_ids; person_id keeps meetings with that person.",
+        "person_ids, the video-call link, the user's own RSVP and the recurrence rule; person_id keeps meetings "
+        "with that person.",
         tool_list_calendar_events,
         {
             "start": {"type": "string", "description": "ISO date/datetime (UTC)"},

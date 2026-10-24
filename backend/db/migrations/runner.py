@@ -140,6 +140,17 @@ async def _dedupe_unclaimed_accounts(conn: AsyncConnection) -> None:
             await conn.exec_driver_sql("DELETE FROM accounts WHERE id = ?", (account_id,))
 
 
+async def _calendar_full_resync(conn: AsyncConnection) -> None:
+    """Drop every account's calendar sync tokens and window times, so the
+    next sync pulls the whole window again and fills the new columns of the
+    stored events (an incremental sync only returns changed events)."""
+    await conn.exec_driver_sql(
+        "UPDATE accounts SET sync_state_json = json_remove(sync_state_json, "
+        "'$.calendar.sync_tokens', '$.calendar.window_synced_at') "
+        "WHERE json_valid(sync_state_json) AND json_type(sync_state_json, '$.calendar') = 'object'"
+    )
+
+
 async def _dismissal_cloud_status(conn: AsyncConnection) -> None:
     """Fill the new columns: uploaded rows are 'synced'; rows a stopgap
     retired by writing ``cloud_skipped`` into payload_json become 'skipped'
@@ -205,6 +216,20 @@ MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
             "ALTER TABLE scam_dismissals ADD COLUMN cloud_status VARCHAR DEFAULT 'pending' NOT NULL",
             "ALTER TABLE scam_dismissals ADD COLUMN cloud_skipped_reason TEXT",
             _dismissal_cloud_status,
+        ],
+    ),
+    (
+        5,
+        "Calendar events: call link, my RSVP, recurrence, colour, free/busy; re-pull the sync windows",
+        [
+            "ALTER TABLE calendar_events ADD COLUMN conference_url VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN conference_name VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN my_response VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN recurring_event_id VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN recurrence VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN color VARCHAR",
+            "ALTER TABLE calendar_events ADD COLUMN transparency VARCHAR",
+            _calendar_full_resync,
         ],
     ),
 ]

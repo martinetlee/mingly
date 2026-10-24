@@ -71,7 +71,9 @@ async def tool_list_calendar_events(db: AsyncSession, args: dict, ctx: dict) -> 
     )
     return {
         "events": await events_out(db, events),
-        "note": "All-day events give start_at / end_at as dates; others as UTC instants. Attendees carry person_id.",
+        "note": "All-day events give start_at / end_at as dates; others as UTC instants. Attendees carry person_id. "
+                "conference_url is the video-call link; my_response is the user's own RSVP (declined = not attending); "
+                "recurrence is the series' RRULE when the event repeats.",
     }
 
 

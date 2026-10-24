@@ -44,8 +44,11 @@ const GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: 't', description: 'Today' },
       { keys: '← / →', description: 'Previous / next range' },
-      { keys: 'a', description: 'Agenda view' },
+      { keys: 'd', description: 'Day view' },
       { keys: 'w', description: 'Week view' },
+      { keys: 'm', description: 'Month view' },
+      { keys: 'a', description: 'Agenda view' },
+      { keys: 'Esc', description: 'Close event details' },
     ],
   },
   {

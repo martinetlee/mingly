@@ -234,6 +234,15 @@ class GmailApi:
     async def list_events(self, calendar_id: str, params: dict) -> dict:
         return await self.request("GET", f"{CALENDAR_BASE}/calendars/{quote(calendar_id, safe='')}/events", params=params)
 
+    async def get_event(self, calendar_id: str, event_id: str) -> dict:
+        return await self.request(
+            "GET", f"{CALENDAR_BASE}/calendars/{quote(calendar_id, safe='')}/events/{quote(event_id, safe='')}",
+        )
+
+    async def calendar_colors(self) -> dict:
+        """Google's colour palettes: ``{"calendar": {id: {background, …}}, "event": {…}}``."""
+        return await self.request("GET", f"{CALENDAR_BASE}/colors")
+
     async def send(self, raw: str, thread_id: Optional[str]) -> dict:
         body: dict[str, Any] = {"raw": raw}
         if thread_id:

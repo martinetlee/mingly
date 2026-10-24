@@ -110,9 +110,9 @@ async def test_ids_are_not_reused_after_merge_or_delete(db):
 
 
 async def _legacy_schema_db(path: Path):
-    """A database at the schema before migrations 2-4: tables without
-    AUTOINCREMENT, no unclaimed-account index, no dismissal status columns;
-    migration 1 applied."""
+    """A database at the schema before migrations 2-5: tables without
+    AUTOINCREMENT, no unclaimed-account index, no dismissal status columns,
+    no calendar event call/RSVP/recurrence/colour columns; migration 1 applied."""
     from backend.db import models
     from backend.db.database import Base
     from backend.db.migrations import runner
@@ -130,6 +130,9 @@ async def _legacy_schema_db(path: Path):
             await conn.exec_driver_sql("DROP INDEX uq_account_channel_unclaimed")
             await conn.exec_driver_sql("ALTER TABLE scam_dismissals DROP COLUMN cloud_status")
             await conn.exec_driver_sql("ALTER TABLE scam_dismissals DROP COLUMN cloud_skipped_reason")
+            for col in ("conference_url", "conference_name", "my_response", "recurring_event_id", "recurrence",
+                        "color", "transparency"):
+                await conn.exec_driver_sql(f"ALTER TABLE calendar_events DROP COLUMN {col}")
             await conn.commit()
     finally:
         for t in tables:
@@ -247,7 +250,7 @@ async def test_migration_2_is_a_no_op_on_a_fresh_database(db_engine):
     async with db_engine.connect() as conn:
         rows = (await conn.exec_driver_sql("SELECT version FROM schema_migrations ORDER BY version")).scalars().all()
         sql = (await conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE name = 'messages'")).scalar()
-    assert list(rows) == [0, 1, 2, 3, 4] and "AUTOINCREMENT" in sql
+    assert list(rows) == [0, 1, 2, 3, 4, 5] and "AUTOINCREMENT" in sql
 
 
 # ── 3. Deleting messages re-derives the preview ──────────────────────────────
@@ -519,6 +522,36 @@ async def test_migration_4_moves_the_skip_marker_into_columns(tmp_path):
         ("skipped", "gone", "raw"),
         ("pending", None, json.dumps({"a": 3})),
     ]
+
+
+@pytest.mark.asyncio
+async def test_migration_5_adds_calendar_columns_and_forces_a_window_pull(tmp_path):
+    import json
+
+    from backend.db.migrations import runner
+
+    engine = await _legacy_schema_db(tmp_path / "legacy.db")
+    states = [
+        {"history_id": "1", "calendar": {"sync_tokens": {"primary": "t"}, "window_synced_at": {"primary": "x"},
+                                         "last_sync_at": "y"}},
+        {"history_id": "2"},
+    ]
+    async with engine.connect() as c:
+        for i, st in enumerate(states):
+            await c.exec_driver_sql(
+                "INSERT INTO accounts (channel, external_id, sync_state_json, created_at) VALUES ('gmail', ?, ?, "
+                "'2026-01-01')", (f"a{i}@x", json.dumps(st)))
+        await c.exec_driver_sql("INSERT INTO accounts (channel, external_id, sync_state_json, created_at) "
+                                "VALUES ('signal', 'n', 'not json', '2026-01-01')")
+        await c.commit()
+        await runner.run_migrations(c, fresh=False)
+        out = [r[0] for r in (await c.exec_driver_sql("SELECT sync_state_json FROM accounts ORDER BY id")).all()]
+        cols = {r[1] for r in (await c.exec_driver_sql("PRAGMA table_info(calendar_events)")).all()}
+    await engine.dispose()
+    assert json.loads(out[0]) == {"history_id": "1", "calendar": {"last_sync_at": "y"}}
+    assert json.loads(out[1]) == {"history_id": "2"} and out[2] == "not json"
+    assert {"conference_url", "conference_name", "my_response", "recurring_event_id", "recurrence", "color",
+            "transparency"} <= cols
 
 
 # ── 9. Identity resolution is memoized per ingest ────────────────────────────

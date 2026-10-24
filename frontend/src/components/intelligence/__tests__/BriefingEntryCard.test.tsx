@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import type { BriefingHistoryEntry, DashboardBriefingEntry } from '../../../api/types'
+import { localDateKey } from '../../../api/calendar'
 import { BriefingEntryList, type RegenerateControls } from '../BriefingEntryCard'
 
 function Where() {
@@ -40,7 +41,8 @@ describe('BriefingEntryList (Home → Latest Briefing)', () => {
     render(<MemoryRouter><BriefingEntryList entries={entries} regen={regen} /></MemoryRouter>)
     const headings = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent)
     expect(headings).toEqual(['Today’s Meetings', 'Tracked Chats'])
-    expect(screen.getByText('Today\'s meetings').getAttribute('href')).toBe('/calendar')
+    // Today in the Calendar's Day view
+    expect(screen.getByText('Today\'s meetings').getAttribute('href')).toBe(`/calendar?view=day&date=${localDateKey(new Date())}`)
     expect(screen.getByText('Sync', { exact: false })).toBeTruthy()
     expect(screen.getAllByText('Regenerate')).toHaveLength(1) // only the tracked chat's
   })

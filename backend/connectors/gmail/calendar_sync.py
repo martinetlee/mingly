@@ -19,14 +19,24 @@ longer returns; events outside it (history, far future) are kept.
 Cancelled events are deleted. Attendees and the organizer become ``gmail``
 identities (external id = lowercased email), so they land on people and
 link by email.
+
+Each event also keeps its video-call link, the account owner's RSVP, its
+colour and free/busy, and for an instance of a recurring event the series'
+RRULE: instances don't carry it, so the series is read once (``events.get``)
+and the rule reused from the stored instances after that. Every pass also
+stores the calendar list (names, colours) and Google's event colour palette
+in the sync state (``calendar.calendars`` / ``calendar.event_colors``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+from sqlalchemy import select
 
 from backend.connectors.gmail.api import GmailApi, GmailAuthError, GmailError, GmailNotFound
 from backend.people import identities as person_identities
@@ -114,7 +124,57 @@ def _email(person: Optional[dict]) -> Optional[str]:
     return email
 
 
-def event_fields(event: dict, calendar_id: str) -> dict:
+# Video-call links found in a location or description when the event has no
+# conference data (pasted invitations)
+_CALL_URL = re.compile(
+    r"https://(?:[\w-]+\.)*(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|teams\.live\.com|webex\.com)"
+    r"/[^\s<>\"')\]]+",
+    re.IGNORECASE,
+)
+_CALL_SERVICES = (("meet.google.com", "Google Meet"), ("zoom.us", "Zoom"), ("teams.microsoft.com", "Microsoft Teams"),
+                  ("teams.live.com", "Microsoft Teams"), ("webex.com", "Webex"))
+
+
+def _service_name(url: str) -> Optional[str]:
+    host = url.split("/")[2].lower() if url.count("/") >= 2 else ""
+    for domain, name in _CALL_SERVICES:
+        if host == domain or host.endswith("." + domain):
+            return name
+    return None
+
+
+def conference(event: dict) -> "tuple[Optional[str], Optional[str]]":
+    """The event's video call: (join URL, service name)."""
+    data = event.get("conferenceData") or {}
+    solution = str((data.get("conferenceSolution") or {}).get("name") or "") or None
+    for ep in data.get("entryPoints") or []:
+        if ep.get("entryPointType") == "video" and ep.get("uri"):
+            url = str(ep["uri"])
+            return url, solution or _service_name(url)
+    if event.get("hangoutLink"):
+        return str(event["hangoutLink"]), "Google Meet"
+    for text in (event.get("location"), event.get("description")):
+        m = _CALL_URL.search(str(text or ""))
+        if m:
+            url = m.group(0).rstrip(".,;:!?")  # sentence punctuation after a pasted link
+            return url, _service_name(url)
+    return None, None
+
+
+def my_response(event: dict) -> Optional[str]:
+    """The account owner's RSVP: their attendee entry (``self``); an event
+    they organize without listing themselves counts as accepted."""
+    for a in event.get("attendees") or []:
+        if a.get("self"):
+            return a.get("responseStatus") or None
+    if (event.get("organizer") or {}).get("self"):
+        return "accepted"
+    return None
+
+
+def event_fields(event: dict, calendar_id: str, event_colors: Optional[dict] = None) -> dict:
+    """The row fields of a Google event (the series' ``recurrence`` is set by
+    the sync). ``event_colors``: Google's event palette, colorId → hex."""
     start, all_day = parse_when(event.get("start"))
     end, _ = parse_when(event.get("end"))
     updated = None
@@ -123,6 +183,7 @@ def event_fields(event: dict, calendar_id: str) -> dict:
             updated = _parse_instant(event["updated"])
         except ValueError:
             updated = None
+    call_url, call_name = conference(event)
     return {
         "calendar_id": calendar_id,
         "title": event.get("summary") or None,
@@ -134,6 +195,12 @@ def event_fields(event: dict, calendar_id: str) -> dict:
         "status": event.get("status") or None,
         "html_link": event.get("htmlLink") or None,
         "updated_at": updated,
+        "conference_url": call_url,
+        "conference_name": call_name,
+        "my_response": my_response(event),
+        "recurring_event_id": event.get("recurringEventId") or None,
+        "color": (event_colors or {}).get(str(event.get("colorId") or "")) or None,
+        "transparency": event.get("transparency") or None,
     }
 
 
@@ -154,6 +221,8 @@ class CalendarSync:
         self.error: Optional[str] = None
         self.last_sync_at: Optional[datetime] = None
         self._wake = asyncio.Event()
+        self._event_colors: dict = {}
+        self._rules: dict = {}  # series id → its RRULE (None: the series has none)
 
     def wake(self) -> None:
         self._wake.set()
@@ -196,6 +265,8 @@ class CalendarSync:
 
         calendars = selected_calendars(self.account_id)
         state = (await load_sync_state(self.account_id)).get(STATE_KEY) or {}
+        meta = await self._calendar_meta(state)
+        self._event_colors = meta.get("event_colors") or {}
         tokens: dict = dict(state.get("sync_tokens") or {})
         windows: dict = dict(state.get("window_synced_at") or {})
         changed = False
@@ -220,16 +291,65 @@ class CalendarSync:
             if full:
                 windows[cal] = datetime.utcnow().isoformat()
             await merge_sync_state(self.account_id, calendar={
-                "sync_tokens": tokens, "window_synced_at": windows, "last_sync_at": datetime.utcnow().isoformat(),
+                **meta, "sync_tokens": tokens, "window_synced_at": windows,
+                "last_sync_at": datetime.utcnow().isoformat(),
             })
         self.last_sync_at = datetime.utcnow()
         await merge_sync_state(self.account_id, calendar={
-            "sync_tokens": tokens, "window_synced_at": windows, "last_sync_at": self.last_sync_at.isoformat(),
+            **meta, "sync_tokens": tokens, "window_synced_at": windows, "last_sync_at": self.last_sync_at.isoformat(),
         })
         if changed:
             from backend.ws.manager import ws_manager
             await ws_manager.broadcast({"type": "calendar_synced", "account_id": self.account_id})
         return changed
+
+    async def _calendar_meta(self, state: dict) -> dict:
+        """The calendar list (names, colours) and the event colour palette,
+        fresh from Google; the stored ones when Google can't be read (they
+        only decorate events, so that never fails the sync)."""
+        meta = {"calendars": state.get("calendars") or [], "event_colors": state.get("event_colors") or {}}
+        try:
+            items = await self.api.calendar_list()
+            meta["calendars"] = [{
+                "id": c["id"],
+                "name": c.get("summaryOverride") or c.get("summary") or c["id"],
+                "color": c.get("backgroundColor") or None,
+                "primary": bool(c.get("primary")),
+            } for c in items if c.get("id")]
+            palette = (await self.api.calendar_colors()).get("event") or {}
+            meta["event_colors"] = {str(k): v.get("background") for k, v in palette.items()
+                                    if isinstance(v, dict) and v.get("background")}
+        except GmailAuthError:
+            raise
+        except GmailError as e:
+            logger.info("Calendar list / colours of account %s unavailable: %s", self.account_id, e)
+        return meta
+
+    async def _series_rules(self, calendar_id: str, items: list) -> None:
+        """Know the RRULE of every recurring series in ``items``: from memory,
+        else from a stored instance, else one ``events.get`` of the series.
+        A failed read is logged and retried on a later pass."""
+        wanted = {str(e["recurringEventId"]) for e in items
+                  if e.get("recurringEventId") and e.get("status") != "cancelled"} - set(self._rules)
+        if not wanted:
+            return
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(CalendarEvent.recurring_event_id, CalendarEvent.recurrence).where(
+                CalendarEvent.account_id == self.account_id,
+                CalendarEvent.recurring_event_id.in_(wanted), CalendarEvent.recurrence.is_not(None),
+            ))).all()
+        for series, rule in rows:
+            self._rules[series] = rule
+        for series in sorted(wanted - set(self._rules)):
+            try:
+                master = await self.api.get_event(calendar_id, series)
+            except GmailAuthError:
+                raise
+            except GmailError as e:
+                logger.info("Recurring series %s of account %s unreadable: %s", series, self.account_id, e)
+                continue
+            rules = [str(r) for r in master.get("recurrence") or [] if str(r).upper().startswith("RRULE:")]
+            self._rules[series] = rules[0] if rules else None
 
     async def _sync_calendar(self, calendar_id: str, sync_token: Optional[str]) -> "tuple[Optional[str], int, bool]":
         """Incremental with ``sync_token``, else the full window. Returns the
@@ -267,6 +387,8 @@ class CalendarSync:
             if page:
                 q["pageToken"] = page
             resp = await self.api.list_events(calendar_id, q)
+            # Read the series rules before the write transaction opens
+            await self._series_rules(calendar_id, resp.get("items") or [])
             async with AsyncSessionLocal() as db:
                 for event in resp.get("items") or []:
                     ext = str(event.get("id") or "")
@@ -317,7 +439,8 @@ class CalendarSync:
             )
             return ident.id
 
-        fields = event_fields(event, calendar_id)
+        fields = event_fields(event, calendar_id, self._event_colors)
+        fields["recurrence"] = self._rules.get(fields["recurring_event_id"]) if fields["recurring_event_id"] else None
         organizer = event.get("organizer")
         organizer_id = await identity_id(organizer)
         fields["organizer_identity_id"] = organizer_id

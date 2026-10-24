@@ -6,7 +6,7 @@ import type { ConnectorState } from '../../api/types'
 import AuthFlow from '../../components/channels/AuthFlow'
 import ChannelIcon from '../../components/channels/ChannelIcon'
 import ChannelSetupNote from '../../components/channels/ChannelSetupNote'
-import { Modal, useConfirm } from '../../components/ui'
+import { LinkifiedText, Modal, useConfirm } from '../../components/ui'
 import { useAccounts } from '../../hooks/useAccounts'
 import { errorMessage, toast } from '../../lib/toast'
 import { Card, Section } from './shared'
@@ -180,7 +180,7 @@ function AccountRow({ account: a, removable, onReauth, onAction, onLogout, onRem
         </div>
       </div>
       {a.status.error && (state === 'error' || state === 'unauthorized' || state === 'reconnecting') && (
-        <p role="alert" className="mt-2 text-xs text-red-400">{a.status.error}</p>
+        <p role="alert" className="mt-2 text-xs text-red-400 [overflow-wrap:anywhere]"><LinkifiedText text={a.status.error} linkClassName="underline hover:text-red-300" /></p>
       )}
     </Card>
   )

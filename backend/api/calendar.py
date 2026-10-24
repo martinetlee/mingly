@@ -6,6 +6,11 @@ Event shape (``event_out``)::
     {id, account_id, calendar_id, title, description, location,
      start_at, end_at,      # ISO UTC ("…Z"); all-day events: "YYYY-MM-DD" (end exclusive)
      all_day, status, html_link,
+     conference_url, conference_name,   # the video call ("Google Meet"), or null
+     my_response,           # the account owner's RSVP: accepted | tentative | declined | needsAction | null
+     recurring, recurrence, # part of a recurring series; its RRULE ("RRULE:FREQ=WEEKLY;…") when known
+     color,                 # the event's own colour ("#rrggbb"); null = its calendar's colour
+     transparency,          # opaque | transparent (shows as free) | null
      organizer: Attendee | null,
      attendees: [Attendee]}  # organizer first
     Attendee = {identity_id, person_id, name, email, response_status, is_organizer, is_self}
@@ -24,7 +29,10 @@ from backend.db.database import get_db
 from backend.db.models import Account
 from backend.serialization import iso_utc
 from backend.connectors.gmail.api import GmailError
-from backend.connectors.gmail.calendar_sync import PRIMARY, selected_calendars, set_selected_calendars
+from backend.connectors.gmail.calendar_sync import (
+    PRIMARY, STATE_KEY, WINDOW_AHEAD_DAYS, WINDOW_PAST_DAYS, selected_calendars, set_selected_calendars,
+)
+from backend.connectors.sync_state import load_sync_state
 from backend.connectors.manager import manager
 
 router = APIRouter()
@@ -93,6 +101,13 @@ def event_out(ev, attendees: list) -> dict:
         "all_day": bool(ev.all_day),
         "status": ev.status,
         "html_link": ev.html_link,
+        "conference_url": ev.conference_url,
+        "conference_name": ev.conference_name,
+        "my_response": ev.my_response,
+        "recurring": ev.recurring_event_id is not None,
+        "recurrence": ev.recurrence,
+        "color": ev.color,
+        "transparency": ev.transparency,
         "organizer": organizer,
         "attendees": people,
     }
@@ -162,19 +177,43 @@ def _sync_of(account_id: int):
     return connector, getattr(connector, "calendar", None)
 
 
+def _synced_calendars(account_id: int, stored: list) -> list[dict]:
+    """The synced calendars with the name and colour from the stored
+    calendar list; ids as events carry them (``primary`` for the primary)."""
+    out = []
+    for cid in selected_calendars(account_id):
+        match = next((c for c in stored if isinstance(c, dict)
+                      and (c.get("id") == cid or (cid == PRIMARY and c.get("primary")))), None)
+        out.append({
+            "id": cid,
+            "name": (match or {}).get("name") or ("Primary" if cid == PRIMARY else cid),
+            "color": (match or {}).get("color"),
+            "primary": cid == PRIMARY or bool((match or {}).get("primary")),
+        })
+    return out
+
+
 @router.get("/accounts")
 async def calendar_accounts(db: AsyncSession = Depends(get_db)):
     """Gmail accounts and their calendar sync: ``[{account_id, label,
-    calendar_ids, syncing, last_sync_at, error}]``."""
+    calendar_ids, calendars: [{id, name, color, primary}], window: {from, to},
+    syncing, last_sync_at, error}]``. ``window``: the local dates the sync
+    keeps current (stored events outside it stay)."""
 
     accounts = await crud.get_accounts(db, channel="gmail")
+    today = local_now().date()
+    window = {"from": (today - timedelta(days=WINDOW_PAST_DAYS)).isoformat(),
+              "to": (today + timedelta(days=WINDOW_AHEAD_DAYS)).isoformat()}
     out = []
     for acc in accounts:
         _, sync = _sync_of(acc.id)
+        stored = ((await load_sync_state(acc.id)).get(STATE_KEY) or {}).get("calendars") or []
         out.append({
             "account_id": acc.id,
             "label": acc.label or acc.external_id,
             "calendar_ids": selected_calendars(acc.id),
+            "calendars": _synced_calendars(acc.id, stored if isinstance(stored, list) else []),
+            "window": window,
             "syncing": sync is not None,
             "last_sync_at": iso_utc(sync.last_sync_at) if sync is not None else None,
             "error": sync.error if sync is not None else None,

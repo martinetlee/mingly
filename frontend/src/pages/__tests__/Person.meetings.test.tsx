@@ -72,7 +72,7 @@ describe('Person page: upcoming meetings', () => {
     expect(row.textContent).toContain('Tomorrow')
     expect(row.textContent).toContain('with Bob') // not you, not Alice herself
     expect(row.textContent).toContain('Room 4')
-    expect(row.getAttribute('href')).toBe(`/calendar?event=11&date=${localDateKey(tomorrow)}`)
+    expect(row.getAttribute('href')).toBe(`/calendar?view=week&date=${localDateKey(tomorrow)}&event=11`)
     // The existing sections stay
     expect(screen.getByTestId('person-timeline')).toBeTruthy()
     expect(screen.getByTestId('person-notes')).toBeTruthy()

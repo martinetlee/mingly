@@ -5,6 +5,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { BriefingHistoryEntry, BriefingSource, BriefingSummary } from '../../api/types'
 import Markdown from '../ui/Markdown'
 import { openConversationUrl, personUrl } from '../../lib/routes'
+import { calendarDayUrl } from '../../features/calendar/agenda'
 
 type Category = BriefingSummary['category']
 
@@ -99,7 +100,7 @@ export default function BriefingEntryCard({ entry, onCite, regen }: CardProps) {
       <div className="mb-1 flex items-center justify-between gap-2">
         {(() => {
           // Important-person entries link to the person; meetings to the Calendar; the rest to their conversation
-          const to = entry.category === 'meetings' ? '/calendar'
+          const to = entry.category === 'meetings' ? calendarDayUrl(new Date())
             : entry.person_id != null && entry.conversation_id == null ? personUrl(entry.person_id)
             : entry.conversation_id != null ? openConversationUrl(entry.conversation_id) : null
           return to

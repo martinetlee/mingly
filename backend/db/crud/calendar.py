@@ -25,7 +25,8 @@ __all__ = [
 ]
 
 EVENT_FIELDS = ("calendar_id", "title", "description", "location", "start_at", "end_at", "all_day", "status",
-                "organizer_identity_id", "html_link", "updated_at")
+                "organizer_identity_id", "html_link", "updated_at", "conference_url", "conference_name",
+                "my_response", "recurring_event_id", "recurrence", "color", "transparency")
 
 
 async def upsert_calendar_event(

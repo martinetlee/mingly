@@ -1,15 +1,24 @@
 /**
- * Calendar date math: view ranges in local days and grouping events by the
- * local day(s) they fall on. All-day events are dates ("YYYY-MM-DD", end
+ * Calendar date math: view ranges (day, week, month, agenda) in local days and
+ * grouping events by the local day(s) they fall on. All-day events are dates ("YYYY-MM-DD", end
  * exclusive) and are placed by date, never shifted by time zone.
  */
 import { localDateKey, type CalendarEvent } from '../../api/calendar'
 import { fmtTime, parseServerDate } from '../../utils/time'
 
-export type CalendarView = 'agenda' | 'week'
+export type CalendarView = 'day' | 'week' | 'month' | 'agenda'
+
+export const CALENDAR_VIEWS: CalendarView[] = ['day', 'week', 'month', 'agenda']
 
 /** Days shown by the agenda view */
 export const AGENDA_DAYS = 14
+
+/** Weeks shown by the month view (every month fits in six) */
+export const MONTH_WEEKS = 6
+
+export function parseView(value: string | null | undefined): CalendarView | null {
+  return CALENDAR_VIEWS.includes(value as CalendarView) ? value as CalendarView : null
+}
 
 export function startOfLocalDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
@@ -35,13 +44,44 @@ export function startOfWeek(d: Date): Date {
 
 /** The local days [from, to) a view shows around `anchor` */
 export function viewRange(view: CalendarView, anchor: Date): { from: Date; to: Date } {
-  const from = view === 'week' ? startOfWeek(anchor) : startOfLocalDay(anchor)
-  return { from, to: addDays(from, view === 'week' ? 7 : AGENDA_DAYS) }
+  switch (view) {
+    case 'day': {
+      const from = startOfLocalDay(anchor)
+      return { from, to: addDays(from, 1) }
+    }
+    case 'week': {
+      const from = startOfWeek(anchor)
+      return { from, to: addDays(from, 7) }
+    }
+    case 'month': {
+      const from = startOfWeek(new Date(anchor.getFullYear(), anchor.getMonth(), 1))
+      return { from, to: addDays(from, 7 * MONTH_WEEKS) }
+    }
+    default: {
+      const from = startOfLocalDay(anchor)
+      return { from, to: addDays(from, AGENDA_DAYS) }
+    }
+  }
 }
 
 /** Where prev / next go from `anchor` */
 export function shiftAnchor(view: CalendarView, anchor: Date, dir: -1 | 1): Date {
-  return addDays(anchor, dir * (view === 'week' ? 7 : AGENDA_DAYS))
+  switch (view) {
+    case 'day': return addDays(anchor, dir)
+    case 'week': return addDays(anchor, dir * 7)
+    // The 1st of the next / previous month (a 31st has no equivalent in every month)
+    case 'month': return new Date(anchor.getFullYear(), anchor.getMonth() + dir, 1)
+    default: return addDays(anchor, dir * AGENDA_DAYS)
+  }
+}
+
+/** The header title: "Tue, Oct 27, 2026" · "Oct 26 – Nov 1, 2026" · "October 2026" */
+export function viewTitle(view: CalendarView, anchor: Date, from: Date, to: Date): string {
+  if (view === 'day') {
+    return anchor.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+  }
+  if (view === 'month') return anchor.toLocaleDateString([], { month: 'long', year: 'numeric' })
+  return rangeLabel(from, to)
 }
 
 /** Local day keys of [from, to) that `ev` falls on */
@@ -122,10 +162,16 @@ export function rangeLabel(from: Date, to: Date): string {
   return `${from.toLocaleDateString([], opts)} – ${last.toLocaleDateString([], { ...opts, year: 'numeric' })}`
 }
 
-/** The event's day in the Calendar space: /calendar?date=…&event=… */
+/** The event in the Calendar space (its week, details open): /calendar?view=week&date=…&event=… */
 export function calendarEventUrl(ev: Pick<CalendarEvent, 'id' | 'start_at' | 'all_day'>): string {
   const day = ev.all_day ? parseDateKey(ev.start_at) : parseServerDate(ev.start_at)
-  const q = new URLSearchParams({ event: String(ev.id) })
+  const q = new URLSearchParams({ view: 'week' })
   if (day) q.set('date', localDateKey(day))
+  q.set('event', String(ev.id))
   return `/calendar?${q}`
+}
+
+/** A day in the Calendar space: /calendar?view=day&date=… */
+export function calendarDayUrl(day: Date): string {
+  return `/calendar?${new URLSearchParams({ view: 'day', date: localDateKey(day) })}`
 }

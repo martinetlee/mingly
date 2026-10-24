@@ -53,6 +53,9 @@ class FakeCalendar:
         self.requests: list[tuple[str, dict]] = []
         self.calendars = [{"id": ME, "summary": ME, "primary": True, "backgroundColor": "#9fe1e7"},
                           {"id": "team@group.calendar.google.com", "summary": "Team"}]
+        self.masters: dict[str, dict] = {}  # recurring series id -> the series event (events.get)
+        self.master_gets: list[str] = []
+        self.meta_status = 200  # calendarList / colors answer
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = urlsplit(str(request.url))
@@ -60,8 +63,20 @@ class FakeCalendar:
             return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path.endswith("/users/me/calendarList"):
+            if self.meta_status != 200:
+                return httpx.Response(self.meta_status, json={"error": {"message": "unavailable"}})
             return httpx.Response(200, json={"items": self.calendars})
-        cal = unquote(url.path.split("/calendars/")[1].rsplit("/events", 1)[0])
+        if url.path.endswith("/calendar/v3/colors"):
+            if self.meta_status != 200:
+                return httpx.Response(self.meta_status, json={"error": {"message": "unavailable"}})
+            return httpx.Response(200, json={"event": {"11": {"background": "#dc2127", "foreground": "#1d1d1d"}}})
+        cal, _, event_id = unquote(url.path.split("/calendars/")[1]).partition("/events")
+        if event_id.strip("/"):
+            sid = event_id.strip("/")
+            self.master_gets.append(sid)
+            if sid not in self.masters:
+                return httpx.Response(500, json={"error": {"message": "backend error"}})
+            return httpx.Response(200, json=self.masters[sid])
         self.requests.append((cal, q))
         if "syncToken" in q:
             if cal in self.gone:
@@ -344,6 +359,104 @@ async def test_calendar_retry_after_is_capped(db, monkeypatch, broadcasts):
     assert delays == [calendar_sync.BACKOFF_MAX]
 
 
+# ── call links, RSVP, colours, recurrence ─────────────────────────────────────
+
+def test_event_fields_call_link_rsvp_colour_and_free_busy():
+    from backend.connectors.gmail.calendar_sync import event_fields
+
+    meet = gevent("m", "2026-10-12T09:00:00Z", attendees=[
+        {"email": ME, "self": True, "responseStatus": "tentative"}, {"email": "a@example.com"},
+    ], organizer={"email": "a@example.com"})
+    meet.update(colorId="11", transparency="transparent", conferenceData={
+        "conferenceSolution": {"name": "Google Meet"},
+        "entryPoints": [{"entryPointType": "phone", "uri": "tel:+1-555"},
+                        {"entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij"}],
+    })
+    f_ = event_fields(meet, "primary", {"11": "#dc2127"})
+    assert (f_["conference_url"], f_["conference_name"]) == ("https://meet.google.com/abc-defg-hij", "Google Meet")
+    assert f_["my_response"] == "tentative" and f_["color"] == "#dc2127" and f_["transparency"] == "transparent"
+    assert f_["recurring_event_id"] is None
+
+    hangout = gevent("h", "2026-10-12T09:00:00Z")  # I organize, nobody listed
+    hangout["hangoutLink"] = "https://meet.google.com/xyz"
+    f_ = event_fields(hangout, "primary")
+    assert (f_["conference_url"], f_["conference_name"], f_["my_response"]) == (
+        "https://meet.google.com/xyz", "Google Meet", "accepted")
+    assert f_["color"] is None and f_["transparency"] is None
+
+    pasted = gevent("z", "2026-10-12T09:00:00Z", location="Zoom: https://us02web.zoom.us/j/123?pwd=x, room 4",
+                    organizer={"email": "a@example.com"}, attendees=[{"email": "a@example.com"}])
+    pasted["description"] = '<a href="https://teams.microsoft.com/l/meetup-join/1">Join</a>'
+    f_ = event_fields(pasted, "primary")
+    assert (f_["conference_url"], f_["conference_name"]) == ("https://us02web.zoom.us/j/123?pwd=x", "Zoom")
+    assert f_["my_response"] is None  # not invited by name, not the organizer
+
+    teams = gevent("t", "2026-10-12T09:00:00Z")
+    teams["description"] = '<a href="https://teams.microsoft.com/l/meetup-join/1">Join</a>'
+    assert event_fields(teams, "primary")["conference_url"] == "https://teams.microsoft.com/l/meetup-join/1"
+    assert event_fields(gevent("n", "2026-10-12T09:00:00Z"), "primary")["conference_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_recurring_series_rule_is_read_once_and_reused(db, gcal, broadcasts):
+    acc = await _account(db)
+    instances = []
+    for i, day in enumerate(("2026-10-12", "2026-10-19")):
+        ev = gevent(f"wk_{i}", f"{day}T09:00:00Z", f"{day}T09:30:00Z", summary="Weekly")
+        ev["recurringEventId"] = "wk"
+        instances.append(ev)
+    gcal.full["primary"] = [instances]
+    gcal.masters["wk"] = {"id": "wk", "recurrence": ["EXDATE;VALUE=DATE:20261026", "RRULE:FREQ=WEEKLY;BYDAY=MO"]}
+    await _sync(acc).sync_once()
+    evs = await _events(db)
+    assert {e.recurrence for e in evs.values()} == {"RRULE:FREQ=WEEKLY;BYDAY=MO"}
+    assert {e.recurring_event_id for e in evs.values()} == {"wk"}
+    assert gcal.master_gets == ["wk"]  # once for the series, not per instance
+
+    # A fresh loop (app restart) reuses the stored rule instead of asking Google again
+    nxt = gevent("wk_2", "2026-10-26T09:00:00Z", "2026-10-26T09:30:00Z", summary="Weekly")
+    nxt["recurringEventId"] = "wk"
+    gcal.incremental["primary"] = [nxt]
+    await _sync(acc).sync_once()
+    assert gcal.master_gets == ["wk"]
+    assert (await _events(db))["wk_2"].recurrence == "RRULE:FREQ=WEEKLY;BYDAY=MO"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_series_or_calendar_list_never_fails_the_sync(db, gcal, broadcasts):
+    acc = await _account(db)
+    ev = gevent("x_1", "2026-10-12T09:00:00Z", "2026-10-12T10:00:00Z")
+    ev["recurringEventId"] = "gone"  # events.get answers 500
+    gcal.full["primary"] = [[ev]]
+    gcal.meta_status = 503
+    await merge_sync_state(acc.id, calendar={"calendars": [{"id": ME, "name": "Mine", "color": "#111111",
+                                                            "primary": True}]})
+    sync = _sync(acc)
+    assert await sync.sync_once() is True
+    stored = (await _events(db))["x_1"]
+    assert stored.recurring_event_id == "gone" and stored.recurrence is None
+    state = (await load_sync_state(acc.id))["calendar"]
+    assert state["calendars"][0]["name"] == "Mine"  # the stored list is kept
+    assert gcal.master_gets == ["gone"]
+
+
+@pytest.mark.asyncio
+async def test_calendar_list_and_event_palette_are_stored_and_colour_events(db, gcal, broadcasts):
+    acc = await _account(db)
+    ev = gevent("c1", "2026-10-12T09:00:00Z", "2026-10-12T10:00:00Z")
+    ev["colorId"] = "11"
+    gcal.full["primary"] = [[ev]]
+    await _sync(acc).sync_once()
+    assert (await _events(db))["c1"].color == "#dc2127"
+    state = (await load_sync_state(acc.id))["calendar"]
+    assert state["event_colors"] == {"11": "#dc2127"}
+    assert state["calendars"] == [
+        {"id": ME, "name": ME, "color": "#9fe1e7", "primary": True},
+        {"id": "team@group.calendar.google.com", "name": "Team", "color": None, "primary": False},
+    ]
+    assert state["sync_tokens"] and state["window_synced_at"]
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 async def _seeded(db):
@@ -358,6 +471,10 @@ async def _seeded(db):
         e = await crud.upsert_calendar_event(db, acc.id, ext, {
             "calendar_id": "primary", "title": title or ext, "start_at": start, "end_at": end, "all_day": all_day,
             "status": "confirmed", "organizer_identity_id": me.id, "html_link": f"https://calendar.google.com/{ext}",
+            "my_response": "accepted",
+            **({"conference_url": "https://meet.google.com/abc", "conference_name": "Google Meet",
+                "recurring_event_id": "series", "recurrence": "RRULE:FREQ=WEEKLY;BYDAY=MO", "color": "#dc2127",
+                "transparency": "opaque"} if ext == "soon" else {}),
         }, [(me.id, "accepted", True)] + list(attendees))
         await db.commit()
         return e
@@ -406,6 +523,13 @@ async def test_events_route_range_shape_and_all_day_by_date(db, api):
     assert [e["title"] for e in events] == ["past", "soon", "declined"]
     soon = events[1]
     assert soon["start_at"].endswith("Z") and soon["html_link"] == "https://calendar.google.com/soon"
+    assert {k: soon[k] for k in ("conference_url", "conference_name", "my_response", "recurring", "recurrence",
+                                 "color", "transparency")} == {
+        "conference_url": "https://meet.google.com/abc", "conference_name": "Google Meet", "my_response": "accepted",
+        "recurring": True, "recurrence": "RRULE:FREQ=WEEKLY;BYDAY=MO", "color": "#dc2127", "transparency": "opaque",
+    }
+    past = events[0]
+    assert past["recurring"] is False and past["recurrence"] is None and past["conference_url"] is None
     assert soon["organizer"]["email"] == ME and soon["organizer"]["is_self"]
     assert [a["email"] for a in soon["attendees"]] == [ME, "alice@example.com"]  # organizer first
     assert soon["attendees"][1] == {
@@ -436,10 +560,29 @@ async def test_upcoming_meetings_route(db, api):
 async def test_accounts_route_and_calendar_selection(db, api, monkeypatch, gcal):
     from backend.connectors.manager import manager
 
+    from backend.api import calendar as calendar_api
+
     acc = await _account(db)
+    monkeypatch.setattr(calendar_api, "local_now", lambda: datetime(2026, 10, 24, 22, 0, tzinfo=timezone.utc))
     resp = await api.get("/api/calendar/accounts")
-    assert resp.json() == [{"account_id": acc.id, "label": ME, "calendar_ids": ["primary"], "syncing": False,
-                            "last_sync_at": None, "error": None}]
+    assert resp.json() == [{
+        "account_id": acc.id, "label": ME, "calendar_ids": ["primary"],
+        "calendars": [{"id": "primary", "name": "Primary", "color": None, "primary": True}],
+        "window": {"from": "2026-09-24", "to": "2027-01-22"},
+        "syncing": False, "last_sync_at": None, "error": None,
+    }]
+    # Names and colours come from the calendar list the sync stored
+    await merge_sync_state(acc.id, calendar={"calendars": [
+        {"id": ME, "name": ME, "color": "#9fe1e7", "primary": True},
+        {"id": "team@group.calendar.google.com", "name": "Team", "color": "#ff887c", "primary": False},
+    ]})
+    calendar_sync.set_selected_calendars(acc.id, ["primary", "team@group.calendar.google.com", "old@x"])
+    assert (await api.get("/api/calendar/accounts")).json()[0]["calendars"] == [
+        {"id": "primary", "name": ME, "color": "#9fe1e7", "primary": True},
+        {"id": "team@group.calendar.google.com", "name": "Team", "color": "#ff887c", "primary": False},
+        {"id": "old@x", "name": "old@x", "color": None, "primary": False},
+    ]
+    calendar_sync.set_selected_calendars(acc.id, [])
     assert (await api.get(f"/api/calendar/accounts/{acc.id}/calendars")).status_code == 409
 
     sync = _sync(acc)
