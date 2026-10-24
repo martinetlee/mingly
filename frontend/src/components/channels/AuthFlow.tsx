@@ -178,7 +178,7 @@ export default function AuthFlow({
       <div className="py-2 text-center">
         <CheckCircle2 size={32} className="mx-auto mb-2 text-emerald-400" aria-hidden />
         <p className="text-sm font-medium text-slate-200">{step.title || 'Connected'}</p>
-        {step.message && <p className="mt-1 text-xs text-slate-400">{step.message}</p>}
+        {step.message && <p className="mt-1 whitespace-pre-line text-xs text-slate-400">{step.message}</p>}
         {onClose && (
           <button type="button" onClick={onClose} className={`mt-4 ${primaryButton}`}>{doneLabel}</button>
         )}
@@ -226,7 +226,7 @@ export default function AuthFlow({
             <p className="mb-3 text-xs text-amber-400">Resolve all 1Password references before continuing</p>
           )}
           <div className="flex items-center justify-end gap-2">
-            {close && <button type="button" onClick={close} className={secondaryButton}>Cancel</button>}
+            {close && <button type="button" onClick={close} className={secondaryButton}>{step.cancel_label || 'Cancel'}</button>}
             <button type="submit" disabled={submitting || missing || blockedByOpRef} className={primaryButton}>
               {submitting ? 'Working…' : (step.submit_label || 'Continue')}
             </button>

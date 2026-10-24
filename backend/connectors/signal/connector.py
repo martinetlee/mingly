@@ -33,7 +33,7 @@ import re
 import secrets
 import shutil
 import time
-from collections import Counter, OrderedDict, deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -45,7 +45,8 @@ from backend import config
 from backend.connectors.base import (
     AuthFlowError, AuthStep, Capability, Connector, ConnectorStatus, OutgoingMessage, SetupStatus,
 )
-from backend.connectors.signal import cli, install
+from backend.connectors.signal import cli, desktop, desktop_import, install
+from backend.connectors.sync_state import load_sync_state
 from backend.connectors.signal.envelopes import (
     Address,
     attachment_kind,
@@ -70,6 +71,7 @@ from backend.ingest.normalized import (
     NormalizedConversation,
     NormalizedIdentity,
     NormalizedMessage,
+    reaction_summary,
 )
 from backend.media import MediaNotFound
 from backend.tasks import spawn
@@ -146,13 +148,6 @@ def _contact_from(raw: dict) -> Optional[_Contact]:
     return _Contact(aci, number, contact_name or profile_name or raw.get("username"), bool(contact_name))
 
 
-def _reaction_summary(by_reactor: dict) -> Optional[str]:
-    if not by_reactor:
-        return None
-    counts = Counter(by_reactor.values())
-    return json.dumps([{"emoji": e, "count": n} for e, n in counts.most_common()], ensure_ascii=False)
-
-
 class SignalConnector(Connector):
     channel = "signal"
     display_name = "Signal"
@@ -175,6 +170,8 @@ class SignalConnector(Connector):
         self._flows: OrderedDict[str, _LinkFlow] = OrderedDict()
         # Sign-in flows on the setup steps: flow id -> "setup" | "repair" | "installing"
         self._setup_flows: OrderedDict[str, str] = OrderedDict()
+        # The Signal Desktop history import's record (accounts.sync_state_json), once done
+        self.desktop_import: Optional[dict] = None
         self._state = "stopped"
         self._error: Optional[str] = None
         self._number: Optional[str] = None
@@ -192,7 +189,19 @@ class SignalConnector(Connector):
 
 
     def history_note(self) -> Optional[str]:
+        if self.desktop_import:
+            when = str(self.desktop_import.get("at") or "")[:10]
+            return (
+                f"Messages from before Mingly was linked were imported from Signal Desktop on {when}, as far back "
+                "as Signal Desktop had them; anything older stays on your phone."
+            )
         return NO_HISTORY_NOTE
+
+    def account_actions(self) -> list[dict]:
+        if desktop.detect() is None or desktop_import.state().running:
+            return []
+        label = "Import again from Signal Desktop" if self.desktop_import else "Import from Signal Desktop"
+        return [{"id": "desktop_import", "label": label, "params": {"desktop_import": True}}]
 
     def is_configured(self) -> bool:
         return self.account_id is not None and (Path(config.DATA_DIR) / "signal" / "data").is_dir()
@@ -259,6 +268,7 @@ class SignalConnector(Connector):
         aci = cli.account_aci(self._number)
         if aci and aci != self._aci:
             await self._learn_aci(aci)
+        self.desktop_import = (await load_sync_state(self.account_id)).get("desktop_import")
         if self._stop_generation != generation:
             return False
 
@@ -590,7 +600,7 @@ class SignalConnector(Connector):
             else:
                 meta.pop("signal_reactions", None)
             msg.meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
-            msg.reactions_json = _reaction_summary(by_reactor)
+            msg.reactions_json = reaction_summary(by_reactor)
             if mine:
                 msg.my_reaction = None if remove else emoji
             await db.commit()
@@ -787,6 +797,8 @@ class SignalConnector(Connector):
         phase = self._setup_flows.pop(flow_id, None)
         if stop and phase == "installing":
             install.cancel()
+        if stop and phase == "desktop_importing":
+            desktop_import.cancel()
 
     async def close_flows(self) -> None:
         for flow_id in list(self._flows):
@@ -865,6 +877,10 @@ class SignalConnector(Connector):
 
     async def begin_auth(self, params: dict[str, Any]) -> AuthStep:
         flow_id = secrets.token_urlsafe(12)
+        if params.get("desktop_import"):
+            if desktop_import.state().running:
+                return self._desktop_progress_step(flow_id)
+            return await self._desktop_offer_step(flow_id)
         if install.state().running:
             return self._install_step(flow_id)
         return await self._begin_link(flow_id)
@@ -918,6 +934,8 @@ class SignalConnector(Connector):
         return self._qr_step(flow_id, flow)
 
     async def continue_auth(self, flow_id: str, data: dict[str, Any]) -> AuthStep:
+        if self._setup_flows.get(flow_id) in ("desktop_offer", "desktop_importing"):
+            return await self._continue_desktop_import(flow_id)
         if flow_id in self._setup_flows:
             return await self._continue_setup(flow_id)
         flow = self._flows.get(flow_id)
@@ -978,7 +996,68 @@ class SignalConnector(Connector):
         await self._record_self()
         if was_registered:  # re-linked an account the manager already runs
             spawn(self._restart(), name=f"signal_restart:{self.account_key}")
+        if desktop.detect() is not None:
+            return await self._desktop_offer_step(flow_id, linked=number)
         return AuthStep(flow_id, "done", title="Signal linked", message=f"Linked {number}. {NO_HISTORY_NOTE}")
+
+    # -- Signal Desktop history import (desktop_import.py) ----------------------
+
+    async def _desktop_offer_step(self, flow_id: str, linked: Optional[str] = None) -> AuthStep:
+        install_ = desktop.detect()
+        if install_ is None:
+            return self._error_step(flow_id, "Signal Desktop isn't installed on this Mac.")
+        self._setup_flows[flow_id] = "desktop_offer"
+        size_mb = round(await asyncio.to_thread(install_.attachments_size) / 1_000_000)
+        intro = (f"Linked {linked}. Signal only sends Mingly new messages, but Signal Desktop on this Mac "
+                 "has your earlier history.\n\n" if linked else "")
+        return AuthStep(
+            flow_id, "fields",
+            title="Signal linked" if linked else "Import from Signal Desktop",
+            message=intro + "\n".join((
+                "• Imports conversations, messages, reactions and attachments",
+                f"• Copies about {size_mb:,} MB of attachments into Mingly",
+                "• Only reads Signal Desktop's data, never changes it",
+                "• macOS will ask to allow access to \"Signal Safe Storage\" (Signal Desktop's key)",
+            )),
+            submit_label="Import history",
+            cancel_label="Skip" if linked else None,
+        )
+
+    def _desktop_progress_step(self, flow_id: str) -> AuthStep:
+        self._setup_flows[flow_id] = "desktop_importing"
+        st = desktop_import.state()
+        if st.messages_total:
+            message = (f"{st.stage}\n{st.conversations_done} of {st.conversations_total} conversations · "
+                       f"{st.messages_done:,} of {st.messages_total:,} messages · {st.files:,} files")
+        else:
+            message = st.stage
+        if st.cancel_requested:
+            return AuthStep(flow_id, "progress", title="Importing from Signal Desktop", message="Stopping…",
+                            progress=st.progress, poll=True)
+        return AuthStep(
+            flow_id, "progress", title="Importing from Signal Desktop",
+            message=message + "\nYou can leave this screen; the import continues in the background.",
+            progress=st.progress, poll=True, stop_label="Stop import",
+        )
+
+    async def _continue_desktop_import(self, flow_id: str) -> AuthStep:
+        st = desktop_import.state()
+        if self._setup_flows.get(flow_id) == "desktop_offer" and not st.running:
+            st = desktop_import.start(self)
+        if st.running:
+            return self._desktop_progress_step(flow_id)
+        self._setup_flows.pop(flow_id, None)
+        if st.status == "error":
+            return self._error_step(flow_id, st.error or "The import failed", title="Signal Desktop import failed")
+        if st.status == "cancelled":
+            return AuthStep(flow_id, "done", title="Import stopped",
+                            message=f"Stopped after {st.messages_imported:,} messages; run it again any time to finish.")
+        skipped = f" {st.files_skipped:,} attachments Signal Desktop no longer had were skipped." if st.files_skipped else ""
+        return AuthStep(
+            flow_id, "done", title="Signal history imported",
+            message=(f"Imported {st.messages_imported:,} messages in {st.conversations_done} conversations and "
+                     f"{st.files:,} attachments from Signal Desktop.{skipped}"),
+        )
 
     async def logout(self) -> None:
         """Stop, unlink this device and delete its local Signal data."""

@@ -26,7 +26,7 @@ import os
 import re
 import secrets
 import shutil
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +46,7 @@ from backend.ingest import fanout
 from backend.ingest import service as ingest_service
 from backend.ingest.normalized import (
     NormalizedAttachment, NormalizedConversation, NormalizedIdentity, NormalizedMessage,
+    reaction_summary,
 )
 from backend.media import MediaNotFound
 from backend.tasks import spawn
@@ -281,13 +282,6 @@ def to_message(raw: RawMessage, attachments: list[RawAttachment], me: Normalized
     )
 
 
-def _reaction_summary(by_reactor: dict) -> Optional[str]:
-    if not by_reactor:
-        return None
-    counts = Counter(by_reactor.values())
-    return json.dumps([{"emoji": e, "count": n} for e, n in counts.most_common()], ensure_ascii=False)
-
-
 # -- connector ------------------------------------------------------------------------
 
 class SmsConnector(Connector):
@@ -521,7 +515,7 @@ class SmsConnector(Connector):
                 else:
                     meta.pop("sms_reactions", None)
                 msg.meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
-                msg.reactions_json = _reaction_summary(by_reactor)
+                msg.reactions_json = reaction_summary(by_reactor)
                 if r.reactor == SELF_KEY:
                     msg.my_reaction = None if r.remove else r.emoji
                 changed[msg.id] = msg

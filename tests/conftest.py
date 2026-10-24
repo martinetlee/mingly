@@ -49,6 +49,15 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_signal_desktop(tmp_path_factory, monkeypatch):
+    """Tests never see this Mac's Signal Desktop data (the import offer is
+    driven by its presence); tests that need one build it and point here."""
+    from backend.connectors.signal import desktop
+
+    monkeypatch.setattr(desktop, "DEFAULT_ROOT", tmp_path_factory.mktemp("no-signal-desktop") / "Signal")
+
+
+@pytest.fixture(autouse=True)
 def _shield_switch(request, monkeypatch):
     """Shield is off by default (backend.config.SHIELD_ENABLED). Its own test
     modules (test_scam_*) and tests marked @pytest.mark.shield run with it on."""

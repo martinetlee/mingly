@@ -97,6 +97,10 @@ class TelegramConnector(Connector, MessageActions, DialogActions, GroupMembers, 
 
         return await download_attachment(attachment.id)
 
+    def account_actions(self) -> list[dict]:
+        return [{"id": "change_credentials", "label": "Change API credentials",
+                 "params": {"reset_credentials": True}}]
+
     def conversation_capabilities(self, conversation) -> frozenset[Capability]:
         caps = set(self.capabilities)
         if not conversation.is_forum:

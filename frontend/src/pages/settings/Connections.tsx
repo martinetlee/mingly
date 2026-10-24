@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Loader2, Plus } from 'lucide-react'
 import { logoutAccount, removeAccount } from '../../api/accounts'
-import type { Account, ConnectableChannel } from '../../api/accounts'
+import type { Account, AccountAction, ConnectableChannel } from '../../api/accounts'
 import type { ConnectorState } from '../../api/types'
 import AuthFlow from '../../components/channels/AuthFlow'
 import ChannelIcon from '../../components/channels/ChannelIcon'
@@ -101,10 +101,8 @@ export default function Connections() {
                 account={a}
                 removable={isMulti(a.channel)}
                 onReauth={() => setFlow({ key: a.account_key, title: `Sign in to ${accountName(a)}` })}
-                // Telegram signs in with your own API id/hash; this re-enters them
-                onChangeCredentials={a.channel === 'telegram'
-                  ? () => setFlow({ key: a.account_key, title: 'Change Telegram API credentials', params: { reset_credentials: true } })
-                  : undefined}
+                // Connector-declared extras (Telegram: API credentials; Signal: Desktop import), each a flow
+                onAction={(action) => setFlow({ key: a.account_key, title: `${action.label} · ${accountName(a)}`, params: action.params })}
                 onLogout={() => void logOut(a)}
                 onRemove={() => void remove(a)}
               />
@@ -145,11 +143,11 @@ function accountName(a: Account) {
   return a.label ? `${a.display_name} (${a.label})` : a.display_name
 }
 
-function AccountRow({ account: a, removable, onReauth, onChangeCredentials, onLogout, onRemove }: {
+function AccountRow({ account: a, removable, onReauth, onAction, onLogout, onRemove }: {
   account: Account
   removable: boolean
   onReauth: () => void
-  onChangeCredentials?: () => void
+  onAction: (action: AccountAction) => void
   onLogout: () => void
   onRemove: () => void
 }) {
@@ -157,11 +155,12 @@ function AccountRow({ account: a, removable, onReauth, onChangeCredentials, onLo
   const signedOut = state === 'unauthorized'
   return (
     <Card>
-      <div className="flex items-center gap-3">
+      {/* The buttons wrap under the name when they don't fit beside it */}
+      <div className="flex flex-wrap items-center gap-3">
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-slate-700">
           <ChannelIcon channel={a.channel} size={16} className="text-slate-300" />
         </div>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[12rem] flex-1">
           <p className="truncate text-sm text-slate-200">{a.display_name}</p>
           <p className="flex items-center gap-1.5 text-xs text-slate-400">
             {a.label && <span className="truncate">{a.label} ·</span>}
@@ -169,13 +168,13 @@ function AccountRow({ account: a, removable, onReauth, onChangeCredentials, onLo
             <span data-testid="account-state">{STATE_LABEL[state] ?? state}</span>
           </p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={onReauth} className={actionButton}>
             {signedOut ? 'Sign in' : 'Re-authorize'}
           </button>
-          {onChangeCredentials && (
-            <button type="button" onClick={onChangeCredentials} className={actionButton}>Change API credentials</button>
-          )}
+          {(a.actions ?? []).map((action) => (
+            <button key={action.id} type="button" onClick={() => onAction(action)} className={actionButton}>{action.label}</button>
+          ))}
           {!signedOut && <button type="button" onClick={onLogout} className={actionButton}>Log out</button>}
           {removable && <button type="button" onClick={onRemove} className={dangerButton}>Remove</button>}
         </div>

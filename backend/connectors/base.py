@@ -69,6 +69,9 @@ class AuthStep:
     # leaves the flow; this labels the button that stops it instead
     # (``abandon_flow(stop=True)``). None: nothing to stop.
     stop_label: Optional[str] = None
+    # The secondary button of a `fields` step ("Cancel" when None), e.g.
+    # "Skip" for an optional step after signing in
+    cancel_label: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -290,6 +293,12 @@ class Connector(ABC):
         """Pull anything new right away (e.g. after the user opens the app)."""
         return None
 
+    def account_actions(self) -> list[dict[str, Any]]:
+        """Extra things the user can do with this account in Settings ›
+        Connections, each an auth flow started with ``params``:
+        ``[{"id", "label", "params"}]``."""
+        return []
+
     def history_note(self) -> Optional[str]:
         """What part of a conversation's history Mingly holds, when that's
         less than everything (Signal: from linking; SMS / Gmail: a backfill
@@ -311,4 +320,5 @@ class Connector(ABC):
             "capabilities": sorted(c.value for c in self.capabilities),
             "configured": self.is_configured(),
             "status": self.status().to_dict(),
+            "actions": self.account_actions() if self.is_configured() else [],
         }

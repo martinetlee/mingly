@@ -35,6 +35,15 @@ export interface AuthStep {
    * is left; this labels the button that stops it (cancel with `stop`).
    */
   stop_label?: string | null
+  /** Secondary button of a `fields` step ("Cancel" when absent), e.g. "Skip" */
+  cancel_label?: string | null
+}
+
+/** Something more the user can do with an account (Settings › Connections): an auth flow started with `params` */
+export interface AccountAction {
+  id: string
+  label: string
+  params: Record<string, unknown>
 }
 
 /** One connector's describe() */
@@ -48,6 +57,8 @@ export interface Account {
   capabilities: string[]
   configured: boolean
   status: { state: ConnectorState; error: string | null }
+  /** Extra actions for this account (e.g. Telegram's API credentials, Signal's Desktop import) */
+  actions?: AccountAction[]
 }
 
 /** A channel's one-time setup before its first sign-in (Signal's signal-cli download) */

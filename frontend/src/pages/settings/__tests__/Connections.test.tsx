@@ -99,23 +99,32 @@ describe('Connections', () => {
   })
 })
 
-describe('Connections: Telegram credentials', () => {
-  it('"Change API credentials" runs the sign-in with reset_credentials; other channels have no such action', async () => {
+describe('Connections: account actions', () => {
+  const credentials = { id: 'change_credentials', label: 'Change API credentials', params: { reset_credentials: true } }
+  const desktopImport = { id: 'desktop_import', label: 'Import from Signal Desktop', params: { desktop_import: true } }
+
+  it('each account offers the actions its connector declares, as a flow with their params', async () => {
     vi.mocked(getAccounts).mockResolvedValue({
       accounts: [
-        account({ label: '@ann' }),
+        account({ label: '@ann', actions: [credentials] }),
         account({ account_key: 'gmail:2', account_id: 2, channel: 'gmail', display_name: 'Gmail', label: 'ann@gmail.com' }),
+        account({ account_key: 'signal:3', account_id: 3, channel: 'signal', display_name: 'Signal', label: '+1555', actions: [desktopImport] }),
       ],
       channels,
     })
     vi.mocked(beginAccountAuth).mockReturnValue(new Promise(() => {}))
     renderConnections()
     expect(await screen.findByText('@ann ·')).toBeTruthy()
-    const buttons = screen.getAllByRole('button', { name: 'Change API credentials' })
-    expect(buttons).toHaveLength(1)
-    fireEvent.click(buttons[0])
+    expect(screen.getAllByRole('button', { name: 'Change API credentials' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Change API credentials' }))
     expect(await screen.findByRole('dialog')).toBeTruthy()
     expect(beginAccountAuth).toHaveBeenCalledWith('telegram:default', { reset_credentials: true })
+    cleanup()
+
+    renderConnections()
+    fireEvent.click(await screen.findByRole('button', { name: 'Import from Signal Desktop' }))
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+    expect(beginAccountAuth).toHaveBeenCalledWith('signal:3', { desktop_import: true })
   })
 })
 

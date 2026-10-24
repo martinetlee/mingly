@@ -188,7 +188,7 @@ def test_describe_lists_sorted_capabilities():
     d = _Fake("a").describe()
     assert d == {
         "account_key": "a:default", "account_id": None, "channel": "a", "display_name": "Fake",
-        "capabilities": ["send"], "configured": True, "status": {"state": "ready", "error": None},
+        "capabilities": ["send"], "configured": True, "status": {"state": "ready", "error": None}, "actions": [],
     }
 
 

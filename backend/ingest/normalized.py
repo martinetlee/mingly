@@ -11,6 +11,8 @@ explicitly: ``attachments=[]``, ``participants=[]``, ``meta={}``, or
 ``NormalizedConversation.clear_peer``.
 """
 
+import json
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -72,3 +74,13 @@ class NormalizedConversation:
     is_archived: Optional[bool] = None
     labels: Optional[list[str]] = None
     last_message_at: Optional[datetime] = None
+
+
+def reaction_summary(by_reactor: dict) -> Optional[str]:
+    """``reactions_json`` for channels that track one reaction per reactor
+    (``{reactor: emoji}``, e.g. Signal, SMS tapbacks): ``[{emoji, count}]``,
+    most used first; None without reactions."""
+    if not by_reactor:
+        return None
+    counts = Counter(by_reactor.values())
+    return json.dumps([{"emoji": e, "count": n} for e, n in counts.most_common()], ensure_ascii=False)

@@ -82,6 +82,17 @@ describe('AuthFlow', () => {
     expect(beginAccountAuth).toHaveBeenCalledTimes(2)
   })
 
+  it('an optional fields step names its secondary button (Skip) and leaving through it closes the flow', async () => {
+    vi.mocked(beginAccountAuth).mockResolvedValue(step({
+      title: 'Signal linked', message: 'Import your earlier history?', submit_label: 'Import history', cancel_label: 'Skip',
+    }))
+    const onClose = vi.fn()
+    render(<AuthFlow accountKey="signal" onClose={onClose} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip' }))
+    expect(onClose).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
+  })
+
   it('qr: renders the payload as a QR code image', async () => {
     vi.mocked(beginAccountAuth).mockResolvedValue(step({
       kind: 'qr', title: 'Link Signal', qr_payload: 'sgnl://linkdevice?uuid=abc&pub_key=xyz',
