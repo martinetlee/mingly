@@ -188,6 +188,10 @@ class DMArchive:
         await ws_manager.broadcast({"type": "archive_progress", **self.get_status()})
 
     async def _set_state(self, state: str) -> None:
+        # Nothing to do while paused is "paused": the worker may reach its idle
+        # path after a pause() that landed past its pause check this step.
+        if state == "idle" and self.paused:
+            state = "paused"
         changed = state != self.state
         self.state = state
         if changed:

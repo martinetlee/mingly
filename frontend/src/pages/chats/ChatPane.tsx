@@ -538,7 +538,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
           No message history available — this group may have been migrated to a newer
           group or its history isn't accessible to this account.
         </div>
-      ) : empty && !msgs.syncFailed && (msgs.syncing || chat.last_synced_at == null) ? (
+      ) : empty && !msgs.syncFailed && msgs.syncing ? (  /* a history sync is running (server); a channel that can't fetch history (Signal) is just empty */
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-sm text-slate-500">
           <Loader2 size={18} className="animate-spin text-indigo-400" />
           Syncing message history — first-time sync can take a while…

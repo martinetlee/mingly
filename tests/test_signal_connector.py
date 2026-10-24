@@ -581,6 +581,40 @@ async def test_group_joined_after_start_is_listed_again_for_its_title(db, fake_c
 
 
 @pytest.mark.asyncio
+async def test_groups_are_listed_before_anyone_posts(db, fake_cli, events):
+    left, blocked = "bGVmdA==", "YmxvY2tlZA=="
+    groups = GROUPS + [
+        {"id": left, "name": "Old club", "isMember": False, "members": [{"uuid": ALICE}]},
+        {"id": blocked, "name": "Spam", "isBlocked": True, "members": [{"uuid": BOB}]},
+    ]
+    renamed = [{**GROUPS[0], "name": "Climbing crew 2026"}]
+    conn = await _running(db, contacts=[], groups=groups, groups_later=renamed, envelopes=[])
+    try:
+        async with AsyncSessionLocal() as s:
+            [conv] = (await s.execute(select(Conversation))).scalars().all()
+        # Only the group the user is in; it waits for messages
+        assert (conv.external_id, conv.kind, conv.title, conv.members_count) == (GROUP, "group", "Climbing crew", 3)
+        assert conv.last_message_at is None
+        assert {"type": "conversations_synced", "conversation_ids": [conv.id]} in events.events
+
+        # A message in it lands in the same conversation
+        await conn.handle_receive({"envelope": _env(1000, dataMessage={
+            "timestamp": 1000, "message": "who's in Saturday?", "groupInfo": {"groupId": GROUP, "type": "DELIVER"}})})
+        [msg] = await _messages(GROUP)
+        assert msg.conversation_id == conv.id
+
+        # A rename reaches the stored group on the next refresh, which creates nothing new
+        before = len([e for e in events.events if e["type"] == "conversations_synced"])
+        await conn.sync_now()
+        async with AsyncSessionLocal() as s:
+            [conv] = (await s.execute(select(Conversation))).scalars().all()
+        assert conv.title == "Climbing crew 2026"
+        assert len([e for e in events.events if e["type"] == "conversations_synced"]) == before
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.asyncio
 async def test_reaction_removal_and_redelivery_keep_counts(db, fake_cli, events):
     conn = await _running(db, contacts=[], groups=[], envelopes=[
         _env(1000, dataMessage={"timestamp": 1000, "message": "x"}),

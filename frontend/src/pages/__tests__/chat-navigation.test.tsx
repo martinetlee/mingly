@@ -419,6 +419,23 @@ describe('Chats: per-chat state and captured targets', () => {
     expect(compose()).not.toBeNull()
   })
 
+  it('an empty chat spins only while the server syncs it: a Signal group that never synced is just empty', async () => {
+    const group = makeConversation(555, 'Climbing crew', { channel: 'signal', kind: 'group', last_synced_at: null })
+    const fresh = makeConversation(556, 'New TG group', { last_synced_at: null })
+    windows[group.id] = []
+    windows[fresh.id] = []
+    getConversations.mockImplementation(async () => [group, fresh])
+    getMessageWindow.mockImplementation(async (conversationId: number) => ({
+      ...page([]), messages: windows[conversationId] ?? [], syncing: conversationId === fresh.id,
+    }))
+    renderChats(`/chats?conversationId=${group.id}`)
+    await waitFor(() => expect(screen.getByText('No messages yet')).toBeTruthy())
+    expect(screen.queryByText(/Syncing message history/)).toBeNull()
+    clickRow(fresh)
+    await waitFor(() => expect(screen.getByText(/Syncing message history/)).toBeTruthy())
+    getMessageWindow.mockImplementation(async (conversationId: number) => ({ ...page([]), messages: windows[conversationId] ?? [] }))
+  })
+
   it('Sync (a pull from the channel) is offered only with history_backfill, e.g. not for Signal', async () => {
     const signal = makeConversation(444, 'Signal pal', { channel: 'signal', kind: 'direct', capabilities: ['send', 'reply', 'react', 'media_send', 'read_receipts'] })
     windows[signal.id] = [msg(7, { conversation_id: signal.id, text: 'hey from signal' })]

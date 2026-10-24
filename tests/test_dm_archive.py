@@ -443,6 +443,19 @@ async def test_per_chat_error_is_recorded_and_others_continue(db, tg, arch):
     assert await stored_ids(1001) == all_ids(tg, 1001)
 
 
+@pytest.mark.asyncio
+async def test_a_pause_is_never_reported_as_idle(arch):
+    # The worker can reach its idle path after a pause() that landed past its
+    # pause check in the same step; the state must still say paused.
+    arch.state = "running"
+    arch.paused = True
+    await arch._set_state("idle")
+    assert arch.state == "paused"
+    arch.paused = False
+    await arch._set_state("idle")
+    assert arch.state == "idle"
+
+
 # ── API contract ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

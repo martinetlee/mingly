@@ -3,7 +3,9 @@
 Sign-in links Mingly as a secondary device of the user's phone
 (``signal-cli link`` → a ``sgnl://linkdevice`` QR code to scan in Signal →
 Settings → Linked devices). A linked device only receives messages sent
-after linking; there is no history backfill.
+after linking; there is no history backfill (signal-cli can't receive
+Signal's link-time history transfer). The groups the user is in are listed
+as conversations when the process comes up.
 
 At runtime one ``signal-cli -a <number> jsonRpc`` process per account
 streams envelopes, which ``envelopes.parse_envelope`` turns into events and
@@ -183,7 +185,7 @@ class SignalConnector(Connector):
         self._consumer: Optional[asyncio.Task] = None
         self._stopping = False
         self._contacts: dict[str, _Contact] = {}  # by ACI and by number
-        self._groups: dict[str, dict] = {}  # group id -> {"name", "members_count"}
+        self._groups: dict[str, dict] = {}  # group id -> {"name", "members_count", "joined"}
         self._groups_looked_up: set[str] = set()  # unknown group ids already re-listed for
 
     # -- state -----------------------------------------------------------------
@@ -386,8 +388,11 @@ class SignalConnector(Connector):
     # -- address book --------------------------------------------------------------
 
     async def _refresh_directory(self, rpc: JsonRpcProcess) -> None:
-        """Contacts and groups → identities (phone contact points link people
-        across channels) and the titles of stored conversations."""
+        """Contacts → identities (phone contact points link people across
+        channels); the groups the user is in → group conversations, listed
+        before anyone posts (like Telegram's dialogs). Direct conversations
+        start with their first message. Titles of stored conversations follow
+        the address book."""
         contacts = [c for c in (_contact_from(r) for r in (await rpc.call("listContacts") or [])
                                 if isinstance(r, dict)) if c]
         groups = await rpc.call("listGroups") or []
@@ -409,7 +414,19 @@ class SignalConnector(Connector):
                                Conversation.external_id.in_([k for k in (c.aci, c.number) if k]))
                         .values(title=c.name)
                     )
+            created: list[int] = []
             for gid, g in self._groups.items():
+                if g["joined"]:
+                    known = await crud.get_conversation_by_external(db, self.account_id, gid) is not None
+                    conv = await ingest_service.upsert_conversation(db, self.account_id, self.channel, NormalizedConversation(
+                        external_id=gid, kind="group", title=g["name"] or "Signal group",
+                        members_count=g["members_count"],
+                    ))
+                    if not known:
+                        await db.flush()
+                        created.append(conv.id)
+                    continue
+                # Left or blocked: never listed, but a stored one keeps its history
                 values = {k: v for k, v in (("title", g["name"]), ("members_count", g["members_count"])) if v}
                 if values:
                     await db.execute(
@@ -418,10 +435,16 @@ class SignalConnector(Connector):
                         .values(**values)
                     )
             await db.commit()
+        if created:
+            await ws_manager.broadcast({"type": "conversations_synced", "conversation_ids": created})
 
     def _set_groups(self, groups: list) -> None:
         self._groups = {
-            str(g["id"]): {"name": g.get("name") or None, "members_count": len(g.get("members") or []) or None}
+            str(g["id"]): {
+                "name": g.get("name") or None,
+                "members_count": len(g.get("members") or []) or None,
+                "joined": g.get("isMember", True) is not False and not g.get("isBlocked"),
+            }
             for g in groups if isinstance(g, dict) and g.get("id")
         }
 
