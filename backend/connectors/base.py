@@ -181,6 +181,10 @@ class Connector(ABC):
     # Several accounts of this channel can be connected (Gmail); the manager
     # then creates one connector per ``accounts`` row.
     multi_account: ClassVar[bool] = False
+    # Why a conversation may hold no earlier messages when the channel can't
+    # load them (Signal: history starts when the device is linked); shown on
+    # an empty conversation. None = nothing to explain.
+    history_note: ClassVar[Optional[str]] = None
 
     # Bumped by every stop request; a start that began before it spawns nothing.
     _stop_generation: int = 0

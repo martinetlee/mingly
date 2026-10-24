@@ -227,7 +227,8 @@ conversation id for the account.
   "is_deleted_account", "history_complete", "is_muted", "muted_until",
   "is_marked_unread", "unread_count", "last_synced_at", "last_activity_at",
   "last_message": { "text", "sender_name", "date" } | absent,
-  "capabilities": ["send", "react", …] }
+  "capabilities": ["send", "react", …],
+  "history_note": "Signal only shares messages …" | null }  // the connector's history_note
 
 // Message
 { "id", "conversation_id", "external_id", "seq",

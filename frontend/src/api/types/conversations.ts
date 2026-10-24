@@ -55,6 +55,8 @@ export interface Conversation {
   last_activity_at: string | null
   last_message?: LastMessagePreview
   capabilities: Capability[]
+  /** Why the conversation may hold no earlier messages (Signal: history starts at linking); null when nothing to explain */
+  history_note?: string | null
   /** Channel labels / folders (Gmail: Inbox, Sent, user labels…); empty elsewhere */
   labels?: string[]
 }

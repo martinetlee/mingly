@@ -139,9 +139,11 @@ def channel_of(conv: Conversation) -> Optional[str]:
     return conv.account.channel if conv.account is not None else None
 
 
-def conversation_out(conv: Conversation, *, capabilities: Iterable[str], with_last_message: bool = True) -> dict:
+def conversation_out(conv: Conversation, *, capabilities: Iterable[str], history_note: Optional[str] = None,
+                     with_last_message: bool = True) -> dict:
     """``capabilities`` are what the conversation's connector supports in it
-    (runtime state the caller resolves, e.g. ``api.views.conversation_json``)."""
+    and ``history_note`` why it may lack earlier messages (runtime state the
+    caller resolves, e.g. ``api.views.conversation_json``)."""
     peer = conv.peer_identity
     avatar = conv.avatar_path or (peer.avatar_path if peer is not None else None)
     title = conv.title
@@ -176,6 +178,7 @@ def conversation_out(conv: Conversation, *, capabilities: Iterable[str], with_la
         "last_synced_at": iso_utc(conv.last_synced_at),
         "last_activity_at": iso_utc(conv.last_activity_at),
         "capabilities": sorted(capabilities),
+        "history_note": history_note,
         "labels": parse_json(conv.labels_json) or [],
     }
     if with_last_message and (conv.last_message_text is not None or conv.last_message_at is not None):

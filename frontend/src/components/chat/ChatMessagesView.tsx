@@ -18,7 +18,7 @@ export default function ChatMessagesView({
   onReact,
 }: {
   msgs: ChatMessages
-  conversation: Pick<Conversation, 'kind' | 'channel' | 'capabilities'>
+  conversation: Pick<Conversation, 'kind' | 'channel' | 'capabilities' | 'history_note'>
   onReply?: (msg: Message) => void
   onReact?: (msg: Message, emoji: string | null) => void
 }) {
@@ -37,7 +37,12 @@ export default function ChatMessagesView({
     return (
       <div className="flex flex-1 flex-col items-center justify-center text-slate-500">
         <p className="text-sm">{msgs.syncing ? 'Syncing messages…' : 'No messages yet'}</p>
-        <p className="text-xs text-slate-600 mt-1">Send a message or sync to load the history</p>
+        {!msgs.syncing && (
+          <p className="mt-1 max-w-sm px-8 text-center text-xs text-slate-600">
+            {conversation.history_note
+              ?? (can(conversation, 'history_backfill') ? 'Send a message or sync to load the history' : 'Send a message to start the conversation')}
+          </p>
+        )}
       </div>
     )
   }

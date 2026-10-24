@@ -41,6 +41,8 @@ interface Props {
   loadingNewer?: boolean
   /** Rendered above the first message (load-older / history status) */
   header?: ReactNode
+  /** Why an empty conversation has no earlier messages (the channel's `history_note`) */
+  emptyNote?: string | null
   /** The window isn't at the newest message (show "Jump to latest") */
   hasNewer?: boolean
   onJumpToLatest?: () => void
@@ -160,7 +162,7 @@ const COMPONENTS = { Header: ListHeader, Footer: ListFooter }
 
 export default function MessageList({
   messages, multiParty, channel, conversationKind, highlightMessageId, onReply, onReact, onEdit, onDelete, onForward, onPin, onJumpToMessage,
-  onJumpToExternal, firstUnreadMessageId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header,
+  onJumpToExternal, firstUnreadMessageId, scrollIntent, onScrollNearTop, onScrollNearBottom, loadingOlder, loadingNewer, header, emptyNote,
   hasNewer, onJumpToLatest, flaggedSenderIds, onReportScam, onScamVerdict, onOpenProfile, onSendMessage, onMention, onRestrict,
 }: Props) {
   const isGroup = multiParty
@@ -328,7 +330,10 @@ export default function MessageList({
     return (
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3" data-testid="message-scroll">
         {header}
-        <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">No messages yet</div>
+        <div className="flex flex-1 flex-col items-center justify-center px-8 text-center text-slate-500">
+          <p className="text-sm">No messages yet</p>
+          {emptyNote && <p className="mt-1 max-w-sm text-xs text-slate-600">{emptyNote}</p>}
+        </div>
       </div>
     )
   }

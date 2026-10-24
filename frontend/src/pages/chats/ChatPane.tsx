@@ -553,6 +553,7 @@ function ChatPane({ chat, topic, selection, showInfo, onToggleInfo, showSearch, 
           scrollIntent={msgs.scrollIntent}
           firstUnreadMessageId={msgs.firstUnreadMessageId}
           header={history}
+          emptyNote={chat.history_note}
           loadingOlder={msgs.loadingOlder}
           loadingNewer={msgs.loadingNewer}
           hasNewer={msgs.hasNewer}

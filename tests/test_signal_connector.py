@@ -838,6 +838,9 @@ async def test_react_and_mark_read_through_the_api(api, fake_cli, events):
         assert r.status_code == 200 and r.json()["my_reaction"] is None
 
         direct_id, group_id = first.conversation_id, msgs[2].conversation_id
+        # Signal conversations say why earlier messages are missing
+        r = await api.get(f"/api/conversations/{group_id}")
+        assert r.json()["history_note"] == SignalConnector.history_note and "linked" in SignalConnector.history_note
         assert (await api.post(f"/api/conversations/{direct_id}/mark-read")).status_code == 200
         assert (await api.post(f"/api/conversations/{group_id}/mark-read")).status_code == 200
         # Nothing new since: no second receipt.

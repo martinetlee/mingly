@@ -157,6 +157,7 @@ class SignalConnector(Connector):
     channel = "signal"
     display_name = "Signal"
     multi_account = True
+    history_note = NO_HISTORY_NOTE
     capabilities = frozenset({
         Capability.SEND, Capability.REPLY, Capability.REACT, Capability.MEDIA_SEND, Capability.READ_RECEIPTS,
     })

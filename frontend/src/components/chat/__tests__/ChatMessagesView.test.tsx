@@ -19,6 +19,17 @@ const msgs = (extra: Record<string, unknown>) => ({ ...base, ...extra }) as unkn
 afterEach(() => cleanup())
 
 describe('ChatMessagesView (Contacts/Tracked pane)', () => {
+  it('an empty chat explains itself: the channel note, else what can load its history', () => {
+    const empty = msgs({ messages: [] })
+    const signal = makeConversation(2, 'Crew', { channel: 'signal', kind: 'group', capabilities: ['send'], history_note: 'Signal only shares messages from linking.' })
+    const { rerender } = render(<ChatMessagesView msgs={empty} conversation={signal} />)
+    expect(screen.getByText('Signal only shares messages from linking.')).toBeTruthy()
+    rerender(<ChatMessagesView msgs={empty} conversation={conv} />)  // Telegram: history_backfill
+    expect(screen.getByText('Send a message or sync to load the history')).toBeTruthy()
+    rerender(<ChatMessagesView msgs={empty} conversation={{ ...conv, capabilities: ['send'] }} />)
+    expect(screen.getByText('Send a message to start the conversation')).toBeTruthy()
+  })
+
   it('shows why a jump failed, with Retry and Dismiss, like the Chats pane', () => {
     const m = msgs({ jumpNotice: { reason: 'unavailable', target: { kind: 'message', messageId: 42 } } })
     render(<ChatMessagesView msgs={m} conversation={conv} />)
