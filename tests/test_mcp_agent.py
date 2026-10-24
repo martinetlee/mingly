@@ -1,4 +1,7 @@
-"""MCP agent workflow: DM listing, keyset paging, write gating, notes, reviews.
+"""MCP agent workflow: DM listing, keyset paging, write gating, notes,
+reviews, and what an agent learns about everything Mingly holds (history
+limits per channel, email participants, Mingly ids only, accounts, timeline,
+calendar, catch-up, briefings, boards, organizations, merge suggestions).
 
 Runs every tool over the real MCP HTTP endpoint against a temp DB, including
 a full "review everyone I've DMed" agent simulation that must read exactly
@@ -15,12 +18,21 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
+from backend import config
 from backend.api import mcp as mcp_module
 from backend.api.mcp_tools import archive as mcp_archive, common as mcp_common
 from backend.api.mcp_tools import conversations as mcp_conversations
 from backend.config import API_PORT
+from backend.connectors.gmail.connector import GmailConnector
+from backend.connectors.manager import manager
+from backend.connectors.roles import ForumTopics
+from backend.connectors.signal.connector import SignalConnector
+from backend.connectors.sms.connector import SmsConnector
 from backend.db import crud, database
-from backend.db.models import AgentReview, HistoryCoverage, Identity, Message, Person, PersonNote
+from backend.db.models import (
+    AgentReview, BriefingEntry, BriefingRun, CalendarAttendee, CalendarEvent, HistoryCoverage, Identity, Message,
+    MessageParticipant, Person, PersonMergeSuggestion, PersonNote, PersonPosition,
+)
 from tests import factories
 
 BASE_URL = f"http://127.0.0.1:{API_PORT}"
@@ -415,7 +427,7 @@ async def test_get_messages_desc_default_and_cursor_scope(agent, db):
     page = await agent.call("get_messages", conversation_id=S.ALICE, limit=5)
     assert [m["seq"] for m in page["messages"]] == [230, 229, 228, 227, 226]
     assert page["conversation"] == {
-        "conversation_id": S.ALICE, "title": "Alice", "kind": "direct", "channel": "telegram",
+        "conversation_id": S.ALICE, "title": "Alice", "kind": "direct", "channel": "telegram", "history_note": None,
     }
     nxt = await agent.call("get_messages", conversation_id=S.ALICE, limit=5, cursor=page["next_cursor"])
     assert nxt["messages"][0]["seq"] == 225
@@ -495,23 +507,26 @@ async def test_get_person_aggregates_identities_across_channels(agent, db, write
     assert sorted(i["channel"] for i in person["identities"]) == ["gmail", "telegram"]
     assert person["positions"][0]["organization"] == "Acme"
     assert person["organizations"][0]["name"] == "Acme"
-    assert person["notes"][0]["citations"] == [{"conversation_id": S.GROUP, "message_id": group_msg}]
+    assert person["person_notes"][0]["citations"] == [{"conversation_id": S.GROUP, "message_id": group_msg}]
     dms = {d["conversation_id"]: d for d in person["dms"]}
     assert set(dms) == {S.ALICE, dm_mail.id}
     assert dms[S.ALICE]["coverage"]["message_count"] == 230
     assert dms[dm_mail.id]["channel"] == "gmail"
     groups = {g["conversation_id"]: g for g in person["groups"]}
-    assert set(groups) == {S.GROUP, thread.id} and person["groups_total"] == 2
+    assert set(groups) == {S.GROUP} and person["groups_total"] == 1
     assert groups[S.GROUP] == {
         "conversation_id": S.GROUP, "title": "Builders", "kind": "group", "channel": "telegram",
         "messages_from_person": 3, "last_message_at": groups[S.GROUP]["last_message_at"],
     }
-    assert groups[thread.id]["channel"] == "gmail" and groups[thread.id]["messages_from_person"] == 1
+    # Email threads beyond her one-to-one ones are listed apart from groups
+    [mail_thread] = person["email_threads"]
+    assert (mail_thread["conversation_id"], mail_thread["channel"], mail_thread["messages_with_person"]) == (thread.id, "gmail", 1)
+    assert person["email_threads_total"] == 1
     err = await agent.call_error("get_person", person_id=424242)
     assert "not found" in err
 
     found = await agent.call("search_people", query="alic")
-    assert [p["id"] for p in found["people"]] == [alice] and found["total"] == 1
+    assert [p["person_id"] for p in found["people"]] == [alice] and found["total"] == 1
 
 
 @pytest.mark.asyncio
@@ -554,6 +569,10 @@ WRITE_CALLS = [
     ("set_person_fields", lambda S: {"person_id": S.people["ALICE"], "is_important": True}),
     ("add_position", lambda S: {"person_id": S.people["ALICE"], "organization": "Acme"}),
     ("tag_conversation", lambda S: {"conversation_id": S.ALICE, "tag_name": "vip"}),
+    ("untag_conversation", lambda S: {"conversation_id": S.ALICE, "tag_name": "vip"}),
+    ("update_position", lambda S: {"person_id": S.people["ALICE"], "position_id": 1, "title": "x"}),
+    ("move_conversation_stage", lambda S: {"workspace_id": 1, "board_id": 1, "conversation_id": S.ALICE}),
+    ("suggest_merge", lambda S: {"person_a_id": S.people["ALICE"], "person_b_id": S.people["BOB"], "reason": "x"}),
     ("mark_reviewed", lambda S: {"conversation_id": S.BOB, "through_message_id": 1}),
 ]
 
@@ -567,6 +586,7 @@ async def test_write_tools_refused_when_disabled(agent, db, name, args):
     assert "turned off" in err
     assert (await db.execute(select(PersonNote))).first() is None
     assert (await db.execute(select(AgentReview))).first() is None
+    assert (await db.execute(select(PersonMergeSuggestion))).first() is None
     assert (await db.execute(select(Person).where(Person.is_important == True))).first() is None  # noqa: E712
 
 
@@ -638,7 +658,7 @@ async def test_set_person_fields(agent, db, writes_on, _quiet_ws):
     carol = S.people["CAROL"]
     out = await agent.call("set_person_fields", person_id=carol, is_important=True,
                            relationship_status="nurturing", linkedin_url="linkedin.com/in/carol")
-    assert out["id"] == carol and out["name"] == "Carol"
+    assert out["person_id"] == carol and out["name"] == "Carol"
     assert out["is_important"] is True
     assert out["relationship_status"] == "nurturing" and out["relationship_status_manual"] is True
     assert out["linkedin_url"] == "https://linkedin.com/in/carol"
@@ -831,3 +851,393 @@ async def test_dms_on_unarchived_channels_count_complete_and_can_be_reviewed(db)
         unreviewed = (await mcp_conversations.tool_list_dms(db, {"filter": "unreviewed"}, {}))["dms"]
         assert [d["conversation_id"] for d in unreviewed] == [tg.id]
         assert (await mcp_archive.tool_get_archive_status(db, {}, {}))["dms"]["reviewed_up_to_date"] == 1
+
+
+# ── Everything Mingly holds: history notes, participants, ids, new tools ─────
+
+# Keys / values that must never reach an agent
+_FORBIDDEN_KEYS = {"avatar_url", "external_id", "from_id", "user_ids", "sender_peer", "inviter_id",
+                   "rfc822_message_id", "references", "in_reply_to", "label_ids"}
+
+
+def _forbidden(obj, path="$") -> list:
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in _FORBIDDEN_KEYS:
+                found.append(f"{path}.{k}")
+            found += _forbidden(v, f"{path}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found += _forbidden(v, f"{path}[{i}]")
+    return found
+
+
+class _Connectors:
+    """Register connectors for a test (the manager is process-global)."""
+
+    def __init__(self, *connectors):
+        self.patch = patch.object(manager, "_connectors", {c.account_key: c for c in connectors})
+
+    def __enter__(self):
+        self.patch.start()
+
+    def __exit__(self, *exc):
+        self.patch.stop()
+
+
+async def _other_channels(db, S):
+    """A Signal group, an SMS DM and a one-to-one Gmail thread with Alice
+    (her gmail identity on her person), each with a message."""
+    alice = S.people["ALICE"]
+    sig_bob = await factories.identity(db, "aci-bob", channel="signal", display_name="Bob S")
+    sig = await factories.conversation(db, "group-1", title="Climbing crew", kind="group", channel="signal")
+    sms_ident = await factories.identity(db, "+15551234567", channel="sms", display_name="Dana", phone="+15551234567")
+    sms = await factories.conversation(db, "chat-1", title="Dana", channel="sms", peer=sms_ident)
+    mail = await factories.identity(db, "alice@example.com", channel="gmail", display_name="Alice L")
+    mail.person_id = alice
+    await db.commit()
+    thread = await factories.conversation(db, "thread-1", title="Quarterly plan", kind="email_thread",
+                                          channel="gmail", peer=mail)
+    await crud.save_messages(db, [
+        _msg(sig.id, 1, sender=sig_bob, text="climbing saturday?"),
+        _msg(sms.id, 1, sender=sms_ident, text="running late"),
+        {**_msg(thread.id, 1, sender=mail, text="plan attached"), "subject": "Quarterly plan",
+         "meta_json": json.dumps({"rfc822_message_id": "<a@x>", "references": "<z@x>", "in_reply_to": "<z@x>",
+                                  "reply_to": "alice@example.com", "label_ids": ["INBOX"]})},
+    ])
+    mid = await _message_id(thread.id, 1)
+    me_mail = await factories.identity(db, "me@example.com", channel="gmail", display_name="Me", is_self=True)
+    cc = await factories.identity(db, "carol@example.com", channel="gmail", display_name="Carol")
+    db.add_all([
+        MessageParticipant(message_id=mid, identity_id=mail.id, role="from"),
+        MessageParticipant(message_id=mid, identity_id=me_mail.id, role="to"),
+        MessageParticipant(message_id=mid, identity_id=cc.id, role="cc"),
+    ])
+    await db.commit()
+    return sig, sms, thread
+
+
+def _connectors_for(sig, sms, thread):
+    gmail = GmailConnector(thread.account_id)
+    sms_c = SmsConnector()
+    sms_c.account_id = sms.account_id
+    return _Connectors(SignalConnector(sig.account_id), sms_c, gmail)
+
+
+# ── History: what each channel holds ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_every_channel_says_how_far_its_history_goes(agent, db):
+    S = await _seed(db)
+    sig, sms, thread = await _other_channels(db, S)
+    with _connectors_for(sig, sms, thread):
+        convs = {c["conversation_id"]: c for c in (await agent.call("list_conversations", sort_by="stable", limit=100))["conversations"]}
+        assert "linked" in convs[sig.id]["history_note"]
+        assert "days of Messages history" in convs[sms.id]["history_note"]
+        assert "days before this account was connected" in convs[thread.id]["history_note"]
+        assert convs[S.ALICE]["history_note"] is None  # Telegram: archived on demand
+        for cid in (sig.id, sms.id, thread.id):
+            assert convs[cid]["coverage"]["fetchable"] is False and convs[cid]["coverage"]["history_complete"] is True
+        assert convs[S.ALICE]["coverage"]["fetchable"] is True
+
+        fetched = await agent.call("fetch_history", conversation_id=sig.id)
+        assert fetched["history_complete"] is True and "linked" in fetched["history_note"]
+        assert "linked" in fetched["note"] and "complete history" not in fetched["note"]
+        page = await agent.call("get_messages", conversation_id=thread.id, order="asc")
+        assert "days before" in page["conversation"]["history_note"]
+
+    # Nothing tells an agent another channel's history is complete
+    init = await agent.rpc("tools/list")
+    texts = [t["description"] for t in init["result"]["tools"]]
+    status = await agent.call("get_archive_status")
+    for text in texts + [status["note"]]:
+        assert "store all the history" not in text and "complete history" not in text
+
+
+# ── People, notes, review queue ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_person_keeps_the_users_notes_and_lists_person_notes(agent, db, writes_on):
+    S = await _seed(db)
+    await _other_channels(db, S)
+    alice = S.people["ALICE"]
+    person_row = await db.get(Person, alice)
+    person_row.notes = "met at KBW, intro via Bob"
+    await db.commit()
+    await agent.call("add_person_note", person_id=alice, kind="context", title="Investor", body="angel")
+
+    person = await agent.call("get_person", person_id=alice)
+    assert person["notes"] == "met at KBW, intro via Bob"
+    assert [n["title"] for n in person["person_notes"]] == ["Investor"] and person["person_notes_count"] == 1
+    addresses = {i["channel"]: i["address"] for i in person["identities"]}
+    assert addresses == {"telegram": None, "gmail": "alice@example.com"}
+    assert _forbidden(person) == []
+
+    found = await agent.call("search_people", query="alice@example")
+    assert [p["person_id"] for p in found["people"]] == [alice]
+    assert _forbidden(found) == []
+    dm = next(d for d in (await agent.call("list_dms"))["dms"] if d["conversation_id"] == S.ALICE)
+    assert dm["person"]["has_notes"] is True and dm["person"]["person_notes_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_one_to_one_email_threads_are_dms_to_review(agent, db, writes_on):
+    S = await _seed(db)
+    sig, sms, thread = await _other_channels(db, S)
+    dms = {d["conversation_id"]: d for d in (await agent.call("list_dms", limit=100))["dms"]}
+    # The review counts cover the same DMs as the queue
+    assert (await agent.call("get_archive_status"))["dms"]["total_people"] == len(dms)
+    assert thread.id in dms and sms.id in dms and sig.id not in dms
+    assert dms[thread.id]["kind"] == "email_thread" and dms[thread.id]["person"]["person_id"] == S.people["ALICE"]
+    unreviewed = {d["conversation_id"] for d in (await agent.call("list_dms", filter="unreviewed", limit=100))["dms"]}
+    assert thread.id in unreviewed
+    await agent.call("mark_reviewed", conversation_id=thread.id, through_message_id=await _message_id(thread.id, 1))
+    unreviewed = {d["conversation_id"] for d in (await agent.call("list_dms", filter="unreviewed", limit=100))["dms"]}
+    assert thread.id not in unreviewed
+
+
+# ── Messages: participants, translated meta, search context ──────────────────
+
+@pytest.mark.asyncio
+async def test_messages_carry_participants_and_mingly_ids_only(agent, db):
+    S = await _seed(db)
+    sig, sms, thread = await _other_channels(db, S)
+    alice, bob = S.idents["ALICE"], S.idents["BOB"]
+    meta_rows = [
+        {**_msg(S.GROUP, 10, sender=alice, text="fwd"), "meta_json": json.dumps(
+            {"forward": {"from_id": 1002, "from_name": "Bob", "date": None, "channel_post": None, "post_author": None}})},
+        {**_msg(S.GROUP, 11, text="Alice added Bob", kind="service"), "meta_json": json.dumps(
+            {"service": {"action": "add_user", "user_ids": [1001, 4242424], "inviter_id": 1002}})},
+        {**_msg(S.GROUP, 12, text="as the group"), "meta_json": json.dumps({"sender_peer": -100500})},
+        {**_msg(S.GROUP, 13, sender=alice, text="contact"), "meta_json": json.dumps(
+            {"contact": {"first_name": "Bob", "phone": "1", "user_id": 1002}})},
+        {**_msg(S.GROUP, 14, text="upgraded", kind="service"), "meta_json": json.dumps(
+            {"service": {"action": "migrate_to", "channel_id": -100999}})},
+    ]
+    await crud.save_messages(db, meta_rows)
+    page = await agent.call("get_messages", conversation_id=S.GROUP, order="asc", limit=100)
+    by_seq = {m["seq"]: m for m in page["messages"]}
+    assert by_seq[10]["meta"]["forward"]["from_person_id"] == bob.person_id
+    assert by_seq[11]["meta"]["service"]["person_ids"] == [alice.person_id]  # the unknown user is dropped
+    assert by_seq[11]["meta"]["service"]["inviter_person_id"] == bob.person_id
+    assert by_seq[12]["meta"] == {"sent_as_conversation_id": S.GROUP}
+    assert by_seq[13]["meta"]["contact"]["contact_person_id"] == bob.person_id
+    assert by_seq[14]["meta"]["service"] == {"action": "migrate_to"}  # the new group isn't stored
+    assert _forbidden(page) == []
+
+    mail = (await agent.call("get_messages", conversation_id=thread.id))["messages"][0]
+    assert mail["subject"] == "Quarterly plan"
+    assert [(p["role"], p["address"]) for p in mail["participants"]] == [
+        ("from", "alice@example.com"), ("to", "me@example.com"), ("cc", "carol@example.com"),
+    ]
+    assert mail["meta"] == {"reply_to": "alice@example.com"}
+    assert _forbidden(mail) == []
+
+    hits = (await agent.call("search_messages", query="climbing"))["messages"]
+    assert [(h["conversation_kind"], h["channel"], h["conversation_title"]) for h in hits] == [
+        ("group", "signal", "Climbing crew")]
+    assert (await agent.call("search_messages", query="plan", kind="email_thread"))["total"] == 1
+    assert (await agent.call("search_messages", query="hello", sender_person_id=bob.person_id))["total"] == 0
+    assert (await agent.call("search_messages", query="hello 1",
+                             since=(T0 + timedelta(minutes=100)).isoformat()))["total"] > 0
+    assert (await agent.call("search_messages", query="hello", until="2020-01-01"))["total"] == 0
+    err = await agent.call_error("search_messages", query="x", since="last week")
+    assert "ISO date" in err
+
+
+@pytest.mark.asyncio
+async def test_no_tool_output_leaks_urls_or_channel_ids(agent, db):
+    S = await _seed(db)
+    await _other_channels(db, S)
+    outputs = [
+        await agent.call("list_dms", limit=100),
+        await agent.call("list_conversations", limit=100),
+        await agent.call("get_person", person_id=S.people["ALICE"]),
+        await agent.call("search_people"),
+        await agent.call("get_messages", conversation_id=S.ALICE, limit=100),
+        await agent.call("search_messages", query="hello"),
+        await agent.call("get_person_timeline", person_id=S.people["ALICE"]),
+    ]
+    assert [p for out in outputs for p in _forbidden(out)] == []
+
+
+# ── Setup & derived views ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_accounts_shows_channels_notes_and_user_orgs(agent, db):
+    S = await _seed(db)
+    sig, sms, thread = await _other_channels(db, S)
+    (config.DATA_DIR / "signal" / "data").mkdir(parents=True, exist_ok=True)
+    from backend.user_orgs import set_user_orgs
+    await set_user_orgs(db, ["Acme"])
+    with _connectors_for(sig, sms, thread):
+        out = await agent.call("list_accounts")
+    by_channel = {a["channel"]: a for a in out["accounts"]}
+    assert "linked" in by_channel["signal"]["history_note"]
+    assert by_channel["signal"]["account_id"] == sig.account_id and by_channel["signal"]["status"]["state"]
+    assert [o["name"] for o in out["user_organizations"]] == ["Acme"]
+
+
+@pytest.mark.asyncio
+async def test_person_timeline_spans_channels_and_meetings(agent, db):
+    S = await _seed(db)
+    sig, sms, thread = await _other_channels(db, S)
+    alice = S.people["ALICE"]
+    ev = CalendarEvent(account_id=thread.account_id, external_id="ev1", title="Coffee", start_at=T0 + timedelta(hours=3),
+                       end_at=T0 + timedelta(hours=4))
+    db.add(ev)
+    await db.commit()
+    mail_ident = (await db.execute(select(Identity).where(Identity.external_id == "alice@example.com"))).scalar_one()
+    db.add(CalendarAttendee(event_id=ev.id, identity_id=mail_ident.id, response_status="accepted"))
+    await db.commit()
+
+    items, cursor = [], None
+    while True:
+        page = await agent.call("get_person_timeline", person_id=alice, limit=100, **({"cursor": cursor} if cursor else {}))
+        items += page["items"]
+        cursor = page["next_cursor"]
+        if not cursor:
+            break
+    kinds = {(i["kind"], (i.get("conversation") or {}).get("channel")) for i in items}
+    assert ("meeting", None) in kinds
+    assert ("message", "telegram") in kinds and ("message", "gmail") in kinds
+    group_posts = [i for i in items if i["kind"] == "message" and i["conversation"]["conversation_id"] == S.GROUP]
+    assert len(group_posts) == 3
+    assert len([i for i in items if i["kind"] == "message"]) == 230 + 3 + 1
+
+    events = (await agent.call("list_calendar_events", start=T0.isoformat(), end=(T0 + timedelta(days=1)).isoformat(),
+                               person_id=alice))["events"]
+    assert [e["title"] for e in events] == ["Coffee"] and events[0]["attendees"][0]["person_id"] == alice
+    none = await agent.call("list_calendar_events", start=T0.isoformat(), end=(T0 + timedelta(days=1)).isoformat(),
+                            person_id=S.people["BOB"])
+    assert none["events"] == []
+    assert "after start" in await agent.call_error("list_calendar_events", start=T0.isoformat(), end=T0.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_catch_up_and_briefings(agent, db):
+    S = await _seed(db)
+    conv = await crud.get_conversation(db, S.ALICE)
+    conv.is_tracked = True
+    run = BriefingRun(generated_at=T0, days=1, status="done", finished_at=T0)
+    db.add(run)
+    await db.commit()
+    group_msg = await _message_id(S.GROUP, 1)
+    db.add(BriefingEntry(run_id=run.id, conversation_id=S.GROUP, conversation_title="Builders", category="tracked",
+                         summary="Builders said gm", sources_json=json.dumps([{"conversation_id": S.GROUP, "message_id": group_msg}])))
+    await db.commit()
+
+    catch_up = await agent.call("get_catch_up")
+    waiting = [e["conversation"]["conversation_id"] for e in catch_up["needs_reply"]]
+    assert S.ALICE in waiting
+    assert _forbidden(catch_up) == []
+
+    assert [b["briefing_id"] for b in (await agent.call("list_briefings"))["briefings"]] == [run.id]
+    latest = (await agent.call("get_briefing"))["briefing"]
+    assert latest["briefing_id"] == run.id
+    assert latest["entries"][0]["sources"] == [{"conversation_id": S.GROUP, "message_id": group_msg}]
+    assert "not found" in await agent.call_error("get_briefing", briefing_id=999)
+
+
+@pytest.mark.asyncio
+async def test_workspace_board_read_and_move(agent, db, writes_on, _quiet_ws):
+    S = await _seed(db)
+    tag, _ = await crud.find_or_create_tag(db, "Deals")
+    await crud.add_tag_to_conversation(db, S.ALICE, tag.id)
+    ws = await crud.create_workspace(db, name="Pipeline", emoji=None, color="indigo", tag_ids=[tag.id], view_mode="kanban")
+    board_id = (await crud.get_workspace_boards(db, ws.id))[0][0].id
+    for name in ("Contacted", "Negotiating"):
+        await crud.add_board_column(db, ws.id, board_id, name, None)
+
+    listed = (await agent.call("list_workspaces"))["workspaces"]
+    assert [(w["workspace_id"], w["name"], w["member_count"]) for w in listed] == [(ws.id, "Pipeline", 1)]
+    board = await agent.call("get_workspace_board", workspace_id=ws.id)
+    assert [s["stage"] for s in board["stages"]] == ["Contacted", "Negotiating"]
+
+    moved = await agent.call("move_conversation_stage", workspace_id=ws.id, board_id=board_id,
+                             conversation_id=S.ALICE, stage="  negotiating ")
+    assert moved["stage"] == "Negotiating"
+    board = await agent.call("get_workspace_board", workspace_id=ws.id, board_id=board_id)
+    stages = {s["stage"]: [c["conversation_id"] for c in s["conversations"]] for s in board["stages"]}
+    assert stages == {"Contacted": [], "Negotiating": [S.ALICE]}
+    assert {"type": "conversations_synced", "conversation_ids": [S.ALICE]} in _quiet_ws
+    err = await agent.call_error("move_conversation_stage", workspace_id=ws.id, board_id=board_id,
+                                 conversation_id=S.ALICE, stage="Won")
+    assert "No stage named" in err and "Negotiating" in err
+    # A stage tag can't be removed as a plain tag
+    assert "move_conversation_stage" in await agent.call_error("untag_conversation", conversation_id=S.ALICE,
+                                                              tag_name="Negotiating")
+    await agent.call("move_conversation_stage", workspace_id=ws.id, board_id=board_id, conversation_id=S.ALICE)
+    board = await agent.call("get_workspace_board", workspace_id=ws.id, board_id=board_id)
+    assert all(s["conversations"] == [] for s in board["stages"])
+
+
+@pytest.mark.asyncio
+async def test_untag_positions_organizations_and_merge_suggestions(agent, db, writes_on):
+    S = await _seed(db)
+    alice, bob = S.people["ALICE"], S.people["BOB"]
+    await agent.call("tag_conversation", conversation_id=S.ALICE, tag_name="vip")
+    out = await agent.call("untag_conversation", conversation_id=S.ALICE, tag_name="VIP")
+    assert out["removed"] is True
+    assert (await agent.call("untag_conversation", conversation_id=S.ALICE, tag_name="vip"))["removed"] is False
+    assert "No tag named" in await agent.call_error("untag_conversation", conversation_id=S.ALICE, tag_name="nope")
+
+    pos = await agent.call("add_position", person_id=alice, organization="Acme", title="CTO")
+    org_id = pos["organization_id"]
+    ended = await agent.call("update_position", person_id=alice, position_id=pos["id"], is_active=False,
+                             ended_at="2026-06-01")
+    assert ended["is_active"] is False and ended["ended_at"].startswith("2026-06-01")
+    assert "is not one of" in await agent.call_error("update_position", person_id=bob, position_id=pos["id"], title="x")
+    org = await agent.call("get_organization", organization_id=org_id)
+    assert org["members"] == [] and [m["person_id"] for m in org["former_members"]] == [alice]
+    assert "not found" in await agent.call_error("get_organization", organization_id=99999)
+
+    made = await agent.call("suggest_merge", person_a_id=alice, person_b_id=bob, reason="same phone")
+    assert made["created"] is True
+    again = await agent.call("suggest_merge", person_a_id=bob, person_b_id=alice, reason="again")
+    assert again["created"] is False and again["suggestion_id"] == made["suggestion_id"]
+    listed = (await agent.call("list_merge_suggestions", person_id=bob))["suggestions"]
+    assert [(s["person_a"]["person_id"], s["person_b"]["person_id"]) for s in listed] == [(alice, bob)]
+    assert "agent: same phone" in listed[0]["reason"]
+    assert "same person" in await agent.call_error("suggest_merge", person_a_id=alice, person_b_id=alice, reason="x")
+    assert (await db.execute(select(PersonMergeSuggestion))).scalars().all()[0].status == "pending"
+    assert (await db.execute(select(PersonPosition))).scalars().all()[0].is_active is False
+
+
+class _FakeForum(ForumTopics):
+    channel = "telegram"
+    account_id = None
+    multi_account = False
+    account_key = "telegram"
+
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    async def list_topics(self, conversation):
+        if self.fail:
+            raise ConnectionError("offline")
+        return [{"id": 1, "title": "General", "date": None}, {"id": 7, "title": "Launch", "date": None,
+                                                                "is_closed": True}]
+
+    async def create_topic(self, conversation, title):
+        return None
+
+    async def set_topic_closed(self, conversation, topic_id, closed):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_forum_topics(agent, db):
+    S = await _seed(db)
+    forum = await factories.conversation(db, -100777, title="DAO", kind="group", is_forum=True)
+    await crud.save_messages(db, [{**_msg(forum.id, 1, text="hi"), "topic_id": 7}])
+    with _Connectors(_FakeForum()):
+        out = await agent.call("list_topics", conversation_id=forum.id)
+    assert out["source"] == "channel" and [(t["topic_id"], t["title"]) for t in out["topics"]] == [(1, "General"), (7, "Launch")]
+    with _Connectors(_FakeForum(fail=True)):
+        out = await agent.call("list_topics", conversation_id=forum.id)
+    assert out["source"] == "stored_messages" and [t["topic_id"] for t in out["topics"]] == [7]
+    assert "not a forum" in await agent.call_error("list_topics", conversation_id=S.GROUP)
+    conv = (await agent.call("get_conversation", conversation_id=forum.id))
+    assert conv["is_forum"] is True

@@ -330,6 +330,12 @@ class SmsConnector(Connector):
     def status(self) -> ConnectorStatus:
         return ConnectorStatus(self._state, self._error)
 
+    def history_note(self) -> Optional[str]:
+        return (
+            f"Mingly imported the last {backfill_days()} days of Messages history from this Mac when it "
+            "connected, and every message since; older messages stay in Messages."
+        )
+
     def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:
         """The account imports its history from chat.db; a conversation has
         no older history to page in (HISTORY_BACKFILL is the account's)."""

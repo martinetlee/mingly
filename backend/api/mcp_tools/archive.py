@@ -19,6 +19,7 @@ from backend.api.mcp_tools.common import (
     ToolError,
     with_state,
 )
+from backend.connectors.manager import manager
 from backend.db import crud
 from backend.db.models import Conversation
 from backend.serializers import channel_of
@@ -51,8 +52,10 @@ async def tool_get_archive_status(db: AsyncSession, args: dict, ctx: dict) -> di
             "unreviewed": people - up_to_date,
         },
         "note": ("" if connected else TELEGRAM_OFFLINE_NOTE + " ") + (
-            "'archive' is the Telegram DM archive; 'dms' covers DMs on every channel, and only Telegram "
-            "DMs can be incomplete (other channels store all the history there is). "
+            "'archive' is the Telegram DM archive; 'dms' covers DMs on every channel. Only Telegram history "
+            "can be fetched, so only Telegram DMs can be incomplete; other channels' DMs hold everything "
+            "Mingly can get, which may not reach back to the start (each conversation's history_note says "
+            "how far: Signal from when Mingly was linked, SMS and Gmail a backfill window). "
             "A DM counts as reviewed only when its history is complete and it was "
             "marked reviewed through its newest stored message. Use list_dms(filter='incomplete') "
             "and fetch_history to close gaps, list_dms(filter='unreviewed') for the work queue."
@@ -64,15 +67,18 @@ async def tool_fetch_history(db: AsyncSession, args: dict, ctx: dict) -> dict:
     conv = await require_visible_conversation(db, args.get("conversation_id"))
     conversation_id = conv.id
     if channel_of(conv) not in ARCHIVED_CHANNELS:
-        # Nothing to archive: the stored history is all there is.
+        # Nothing to fetch: what's stored is all Mingly can get.
         st = (await conversation_states(db, [conversation_id])).get(conversation_id, {})
+        history_note = manager.history_note_for(conv)
         return {
             "conversation_id": conversation_id,
             "history_complete": True,
             "coverage": st.get("coverage") or {},
+            "history_note": history_note,
             "note": (
-                f"{channel_of(conv)} history isn't fetched on demand: what Mingly stores is the complete "
-                "history. Read it with get_messages(order='asc')."
+                f"{channel_of(conv)} history isn't fetched on demand: what Mingly stores is all it can get"
+                + (f" ({history_note})" if history_note else "")
+                + ". Read it with get_messages(order='asc')."
             ),
         }
     try:

@@ -14,6 +14,7 @@ from backend.db.models import Account, Conversation, ConversationTag, HistoryCov
 __all__ = [
     "ONE_TO_ONE_KINDS",
     "one_to_one_filter",
+    "label_filter",
     "visible_filter",
     "list_conversations",
     "conversation_labels",
@@ -97,7 +98,7 @@ async def list_conversations(
     if archived is not None:
         query = query.where(Conversation.is_archived == archived)
     if label is not None:
-        query = query.where(_has_label(label))
+        query = query.where(label_filter(label))
     if kind is not None:
         query = query.where(Conversation.kind == kind)
     if exclude_kind is not None:
@@ -125,7 +126,8 @@ async def list_conversations(
     return list((await db.execute(query.limit(limit).offset(offset))).scalars().all())
 
 
-def _has_label(label: str):
+def label_filter(label: str):
+    """Conversations carrying the channel label ``label`` (Gmail)."""
     return text(
         "EXISTS (SELECT 1 FROM json_each(conversations.labels_json) WHERE json_each.value = :label)"
     ).bindparams(label=label)

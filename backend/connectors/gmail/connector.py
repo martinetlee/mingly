@@ -136,6 +136,12 @@ class GmailConnector(Connector):
     def status(self) -> ConnectorStatus:
         return ConnectorStatus(self._state, self._error)
 
+    def history_note(self) -> Optional[str]:
+        return (
+            f"Mingly holds mail from the {backfill_days()} days before this account was connected (at most "
+            f"{MAX_BACKFILL_THREADS} threads) and everything since; older mail stays in Gmail."
+        )
+
     def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:
         """A thread is always synced whole, so there is no older history to
         page in (HISTORY_BACKFILL is the account's mailbox backfill)."""

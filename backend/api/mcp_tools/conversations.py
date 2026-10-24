@@ -10,25 +10,29 @@ from backend.api.mcp_tools.common import (
     clamp,
     COMPLETE,
     conversation_states,
+    date_arg,
     decode_cursor,
     direct_filter,
     encode_cursor,
     EPOCH,
     incomplete_note,
     mcp_conversation,
-    mcp_msg,
+    mcp_messages,
     order_by,
     person_summaries,
     require_visible_conversation,
     review_up_to_date,
-    search_hit,
+    search_hits,
     tag_dict,
     ToolError,
     visible,
     with_state,
 )
+from backend.api.conversations import stored_topic_list
+from backend.api.lookups import connector_for
+from backend.connectors.roles import ForumTopics
 from backend.db import crud
-from backend.db.models import Conversation, ConversationTag, Message
+from backend.db.models import Conversation, ConversationTag, Identity, Message
 from backend.serializers import channel_of
 
 
@@ -117,9 +121,10 @@ async def tool_list_conversations(db: AsyncSession, args: dict, ctx: dict) -> di
     kind = args.get("kind") or "any"
     channel = args.get("channel") or None
     tag_id = args.get("tag_id")
+    label = args.get("label") or None
     include_archived = args.get("include_archived", True) is not False
     limit = clamp(args.get("limit"), 50)
-    scope = {"s": sort_by, "k": kind, "ch": channel, "g": tag_id, "a": include_archived}
+    scope = {"s": sort_by, "k": kind, "ch": channel, "g": tag_id, "a": include_archived, "l": label}
     key = decode_cursor(args.get("cursor"), "conversations", scope)
 
     cols = _sort_cols(sort_by)
@@ -134,6 +139,8 @@ async def tool_list_conversations(db: AsyncSession, args: dict, ctx: dict) -> di
         q = q.where(Conversation.id.in_(
             select(ConversationTag.conversation_id).where(ConversationTag.tag_id == tag_id)
         ))
+    if label is not None:
+        q = q.where(crud.label_filter(label))
     if key is not None:
         q = q.where(after(cols, key))
     convs = list((await db.execute(q.order_by(*order_by(cols)).limit(limit + 1))).scalars().all())
@@ -211,12 +218,13 @@ async def tool_get_messages(db: AsyncSession, args: dict, ctx: dict) -> dict:
     complete = bool(coverage.get("history_complete"))
 
     last = rows[-1][0] if rows else None
+    header = mcp_conversation(conv, with_last_message=False)
     result = {
         "conversation": {
-            "conversation_id": conv.id, "title": conv.title, "kind": conv.kind, "channel": channel_of(conv),
+            k: header.get(k) for k in ("conversation_id", "title", "kind", "channel", "history_note")
         },
         "order": order,
-        "messages": [mcp_msg(row) for row in rows],
+        "messages": await mcp_messages(db, rows),
         "next_cursor": encode_cursor("msgs", [last.date, last.seq, last.id], scope) if more and last else None,
         "history_complete": complete,
         "coverage": coverage,
@@ -242,10 +250,14 @@ async def tool_search_messages(db: AsyncSession, args: dict, ctx: dict) -> dict:
         raise ToolError("query is required")
     limit = clamp(args.get("limit"), 30)
     channel = args.get("channel") or None
+    kind = args.get("kind") or "any"
+    sender = args.get("sender_person_id")
+    since, until = date_arg(args, "since"), date_arg(args, "until")
     conversation_id = None
     if args.get("conversation_id") is not None:
         conversation_id = (await require_visible_conversation(db, args.get("conversation_id"))).id
-    scope = {"q": query, "c": conversation_id, "ch": channel}
+    scope = {"q": query, "c": conversation_id, "ch": channel, "k": kind, "p": sender,
+             "s": args.get("since"), "u": args.get("until")}
     key = decode_cursor(args.get("cursor"), "search", scope)
 
     match = [
@@ -255,6 +267,14 @@ async def tool_search_messages(db: AsyncSession, args: dict, ctx: dict) -> dict:
     ]
     if conversation_id is not None:
         match.append(Message.conversation_id == conversation_id)
+    if kind != "any":
+        match.append(Conversation.kind == kind)
+    if sender is not None:
+        match.append(Message.sender_identity_id.in_(select(Identity.id).where(Identity.person_id == sender)))
+    if since is not None:
+        match.append(Message.date >= since)
+    if until is not None:
+        match.append(Message.date < until)
     joined = select(Message, Conversation).join(Conversation, Message.conversation_id == Conversation.id)
     total = (await db.execute(
         select(func.count()).select_from(Message)
@@ -269,14 +289,14 @@ async def tool_search_messages(db: AsyncSession, args: dict, ctx: dict) -> dict:
     rows = rows[:limit]
     last = rows[-1][0] if rows else None
     return {
-        "messages": [search_hit(m, conv) for m, conv in rows],
+        "messages": await search_hits(db, rows),
         "total": total,
         "next_cursor": encode_cursor("search", [last.date, last.id], scope) if more and last else None,
     }
 
 
 async def tool_list_tags(db: AsyncSession, args: dict, ctx: dict) -> dict:
-    rows = await crud.get_all_tags_with_counts(db)
+    rows = await crud.get_all_tags_with_counts(db, inbox_only=False)
     return {"tags": [tag_dict(t, count) for t, count in rows]}
 
 
@@ -289,3 +309,33 @@ async def tool_get_conversations_by_tag(db: AsyncSession, args: dict, ctx: dict)
     return {"conversations": [
         mcp_conversation(c) for c in convs if visible(c) and (channel is None or channel_of(c) == channel)
     ]}
+
+
+async def tool_list_topics(db: AsyncSession, args: dict, ctx: dict) -> dict:
+    conv = await require_visible_conversation(db, args.get("conversation_id"))
+    if not conv.is_forum:
+        raise ToolError(f"Conversation {conv.id} is not a forum (no topics); its messages have no topic_id")
+    connector = connector_for(conv)
+    source = "channel"
+    topics = None
+    if isinstance(connector, ForumTopics):
+        try:
+            topics = await connector.list_topics(conv)
+        except Exception:  # offline, or the channel refused: fall back to stored messages
+            topics = None
+    if topics is None:
+        source = "stored_messages"
+        topics = await stored_topic_list(db, conv.id)
+    return {
+        "conversation_id": conv.id,
+        "topics": [
+            {"topic_id": t["id"], "title": t["title"], "is_closed": t.get("is_closed", False),
+             "is_pinned": t.get("is_pinned", False), "created_at": t.get("date")}
+            for t in topics
+        ],
+        "source": source,
+        "note": (
+            "Messages carry topic_id (1 = General). Titles come from the channel; with source "
+            "'stored_messages' the channel couldn't be asked and titles are placeholders."
+        ),
+    }

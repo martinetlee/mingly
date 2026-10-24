@@ -7,7 +7,7 @@ identity belongs to them, across all channels (``_direct_conversations``).
 from datetime import datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import desc, exists, func, or_, select, update
+from sqlalchemy import and_, desc, exists, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -308,6 +308,8 @@ async def list_people(
                     contains_ci(Identity.display_name, term),
                     contains_ci(Identity.username, term),
                     contains_ci(Identity.phone, term),
+                    # Email / SMS handles are addresses (Telegram / Signal ids are opaque)
+                    and_(Identity.channel.in_(("gmail", "sms")), contains_ci(Identity.external_id, term)),
                 ),
             ).correlate(Person)),
         ))

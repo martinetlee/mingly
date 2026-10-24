@@ -98,7 +98,7 @@ class ConnectorManager:
         """The serving connector's ``history_note`` (None without one)."""
         account = conversation.account
         connector = self.for_account(account.channel if account is not None else None, conversation.account_id)
-        return connector.history_note if connector is not None else None
+        return connector.history_note() if connector is not None else None
 
     async def load_accounts(self) -> None:
         """Create connectors for stored accounts of multi-account channels,

@@ -12,9 +12,10 @@ Security model (see also backend/api/settings.py MCP section):
   or the feature is disabled the endpoint answers a bare 404.
 - Host/Origin validation against loopback to block DNS-rebinding.
 - Read tools query the local DB (fetch_history also asks the archive to pull a
-  conversation's history from Telegram). Write tools (notes, person fields, tags,
-  review marks) only run while the user enables them (pref
-  mcp_write_enabled, default off); nothing ever sends messages.
+  conversation's history from Telegram; list_topics asks the channel). Write
+  tools (notes, person fields, positions, tags, board stages, merge
+  suggestions, review marks) only run while the user enables them (pref
+  mcp_write_enabled, default off); nothing ever sends messages or merges people.
 """
 import json
 import logging
@@ -43,42 +44,66 @@ LATEST_PROTOCOL_VERSION = "2025-06-18"
 
 SERVER_INFO = {"name": "mingly", "version": "1.0"}
 KNOWN_LIMITS = (
-    "Known limits: a DM whose history was deleted for both sides, or whose dialog was "
-    "deleted, no longer exists on Telegram and cannot be recovered; secret chats are not "
-    "available through the API; messages the other party deleted are gone; bots are "
-    "excluded from list_dms unless include_bots=true; Saved Messages is not a DM."
+    "Known limits. Telegram: a DM whose history was deleted for both sides, or whose dialog was deleted, "
+    "can't be recovered; secret chats aren't available through the API; messages the other party "
+    "deleted are gone. Signal: nothing from before Mingly was linked to the phone. SMS / iMessage: only "
+    "what Mingly imported from this Mac (a backfill window, then everything new); read-only. Gmail: mail "
+    "from a backfill window before the account was connected, then everything new. Deleted messages "
+    "disappear without a trace on every channel. Bots are excluded from list_dms unless "
+    "include_bots=true; notes-to-self (Saved Messages, Note to Self) is not a DM."
 )
 
 REVIEW_PROCEDURE = (
-    "1. get_archive_status. If telegram_connected is false, stop and tell the user to open and "
-    "unlock Mingly (archiving resumes automatically; stored messages stay readable, but no "
-    "review can be completed for DMs whose history is incomplete). If DMs are still archiving, "
-    "wait (or call fetch_history on the DMs you need) — list_dms(filter='incomplete') shows which "
-    "histories are not complete.\n"
-    "2. list_dms(filter='unreviewed'), following next_cursor until it is null.\n"
-    "3. For each DM: if history_complete is false, fetch_history(conversation_id) until it is (if it "
-    "reports telegram_connected: false, stop retrying and tell the user). Then read "
+    "1. get_archive_status. Telegram DMs may still be archiving: if telegram_connected is false, tell the "
+    "user to open and unlock Mingly (stored messages stay readable, but Telegram DMs with incomplete "
+    "history can't be reviewed until archiving finishes); list_dms(filter='incomplete') shows which. "
+    "DMs on other channels are always ready.\n"
+    "2. list_dms(filter='unreviewed'), following next_cursor until it is null. DMs are one-to-one "
+    "conversations on every channel (chats, and email threads with a single counterpart).\n"
+    "3. For each DM: if history_complete is false (Telegram only), fetch_history(conversation_id) until it "
+    "is (if it reports telegram_connected: false, stop retrying and tell the user). Then read "
     "get_messages(conversation_id, order='asc') from the start (or after_message_id = "
-    "review.reviewed_through_message_id when re-reviewing), following next_cursor to the end.\n"
-    "4. Record what you learned about the DM's person (person.person_id) with add_person_note "
-    "(kind: context, due_diligence, risk, relationship or todo), citing the messages "
-    "({conversation_id, message_id}) each claim rests on; use get_person first to avoid repeating "
-    "existing notes (one person may have DMs on several channels). Optionally set_person_fields / "
-    "add_position / tag_conversation.\n"
-    "5. mark_reviewed(conversation_id, through_message_id = the newest message_id you read; omit it "
-    "for an empty conversation).\n"
-    "6. Repeat from step 2 until list_dms(filter='unreviewed') returns no DMs. New messages "
-    "put a DM back in that queue, so nothing is silently skipped."
+    "review.reviewed_through_message_id when re-reviewing), following next_cursor to the end. Mind the "
+    "conversation's history_note: on Signal / SMS / Gmail the stored history may start later than the "
+    "relationship.\n"
+    "4. Record what you learned about the DM's person (person.person_id) with add_person_note (kind: "
+    "context, due_diligence, risk, relationship or todo), citing the messages ({conversation_id, "
+    "message_id}) each claim rests on; use get_person first to avoid repeating existing person_notes (one "
+    "person may have DMs on several channels; get_person_timeline shows everything about them at once). "
+    "Optionally set_person_fields / add_position / update_position / tag_conversation.\n"
+    "5. mark_reviewed(conversation_id, through_message_id = the newest message_id you read; omit it for "
+    "an empty conversation).\n"
+    "6. Repeat from step 2 until list_dms(filter='unreviewed') returns no DMs. New messages put a DM back "
+    "in that queue, so nothing is silently skipped."
 )
 
 SERVER_INSTRUCTIONS = (
-    "Access to Mingly's local message archive (Telegram and any other connected channel): list and "
-    "search conversations and DMs, read full message histories (including service events), look up "
-    "people (one person merges their identities on every channel) and organizations, and ask the "
-    "archive to fetch missing Telegram history. Ids are Mingly's own conversation_id / message_id / "
-    "person_id. Write tools (add_person_note, update_person_note, set_person_fields, add_position, "
-    "tag_conversation, mark_reviewed) work only while the user allows agent writes in Mingly "
-    "Settings › MCP. No tool sends messages. Paged tools return next_cursor; pass it back unchanged.\n\n"
+    "Mingly is the user's local relationship manager: it stores their conversations from every connected "
+    "channel and organizes them around people. Call list_accounts to see which channels are connected.\n\n"
+    "What it holds:\n"
+    "- People: one person per human, with identities on each channel (merged when the same phone / "
+    "email links them), CRM fields (important, relationship status, Twitter / LinkedIn, the user's own "
+    "notes), job positions at organizations, and person_notes written by the user or agents. Possible "
+    "duplicates: list_merge_suggestions.\n"
+    "- Conversations (kind): direct = a one-to-one chat; group; channel = a broadcast channel; "
+    "email_thread = a Gmail thread (title = subject). Each has channel, flags (pinned, archived, hidden, "
+    "tracked, briefing, muted), tags, and for one-to-ones the peer person.\n"
+    "- Messages: text, sender (person), date, replies, reactions, attachments (metadata only), forwards "
+    "and service events (joins, renames…; meta.service), forum topic_id (list_topics), and for email the "
+    "subject and from / to / cc participants.\n"
+    "- Channels: Telegram history is archived in the background and fetched on demand (fetch_history); "
+    "Signal starts when Mingly was linked; SMS / iMessage comes from this Mac's Messages (read-only, "
+    "meta.service tells iMessage from SMS); Gmail threads carry labels (list_conversations(label=…)). "
+    "Every conversation's history_note says when its stored history doesn't reach back to the start.\n"
+    "- Derived views: get_catch_up (who is waiting on the user), get_briefing, list_calendar_events and "
+    "meetings in get_person_timeline, workspaces / boards (list_workspaces, get_workspace_board: pipeline "
+    "stages), organizations (get_organization).\n\n"
+    "Ids are Mingly's own (person_id, conversation_id, message_id, identity_id); channel ids are never "
+    "shown, identities carry an address (email / phone) where the channel has one. Write tools "
+    "(add_person_note, update_person_note, set_person_fields, add_position, update_position, "
+    "tag_conversation, untag_conversation, move_conversation_stage, suggest_merge, mark_reviewed) work "
+    "only while the user allows agent writes in Mingly Settings › MCP. No tool sends messages or merges "
+    "people. Paged tools return next_cursor; pass it back unchanged.\n\n"
     "To review everyone the user has DMed (the review_dms prompt has the same steps):\n"
     + REVIEW_PROCEDURE + "\n\n" + KNOWN_LIMITS
 )
@@ -225,7 +250,7 @@ async def _handle_tools_call(req_id, params: dict, db: AsyncSession, ctx: dict) 
 
 def _review_prompt_text(focus: Optional[str]) -> str:
     text = (
-        "Review everyone I have DMed on Telegram using the Mingly tools and record context and "
+        "Review everyone I have DMed, on every channel, using the Mingly tools and record context and "
         "due diligence about each person. Nobody and no message may be skipped.\n\n"
         + REVIEW_PROCEDURE + "\n\n" + KNOWN_LIMITS
     )

@@ -70,14 +70,19 @@ async def get_all_tags(db: AsyncSession) -> list[Tag]:
     return list(result.scalars().all())
 
 
-async def get_all_tags_with_counts(db: AsyncSession, include_stage: bool = True) -> list[tuple[Tag, int]]:
+async def get_all_tags_with_counts(
+    db: AsyncSession, include_stage: bool = True, inbox_only: bool = True,
+) -> list[tuple[Tag, int]]:
     """All tags plus the number of conversations each would show in the inbox
-    (same exclusions as crud.list_conversations). ``include_stage=False``
-    hides board-column stage tags (user-facing lists)."""
+    (same exclusions as crud.list_conversations), or with ``inbox_only=False``
+    every conversation carrying it except deactivated ones (MCP agents see
+    hidden / archived / briefing ones too). ``include_stage=False`` hides
+    board-column stage tags (user-facing lists)."""
+    shown = visible_filter() if inbox_only else (Conversation.is_deactivated == False)  # noqa: E712
     q = (
         select(Tag, func.count(Conversation.id))
         .outerjoin(ConversationTag, ConversationTag.tag_id == Tag.id)
-        .outerjoin(Conversation, (Conversation.id == ConversationTag.conversation_id) & visible_filter())
+        .outerjoin(Conversation, (Conversation.id == ConversationTag.conversation_id) & shown)
         .group_by(Tag.id)
         .order_by(Tag.is_default.desc(), Tag.name)
     )

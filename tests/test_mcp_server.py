@@ -245,12 +245,16 @@ async def test_tools_list(app):
         tools = resp.json()["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == {
-            "get_archive_status", "list_dms", "list_conversations", "search_conversations",
-            "get_conversation", "get_messages", "search_messages", "list_tags", "get_conversations_by_tag",
-            "search_people", "get_person", "fetch_history", "list_organizations",
+            "list_accounts", "get_archive_status", "list_dms", "fetch_history",
+            "list_conversations", "search_conversations", "get_conversation", "get_messages", "search_messages",
+            "list_topics", "list_tags", "get_conversations_by_tag",
+            "search_people", "get_person", "get_person_timeline", "list_merge_suggestions",
+            "list_organizations", "get_organization",
+            "get_catch_up", "list_briefings", "get_briefing", "list_calendar_events",
+            "list_workspaces", "get_workspace_board",
             # write tools (gated by the mcp_write_enabled pref)
-            "add_person_note", "update_person_note", "set_person_fields",
-            "add_position", "tag_conversation", "mark_reviewed",
+            "add_person_note", "update_person_note", "set_person_fields", "add_position", "update_position",
+            "tag_conversation", "untag_conversation", "move_conversation_stage", "suggest_merge", "mark_reviewed",
         }
         assert all("inputSchema" in t and "description" in t and "annotations" in t for t in tools)
         by_name = {t["name"]: t for t in tools}

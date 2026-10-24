@@ -157,7 +157,6 @@ class SignalConnector(Connector):
     channel = "signal"
     display_name = "Signal"
     multi_account = True
-    history_note = NO_HISTORY_NOTE
     capabilities = frozenset({
         Capability.SEND, Capability.REPLY, Capability.REACT, Capability.MEDIA_SEND, Capability.READ_RECEIPTS,
     })
@@ -190,6 +189,10 @@ class SignalConnector(Connector):
         self._groups_looked_up: set[str] = set()  # unknown group ids already re-listed for
 
     # -- state -----------------------------------------------------------------
+
+
+    def history_note(self) -> Optional[str]:
+        return NO_HISTORY_NOTE
 
     def is_configured(self) -> bool:
         return self.account_id is not None and (Path(config.DATA_DIR) / "signal" / "data").is_dir()

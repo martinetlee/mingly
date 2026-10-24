@@ -514,6 +514,12 @@ async def list_topics(conversation_id: int, db: AsyncSession = Depends(get_db)):
         # The channel can't list them (or it's not a forum) — derive topics
         # from stored messages
         logger.warning("Listing forum topics failed, using fallback: %s", exc)
+    return await stored_topic_list(db, conversation_id)
+
+
+async def stored_topic_list(db: AsyncSession, conversation_id: int) -> list[dict]:
+    """Forum topics seen in stored messages, for when the channel can't list
+    them (titles unknown: "Topic <id>")."""
     return [
         {
             "id": tid, "title": f"Topic {tid}", "icon_color": None, "icon_emoji_id": None,

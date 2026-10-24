@@ -436,19 +436,27 @@ async def update_position(
     person_id: int, position_id: int, data: PositionUpdate, db: AsyncSession = Depends(get_db)
 ):
     pos = await _position_or_404(db, person_id, position_id)
-    if data.title is not None:
-        pos.title = data.title.strip() or None
-    if data.is_active is not None:
-        pos.is_active = data.is_active
-    if data.ended_at is not None:
-        # Empty string clears the date
-        pos.ended_at = _parse_date(data.ended_at) if data.ended_at.strip() else None
-    elif data.is_active is True:
-        pos.ended_at = None  # reactivating
+    apply_position_update(pos, title=data.title, is_active=data.is_active, ended_at=data.ended_at)
     await db.commit()
     await db.refresh(pos)
     await broadcast_person_changed(person_id)
     return position_dict(pos)
+
+
+def apply_position_update(
+    pos: PersonPosition, *, title: Optional[str], is_active: Optional[bool], ended_at: Optional[str],
+) -> None:
+    """Edit a position in place (doesn't commit). None leaves a field as it
+    is; an empty ``ended_at`` clears the date; reactivating clears it too.
+    Raises HTTPException 400 for an unreadable date."""
+    if title is not None:
+        pos.title = title.strip() or None
+    if is_active is not None:
+        pos.is_active = is_active
+    if ended_at is not None:
+        pos.ended_at = _parse_date(ended_at) if ended_at.strip() else None
+    elif is_active is True:
+        pos.ended_at = None
 
 
 @router.delete("/{person_id}/positions/{position_id}")

@@ -181,10 +181,6 @@ class Connector(ABC):
     # Several accounts of this channel can be connected (Gmail); the manager
     # then creates one connector per ``accounts`` row.
     multi_account: ClassVar[bool] = False
-    # Why a conversation may hold no earlier messages when the channel can't
-    # load them (Signal: history starts when the device is linked); shown on
-    # an empty conversation. None = nothing to explain.
-    history_note: ClassVar[Optional[str]] = None
 
     # Bumped by every stop request; a start that began before it spawns nothing.
     _stop_generation: int = 0
@@ -292,6 +288,13 @@ class Connector(ABC):
 
     async def sync_now(self) -> None:
         """Pull anything new right away (e.g. after the user opens the app)."""
+        return None
+
+    def history_note(self) -> Optional[str]:
+        """What part of a conversation's history Mingly holds, when that's
+        less than everything (Signal: from linking; SMS / Gmail: a backfill
+        window). Shown on empty conversations and to MCP agents. None = the
+        channel's history is complete, or fetched on demand (Telegram)."""
         return None
 
     def conversation_capabilities(self, conversation: Any) -> frozenset[Capability]:

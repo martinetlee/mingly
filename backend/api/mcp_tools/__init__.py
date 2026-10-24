@@ -3,7 +3,8 @@
 Each tool returns a plain dict that the transport serializes into an MCP
 text-content result; every tool is tagged ``access`` "read" or "write" and
 mcp.py refuses write tools unless the user enabled them. The tools are split
-by responsibility: ``conversations``, ``people``, ``archive``, ``writes``;
+by responsibility: ``conversations``, ``people``, ``archive``, ``context``
+(accounts, calendar, catch-up, briefings), ``boards`` (workspaces), ``writes``;
 ``common`` holds cursors, coverage / review state and serializations
 (visibility and paging rules are documented there); ``registry`` the schemas
 and argument validation.

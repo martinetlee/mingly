@@ -44,7 +44,7 @@ async def _get_org(db: AsyncSession, org_id: int) -> Organization:
     return org
 
 
-async def _org_detail(db: AsyncSession, org: Organization) -> dict:
+async def org_detail(db: AsyncSession, org: Organization) -> dict:
     """Full org: current and former members, related group conversations."""
     positions = await crud.organization_positions(db, org.id)
     people = await crud.get_people(db, {p.person_id for p in positions})
@@ -143,7 +143,7 @@ async def create_organization(data: OrgCreate, db: AsyncSession = Depends(get_db
         if existing:
             raise _exists_409(existing)
         raise HTTPException(status_code=409, detail="Organization already exists")
-    return await _org_detail(db, org)
+    return await org_detail(db, org)
 
 
 @router.post("/auto-discover")
@@ -167,7 +167,7 @@ async def auto_discover_organizations(db: AsyncSession = Depends(get_db)):
 
 @router.get("/{org_id}")
 async def get_organization(org_id: int, db: AsyncSession = Depends(get_db)):
-    return await _org_detail(db, await _get_org(db, org_id))
+    return await org_detail(db, await _get_org(db, org_id))
 
 
 @router.put("/{org_id}")
@@ -204,7 +204,7 @@ async def update_organization(
         raise HTTPException(status_code=409, detail="Organization changed concurrently; reload and retry")
     if after_commit is not None:
         after_commit()
-    return await _org_detail(db, result_org)
+    return await org_detail(db, result_org)
 
 
 @router.post("/{org_id}/merge")
@@ -222,7 +222,7 @@ async def merge_organization(org_id: int, data: OrgMerge, db: AsyncSession = Dep
         await db.rollback()
         raise HTTPException(status_code=409, detail="Organization changed concurrently; reload and retry")
     user_orgs.on_org_merged(org_id, source_name, target.id, target.name)
-    return {**await _org_detail(db, target), **counts}
+    return {**await org_detail(db, target), **counts}
 
 
 @router.delete("/{org_id}")
@@ -250,7 +250,7 @@ async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
     (409 in that case)."""
     org = await _get_org(db, org_id)
     context_before = org.context
-    detail = await _org_detail(db, org)
+    detail = await org_detail(db, org)
     # Release the read transaction; the LLM call can take a minute
     await db.commit()
 
@@ -305,4 +305,4 @@ async def generate_org_context(org_id: int, db: AsyncSession = Depends(get_db)):
         )
     org = await _get_org(db, org_id)
     await db.refresh(org)
-    return await _org_detail(db, org)
+    return await org_detail(db, org)
