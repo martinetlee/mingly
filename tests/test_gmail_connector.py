@@ -16,7 +16,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend import secrets as vault
 from backend.connectors.gmail import oauth
@@ -68,6 +68,9 @@ class FakeGoogle:
         self.calls: list[str] = []
         self.modified: list = []
         self.labels = [{"id": "Label_1", "name": "Clients", "type": "user"}, {"id": "INBOX", "type": "system"}]
+        self.page_size: int | None = None  # threads.list pages ("p<offset>" tokens) when set
+        self.expired_tokens: set = set()
+        self.quota_on: set = set()  # threads whose next fetch hits Google's per-minute quota
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = request.url
@@ -86,7 +89,17 @@ class FakeGoogle:
         if path == "/labels":
             return httpx.Response(200, json={"labels": self.labels})
         if path == "/threads":
-            return httpx.Response(200, json={"threads": [{"id": t} for t in self.threads]})
+            ids = list(self.threads)
+            if self.page_size is None:
+                return httpx.Response(200, json={"threads": [{"id": t} for t in ids]})
+            token = url.params.get("pageToken")
+            if token in self.expired_tokens:
+                return httpx.Response(400, json={"error": {"code": 400, "message": "Invalid pageToken"}})
+            start = int(token[1:]) if token else 0
+            body: dict = {"threads": [{"id": t} for t in ids[start:start + self.page_size]]}
+            if start + self.page_size < len(ids):
+                body["nextPageToken"] = f"p{start + self.page_size}"
+            return httpx.Response(200, json=body)
         if path.startswith("/threads/") and path.endswith("/modify"):
             tid = path.split("/")[2]
             body = json.loads(request.content)
@@ -96,6 +109,14 @@ class FakeGoogle:
             return httpx.Response(200, json={"id": tid})
         if path.startswith("/threads/"):
             tid = path.split("/")[2]
+            if tid in self.quota_on:
+                self.quota_on.discard(tid)
+                return httpx.Response(403, json={"error": {  # as Google answers it
+                    "code": 403, "status": "PERMISSION_DENIED",
+                    "message": "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per "
+                               "user' of service 'gmail.googleapis.com' for consumer 'project_number:1'.",
+                    "errors": [{"message": "Quota exceeded", "domain": "usageLimits", "reason": "rateLimitExceeded"}],
+                }})
             if tid not in self.threads:
                 return httpx.Response(404, json={"error": {"message": "not found"}})
             return httpx.Response(200, json={"id": tid, "messages": self.threads[tid]})
@@ -775,6 +796,144 @@ async def test_a_retryable_thread_error_still_waits_for_the_other_threads(db, go
     with pytest.raises(GmailError):
         await c._backfill(90)
     assert failing["slow_done"]  # no fetch left running behind the failed pass
+    await c._api.close()
+
+
+# ── quota ───────────────────────────────────────────────────────────────────────
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+        self.slept: list = []
+
+    def __call__(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.mark.asyncio
+async def test_quota_budget_paces_background_and_keeps_room_for_user_actions():
+    from backend.connectors.gmail.api import COST_THREAD_FULL, QuotaBudget
+
+    clock = FakeClock()
+    budget = QuotaBudget(6000, clock=clock, sleep=clock.sleep)
+    for _ in range(40):  # 4,800 units: the background share of the minute
+        await budget.take(COST_THREAD_FULL, background=True)
+    assert clock.slept == [] and budget.used() == 4800
+
+    await budget.take(COST_THREAD_FULL, background=False)  # a user action still fits
+    assert clock.slept == []
+
+    await budget.take(COST_THREAD_FULL, background=True)  # the next sync fetch waits for the window
+    assert clock.slept and clock.now >= 1060.0 and budget.used() <= 4800
+
+
+@pytest.mark.asyncio
+async def test_backfill_stays_under_the_per_minute_quota(db, google, unlocked_vault, broadcasts):
+    from backend.connectors.gmail.api import QuotaBudget
+
+    google.threads = {f"t{i}": [gmsg(f"m{i}", f"t{i}", frm="ann@example.com")] for i in range(60)}
+    google.page_size = 50
+    c = await _signed_in(db, google)
+    clock = FakeClock()
+    c._api.budget = QuotaBudget(6000, clock=clock, sleep=clock.sleep)
+    spent: list = []
+    take = c._api.budget.take
+
+    async def record(cost, *, background):
+        await take(cost, background=background)
+        spent.append((clock.now, cost))
+
+    c._api.budget.take = record
+    await c._backfill(90)
+    assert (await db.execute(select(func.count(Message.id)))).scalar() == 60
+    for t, _ in spent:  # no 60-second window ever goes over the limit
+        assert sum(cost for u, cost in spent if t - 60 < u <= t) <= 6000
+    assert clock.slept  # 60 full threads (7,200 units) don't fit in one minute
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_error_is_retryable_with_a_one_minute_wait(db, google, unlocked_vault, broadcasts):
+    from backend.connectors.gmail.api import GmailError
+
+    google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")]}
+    google.quota_on = {"t0"}
+    c = await _signed_in(db, google)
+    with pytest.raises(GmailError) as err:
+        await c._api.get_thread("t0")
+    assert err.value.retryable and err.value.status == 429 and err.value.retry_after == 60
+    assert "per-minute limit" in str(err.value) and "project_number" not in str(err.value)
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_backfill_resumes_at_the_saved_page(db, google, unlocked_vault, broadcasts):
+    from backend.connectors.gmail.api import GmailError
+    from backend.connectors.sync_state import load_sync_state
+
+    google.threads = {f"t{i}": [gmsg(f"m{i}", f"t{i}", frm="ann@example.com")] for i in range(5)}
+    google.page_size = 2
+    google.quota_on = {"t2"}  # page 2 hits the quota
+    c = await _signed_in(db, google)
+    with pytest.raises(GmailError):
+        await c._backfill(90)
+    state = await load_sync_state(c.account_id)
+    assert "history_id" not in state
+    assert state["backfill"] == {"history_id": "1000", "days": 90, "page_token": "p2", "seen": 2}
+
+    google.history_id = "1500"  # mail moved on meanwhile: the pass keeps its own starting point
+    google.calls.clear()
+    await c._backfill(90)
+    fetched = [call for call in google.calls if call.startswith("GET /gmail/v1/users/me/threads/")]
+    assert sorted(f.rsplit("/", 1)[1] for f in fetched) == ["t2", "t3", "t4"]  # page 1 isn't fetched again
+    state = await load_sync_state(c.account_id)
+    assert state["history_id"] == "1000" and state["backfill"] is None
+    assert (await db.execute(select(func.count(Message.id)))).scalar() == 5
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_with_an_expired_page_token_starts_over(db, google, unlocked_vault, broadcasts):
+    from backend.connectors.sync_state import load_sync_state, merge_sync_state
+
+    google.threads = {f"t{i}": [gmsg(f"m{i}", f"t{i}", frm="ann@example.com")] for i in range(3)}
+    google.page_size = 2
+    google.expired_tokens = {"p2"}
+    google.history_id = "1700"
+    c = await _signed_in(db, google)
+    await merge_sync_state(c.account_id, backfill={"history_id": "1000", "days": 90, "page_token": "p2", "seen": 2})
+    google.page_size = 5  # the fresh pass lists everything in one page
+    await c._backfill(90)
+    state = await load_sync_state(c.account_id)
+    assert state["history_id"] == "1700" and state["backfill"] is None
+    assert (await db.execute(select(func.count(Message.id)))).scalar() == 3
+    await c._api.close()
+
+
+@pytest.mark.asyncio
+async def test_quota_hit_in_the_sync_loop_shows_reconnecting_not_error(db, google, unlocked_vault, broadcasts):
+    google.threads = {"t0": [gmsg("m0", "t0", frm="ann@example.com")]}
+    google.quota_on = {"t0"}
+    c = await _signed_in(db, google)
+    c._wake = asyncio.Event()
+    states: list = []
+    real = c._set_state
+
+    async def capture(state, error=None):
+        states.append((state, error))
+        await real(state, error)
+        if state == "reconnecting":
+            raise asyncio.CancelledError
+
+    c._set_state = capture
+    with pytest.raises(asyncio.CancelledError):
+        await c._run()
+    state, error = states[-1]
+    assert state == "reconnecting" and "per-minute limit" in error
     await c._api.close()
 
 

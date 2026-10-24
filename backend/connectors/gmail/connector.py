@@ -429,31 +429,49 @@ class GmailConnector(Connector):
         self._labels_at = now
 
     async def _backfill(self, days: int) -> None:
-        """Pull every thread of the last ``days`` days; the historyId taken
-        first makes the next poll catch anything that changed meanwhile."""
+        """Pull every thread of the last ``days`` days, one ``threads.list``
+        page at a time. The historyId taken first makes the next poll catch
+        anything that changed meanwhile. Progress (``backfill`` in the sync
+        state) is saved after each page, so a pass interrupted by the quota,
+        the network or a restart resumes where it stopped."""
         api = self._require_api()
         profile = await api.profile()
-        history_id = str(profile["historyId"])
         if not self._self_email:
             self._self_email = str(profile.get("emailAddress") or "").lower() or None
         await self._refresh_labels(force=True)
-        page: Optional[str] = None
-        seen = 0
-        attempted: set = set()
-        failed: set = set()
-        while True:
-            resp = await api.list_threads(f"newer_than:{days}d", page)
+        progress = (await self._load_sync_state()).get("backfill")
+        resuming = isinstance(progress, dict) and progress.get("days") == days and bool(progress.get("history_id"))
+        if resuming:
+            assert isinstance(progress, dict)
+            history_id = str(progress["history_id"])
+            page: Optional[str] = progress.get("page_token") or None
+            seen = int(progress.get("seen") or 0)
+        else:
+            history_id, page, seen = str(profile["historyId"]), None, 0
+            await self._save_sync_state(backfill={"history_id": history_id, "days": days, "page_token": None, "seen": 0})
+        while seen < MAX_BACKFILL_THREADS:
+            try:
+                resp = await api.list_threads(f"newer_than:{days}d", page)
+            except GmailError as e:
+                if not (resuming and page and e.status in (400, 404)):
+                    raise
+                # The saved page token expired: start this pass over, once
+                logger.info("Gmail backfill page token expired for account %s; starting over", self.account_id)
+                history_id, page, seen, resuming = str((await api.profile())["historyId"]), None, 0, False
+                continue
             ids = [t["id"] for t in resp.get("threads") or []][: MAX_BACKFILL_THREADS - seen]
-            failed |= await self._sync_threads(ids)
-            attempted.update(ids)
+            failed = await self._sync_threads(ids)
             seen += len(ids)
             page = resp.get("nextPageToken")
-            if not page or seen >= MAX_BACKFILL_THREADS:
+            previous = _failed_threads(await self._load_sync_state())
+            await self._save_sync_state(
+                failed_threads=_next_failures(previous, set(ids), failed),
+                backfill={"history_id": history_id, "days": days, "page_token": page, "seen": seen},
+            )
+            if not page:
                 break
-        previous = _failed_threads(await self._load_sync_state())
         await self._save_sync_state(
-            history_id=history_id, last_sync_at=datetime.utcnow().isoformat(),
-            failed_threads=_next_failures(previous, attempted, failed),
+            history_id=history_id, last_sync_at=datetime.utcnow().isoformat(), backfill=None,
         )
 
     async def _incremental(self, state: dict) -> None:
@@ -524,7 +542,7 @@ class GmailConnector(Connector):
         thread fails in a way that retrying the whole pass can't fix, so it
         never holds back the cursor; retryable and auth errors propagate."""
         try:
-            await self._sync_thread(thread_id, realtime_ids=realtime_ids)
+            await self._sync_thread(thread_id, realtime_ids=realtime_ids, background=True)
             return True
         except GmailAuthError:
             raise
@@ -538,13 +556,20 @@ class GmailConnector(Connector):
 
     # -- threads → normalized shapes --------------------------------------------------------
 
-    async def _sync_thread(self, thread_id: str, realtime_ids: frozenset = frozenset()) -> Optional[int]:
-
-        async with self._sem.get():
-            try:
+    async def _sync_thread(
+        self, thread_id: str, realtime_ids: frozenset = frozenset(), *, background: bool = False,
+    ) -> Optional[int]:
+        """Fetch one thread and store it. Sync passes (``background``) share
+        the concurrency slots; a user action (send, label change) skips them
+        so it never waits behind a sync that is waiting for quota."""
+        try:
+            if background:
+                async with self._sem.get():
+                    thread = await self._require_api().get_thread(thread_id, background=True)
+            else:
                 thread = await self._require_api().get_thread(thread_id)
-            except GmailNotFound:
-                return None
+        except GmailNotFound:
+            return None
         conv, msgs = self.normalize_thread(thread)
         if conv is None:
             return None
