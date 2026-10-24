@@ -661,6 +661,7 @@ async def test_media_download_is_atomic_and_single_flight(db, tmp_path):
     conv = await tg_conv(db)
     msg = await f.message(db, conv, 9, "doc", attachments=[{"kind": "document", "filename": "a.pdf", "size": 3}])
     att_id = msg.attachments[0].id
+    from backend import media_paths
     from backend.telegram import media
 
     class FakeMediaClient:
@@ -687,7 +688,7 @@ async def test_media_download_is_atomic_and_single_flight(db, tmp_path):
             return file
 
     final = tmp_path / "media" / str(conv.id) / f"{att_id}.pdf"
-    with patch.object(media, "MEDIA_DIR", tmp_path / "media"), patch.object(media, "DATA_DIR", tmp_path):
+    with patch.object(media_paths, "MEDIA_DIR", tmp_path / "media"), patch.object(media, "DATA_DIR", tmp_path):
         failing = FakeMediaClient(fail=True)
         with use_client(failing):
             with pytest.raises(ConnectionError):

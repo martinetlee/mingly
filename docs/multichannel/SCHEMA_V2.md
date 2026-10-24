@@ -13,9 +13,9 @@ document. Where this doc and old code disagree, this doc wins.
    Gmail thread id, Signal UUID) lives in an `external_id TEXT` column and is
    only read by that channel's connector code (`backend/telegram/…`).
 3. **Real foreign keys** with explicit `ondelete`. `PRAGMA foreign_keys=ON`.
-4. **Fresh schema.** No legacy migrations. A pre-v2 database is backed up to
-   `DATA_DIR/backups/` and replaced on first start (see "Database lifecycle").
-   Telegram history re-syncs from Telegram.
+4. **Fresh schema.** No in-place legacy migrations. A pre-v2 (generation 1)
+   database is imported into a new v2 database on first start, its original
+   kept in `DATA_DIR/backups/` (see "Database lifecycle").
 5. **Person-centric.** A *person* is the CRM entity; an *identity* is one
    handle on one channel. Every identity belongs to exactly one person.
 
@@ -23,10 +23,20 @@ document. Where this doc and old code disagree, this doc wins.
 
 - `schema_meta(key TEXT PK, value TEXT)` holds `schema_generation = '2'`.
 - `init_db()`: if the DB file exists and is not generation 2 (no
-  `schema_meta`, or it has the pre-v2 `chats` table), copy it to
-  `DATA_DIR/backups/mingly-retired-gen<N>-<ts>.db` (sqlite online backup; the
-  migration runner's `-pre-v*` backup rotation never touches it), delete the
-  original (+ `-wal`/`-shm`), and create a fresh DB. Log the backup path.
+  `schema_meta`), copy it to `DATA_DIR/backups/mingly-retired-gen<N>-<ts>.db`
+  (sqlite online backup; the migration runner's `-pre-v*` backup rotation
+  never touches it). Generation 1 is then imported
+  (`backend/db/legacy_import.py`): a complete v2 DB is built from the backup
+  in `mingly.db.importing`, downloaded media and profile photos are linked
+  into the v2 layout under `media.importing/`, counts and foreign keys are
+  verified, then the old `media/` and `profile_photos/` move to
+  `backups/retired-gen1-<ts>/` and the new DB replaces the old one. A failure
+  before that swap leaves the old DB in place (startup fails, the next start
+  retries); a journal (`gen1-import.json`) lets a retry after a crash mid-swap
+  find the moved files. v1 integer ids are kept for the rows that had them
+  (conversations ← `chats.id`, messages, tags, notes, workspaces…); people and
+  identities are new, one per Telegram user. Not imported: the
+  `catchup_summaries` cache, pending `scam_check_requests`, `sync_text_repair`.
   A DB stamped with a NEWER generation is never touched: startup fails
   (`NewerSchemaError`).
 - Ids are never reused: every table keyed by an integer `id` is
@@ -35,8 +45,9 @@ document. Where this doc and old code disagree, this doc wins.
 - Fresh DB: `create_all`, then stamp generation 2, then run v2 migrations
   (`backend/db/migrations/runner.py`, list starts empty at version 1) and seed
   default tags.
-- Media under `DATA_DIR/media/` from v1 is left on disk untouched (orphaned;
-  re-downloaded on demand).
+- Media from v1 is linked to `media/<conversation_id>/<attachment_id><ext>`
+  (attachment id = message id); avatars to `media/avatars/…`. Attachments
+  whose file was never downloaded are fetched on demand.
 
 ## Tables
 

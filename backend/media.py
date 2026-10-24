@@ -18,12 +18,11 @@ from sqlalchemy import select, update
 from backend.config import DATA_DIR
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import MessageAttachment
+from backend.media_paths import MEDIA_DIR
 
 logger = logging.getLogger(__name__)
 
-MEDIA_DIR = DATA_DIR / "media"
 MEDIA_DIR.mkdir(exist_ok=True)
-AVATAR_DIR = MEDIA_DIR / "avatars"
 
 # Attachment kinds the UI may ask to download on demand.
 DOWNLOADABLE_TYPES = frozenset({"photo", "video", "video_note", "voice", "audio", "document", "gif"})

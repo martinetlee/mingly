@@ -151,7 +151,8 @@ async def test_deleting_conversation_cascades(db):
 
 
 @pytest.mark.asyncio
-async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
+async def test_pre_v2_database_is_backed_up_and_imported(tmp_path, monkeypatch):
+    # The full mapping is covered in tests/test_legacy_import.py
     from sqlalchemy.ext.asyncio import create_async_engine
     from backend.db import database, startup
 
@@ -169,6 +170,7 @@ async def test_pre_v2_database_is_backed_up_and_replaced(tmp_path, monkeypatch):
         tables = {r[0] for r in new.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "chats" not in tables and "conversations" in tables
         assert new.execute("SELECT value FROM schema_meta").fetchone() == ("2",)
+        assert new.execute("SELECT external_id FROM conversations").fetchall() == [("77",)]
     # A current DB is left alone on the next start.
     await startup.init_db()
     assert len(list((tmp_path / "backups").glob("*.db"))) == 1

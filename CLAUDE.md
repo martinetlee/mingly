@@ -123,7 +123,7 @@ Preview servers are configured in `.claude/launch.json` (backend + frontend).
 - Schema v2 contract: `docs/multichannel/SCHEMA_V2.md` (tables, id rules, payload shapes, route map, WS events). Read it before touching ids.
 - Async SQLAlchemy ORM models in `backend/db/models.py`. Every row has an internal integer id; a channel's own ids live only in `external_id` text columns and only that channel's code (`backend/telegram/ids.py`) interprets them.
 - CRUD helpers in the `backend/db/crud/` package (one module per area, each with `__all__`, re-exported so callers use `crud.<name>`)
-- **Migrations**: `create_all` builds the full schema on a fresh DB; later changes are append-only numbered steps in `backend/db/migrations/runner.py` `MIGRATIONS` (SQL strings or async callables). An existing DB is backed up to `DATA_DIR/backups/` before pending migrations run. A DB from an older schema generation is backed up and replaced on startup (`init_db`).
+- **Migrations**: `create_all` builds the full schema on a fresh DB; later changes are append-only numbered steps in `backend/db/migrations/runner.py` `MIGRATIONS` (SQL strings or async callables). An existing DB is backed up to `DATA_DIR/backups/` before pending migrations run. A generation-1 (pre-v2) DB is backed up and imported on startup (`init_db` → `db/legacy_import.py`).
 
 ### LLM Integration
 - Provider registry singleton in `backend/llm/registry.py`; `backend/llm/resolve.py` picks a provider by role

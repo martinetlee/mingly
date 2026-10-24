@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent / "backend"
 LAYERS = [
     # Configuration, process plumbing, secrets, preferences, sessions.
     ("core", {"config", "errors", "fsutil", "aio", "tasks", "jobs", "features", "validators",
-              "serialization", "instance", "prefs", "secrets", "secret_prefs", "sessions"}),
+              "serialization", "instance", "prefs", "secrets", "secret_prefs", "sessions", "media_paths"}),
     # SQLAlchemy models, sessions, crud queries, migrations.
     ("data", {"db"}),
     # Building blocks every higher layer shares: JSON shapes, the WebSocket

@@ -21,7 +21,8 @@ from backend.db import crud
 from backend.db.database import AsyncSessionLocal
 from backend.db.models import Conversation, Identity, Message, MessageAttachment
 from backend.jobs import await_single
-from backend.media import AVATAR_DIR, MEDIA_DIR, MediaIncomplete, MediaNotFound, MediaUnavailable, file_is_complete
+from backend import media_paths
+from backend.media import MediaIncomplete, MediaNotFound, MediaUnavailable, file_is_complete
 from backend.serializers import media_url
 from backend.tasks import spawn
 from backend.telegram import ids
@@ -82,7 +83,7 @@ def _extension(media_type: str, tg_msg, media_filename: Optional[str]) -> str:
 
 
 def _final_path(conversation_id: int, attachment_id: int, ext: str) -> Path:
-    return MEDIA_DIR / str(conversation_id) / f"{attachment_id}{ext}"
+    return media_paths.attachment_file(conversation_id, attachment_id, ext)
 
 
 async def _attachment_context(attachment_id: int):
@@ -246,10 +247,10 @@ async def download_avatar(client, entity, *, conversation_id: Optional[int] = No
     """Store ``entity``'s profile photo as the avatar of an identity (users)
     or a conversation (groups/channels). Returns the relative path."""
     if identity_id is not None:
-        final = AVATAR_DIR / "identities" / f"{identity_id}.jpg"
+        final = media_paths.identity_avatar_file(identity_id)
         table, key = Identity, identity_id
     elif conversation_id is not None:
-        final = AVATAR_DIR / "conversations" / f"{conversation_id}.jpg"
+        final = media_paths.conversation_avatar_file(conversation_id)
         table, key = Conversation, conversation_id
     else:
         raise ValueError("download_avatar needs conversation_id or identity_id")

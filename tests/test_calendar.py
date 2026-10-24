@@ -352,6 +352,7 @@ async def _seeded(db):
     alice = await f.identity(db, "alice@example.com", channel="gmail", display_name="Alice")
     me = await crud.get_identity_by_external(db, "gmail", ME)
     now = datetime.utcnow().replace(microsecond=0)
+    allday_start = datetime.combine((now + timedelta(days=400)).date(), datetime.min.time())
 
     async def ev(ext, start, end, *, all_day=False, attendees=(), title=None):
         e = await crud.upsert_calendar_event(db, acc.id, ext, {
@@ -370,7 +371,8 @@ async def _seeded(db):
                           attendees=[(alice.id, "accepted", False)]),
         "declined": await ev("declined", now + timedelta(days=1), now + timedelta(days=1, hours=1),
                              attendees=[(alice.id, "declined", False)]),
-        "allday": await ev("allday", datetime(2026, 11, 3), datetime(2026, 11, 4), all_day=True),
+        # Far from the now-relative events, so no date window catches both
+        "allday": await ev("allday", allday_start, allday_start + timedelta(days=1), all_day=True),
     }
     return acc, alice, events
 
@@ -378,17 +380,22 @@ async def _seeded(db):
 @pytest.mark.asyncio
 async def test_events_route_range_shape_and_all_day_by_date(db, api):
     acc, alice, evs = await _seeded(db)
-    # A week in a UTC+8 viewer's days: 2026-11-02 00:00 local = 2026-11-01 16:00Z
-    resp = await api.get("/api/calendar/events", params={
-        "start": "2026-11-01T16:00:00Z", "end": "2026-11-03T16:00:00Z", "from_date": "2026-11-02", "to_date": "2026-11-04",
-    })
+    day = evs["allday"].start_at.date()  # the all-day event's date (D)
+
+    def utc8_days(first, last):
+        """[first, last) local days of a UTC+8 viewer: midnight local = 16:00Z the day before."""
+        return {
+            "start": f"{first - timedelta(days=1)}T16:00:00Z", "end": f"{last - timedelta(days=1)}T16:00:00Z",
+            "from_date": str(first), "to_date": str(last),
+        }
+
+    # Days D-1 and D in a UTC+8 viewer's calendar
+    resp = await api.get("/api/calendar/events", params=utc8_days(day - timedelta(days=1), day + timedelta(days=1)))
     assert resp.status_code == 200
     (allday,) = resp.json()["events"]
-    assert allday["all_day"] and allday["start_at"] == "2026-11-03" and allday["end_at"] == "2026-11-04"
-    # …the day after (2026-11-04 local) doesn't show it, although the UTC instants overlap
-    resp = await api.get("/api/calendar/events", params={
-        "start": "2026-11-03T16:00:00Z", "end": "2026-11-04T16:00:00Z", "from_date": "2026-11-04", "to_date": "2026-11-05",
-    })
+    assert allday["all_day"] and allday["start_at"] == str(day) and allday["end_at"] == str(day + timedelta(days=1))
+    # …the day after (D+1 local) doesn't show it, although the UTC instants overlap
+    resp = await api.get("/api/calendar/events", params=utc8_days(day + timedelta(days=1), day + timedelta(days=2)))
     assert resp.json()["events"] == []
 
     now = datetime.utcnow()
