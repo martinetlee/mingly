@@ -9,9 +9,19 @@ import type { ChannelName, ConnectorState } from './types'
 export interface AuthField {
   name: string
   label: string
-  kind: 'text' | 'password' | 'phone' | 'code' | (string & {})
+  kind: 'text' | 'password' | 'phone' | 'code' | 'choice' | (string & {})
   required: boolean
   placeholder: string | null
+  /** `choice`: the options, shown as a radio list */
+  options?: AuthFieldOption[]
+  /** `choice`: the option preselected */
+  default?: string | null
+}
+
+export interface AuthFieldOption {
+  value: string
+  label: string
+  hint?: string | null
 }
 
 export interface AuthStep {

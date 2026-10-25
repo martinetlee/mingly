@@ -62,6 +62,31 @@ describe('AuthFlow', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Invalid code')
   })
 
+  it('choice: preselects the default, lets you pick another option and submits it', async () => {
+    const choiceStep = step({
+      title: 'Connect Gmail',
+      fields: [{
+        name: 'client', label: 'OAuth client', kind: 'choice', required: true, placeholder: null, default: '3',
+        options: [
+          { value: '3', label: 'cid.apps.googleusercontent.com', hint: 'Used by me@example.com' },
+          { value: 'new', label: 'Use a different OAuth client', hint: 'Enter another client ID and secret' },
+        ],
+      }],
+    })
+    vi.mocked(beginAccountAuth).mockResolvedValue(choiceStep)
+    vi.mocked(continueAccountAuth).mockResolvedValue(step({ kind: 'done', message: 'ok' }))
+    render(<AuthFlow accountKey="gmail" />)
+
+    const saved = await screen.findByRole('radio', { name: /cid\.apps/ }) as HTMLInputElement
+    expect(saved.checked).toBe(true)
+    expect(screen.getByText('Used by me@example.com')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Continue' })).toHaveProperty('disabled', false)
+
+    fireEvent.click(screen.getByRole('radio', { name: /different OAuth client/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(continueAccountAuth).toHaveBeenCalledWith('gmail', 'f1', { client: 'new' }))
+  })
+
   it('done: shows the message and fires onDone once; error step offers Try again', async () => {
     const onDone = vi.fn()
     const onClose = vi.fn()

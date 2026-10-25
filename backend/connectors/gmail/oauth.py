@@ -97,6 +97,16 @@ class Credentials:
             vault.save_secret(vault_key(account_id, "refresh_token"), self.refresh_token)
 
 
+def client_account_ids() -> list[int]:
+    """Ids of the accounts with an OAuth client in the vault, oldest first."""
+    ids = set()
+    for key in vault.secret_keys("gmail:"):
+        parts = key.split(":")
+        if len(parts) == 3 and parts[2] == "client_id" and parts[1].isdigit():
+            ids.add(int(parts[1]))
+    return sorted(ids)
+
+
 def forget(account_id: int, *, keep_client: bool) -> None:
     vault.delete_secret(vault_key(account_id, "refresh_token"))
     if not keep_client:

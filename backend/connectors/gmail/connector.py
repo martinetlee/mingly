@@ -89,6 +89,9 @@ SETUP_HELP = (
     "credentials → OAuth client ID → application type \"Desktop app\" and paste its client ID and secret here."
 )
 
+# The sign-in choice for entering a client instead of reusing a saved one
+NEW_CLIENT = "new"
+
 _MSGID = re.compile(r"<[^<>\s]+>")
 
 
@@ -247,10 +250,7 @@ class GmailConnector(Connector):
     # -- sign-in -------------------------------------------------------------------------
 
     def _fields_step(self, flow_id: str, error: Optional[str] = None) -> AuthStep:
-        has_client = self.account_id is not None and oauth.Credentials.load(self.account_id) is not None
         message = SETUP_HELP
-        if has_client:
-            message += " Leave both empty to keep the client this account already uses."
         if error:
             message = f"{error}\n\n{message}"
         return AuthStep(
@@ -259,10 +259,48 @@ class GmailConnector(Connector):
             title="Connect Gmail",
             message=message,
             fields=[
-                AuthField("client_id", "OAuth client ID", required=not has_client,
-                          placeholder="1234-abc.apps.googleusercontent.com"),
-                AuthField("client_secret", "OAuth client secret", kind="password", required=not has_client),
+                AuthField("client_id", "OAuth client ID", placeholder="1234-abc.apps.googleusercontent.com"),
+                AuthField("client_secret", "OAuth client secret", kind="password"),
             ],
+        )
+
+    async def _saved_clients(self) -> "list[tuple[int, str, list[str]]]":
+        """The OAuth clients already in the vault, one per client id:
+        (an account id holding it, client id, labels of the accounts using
+        it). This account's own client comes first."""
+        ids = oauth.client_account_ids()
+        if not ids:
+            return []
+        async with AsyncSessionLocal() as db:
+            accounts = (await db.execute(
+                select(Account).where(Account.id.in_(ids), Account.channel == self.channel)
+            )).scalars().all()
+        labels = {a.id: a.label or a.external_id or f"Account {a.id}" for a in accounts}
+        order = sorted(labels, key=lambda i: (i != self.account_id, i))
+        clients: dict[str, tuple[int, list[str]]] = {}
+        for account_id in order:
+            creds = oauth.Credentials.load(account_id)
+            if creds is None:
+                continue
+            holder, used_by = clients.setdefault(creds.client_id, (account_id, []))
+            used_by.append(labels[account_id])
+        return [(holder, client_id, used_by) for client_id, (holder, used_by) in clients.items()]
+
+    def _choice_step(self, flow_id: str, clients: "list[tuple[int, str, list[str]]]",
+                     error: Optional[str] = None) -> AuthStep:
+        options = [
+            {"value": str(holder), "label": client_id, "hint": f"Used by {', '.join(used_by)}"}
+            for holder, client_id, used_by in clients
+        ]
+        options.append({"value": NEW_CLIENT, "label": "Use a different OAuth client",
+                        "hint": "Enter another client ID and secret"})
+        message = "Sign in with an OAuth client you already set up, or enter a different one."
+        return AuthStep(
+            flow_id=flow_id,
+            kind="fields",
+            title="Connect Gmail",
+            message=f"{error}\n\n{message}" if error else message,
+            fields=[AuthField("client", "OAuth client", kind="choice", options=options, default=options[0]["value"])],
         )
 
     def _browser_step(self, pending: oauth.PendingAuth) -> AuthStep:
@@ -278,6 +316,10 @@ class GmailConnector(Connector):
 
     async def begin_auth(self, params: dict[str, Any]) -> AuthStep:
         flow_id = secrets.token_urlsafe(16)
+        clients = await self._saved_clients()
+        if clients:
+            self._flows[flow_id] = "choose"
+            return self._choice_step(flow_id, clients)
         self._flows[flow_id] = "fields"
         return self._fields_step(flow_id)
 
@@ -285,13 +327,21 @@ class GmailConnector(Connector):
         stage = self._flows.get(flow_id)
         if stage is None:
             raise AuthFlowError("Unknown or expired sign-in flow")
+        if stage == "choose":
+            choice = str(data.get("client") or "").strip()
+            if choice == NEW_CLIENT:
+                self._flows[flow_id] = "fields"
+                return self._fields_step(flow_id)
+            clients = await self._saved_clients()
+            holder = next((h for h, _, _ in clients if str(h) == choice), None)
+            saved = oauth.Credentials.load(holder) if holder is not None else None
+            if saved is None:
+                return self._choice_step(flow_id, clients, "That client is no longer saved. Choose another.")
+            self._flows[flow_id] = "browser"
+            return self._browser_step(oauth.start(flow_id, saved.client_id, saved.client_secret))
         if stage == "fields":
             client_id = str(data.get("client_id") or "").strip()
             client_secret = str(data.get("client_secret") or "").strip()
-            if not client_id and not client_secret and self.account_id is not None:
-                existing = oauth.Credentials.load(self.account_id)
-                if existing is not None:
-                    client_id, client_secret = existing.client_id, existing.client_secret
             if not client_id or not client_secret:
                 return self._fields_step(flow_id, "Enter both the client ID and the client secret.")
             self._flows[flow_id] = "browser"

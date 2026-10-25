@@ -128,7 +128,7 @@ export default function AuthFlow({
   const submit = async () => {
     if (!step || submitting) return
     const data: Record<string, string> = {}
-    for (const f of step.fields) data[f.name] = (values[f.name] ?? '').trim()
+    for (const f of step.fields) data[f.name] = fieldValue(f, values).trim()
     setSubmitting(true)
     setRequestError('')
     try {
@@ -196,7 +196,7 @@ export default function AuthFlow({
   }
 
   const blockedByOpRef = step.fields.some((f) => isOpRef(values[f.name] ?? ''))
-  const missing = step.fields.some((f) => f.required && !(values[f.name] ?? '').trim())
+  const missing = step.fields.some((f) => f.required && !fieldValue(f, values).trim())
 
   return (
     <div>
@@ -216,7 +216,7 @@ export default function AuthFlow({
             <FieldInput
               key={`${step.flow_id}:${f.name}`}
               field={f}
-              value={values[f.name] ?? ''}
+              value={fieldValue(f, values)}
               autoFocus={i === 0}
               onChange={(v) => setValues((prev) => ({ ...prev, [f.name]: v }))}
             />
@@ -306,7 +306,64 @@ function ErrorBlock({ message, onRetry, onClose }: { message: string; onRetry: (
   )
 }
 
+/** What a field holds: typed text, or a choice's pick (its default, else the first option) */
+function fieldValue(field: AuthField, values: Record<string, string>): string {
+  if (values[field.name] != null) return values[field.name]
+  if (field.kind === 'choice') return field.default ?? field.options?.[0]?.value ?? ''
+  return ''
+}
+
 function FieldInput({ field, value, onChange, autoFocus }: {
+  field: AuthField
+  value: string
+  onChange: (v: string) => void
+  autoFocus: boolean
+}) {
+  if (field.kind === 'choice') return <ChoiceInput field={field} value={value} onChange={onChange} autoFocus={autoFocus} />
+  return <TextInput field={field} value={value} onChange={onChange} autoFocus={autoFocus} />
+}
+
+function ChoiceInput({ field, value, onChange, autoFocus }: {
+  field: AuthField
+  value: string
+  onChange: (v: string) => void
+  autoFocus: boolean
+}) {
+  return (
+    <fieldset className="mb-4">
+      <legend className="mb-1.5 block text-xs font-medium text-slate-400">{field.label}</legend>
+      <div className="flex flex-col gap-2">
+        {(field.options ?? []).map((o) => {
+          const checked = o.value === value
+          return (
+            <label
+              key={o.value}
+              className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors ${
+                checked ? 'border-indigo-500/60 bg-indigo-500/10' : 'border-slate-600 hover:bg-slate-700/40'
+              }`}
+            >
+              <input
+                type="radio"
+                name={`auth-field-${field.name}`}
+                value={o.value}
+                checked={checked}
+                autoFocus={autoFocus && checked}
+                onChange={() => onChange(o.value)}
+                className="mt-0.5 accent-indigo-500"
+              />
+              <span className="min-w-0">
+                <span className="block break-all text-sm text-slate-200">{o.label}</span>
+                {o.hint && <span className="block text-xs text-slate-400">{o.hint}</span>}
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </fieldset>
+  )
+}
+
+function TextInput({ field, value, onChange, autoFocus }: {
   field: AuthField
   value: string
   onChange: (v: string) => void

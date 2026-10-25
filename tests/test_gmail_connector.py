@@ -260,6 +260,57 @@ async def test_denied_consent_ends_in_error_step(google, unlocked_vault):
     assert err.kind == "error" and "denied" in err.message
 
 
+@pytest.mark.asyncio
+async def test_adding_an_account_offers_the_saved_client(db, google, unlocked_vault):
+    first = await _signed_in(db, google)  # client "cid" / "secret" saved for this account
+    await first._api.close()
+    c = GmailConnector()
+    step = await c.begin_auth({})
+    assert step.kind == "fields" and [f.kind for f in step.fields] == ["choice"]
+    choice = step.fields[0]
+    assert [o["label"] for o in choice.options] == ["cid", "Use a different OAuth client"]
+    assert ME in choice.options[0]["hint"] and choice.default == choice.options[0]["value"]
+    assert '"secret"' not in json.dumps(step.to_dict())  # the stored secret value never leaves the vault
+
+    browser = await c.continue_auth(step.flow_id, {"client": choice.default})
+    assert browser.kind == "oauth_browser"
+    q = {k: v[0] for k, v in parse_qs(urlsplit(browser.auth_url).query).items()}
+    assert q["client_id"] == "cid"
+    assert oauth.by_flow(step.flow_id).client_secret == "secret"
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_different_client_asks_for_id_and_secret(db, google, unlocked_vault):
+    first = await _signed_in(db, google)
+    await first._api.close()
+    c = GmailConnector()
+    step = await c.begin_auth({})
+    fields = await c.continue_auth(step.flow_id, {"client": "new"})
+    assert [f.name for f in fields.fields] == ["client_id", "client_secret"] and all(f.required for f in fields.fields)
+    browser = await c.continue_auth(step.flow_id, {"client_id": "other.apps.googleusercontent.com", "client_secret": "s2"})
+    assert browser.kind == "oauth_browser" and "other.apps.googleusercontent.com" in browser.auth_url
+
+
+@pytest.mark.asyncio
+async def test_reauthorize_preselects_the_accounts_own_client(db, google, unlocked_vault):
+    other = Account(channel="gmail", external_id="old@example.com", label="old@example.com")
+    db.add(other)
+    await db.commit()
+    oauth.Credentials("cid-old", "s-old", "rt").save(other.id)
+    mine = await _signed_in(db, google)
+    await mine._api.close()
+    step = await mine.begin_auth({})
+    choice = step.fields[0]
+    assert [o["label"] for o in choice.options] == ["cid", "cid-old", "Use a different OAuth client"]
+    assert choice.default == str(mine.account_id)
+
+
+@pytest.mark.asyncio
+async def test_without_saved_clients_sign_in_asks_for_the_client(google, unlocked_vault):
+    step = await GmailConnector().begin_auth({})
+    assert [f.name for f in step.fields] == ["client_id", "client_secret"]
+
+
 # ── sync ────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

@@ -48,9 +48,12 @@ class Capability(str, enum.Enum):
 class AuthField:
     name: str
     label: str
-    kind: str = "text"  # text | password | phone | code
+    kind: str = "text"  # text | password | phone | code | choice
     required: bool = True
     placeholder: Optional[str] = None
+    # ``choice``: the options ({value, label, hint}) as a radio list, ``default`` preselected
+    options: list[dict] = field(default_factory=list)
+    default: Optional[str] = None
 
 
 @dataclass

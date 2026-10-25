@@ -197,6 +197,13 @@ def get_secret(key: str) -> Optional[str]:
     return _cache.get(key)
 
 
+def secret_keys(prefix: str) -> list[str]:
+    """The stored keys starting with ``prefix`` (none while locked)."""
+    if _cache is None:
+        return []
+    return [k for k in _cache if k.startswith(prefix)]
+
+
 def delete_secret(key: str) -> None:
     if _cache is None or key not in _cache:
         return
